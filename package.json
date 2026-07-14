@@ -1,0 +1,29 @@
+{
+  "name": "agent-cli",
+  "version": "0.1.0",
+  "description": "A local-first, terminal-native, safely extensible general-purpose agent harness.",
+  "type": "module",
+  "bin": {
+    "agent": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
+    "ignore": "^7.0.6",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.10"
+  }
+}
