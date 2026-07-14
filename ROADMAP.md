@@ -4,6 +4,59 @@ Session-by-session evolution of Agent CLI. Newest first.
 
 ---
 
+## Session 1b (2026-07-14) — Automatic proxy support + verified live E2E
+
+### Objective
+
+Close the one surface Session 1 left unproven: the live Anthropic path (previously a `403` from a
+filtered direct egress). Add clean, automatic proxy support so the harness works behind a system
+proxy, then run a real end-to-end of the complete V0.1 loop with the authorized credentials.
+
+### What was implemented
+
+- **Reusable transport factory** (`src/net/transport.ts`). A pure `resolveProxy` that detects
+  `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case) with correct precedence and
+  bypass rules, and `createTransport` which returns a per-request-proxied `fetch` (undici
+  `ProxyAgent` dispatcher, no global side effects) or nothing at all for direct connections.
+  Credentials are redacted from the description and never persisted.
+- **Provider decoupled from networking.** `AnthropicProvider` now takes a `Transport` from the
+  factory and exposes a redacted `transport` description; it holds no proxy logic, so future
+  providers reuse the same infrastructure. The CLI logs the (redacted) network path to stderr.
+- **`undici`** added as a dependency for `ProxyAgent`.
+
+### Verification evidence
+
+- `npm run typecheck` clean; `npm run build` clean.
+- `npm test`: **143 passing, 1 skipped** (the skipped one is the opt-in live test). The new
+  `test/transport.test.ts` covers direct mode, HTTPS/HTTP/ALL_PROXY detection, lowercase vars,
+  precedence, all NO_PROXY bypass forms, explicit override, credential redaction, per-request
+  dispatcher routing, and provider integration (the SDK routes through the injected fetch to an
+  `anthropic.com` URL).
+- **Live unit smoke** (`AGENT_LIVE_TEST=1`): the real API call that returned `403` in Session 1
+  now **succeeds through the proxy** — 5/5 pass.
+- **Live full-loop E2E** through the built CLI against real Opus 4.8:
+  - Run 1 (create): the model read `service.yaml` and wrote `SUMMARY.md`; the file was created on
+    disk with correct content; the CLI reported `network: proxy http://127.0.0.1:7897/ (via
+    https_proxy)` and `1 file(s) changed`.
+  - Run 2 (edit + recover): the model used `edit_file` to change `beta`→`BETA` in `data.txt` (edit
+    landed on disk); the evidence report showed `modify … [undo-recorded] UNCHECKED`; `agent undo`
+    then restored the file to its original bytes.
+  - This exercises the complete loop with real credentials: proxy transport → streaming provider →
+    agent loop → policy gate (observe allow / reversible auto-allow) → snapshot → tool execution →
+    event log → report → undo recovery.
+
+### Decisions
+
+- **Per-request dispatcher, never `setGlobalDispatcher`** — no process-wide side effects, and
+  `NO_PROXY` is evaluated per target host so the transport is correct for any provider/host.
+- **No custom `fetch` in pure-direct mode** — when no proxy is configured the SDK keeps its own
+  default fetch, so nothing changes for users without a proxy.
+- **No `--proxy` CLI flag** — proxy config comes from the environment (or the factory API);
+  keeping it out of argv avoids any risk of a credential-bearing proxy URL landing in the logged
+  `session.started` argv.
+
+---
+
 ## Session 1 (2026-07-14) — V0.1 bounded local agent loop
 
 ### Objective
@@ -86,13 +139,10 @@ The whole seven-pillar loop, all tested:
 
 ### Open issues / not verified
 
-- **Live Anthropic call not verified in this environment.** The `AnthropicProvider` is unit-tested
-  (message/block/stop-reason mapping) but a real API call returned `403 forbidden "Request not
-  allowed"` from the credential available in this sandbox (the key is not authorized for direct
-  Messages API use, or is an OAuth-style token the SDK sends as `x-api-key`). The request was
-  built, streamed, and the error surfaced correctly — this is a credential/permission constraint,
-  not a code defect, but the live path remains unproven here. Re-run `AGENT_LIVE_TEST=1 npm test`
-  with an authorized key.
+- **Live Anthropic call — RESOLVED in Session 1b.** The `403` was a filtered direct egress: the
+  authorized path is a system proxy. Session 1b added automatic proxy support and verified the
+  full live loop end-to-end. (The original speculation that the key might be unauthorized was
+  wrong; the request simply needed to go through `HTTPS_PROXY`.)
 - **Not a git repository yet.** `git init` was intentionally not run (the constitution says commit
   only when asked). `.gitignore` is in place.
 - **Known honest limitations** (documented in README): no OS sandbox; `run_command` output is not

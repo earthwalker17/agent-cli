@@ -28,10 +28,12 @@ src/
   tools/
     index.ts               read_file, list_files, search, write_file, edit_file + registry + JSON-Schema derivation.
     run-command.ts         Shell exec: PowerShell $LASTEXITCODE propagation, timeout, tree-kill.
+  net/
+    transport.ts           Reusable proxy-aware transport factory (pure resolver + custom fetch).
   provider/
     types.ts (in types.ts) Provider interface + wire types (Mock needs no SDK).
     mock.ts                Scripted, offline provider (backbone of the tests).
-    anthropic.ts           Streaming SDK adapter + pure response mapping.
+    anthropic.ts           Streaming SDK adapter + pure response mapping (delegates networking to net/).
   runtime/
     session.ts             startSession / runTurn / resumeSession / reconstruct / endSession.
     approvals.ts           auto-deny, dangerous, and interactive approvers.
@@ -144,4 +146,22 @@ evidence and restates the undo/sandbox limitations. PowerShell invocations appen
 `MockProvider` replays scripted turns offline and throws if exhausted — the entire loop, policy,
 snapshot, resume, and report behavior are proven through it. `AnthropicProvider` streams via the
 SDK, maps messages/blocks/stop-reasons, and (in V0.1) omits the `thinking` parameter to avoid the
-thinking-block round-trip a tool-use loop would otherwise have to preserve.
+thinking-block round-trip a tool-use loop would otherwise have to preserve. It contains no
+networking logic — it obtains a `fetch` from the transport factory and passes it to the SDK client.
+
+## Networking (`net/transport.ts`)
+
+A reusable transport factory, deliberately decoupled from any provider so future providers share
+it. `resolveProxy(targetUrl, env, explicit?)` is a pure function that detects standard system
+proxy settings (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, in either case) and decides,
+per target URL, whether to proxy or go direct. Precedence: an explicit override wins; otherwise
+the protocol-specific variable beats `ALL_PROXY`; and `NO_PROXY` (exact host, domain-suffix, `*`,
+or `host:port`) overrides an environment-derived proxy but not an explicit override.
+
+`createTransport(opts)` returns `{ fetch?, describe() }`. When no proxy could ever apply it returns
+no custom `fetch`, so the client uses its own default (an ordinary direct connection). Otherwise
+`fetch` resolves the proxy **per request URL** (so `NO_PROXY` is honored for any host) and attaches
+an undici `ProxyAgent` **dispatcher for that request only** — there are no global side effects
+(`setGlobalDispatcher` is never called); ProxyAgent instances are cached per proxy URL. `describe()`
+returns a credential-redacted summary for logging. Proxy URLs (and any embedded credentials) are
+never written to the event log, report, or any persisted state.

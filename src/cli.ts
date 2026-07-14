@@ -145,6 +145,9 @@ async function runTask(values: Args['values'], task: string, opts: { resumeId?: 
   if (values['dangerously-allow-all']) {
     process.stderr.write('⚠ --dangerously-allow-all: approvals are bypassed. No isolation whatsoever.\n');
   }
+  if (provider instanceof AnthropicProvider) {
+    process.stderr.write(`network: ${provider.transport}\n`);
+  }
 
   let session: Session;
   if (opts.resumeId) {

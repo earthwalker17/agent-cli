@@ -1,9 +1,13 @@
-import Anthropic from '@anthropic-ai/sdk';
+import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import type { ChatMessage, ContentBlock, Provider, ProviderRequest, ProviderTurn, StopReason } from '../types.js';
+import { createTransport, type Transport } from '../net/transport.js';
 
 /**
  * The Anthropic provider. Streams so large `max_tokens` never hits an HTTP timeout, surfaces text
  * deltas for live rendering, and maps the SDK response to the harness's plain ProviderTurn.
+ *
+ * Networking (proxy detection, direct vs proxied) is delegated to the shared transport factory —
+ * this class contains no proxy logic, so future providers can reuse the same infrastructure.
  *
  * V0.1 deliberately does NOT enable extended/adaptive thinking: on Opus 4.8, omitting the
  * `thinking` param runs without thinking, which avoids the thinking-block round-trip that a
@@ -12,10 +16,17 @@ import type { ChatMessage, ContentBlock, Provider, ProviderRequest, ProviderTurn
  */
 export class AnthropicProvider implements Provider {
   readonly name = 'anthropic';
+  /** Credential-redacted description of the network path (e.g. "proxy … (via https_proxy)"). */
+  readonly transport: string;
   private readonly client: Anthropic;
 
-  constructor(opts: { apiKey?: string } = {}) {
-    this.client = new Anthropic(opts.apiKey ? { apiKey: opts.apiKey } : {});
+  constructor(opts: { apiKey?: string; transport?: Transport } = {}) {
+    const transport = opts.transport ?? createTransport();
+    const clientOpts: ClientOptions = {};
+    if (opts.apiKey) clientOpts.apiKey = opts.apiKey;
+    if (transport.fetch) clientOpts.fetch = transport.fetch as ClientOptions['fetch'];
+    this.client = new Anthropic(clientOpts);
+    this.transport = transport.describe();
   }
 
   async complete(req: ProviderRequest, onText?: (delta: string) => void): Promise<ProviderTurn> {
