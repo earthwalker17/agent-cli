@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
+import { sanitizeLine } from '../shared/text.js';
 
 /**
  * The REPL's terminal seam: ONE persistent readline owns stdin for the whole session — the idle
@@ -89,23 +90,34 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
   });
 
   async function ask(promptText: string): Promise<ReplLine> {
-    if (typedAhead.length > 0) return { kind: 'line', text: typedAhead.shift()! };
-    if (closed) return { kind: 'eof' };
-    const wasMuted = gate.muted;
-    gate.muted = false;
-    if (opts.isTTY) {
-      rl.setPrompt(promptText);
-      rl.prompt();
+    let r: ReplLine;
+    if (typedAhead.length > 0) {
+      r = { kind: 'line', text: typedAhead.shift()! };
+      if (!opts.isTTY) opts.output.write(promptText);
+    } else if (closed) {
+      return { kind: 'eof' };
     } else {
-      opts.output.write(promptText);
+      const wasMuted = gate.muted;
+      gate.muted = false;
+      if (opts.isTTY) {
+        rl.setPrompt(promptText);
+        rl.prompt();
+      } else {
+        opts.output.write(promptText);
+      }
+      try {
+        r = await new Promise<ReplLine>((resolve) => {
+          pending = resolve;
+        });
+      } finally {
+        gate.muted = wasMuted;
+      }
     }
-    try {
-      return await new Promise<ReplLine>((resolve) => {
-        pending = resolve;
-      });
-    } finally {
-      gate.muted = wasMuted;
-    }
+    // Piped input is never echoed by readline; echo accepted lines into the chrome stream so a
+    // captured transcript shows the dialogue ("> instruction"), not just prompts merging into
+    // the next status line.
+    if (!opts.isTTY && r.kind === 'line') opts.output.write(sanitizeLine(r.text) + '\n');
+    return r;
   }
 
   return {

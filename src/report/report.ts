@@ -91,9 +91,14 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   const decisionByCall = new Map<string, Extract<SessionEvent, { type: 'policy.decision' }>>();
   const completedByCall = new Map<string, Extract<SessionEvent, { type: 'tool.completed' }>>();
   const snapshotCalls = new Set<string>();
+  const neverRan = new Set<string>(); // denied by policy or by the human — the call never executed
   for (const e of events) {
-    if (e.type === 'policy.decision') decisionByCall.set(e.callId, e);
-    else if (e.type === 'tool.completed') completedByCall.set(e.callId, e);
+    if (e.type === 'policy.decision') {
+      decisionByCall.set(e.callId, e);
+      if (e.decision === 'deny') neverRan.add(e.callId);
+    } else if (e.type === 'approval.resolved') {
+      if (e.decision !== 'allow') neverRan.add(e.callId);
+    } else if (e.type === 'tool.completed') completedByCall.set(e.callId, e);
     else if (e.type === 'snapshot.created') snapshotCalls.add(e.callId);
   }
 
@@ -122,6 +127,9 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     if (e.type !== 'tool.completed') continue;
     const cmd = commandByCall.get(e.callId);
     if (cmd === undefined) continue;
+    // "Commands run" means commands that EXECUTED. A denied call is visible under Actions and
+    // Approvals; listing it here would read as if it ran.
+    if (neverRan.has(e.callId)) continue;
     commands.push({ command: cmd, ok: e.ok, durationMs: e.durationMs, ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}) });
     commandCompletions.push({ command: cmd, seq: e.seq, ok: e.ok, ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}) });
   }
@@ -198,7 +206,7 @@ function renderMarkdown(r: ReportJson): string {
   L.push(`- session: ${r.session.id}`);
   L.push(`- workspace: ${r.session.workspaceRoot}`);
   L.push(`- model: ${r.session.model} (provider: ${r.session.providerName}, mode: ${r.session.mode})`);
-  L.push(`- ended: ${r.session.endedReason ?? 'CRASHED/UNKNOWN (no session.ended recorded)'}`);
+  L.push(`- ended: ${r.session.endedReason ?? 'IN PROGRESS or CRASHED/UNKNOWN (no session.ended recorded)'}`);
   if (r.session.resumes > 0) L.push(`- resumed ${r.session.resumes} time(s)`);
   L.push(`- tokens: ${r.session.usage.inputTokens} in / ${r.session.usage.outputTokens} out`);
   L.push('');

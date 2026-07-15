@@ -68,10 +68,29 @@ describe('buildReport determinism & honesty', () => {
     expect(md).toContain('no OS sandbox');
   });
 
-  it('renders a crashed session (no session.ended) as CRASHED/UNKNOWN, never completed', () => {
+  it('renders a session without session.ended as in-progress-or-crashed, never completed', () => {
     const md = buildReport({ events: [started] }).md;
-    expect(md).toContain('CRASHED/UNKNOWN');
+    expect(md).toContain('IN PROGRESS or CRASHED/UNKNOWN');
     expect(md).not.toContain('ended: completed');
+  });
+
+  it('excludes denied commands from "Commands run" (they never executed)', () => {
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'tool.requested', callId: 'c1', tool: 'run_command', input: { command: 'evil.exe' } }),
+      evt({ seq: 3, type: 'policy.decision', callId: 'c1', classification: 'observe', decision: 'ask', rule: 'cmd.always-ask', reason: 'r' }),
+      evt({ seq: 4, type: 'approval.resolved', callId: 'c1', decision: 'deny', scope: 'once', source: 'user' }),
+      evt({ seq: 5, type: 'tool.completed', callId: 'c1', ok: false, outputPreview: 'denied by user', durationMs: 0, truncated: false }),
+      evt({ seq: 6, type: 'tool.requested', callId: 'c2', tool: 'run_command', input: { command: 'echo ok' } }),
+      evt({ seq: 7, type: 'policy.decision', callId: 'c2', classification: 'observe', decision: 'ask', rule: 'cmd.always-ask', reason: 'r' }),
+      evt({ seq: 8, type: 'approval.resolved', callId: 'c2', decision: 'allow', scope: 'once', source: 'user' }),
+      evt({ seq: 9, type: 'tool.completed', callId: 'c2', ok: true, outputPreview: 'ok', exitCode: 0, durationMs: 5, truncated: false }),
+    ];
+    const { json } = buildReport({ events });
+    expect(json.commands).toHaveLength(1);
+    expect(json.commands[0]).toMatchObject({ command: 'echo ok', exitCode: 0 });
+    // The denied call is still fully visible as an action.
+    expect(json.actions.find((a) => a.callId === 'c1')).toMatchObject({ decision: 'ask', ok: false });
   });
 
   it('surfaces a corrupt-log banner and still renders prior events', () => {
