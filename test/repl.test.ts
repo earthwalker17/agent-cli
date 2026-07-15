@@ -177,6 +177,86 @@ describe('REPL: slash commands over the live log', () => {
   });
 });
 
+describe('REPL io: approval prompts vs typed-ahead lines (TTY)', () => {
+  async function tick(): Promise<void> {
+    await new Promise((r) => setImmediate(r));
+  }
+
+  it('a line typed BEFORE an approval question never answers it; it stays queued for the prompt', async () => {
+    const { createReplIO } = await import('../src/repl/io.js');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.on('data', () => {});
+    const io = createReplIO({ input, output, isTTY: true });
+
+    // The user types their NEXT INSTRUCTION while a turn is running ("sure, add tests too"
+    // happens to start with 's' — which parseAnswer reads as allow-for-session).
+    input.write('sure, add tests too\n');
+    await tick();
+
+    let answered: string | null | undefined;
+    const q = io.question('approve command? ').then((a) => (answered = a));
+    await tick();
+    expect(answered).toBeUndefined(); // the buffered line did NOT answer the security prompt
+
+    input.write('n\n'); // only a line typed AFTER the question can answer it
+    await q;
+    expect(answered).toBe('n');
+
+    // The buffered instruction is still there for the next idle prompt.
+    const line = await io.prompt('> ');
+    expect(line).toEqual({ kind: 'line', text: 'sure, add tests too' });
+    io.close();
+  });
+
+  it('piped (non-TTY) input keeps queue semantics so scripted drivers can pre-supply answers', async () => {
+    const { createReplIO } = await import('../src/repl/io.js');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.on('data', () => {});
+    const io = createReplIO({ input, output, isTTY: false });
+    input.write('y\n');
+    await tick();
+    expect(await io.question('approve? ')).toBe('y');
+    io.close();
+  });
+
+  it('Ctrl+C during a pending question fires the interrupt handler and resolves null', async () => {
+    const { createReplIO } = await import('../src/repl/io.js');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.on('data', () => {});
+    const io = createReplIO({ input, output, isTTY: true });
+    let interrupted = false;
+    io.onInterrupt(() => (interrupted = true));
+    const q = io.question('approve? ');
+    await tick();
+    input.write('\x03'); // raw ^C keypress in terminal mode
+    expect(await q).toBeNull();
+    expect(interrupted).toBe(true);
+    io.close();
+  });
+});
+
+describe('approval prompt display safety', () => {
+  it('escapes ANSI/bidi in the model-controlled command before it reaches the terminal', async () => {
+    const { formatApprovalPrompt } = await import('../src/runtime/approvals.js');
+    const esc = String.fromCharCode(0x1b);
+    const prompt = formatApprovalPrompt({
+      callId: 'c1',
+      tool: 'run_command',
+      classification: 'observe',
+      summary: `run: echo safe${esc}[2K${esc}[1A‮rm -rf /`,
+      detail: `echo safe${esc}[2K`,
+      reason: 'r',
+    });
+    expect(prompt).not.toContain(esc);
+    expect(prompt).not.toContain('‮');
+    expect(prompt).toContain('\\u{1b}');
+    expect(prompt).toContain('\\u{202e}');
+  });
+});
+
 describe('REPL: resilience', () => {
   it('a turn error keeps the session alive and the next turn works', async () => {
     // Turn 1: an invalid tool input → recorded deny, then 'recovered'. Turn 2: the script is

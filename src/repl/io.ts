@@ -22,11 +22,16 @@ import { sanitizeLine } from '../shared/text.js';
 export type ReplLine = { kind: 'line'; text: string } | { kind: 'eof' } | { kind: 'interrupt' };
 
 export interface ReplIO {
-  /** Idle prompt. One pending read at a time. */
+  /** Idle prompt. One pending read at a time. Consumes typed-ahead lines. */
   prompt(promptText: string): Promise<ReplLine>;
   /**
    * Approval question through the same readline. Resolves null on EOF (caller must fail safe)
    * and on Ctrl+C (the registered interrupt handler fires first, so the caller sees an abort).
+   * On a TTY this NEVER consumes typed-ahead lines: a line typed before the question existed
+   * (the user's next instruction, buffered during a running turn) is not an answer to a
+   * security prompt the user never saw — it stays queued for the next idle prompt, and only a
+   * line typed after the question is displayed can answer it. Piped input keeps queue semantics
+   * so scripted drivers can pre-supply answers.
    */
   question(q: string): Promise<string | null>;
   /** Register the Ctrl+C handler for the duration of a turn; returns an unsubscriber. */
@@ -45,6 +50,13 @@ class Gate extends Writable {
   override _write(chunk: Buffer, _enc: BufferEncoding, cb: (e?: Error | null) => void): void {
     if (!this.muted) this.target.write(chunk);
     cb();
+  }
+  /** Readline uses output.columns/rows for line-wrap redraw; pass the real terminal's through. */
+  get columns(): number | undefined {
+    return (this.target as Partial<NodeJS.WriteStream>).columns;
+  }
+  get rows(): number | undefined {
+    return (this.target as Partial<NodeJS.WriteStream>).rows;
   }
 }
 
@@ -89,14 +101,20 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
     settle({ kind: 'interrupt' });
   });
 
-  async function ask(promptText: string): Promise<ReplLine> {
+  async function ask(promptText: string, o: { fresh?: boolean } = {}): Promise<ReplLine> {
+    // `fresh` (TTY approvals): never satisfy a security prompt with a line typed before the
+    // prompt existed; leave the queue for the next idle prompt and wait for a NEW line.
+    const useQueue = !(o.fresh && opts.isTTY);
     let r: ReplLine;
-    if (typedAhead.length > 0) {
+    if (useQueue && typedAhead.length > 0) {
       r = { kind: 'line', text: typedAhead.shift()! };
-      if (!opts.isTTY) opts.output.write(promptText);
-    } else if (closed) {
-      return { kind: 'eof' };
-    } else {
+      // Echo the consumed line after the prompt: piped transcripts need the dialogue, and a
+      // TTY user must SEE which buffered line is now being executed (it was typed unechoed).
+      opts.output.write(promptText + sanitizeLine(r.text) + '\n');
+      return r;
+    }
+    if (closed) return { kind: 'eof' };
+    {
       const wasMuted = gate.muted;
       gate.muted = false;
       if (opts.isTTY) {
@@ -123,7 +141,7 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
   return {
     prompt: (p) => ask(p),
     async question(q) {
-      const r = await ask(q);
+      const r = await ask(q, { fresh: true });
       return r.kind === 'line' ? r.text : null;
     },
     onInterrupt(handler) {

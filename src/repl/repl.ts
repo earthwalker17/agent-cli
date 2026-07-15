@@ -39,7 +39,9 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     input: process.stdin,
     modelOut: process.stdout,
     chromeOut: process.stderr,
-    isTTY: process.stdin.isTTY === true,
+    // Full-terminal mode needs BOTH ends: raw-mode stdin disables kernel echo, and readline's
+    // own echo goes to the chrome stream — with stderr redirected, typing would be invisible.
+    isTTY: process.stdin.isTTY === true && process.stderr.isTTY === true,
   };
 
   // Order is load-bearing: trust gate before the workspace config file is read, before

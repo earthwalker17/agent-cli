@@ -1,4 +1,5 @@
 import readline from 'node:readline/promises';
+import { sanitizeLine } from '../shared/text.js';
 import type { ApprovalOutcome, ApprovalRequest, Approver } from '../types.js';
 
 /** Non-interactive mode: every `ask` becomes a recorded denial (fails safe). */
@@ -15,15 +16,19 @@ export const dangerousApprover: Approver = async () => ({
   source: 'dangerous-mode',
 });
 
-/** Render an approval request as a human-readable block for the terminal. */
+/**
+ * Render an approval request as a human-readable block for the terminal. The summary/detail come
+ * from UNTRUSTED model output (the proposed command string); they are sanitized so embedded
+ * ANSI/bidi/control characters cannot visually rewrite the very prompt that gates execution.
+ */
 export function formatApprovalPrompt(req: ApprovalRequest): string {
   const lines = [
     '',
     `  ⚠ approval required  [${req.classification}]  ${req.tool}`,
-    `  ${req.summary}`,
+    `  ${sanitizeLine(req.summary)}`,
   ];
   if (req.detail && req.detail !== req.summary) {
-    for (const l of req.detail.split('\n').slice(0, 12)) lines.push(`    ${l}`);
+    for (const l of req.detail.split('\n').slice(0, 12)) lines.push(`    ${sanitizeLine(l)}`);
   }
   lines.push(`  reason: ${req.reason}`);
   if (req.noUndoWarning) lines.push('  ⚠ this action is NOT undoable');

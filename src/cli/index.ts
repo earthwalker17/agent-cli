@@ -16,6 +16,7 @@ import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { buildReport } from '../report/report.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { randomSaltHex } from '../shared/hash.js';
+import { sanitizeLine } from '../shared/text.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
 
 const USAGE = `Agent CLI — a bounded local agent harness (V0.2).
@@ -202,7 +203,9 @@ function cmdSessions(values: CliValues): number {
 function cmdMap(values: CliValues): number {
   const ws = workspaceRoot(values);
   const map = buildWorkspaceMap(ws, values.budget ? { budget: Number(values.budget) } : {});
-  process.stdout.write(map.text + `\n\n(${map.fileCount} files${map.truncated ? ', truncated' : ''})\n`);
+  // File names are untrusted folder content; escape terminal-spoofing characters for display.
+  const safe = map.text.split('\n').map(sanitizeLine).join('\n');
+  process.stdout.write(safe + `\n\n(${map.fileCount} files${map.truncated ? ', truncated' : ''})\n`);
   return 0;
 }
 
