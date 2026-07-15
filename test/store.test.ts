@@ -120,6 +120,65 @@ describe('EventLog append/replay', () => {
   });
 });
 
+describe('EventLog liveness and observation', () => {
+  it('events is live: appends through this instance appear immediately', () => {
+    const file = path.join(tmp, 's.jsonl');
+    const lock = path.join(tmp, 's.lock');
+    const log = EventLog.open({ file, lockFile: lock });
+    expect(log.events.length).toBe(0);
+    log.append(started);
+    log.append({ type: 'user.message', text: 'hi' });
+    expect(log.events.length).toBe(2);
+    expect(log.events[1]).toMatchObject({ type: 'user.message', text: 'hi' });
+    log.close();
+  });
+
+  it('a reopened log stays live past the opened snapshot', () => {
+    const file = path.join(tmp, 's.jsonl');
+    const lock = path.join(tmp, 's.lock');
+    let log = EventLog.open({ file, lockFile: lock });
+    log.append(started);
+    log.close();
+    log = EventLog.open({ file, lockFile: lock });
+    expect(log.events.length).toBe(1);
+    log.append({ type: 'user.message', text: 'later' });
+    expect(log.events.length).toBe(2);
+    log.close();
+  });
+
+  it('onAppend fires after the write with the stamped event', () => {
+    const file = path.join(tmp, 's.jsonl');
+    const lock = path.join(tmp, 's.lock');
+    const log = EventLog.open({ file, lockFile: lock });
+    const seen: { seq: number; persisted: boolean }[] = [];
+    log.onAppend = (e) => {
+      // At observation time the event must already be on disk.
+      const onDisk = fs.readFileSync(file, 'utf8').includes(`"seq":${e.seq}`);
+      seen.push({ seq: e.seq, persisted: onDisk });
+    };
+    log.append(started);
+    log.append({ type: 'user.message', text: 'x' });
+    expect(seen).toEqual([
+      { seq: 1, persisted: true },
+      { seq: 2, persisted: true },
+    ]);
+    log.close();
+  });
+
+  it('a throwing observer never fails the append', () => {
+    const file = path.join(tmp, 's.jsonl');
+    const lock = path.join(tmp, 's.lock');
+    const log = EventLog.open({ file, lockFile: lock });
+    log.onAppend = () => {
+      throw new Error('renderer exploded');
+    };
+    expect(() => log.append(started)).not.toThrow();
+    expect(log.events.length).toBe(1);
+    log.close();
+    expect(EventLog.readLenient(file).events.length).toBe(1);
+  });
+});
+
 describe('EventLog locking', () => {
   it('refuses when a live foreign process holds the lock', () => {
     const file = path.join(tmp, 's.jsonl');

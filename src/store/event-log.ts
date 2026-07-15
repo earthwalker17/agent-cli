@@ -67,19 +67,34 @@ function parseRaw(raw: string): ParseResult {
 export class EventLog {
   private lastSeq: number;
   private closed = false;
+  private readonly live: SessionEvent[];
+  /**
+   * Optional observer fired after each successful append (i.e. after the synchronous fs write).
+   * Set by the session owner (the REPL renderer). A throwing observer is swallowed: rendering
+   * must never be able to fail an already-persisted append.
+   */
+  onAppend?: (e: SessionEvent) => void;
 
   private constructor(
     private readonly file: string,
     private readonly lockFilePath: string,
     private readonly clock: Clock,
-    /** Committed events present when the log was opened (empty for a fresh session). */
-    readonly events: readonly SessionEvent[],
+    openedEvents: readonly SessionEvent[],
     /** A partial trailing line was discarded on open. */
     readonly repairedTail: boolean,
     /** A stale lock from a dead process was reclaimed. */
     readonly stoleLock: boolean,
   ) {
-    this.lastSeq = events.length > 0 ? events[events.length - 1]!.seq : 0;
+    this.live = [...openedEvents];
+    this.lastSeq = this.live.length > 0 ? this.live[this.live.length - 1]!.seq : 0;
+  }
+
+  /**
+   * All committed events, LIVE: events appended through this instance appear here immediately.
+   * (In-session /undo, /report, and /status depend on this liveness contract.)
+   */
+  get events(): readonly SessionEvent[] {
+    return this.live;
   }
 
   static open(opts: {
@@ -175,6 +190,12 @@ export class EventLog {
       ...body,
     };
     fs.appendFileSync(this.file, JSON.stringify(event) + '\n');
+    this.live.push(event);
+    try {
+      this.onAppend?.(event);
+    } catch {
+      /* observers must never fail a persisted append */
+    }
     return event;
   }
 
