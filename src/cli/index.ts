@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { resolveLayout, resolveStateRoot, type ProjectLayout } from '../store/layout.js';
 import { ensureTrusted, type TrustDecision } from '../trust/gate.js';
 import { cmdTrust } from '../trust/commands.js';
+import { loadConfig } from '../config/config.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
 import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, type Session } from '../runtime/session.js';
@@ -102,12 +103,16 @@ async function checkTrust(values: CliValues, ws: string): Promise<TrustDecision>
 
 /** Shared run/resume tail: run one task turn, end the session, print a verdict. */
 async function runTask(values: CliValues, task: string, opts: { resumeId?: string }): Promise<number> {
-  const ctx = buildRunContext(values);
-  const trust = await checkTrust(values, ctx.ws);
+  // Order is load-bearing: trust gate BEFORE the workspace config file is read, before
+  // per-project state is created, and before any workspace byte reaches a model.
+  const ws = workspaceRoot(values);
+  const trust = await checkTrust(values, ws);
   if (!trust.trusted) {
     process.stderr.write(`refusing to run: ${trust.reason}\n`);
     return 3;
   }
+  const config = loadConfig(resolveStateRoot(), ws);
+  const ctx = buildRunContext(values, { config });
   const layout = resolveLayout(ctx.ws, { ensure: true });
   const map = buildWorkspaceMap(ctx.ws);
   const system = buildSystemPrompt(ctx.ws, map);
@@ -134,6 +139,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     maxTokens: ctx.maxTokens,
     saltHex: randomSaltHex(),
     onText,
+    rules: config.rules,
   };
   let session: Session;
   if (opts.resumeId) {
@@ -142,6 +148,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     session = startSession({ ...common, argv: process.argv.slice(2) });
   }
   session.log.append({ type: 'trust.verified', source: trust.source });
+  session.log.append({ type: 'config.loaded', sources: config.sources });
   recordWorkspaceMap(session, map);
 
   try {

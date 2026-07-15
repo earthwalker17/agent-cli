@@ -77,18 +77,25 @@ export interface RunContext {
   maxTokens: number;
 }
 
+export interface RunContextOptions {
+  /** Resolved config preferences (flags still win): from loadConfig, which runs post-trust. */
+  config?: { model?: string; maxSteps?: number };
+  /** REPL approval routing through its one persistent readline. */
+  io?: { question: (q: string) => Promise<string> };
+}
+
 /**
  * Assemble the pieces every session-running entry point (one-shot and REPL) shares, so the two
- * cannot drift into parallel construction paths. `io` lets the REPL route approvals through its
- * one persistent readline.
+ * cannot drift into parallel construction paths. Preference precedence: CLI flag > user config >
+ * built-in default.
  */
-export function buildRunContext(values: CliValues, io?: { question: (q: string) => Promise<string> }): RunContext {
+export function buildRunContext(values: CliValues, opts: RunContextOptions = {}): RunContext {
   const ws = workspaceRoot(values);
   const mode = resolveMode(values);
   const provider = makeProvider(values);
-  const approver = makeApprover(values, mode, io);
-  const model = values.model ?? DEFAULT_MODEL;
-  const maxSteps = values['max-turns'] ? Number(values['max-turns']) : 20;
+  const approver = makeApprover(values, mode, opts.io);
+  const model = values.model ?? opts.config?.model ?? DEFAULT_MODEL;
+  const maxSteps = values['max-turns'] ? Number(values['max-turns']) : (opts.config?.maxSteps ?? 20);
   const maxTokens = provider.name === 'anthropic' ? 64_000 : 16_000;
   return { ws, mode, provider, approver, model, maxSteps, maxTokens };
 }

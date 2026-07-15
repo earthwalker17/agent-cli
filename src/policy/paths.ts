@@ -53,7 +53,7 @@ function realpathBoundary(abs: string): string {
 export function validatePath(
   workspaceRoot: string,
   input: string,
-  opts: { stateDir?: string } = {},
+  opts: { stateDir?: string; extraProtected?: readonly string[] } = {},
 ): PathVerdict {
   if (input.length === 0) throw new PathError('empty path', 'path.empty');
   if (input.includes('\0')) throw new PathError('path contains a NUL byte', 'path.nul');
@@ -83,6 +83,8 @@ export function validatePath(
 
   const protectedRoots = [path.join(realWorkspace, '.git')];
   if (opts.stateDir) protectedRoots.push(path.resolve(opts.stateDir));
+  // Config-declared extra write-deny roots (narrowing only; resolved against the workspace).
+  for (const e of opts.extraProtected ?? []) protectedRoots.push(path.resolve(realWorkspace, e));
   const protectedPath =
     protectedRoots.some((r) => isInside(r, resolved)) ||
     segments(resolved).includes('.agent-cli');

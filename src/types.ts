@@ -17,9 +17,19 @@ export interface MutationPlan {
   paths: string[];
 }
 
+/** Narrowing-only policy additions from configuration (union across layers; never widening). */
+export interface PolicyRules {
+  /** Extra write-deny roots, resolved against the workspace root. */
+  protectedPaths: string[];
+  /** Literal lowercase basename substrings marking files as secret-like. */
+  secretPatterns: string[];
+}
+
 export interface ToolContext {
   workspaceRoot: string;
   stateDir: string;
+  /** Present when configuration narrowed policy; read by the engine and the search tool. */
+  rules?: PolicyRules;
 }
 
 export interface ToolResult {
@@ -231,6 +241,11 @@ export type EventBody =
       /** How the workspace-trust gate was satisfied for this run (consent provenance). */
       type: 'trust.verified';
       source: 'store' | 'prompt-remember' | 'prompt-once' | 'flag';
+    }
+  | {
+      /** Which config files were loaded (post-trust) and their content hashes. */
+      type: 'config.loaded';
+      sources: { path: string; sha256: string }[];
     }
   | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
 

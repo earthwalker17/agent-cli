@@ -31,7 +31,7 @@ export class Grants {
   }
 }
 
-export function isSecretName(p: string): boolean {
+export function isSecretName(p: string, extraPatterns?: readonly string[]): boolean {
   const base = path.basename(p).toLowerCase();
   return (
     base === '.env' ||
@@ -39,7 +39,8 @@ export function isSecretName(p: string): boolean {
     /\.(pem|key)$/.test(base) ||
     base.includes('id_rsa') ||
     base.includes('credential') ||
-    base.includes('secret')
+    base.includes('secret') ||
+    (extraPatterns ?? []).some((pat) => pat.length > 0 && base.includes(pat))
   );
 }
 
@@ -105,7 +106,10 @@ export function decide<I>(
   ctx: ToolContext,
   grants: Grants,
 ): PolicyDecision {
-  const stateOpt = ctx.stateDir ? { stateDir: ctx.stateDir } : {};
+  const stateOpt = {
+    ...(ctx.stateDir ? { stateDir: ctx.stateDir } : {}),
+    ...(ctx.rules && ctx.rules.protectedPaths.length > 0 ? { extraProtected: ctx.rules.protectedPaths } : {}),
+  };
 
   // 1. Shell command → always ask (no allowlist). Label informs the human only.
   const command = tool.command?.(input);
@@ -176,7 +180,7 @@ export function decide<I>(
         grants,
       );
     }
-    if (isSecretName(p)) {
+    if (isSecretName(p, ctx.rules?.secretPatterns)) {
       return applyGrant(
         decision(
           'sensitive',

@@ -132,7 +132,7 @@ export const searchTool: Tool<z.infer<typeof SearchInput>> = {
         }
         // Skip secret-looking files so search can never spill credentials into results/prompt
         // (the policy gate can't enumerate grep matches ahead of time, so filter here).
-        if (isSecretName(e.name)) continue;
+        if (isSecretName(e.name, ctx.rules?.secretPatterns)) continue;
         if (filesScanned >= SEARCH_MAX_FILES || Date.now() - start > SEARCH_TIME_BUDGET_MS) {
           stoppedEarly = true;
           return;

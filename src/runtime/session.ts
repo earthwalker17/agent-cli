@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   ContentBlock,
   PolicyDecision,
+  PolicyRules,
   Provider,
   ProviderRequest,
   SessionEvent,
@@ -43,6 +44,8 @@ export interface Session {
   saltHex: string;
   messages: ChatMessage[];
   onText?: (delta: string) => void;
+  /** Narrowing-only policy additions from config; passed to every tool/policy context. */
+  rules?: PolicyRules;
   clock: Clock;
 }
 
@@ -70,6 +73,7 @@ export interface StartOptions {
   onText?: (delta: string) => void;
   argv?: string[];
   tools?: Tool[];
+  rules?: PolicyRules;
   clock?: Clock;
   idGen?: IdGen;
   saltHex: string;
@@ -115,6 +119,7 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
     clock,
   };
   if (opts.onText) base.onText = opts.onText;
+  if (opts.rules) base.rules = opts.rules;
   return base;
 }
 
@@ -234,7 +239,11 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
   session.log.append({ type: 'user.message', text: userText });
   session.messages.push({ role: 'user', content: [{ type: 'text', text: userText }] });
 
-  const ctx: ToolContext = { workspaceRoot: session.workspaceRoot, stateDir: session.stateDir };
+  const ctx: ToolContext = {
+    workspaceRoot: session.workspaceRoot,
+    stateDir: session.stateDir,
+    ...(session.rules ? { rules: session.rules } : {}),
+  };
   let denials = 0;
   let steps = 0;
   let finalText = '';
