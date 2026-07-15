@@ -76,6 +76,9 @@ policy has already authorized them.
 ## Git and Change Hygiene
 
 - Keep each change set understandable and reviewable.
+- Commit incrementally during a session: create a small, logically separated commit after each
+  meaningful module or stage is complete and verified. Do not accumulate an entire session into
+  one large final commit.
 - Separate feature work, refactoring, formatting, generated output, and dependency changes when practical.
 - Avoid giant phase commits and unexplained mass rewrites.
 - Inspect existing changes before editing; do not overwrite unrelated user work.

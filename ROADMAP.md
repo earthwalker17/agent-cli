@@ -4,6 +4,118 @@ Session-by-session evolution of Agent CLI. Newest first.
 
 ---
 
+## Session 2 (2026-07-15) — V0.2: interactive REPL, workspace trust, narrowing-only config
+
+### Objective
+
+Evolve the one-shot CLI into a practical interactive REPL (Claude Code-like: launch in any
+folder, converse continuously, live tool activity, inline approvals) WITHOUT weakening the
+safety model — shipping the workspace-trust gate and policy-config file that V0.1 deliberately
+deferred, and keeping trust (consent), approval (human gate), logical policy, and sandboxing
+(nonexistent, stated honestly) separated.
+
+The design came from a 3-designer + 3-adversarial-critic workflow (as in Session 1). The
+critics — verifying claims against source — caught real pre-implementation defects that shaped
+the build: `EventLog.events` was a frozen open-time snapshot (in-session /undo would have
+restored a PRIOR session's mutation while claiming success); the `forceDeny` path cannot stop
+auto-allowed writes (the planned interrupt wouldn't interrupt — and the same gap existed in
+V0.1's deny-&-stop); a mid-stream abort leaves consecutive user-role messages on the wire; and
+`--interactive` without a mode override would have paired the REPL with the auto-deny approver.
+
+### What was implemented (9 commits, one per verified stage)
+
+1. **Live, observable EventLog** — `events` getter over a live array + `onAppend` observer
+   (fired post-write, throws swallowed): the single point the REPL renders from.
+2. **Turn abort** — `runTurn(…, {signal})` / `Provider.complete(…, signal)`; pre-gate skips
+   every pending call once aborted or deny-&-stopped (fixes the V0.1 deny-&-stop gap,
+   regression-tested); `turn.aborted {phase}` event; `coalesceUserMessages` at the Anthropic
+   wire; `repairDanglingToolUses` for turn errors; MockProvider `hang` turns.
+3. **CLI split** — `src/cli/{index,context,trust-check}.ts`; ONE `buildRunContext` for both
+   interfaces; mode precedence `--no-input` > `--interactive` > isTTY (conflict = error);
+   read-only commands stop creating state dirs.
+4. **Workspace trust** — `<state>/trust.json` + `trust.log` audit; gate before any workspace
+   byte is read; hoisted state-root-inside-workspace refusal (a folder cannot self-grant);
+   prompt only on a real TTY; exit 3 fail-safe; `--trust-this-workspace` never persists;
+   `agent trust [--revoke|--list]`; `trust.verified` event; bidi-sanitized prompt paths.
+5. **Narrowing-only config** — user prefs + workspace narrowing knobs (`protectedPaths`,
+   `secretPatterns` as literal substrings); strict schemas that cannot express widening; read
+   only post-trust; `.agent-cli/` write-protected from the agent; `config.loaded` provenance.
+6. **REPL** — bare `agent` (TTY or `--interactive`) / `--continue` / `resume <id>`; one
+   persistent readline shared with approvals (EOF at an approval → deny-&-stop); live render
+   from the log; stdout = model text only, chrome on stderr; ASCII glyph fallback for legacy
+   consoles; slash commands over the live log; Ctrl+C aborts the turn / twice quits;
+   `user-quit` for every human-initiated end; system prompt: never touch git unless asked.
+7. **Subprocess smoke tests** for the piped REPL (real approver over pipes, stream purity,
+   trust refusal, flag conflict).
+8. **Live E2E fixes** (below) and **docs**.
+
+### Verification evidence
+
+- `npm run typecheck` clean; `npm run build` clean; `npm test`: **196 passing, 1 skipped**
+  across 18 files (was 143+1). New suites: runtime.abort (8), trust (12), config (9), repl (12),
+  store liveness (4), report exclusions, and 7 new CLI smoke tests.
+- **Live E2E round 1** (real Opus 4.8 through the system proxy, expect-style driver, isolated
+  `Desktop\agent-cli-e2e\ws`): `agent trust` → piped `--interactive` REPL → 3 natural-language
+  instructions built a working `wordstats` utility (README + tests). Human-proxy driver DENIED
+  the model's first compound shell command; the model adapted and verified with `node --test`
+  (3/3 pass, exit 0 — files CHECKED in the report). Verified after the run: the utility works
+  (`lines=47 words=161 chars=1021`), no `.git` created, zero writes to the Agent CLI repo,
+  state only under the isolated state dir.
+- Round 1 surfaced **3 real defects, fixed + tested**: in-session `/report` labeled a running
+  session CRASHED/UNKNOWN; "Commands run" listed a denied command as if executed; piped
+  transcripts lost the dialogue (no echo of piped input).
+- **Live E2E round 2**: `/undo` live (created file restored), the `[[harness note]]` reached
+  the model on the next turn (it recreated the file), fixed transcript confirmed.
+- **Live E2E round 3**: interactive resume (`agent --continue`) replayed the conversation
+  against the real API and extended the file correctly (also exercising coalesceUserMessages
+  wire-shape acceptance on a resumed history).
+
+### Decisions (and why)
+
+- **Trust prompt only on a real TTY.** A piped "t" into a prompt nobody read is ambient consent;
+  piped runs must use the explicit flag or `agent trust`. `--trust-this-workspace` deliberately
+  never persists — a CI flag must not silently pre-authorize future interactive runs.
+- **Workspace config carries no preferences.** A folder is attacker-influencable ground; it may
+  narrow policy but never choose the model, provider, or budgets. Config schemas structurally
+  cannot express widening (no allowlists — the V0.1 always-ask command decision stands).
+- **The screen renders from the log** (`EventLog.onAppend`), not from a parallel narrative —
+  and stdout stays model-text-only so piped transcripts are clean evidence.
+- **`user-quit` for /quit, EOF, and double-Ctrl+C** — human departure is not task completion.
+- **Abort at boundaries only.** A running `run_command` is not killable in V0.2; the abort
+  lands at the next tool boundary and the limitation is printed and documented.
+
+### Open issues / not verified
+
+- **Ctrl+C on a real console (raw-mode readline SIGINT + echo-mute) is manually unverified** —
+  Windows cannot deliver a genuine ^C to a piped child, so the abort path is proven at the
+  runtime level (in-process tests) but the end-to-end keypress needs one manual smoke on
+  Windows Terminal and conhost: run `agent`, start a long turn, press Ctrl+C (expect "turn
+  interrupted" + prompt), press it twice at idle (expect exit).
+- Approval-prompt Ctrl+C resolves the pending question via stream close/EOF mapping in piped
+  mode; on a real TTY the 'SIGINT' path resolves it as interrupt → abort (unit-covered, same
+  manual smoke applies).
+- The pre-existing V0.1 flakiness of subprocess tests under heavy parallel load (PowerShell
+  spawn latency) was observed once early in the session and not reproduced after; no timeout
+  changes were made.
+- `agent map` remains ungated pre-trust (reads .gitignore + prints file names locally, nothing
+  sent to a model) — documented exception.
+
+### Deferred to V0.3+
+
+Adaptive thinking with block preservation; killing an in-flight run_command on abort; per-action
+/ `--to` / `--steps` undo; tree-sitter ranked repo map; network/web tools; MCP and workflow
+packs; SQLite index over the JSONL; conversation rewind; session pruning/sanitized export;
+prompt-history persistence and line editing niceties in the REPL; OS-level sandboxing research.
+
+### Recommended next step
+
+Two candidates, in order: (1) **first non-coding workflow pack** (documents/PDF per PROJECT.md
+§9) to prove the small-kernel/broad-workflow thesis now that the interactive loop exists;
+(2) **context management for long REPL sessions** (token budgeting + history compaction with
+evidence-faithful summaries), which multi-turn interactive use will hit first in practice.
+
+---
+
 ## Session 1b (2026-07-14) — Automatic proxy support + verified live E2E
 
 ### Objective
