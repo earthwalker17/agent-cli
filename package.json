@@ -4,7 +4,7 @@
   "description": "A local-first, terminal-native, safely extensible general-purpose agent harness.",
   "type": "module",
   "bin": {
-    "agent": "dist/cli.js"
+    "agent": "dist/cli/index.js"
   },
   "engines": {
     "node": ">=22"
@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli/index.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

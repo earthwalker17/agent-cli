@@ -1,24 +1,20 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { resolveLayout, type ProjectLayout } from './store/layout.js';
-import { EventLog } from './store/event-log.js';
-import { SnapshotStore } from './store/snapshots.js';
-import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, type Session } from './runtime/session.js';
-import { autoDenyApprover, dangerousApprover, createInteractiveApprover } from './runtime/approvals.js';
-import { applyUndo } from './runtime/undo.js';
-import { buildWorkspaceMap } from './workspace/map.js';
-import { buildSystemPrompt } from './workspace/system-prompt.js';
-import { buildReport } from './report/report.js';
-import { MockProvider, parseScript } from './provider/mock.js';
-import { AnthropicProvider } from './provider/anthropic.js';
-import { randomSaltHex } from './shared/hash.js';
-import { ConfigError } from './shared/errors.js';
-import type { Approver, Provider, SessionMode } from './types.js';
+import { resolveLayout, type ProjectLayout } from '../store/layout.js';
+import { EventLog } from '../store/event-log.js';
+import { SnapshotStore } from '../store/snapshots.js';
+import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, type Session } from '../runtime/session.js';
+import { applyUndo } from '../runtime/undo.js';
+import { buildWorkspaceMap } from '../workspace/map.js';
+import { buildSystemPrompt } from '../workspace/system-prompt.js';
+import { buildReport } from '../report/report.js';
+import { AnthropicProvider } from '../provider/anthropic.js';
+import { randomSaltHex } from '../shared/hash.js';
+import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
 
-const USAGE = `Agent CLI — a bounded local agent harness (V0.1).
+const USAGE = `Agent CLI — a bounded local agent harness (V0.2).
 
 Usage:
   agent "<task>"                 Run a one-shot task in the current directory
@@ -35,33 +31,19 @@ Options:
   --script <file>          Scripted turns (required with --provider mock)
   --model <id>             Model id (default: claude-opus-4-8)
   --no-input               Non-interactive: every approval auto-denies (also auto-detected off a TTY)
+  --interactive            Force interactive mode on piped stdio (expect-style test driving)
   --max-turns <n>          Maximum agent steps per task (default: 20)
   --dangerously-allow-all  Bypass approvals (loud; every auto-allow is logged). No isolation whatsoever.
   --session <id>           Target session for undo (default: latest)
   -h, --help               Show this help
 
-Security: V0.1 has NO OS sandbox. The only control is the approval prompt. An approved command
+Security: V0.2 has NO OS sandbox. The only control is the approval prompt. An approved command
 runs with your full privileges and is not undoable. See README "Security model & honest limitations".`;
 
-const DEFAULT_MODEL = 'claude-opus-4-8';
 const KNOWN = new Set(['run', 'resume', 'undo', 'report', 'sessions', 'map']);
 
 interface Args {
-  values: {
-    C?: string;
-    provider?: string;
-    script?: string;
-    model?: string;
-    'no-input'?: boolean;
-    'max-turns'?: string;
-    'dangerously-allow-all'?: boolean;
-    session?: string;
-    budget?: string;
-    json?: boolean;
-    all?: boolean;
-    continue?: boolean;
-    help?: boolean;
-  };
+  values: CliValues;
   positionals: string[];
 }
 
@@ -75,8 +57,10 @@ function parse(argv: string[]): Args {
       script: { type: 'string' },
       model: { type: 'string' },
       'no-input': { type: 'boolean' },
+      interactive: { type: 'boolean' },
       'max-turns': { type: 'string' },
       'dangerously-allow-all': { type: 'boolean' },
+      'trust-this-workspace': { type: 'boolean' },
       session: { type: 'string' },
       budget: { type: 'string' },
       json: { type: 'boolean' },
@@ -87,57 +71,12 @@ function parse(argv: string[]): Args {
   }) as Args;
 }
 
-function workspaceRoot(values: Args['values']): string {
-  const dir = values.C ? path.resolve(values.C) : process.cwd();
-  if (!fs.existsSync(dir)) throw new ConfigError(`workspace directory does not exist: ${dir}`);
-  return fs.realpathSync.native(dir);
-}
-
-function makeProvider(values: Args['values']): Provider {
-  const kind = values.provider ?? 'anthropic';
-  if (kind === 'mock') {
-    if (!values.script) throw new ConfigError('--provider mock requires --script <file>');
-    return new MockProvider(parseScript(fs.readFileSync(values.script, 'utf8')));
-  }
-  if (kind === 'anthropic') return new AnthropicProvider();
-  throw new ConfigError(`unknown provider: ${kind}`);
-}
-
-function makeApprover(values: Args['values'], mode: SessionMode): Approver {
-  if (values['dangerously-allow-all']) return dangerousApprover;
-  if (mode === 'non-interactive') return autoDenyApprover;
-  return createInteractiveApprover();
-}
-
-function resolveMode(values: Args['values']): SessionMode {
-  return values['no-input'] || !process.stdin.isTTY ? 'non-interactive' : 'interactive';
-}
-
-function latestSessionId(layout: ProjectLayout): string | undefined {
-  try {
-    return fs
-      .readdirSync(layout.sessionsDir)
-      .filter((f) => f.endsWith('.jsonl'))
-      .map((f) => f.slice(0, -'.jsonl'.length))
-      .sort()
-      .pop();
-  } catch {
-    return undefined;
-  }
-}
-
 /** Shared run/resume tail: run one task turn, end the session, print a verdict. */
-async function runTask(values: Args['values'], task: string, opts: { resumeId?: string }): Promise<number> {
-  const ws = workspaceRoot(values);
-  const layout = resolveLayout(ws, { ensure: true });
-  const mode = resolveMode(values);
-  const provider = makeProvider(values);
-  const approver = makeApprover(values, mode);
-  const model = values.model ?? DEFAULT_MODEL;
-  const maxSteps = values['max-turns'] ? Number(values['max-turns']) : 20;
-  const maxTokens = provider.name === 'anthropic' ? 64_000 : 16_000;
-  const map = buildWorkspaceMap(ws);
-  const system = buildSystemPrompt(ws, map);
+async function runTask(values: CliValues, task: string, opts: { resumeId?: string }): Promise<number> {
+  const ctx = buildRunContext(values);
+  const layout = resolveLayout(ctx.ws, { ensure: true });
+  const map = buildWorkspaceMap(ctx.ws);
+  const system = buildSystemPrompt(ctx.ws, map);
   const onText = (t: string): void => {
     process.stdout.write(t);
   };
@@ -145,21 +84,34 @@ async function runTask(values: Args['values'], task: string, opts: { resumeId?: 
   if (values['dangerously-allow-all']) {
     process.stderr.write('⚠ --dangerously-allow-all: approvals are bypassed. No isolation whatsoever.\n');
   }
-  if (provider instanceof AnthropicProvider) {
-    process.stderr.write(`network: ${provider.transport}\n`);
+  if (ctx.provider instanceof AnthropicProvider) {
+    process.stderr.write(`network: ${ctx.provider.transport}\n`);
   }
 
+  const common = {
+    workspaceRoot: ctx.ws,
+    layout,
+    model: ctx.model,
+    mode: ctx.mode,
+    provider: ctx.provider,
+    approver: ctx.approver,
+    system,
+    maxSteps: ctx.maxSteps,
+    maxTokens: ctx.maxTokens,
+    saltHex: randomSaltHex(),
+    onText,
+  };
   let session: Session;
   if (opts.resumeId) {
-    session = resumeSession({ workspaceRoot: ws, layout, model, mode, provider, approver, system, maxSteps, maxTokens, saltHex: randomSaltHex(), sessionId: opts.resumeId, onText });
+    session = resumeSession({ ...common, sessionId: opts.resumeId });
   } else {
-    session = startSession({ workspaceRoot: ws, layout, model, mode, provider, approver, system, maxSteps, maxTokens, saltHex: randomSaltHex(), argv: process.argv.slice(2), onText });
+    session = startSession({ ...common, argv: process.argv.slice(2) });
   }
   recordWorkspaceMap(session, map);
 
   try {
     const result = await runTurn(session, task);
-    endSession(session, result.stopped && result.steps >= maxSteps ? 'max-steps' : result.stopped ? 'user-quit' : 'completed');
+    endSession(session, result.stopped && result.steps >= ctx.maxSteps ? 'max-steps' : result.stopped ? 'user-quit' : 'completed');
     process.stdout.write('\n');
     printVerdict(layout, session.id);
     return result.denials > 0 || result.stopped ? 2 : 0;
@@ -181,9 +133,9 @@ function printVerdict(layout: ProjectLayout, id: string): void {
   );
 }
 
-function cmdReport(values: Args['values'], id?: string): number {
+function cmdReport(values: CliValues, id?: string): number {
   const ws = workspaceRoot(values);
-  const layout = resolveLayout(ws, { ensure: true });
+  const layout = resolveLayout(ws);
   const sessionId = id ?? values.session ?? latestSessionId(layout);
   if (!sessionId) {
     process.stderr.write('no sessions found for this workspace\n');
@@ -195,9 +147,9 @@ function cmdReport(values: Args['values'], id?: string): number {
   return 0;
 }
 
-function cmdSessions(values: Args['values']): number {
+function cmdSessions(values: CliValues): number {
   const ws = workspaceRoot(values);
-  const layout = resolveLayout(ws, { ensure: true });
+  const layout = resolveLayout(ws);
   let files: string[];
   try {
     files = fs.readdirSync(layout.sessionsDir).filter((f) => f.endsWith('.jsonl'));
@@ -222,16 +174,16 @@ function cmdSessions(values: Args['values']): number {
   return 0;
 }
 
-function cmdMap(values: Args['values']): number {
+function cmdMap(values: CliValues): number {
   const ws = workspaceRoot(values);
   const map = buildWorkspaceMap(ws, values.budget ? { budget: Number(values.budget) } : {});
   process.stdout.write(map.text + `\n\n(${map.fileCount} files${map.truncated ? ', truncated' : ''})\n`);
   return 0;
 }
 
-function cmdUndo(values: Args['values']): number {
+function cmdUndo(values: CliValues): number {
   const ws = workspaceRoot(values);
-  const layout = resolveLayout(ws, { ensure: true });
+  const layout = resolveLayout(ws);
   const id = values.session ?? latestSessionId(layout);
   if (!id) {
     process.stderr.write('no sessions found for this workspace\n');
@@ -296,7 +248,7 @@ export async function main(argv: string[]): Promise<number> {
     // Bare task, or --continue.
     if (values.continue) {
       const ws = workspaceRoot(values);
-      const layout = resolveLayout(ws, { ensure: true });
+      const layout = resolveLayout(ws);
       const id = latestSessionId(layout);
       if (!id) {
         process.stderr.write('no session to continue\n');

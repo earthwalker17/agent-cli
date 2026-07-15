@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const CLI = path.resolve('dist/cli.js');
+const CLI = path.resolve('dist/cli/index.js');
 const hasBuild = fs.existsSync(CLI);
 const d = hasBuild ? describe : describe.skip;
 
