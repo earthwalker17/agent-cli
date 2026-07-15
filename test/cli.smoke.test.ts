@@ -25,13 +25,32 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-function run(args: string[]): { code: number; stdout: string; stderr: string } {
+function run(args: string[], input?: string): { code: number; stdout: string; stderr: string } {
   const r = spawnSync(process.execPath, [CLI, ...args], {
     cwd: ws,
     env: { ...process.env, AGENT_CLI_STATE_DIR: state },
     encoding: 'utf8',
+    ...(input !== undefined ? { input } : {}),
   });
   return { code: r.status ?? -1, stdout: r.stdout, stderr: r.stderr };
+}
+
+/** Events of the first (or only) session recorded for the suite's workspace. */
+function sessionEvents(): { type: string; [k: string]: unknown }[] {
+  const projects = path.join(state, 'projects');
+  if (!fs.existsSync(projects)) return [];
+  for (const slug of fs.readdirSync(projects)) {
+    const dir = path.join(projects, slug, 'sessions');
+    if (!fs.existsSync(dir)) continue;
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+    if (files.length === 0) continue;
+    return fs
+      .readFileSync(path.join(dir, files[0]!), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { type: string });
+  }
+  return [];
 }
 
 d('CLI end-to-end via the built binary', () => {
@@ -107,6 +126,42 @@ d('CLI end-to-end via the built binary', () => {
     const res = run(['--help']);
     expect(res.code).toBe(0);
     expect(res.stdout).toMatch(/NO OS sandbox/);
+  });
+
+  it('drives a full piped REPL session: real approver, clean stdout, user-quit', () => {
+    const script = path.join(tmp, 'script.json');
+    fs.writeFileSync(
+      script,
+      JSON.stringify([
+        { calls: [{ name: 'run_command', input: { command: 'echo smoke' } }] },
+        { say: 'finished' },
+      ]),
+    );
+    const res = run(['--provider', 'mock', '--script', script, '--interactive'], 'do the thing\ny\n/quit\n');
+    expect(res.code).toBe(0);
+    // Stream purity: stdout is ONLY model text; every prompt/status line went to stderr.
+    expect(res.stdout).toBe('finished\n');
+    expect(res.stderr).toContain('agent session');
+
+    const events = sessionEvents();
+    expect(events.find((e) => e.type === 'session.started')).toMatchObject({ mode: 'interactive' });
+    // The piped 'y' was consumed by the REAL interactive approver, not auto-deny.
+    expect(events.find((e) => e.type === 'approval.resolved')).toMatchObject({ decision: 'allow', source: 'user' });
+    expect(events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
+  });
+
+  it('bare agent without a TTY prints usage instead of a REPL nobody watches', () => {
+    const res = run([], '');
+    expect(res.code).toBe(0);
+    expect(res.stdout).toMatch(/Usage:/);
+    // No REPL means no session was started at all.
+    expect(sessionEvents()).toHaveLength(0);
+  });
+
+  it('--no-input with --interactive is a hard contradiction', () => {
+    const res = run(['--no-input', '--interactive', 'task']);
+    expect(res.code).toBe(1);
+    expect(res.stderr).toMatch(/contradictory/);
   });
 
   it('refuses an untrusted workspace non-interactively with exit 3', () => {
