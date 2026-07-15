@@ -1,0 +1,179 @@
+import type { SessionEvent } from '../types.js';
+import type { TurnResult } from '../runtime/session.js';
+import { sanitizeLine } from '../shared/text.js';
+import { fmtDuration, fmtTokens, toolLabel, type Style } from './format.js';
+
+/**
+ * The live view of the session: subscribes to EventLog.onAppend, so the screen renders exactly
+ * what the evidence log persisted — never a parallel narrative (evidence over narration).
+ *
+ * Stream split (load-bearing for redirection and tests): assistant text goes to `modelOut`
+ * (stdout) verbatim; ALL chrome — tool activity, approvals, summaries, banners — goes to
+ * `chromeOut` (stderr). `agent --interactive < script > transcript.txt` captures only what the
+ * model said plus explicitly requested artifacts.
+ */
+
+export interface Renderer {
+  onText(delta: string): void;
+  onEvent(e: SessionEvent): void;
+  beginTurn(): void;
+  endTurn(result: TurnResult, maxSteps: number): void;
+  turnError(err: Error): void;
+  banner(info: BannerInfo): void;
+  chromeLine(text: string): void;
+  /** Close any half-open output line (called before prompts). */
+  flush(): void;
+}
+
+export interface BannerInfo {
+  sessionId: string;
+  resumed: boolean;
+  model: string;
+  workspaceRoot: string;
+  stateDir: string;
+  network?: string;
+  dangerous: boolean;
+}
+
+interface Counters {
+  files: Set<string>;
+  commands: number;
+  denials: number;
+  inTokens: number;
+  outTokens: number;
+  steps: number;
+}
+
+export function createRenderer(opts: {
+  modelOut: NodeJS.WritableStream;
+  chromeOut: NodeJS.WritableStream;
+  style: Style;
+}): Renderer {
+  const { modelOut, chromeOut, style } = opts;
+  const g = style.glyph;
+  let textOpen = false; // assistant text column open on modelOut
+  let toolOpen = false; // an unterminated tool line open on chromeOut
+  let counters: Counters = { files: new Set(), commands: 0, denials: 0, inTokens: 0, outTokens: 0, steps: 0 };
+
+  const flush = (): void => {
+    if (textOpen) {
+      modelOut.write('\n');
+      textOpen = false;
+    }
+    if (toolOpen) {
+      chromeOut.write('\n');
+      toolOpen = false;
+    }
+  };
+  const chromeLine = (text: string): void => {
+    flush();
+    chromeOut.write(text + '\n');
+  };
+
+  return {
+    flush,
+    chromeLine,
+
+    onText(delta) {
+      if (delta.length === 0) return;
+      if (toolOpen) {
+        chromeOut.write('\n');
+        toolOpen = false;
+      }
+      modelOut.write(delta);
+      textOpen = !delta.endsWith('\n');
+    },
+
+    onEvent(e) {
+      switch (e.type) {
+        case 'tool.requested': {
+          flush();
+          chromeOut.write(style.dim(`  ${g.bullet} ${toolLabel(e.tool, e.input)} `));
+          toolOpen = true;
+          if (e.tool === 'run_command') counters.commands++;
+          break;
+        }
+        case 'tool.completed': {
+          const mark = e.ok ? style.green(g.ok) : style.red(g.fail);
+          const dur = e.durationMs > 0 ? ` ${style.dim(fmtDuration(e.durationMs))}` : '';
+          const note = e.ok ? '' : ` ${style.dim(sanitizeLine(e.outputPreview.slice(0, 80)))}`;
+          if (toolOpen) {
+            chromeOut.write(`${mark}${dur}${note}\n`);
+            toolOpen = false;
+          } else {
+            chromeLine(`  ${mark}${dur}${note}`);
+          }
+          break;
+        }
+        case 'policy.decision': {
+          if (e.decision === 'deny') counters.denials++;
+          break;
+        }
+        case 'approval.resolved': {
+          if (e.decision !== 'allow') counters.denials++;
+          chromeLine(style.dim(`  ${g.arrow} ${e.decision}${e.scope === 'session' ? ' (rest of session)' : ''}`));
+          break;
+        }
+        case 'file.mutated': {
+          counters.files.add(e.path);
+          break;
+        }
+        case 'assistant.message': {
+          counters.steps++;
+          counters.inTokens += e.usage.inputTokens;
+          counters.outTokens += e.usage.outputTokens;
+          break;
+        }
+        case 'turn.aborted': {
+          chromeLine(style.yellow(`  ${g.warn} turn interrupted`));
+          break;
+        }
+        case 'snapshot.failed': {
+          chromeLine(style.yellow(`  ${g.warn} snapshot failed for ${sanitizeLine(e.path)} — change would NOT be undoable`));
+          break;
+        }
+        case 'undo.applied': {
+          for (const r of e.restored) chromeLine(`  ${style.green(g.ok)} restored ${sanitizeLine(r.path)}`);
+          for (const r of e.refused) chromeLine(`  ${style.red(g.fail)} refused ${sanitizeLine(r.path)}: ${r.reason}`);
+          if (e.restored.length === 0 && e.refused.length === 0) chromeLine(style.dim('  nothing to undo'));
+          break;
+        }
+        default:
+          break;
+      }
+    },
+
+    beginTurn() {
+      counters = { files: new Set(), commands: 0, denials: 0, inTokens: 0, outTokens: 0, steps: 0 };
+    },
+
+    endTurn(result, maxSteps) {
+      flush();
+      const bits = [
+        `${counters.files.size} file(s)`,
+        `${counters.commands} cmd`,
+        `${counters.steps} step(s)`,
+        `${fmtTokens(counters.inTokens)}/${fmtTokens(counters.outTokens)} tok`,
+      ];
+      if (counters.denials > 0) bits.push(`${counters.denials} denied`);
+      let status = '';
+      if (result.aborted) status = ` ${g.warn} interrupted`;
+      else if (result.stopped && result.steps >= maxSteps) status = ` ${g.warn} step budget reached — continue with another instruction`;
+      else if (result.stopped) status = ` ${g.warn} stopped`;
+      chromeLine(style.dim(`${g.rule.repeat(2)} ${bits.join(' · ')}`) + (status ? style.yellow(status) : ''));
+    },
+
+    turnError(err) {
+      chromeLine(style.red(`${g.fail} turn failed: ${sanitizeLine(err.message)}`) + style.dim(' (session continues; evidence is in the log)'));
+    },
+
+    banner(info) {
+      chromeLine(style.bold(`agent ${info.resumed ? 'resumed' : 'session'} ${info.sessionId}`));
+      chromeLine(style.dim(`  workspace: ${sanitizeLine(info.workspaceRoot)}`));
+      chromeLine(style.dim(`  model: ${info.model} · state: ${sanitizeLine(info.stateDir)}`));
+      if (info.network) chromeLine(style.dim(`  network: ${info.network}`));
+      if (info.dangerous) chromeLine(style.red(`  ${g.warn} approvals BYPASSED (--dangerously-allow-all)`));
+      chromeLine(style.dim(`  /help for commands · Ctrl+C interrupts a running turn · /quit to leave`));
+    },
+  };
+}

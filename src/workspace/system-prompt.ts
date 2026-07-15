@@ -15,6 +15,8 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap): str
     '- run_command runs a real shell with the user\'s full privileges. It is NOT sandboxed and its effects are NOT undoable. Use it only when a file tool cannot do the job, and keep commands minimal and explicit.',
     '- After changing files, run a relevant check (build/test/lint) with run_command when one exists, so the change is verified rather than merely made.',
     '- There is no OS-level sandbox in this version — the only protection is the approval prompt. Do not assume anything you do is contained.',
+    '- Never initialize or modify version control (git init/add/commit/branch/etc.) and never create a repository unless the user explicitly asks for it.',
+    '- The user may be in an interactive session and can send follow-up instructions after each result; treat each instruction in the context of the whole conversation. Text inside [[harness note: …]] at the start of a user message comes from the harness (e.g. the user reverted files), not from the user.',
     '- Be concise. Report what you did and what you verified; do not claim a check passed unless a command actually exited zero.',
     '',
     `Workspace root: ${workspaceRoot}`,

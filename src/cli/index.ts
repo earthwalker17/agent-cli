@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import readline from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { resolveLayout, resolveStateRoot, type ProjectLayout } from '../store/layout.js';
-import { ensureTrusted, type TrustDecision } from '../trust/gate.js';
 import { cmdTrust } from '../trust/commands.js';
+import { checkTrust } from './trust-check.js';
 import { loadConfig } from '../config/config.js';
+import { runRepl } from '../repl/repl.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
 import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, type Session } from '../runtime/session.js';
@@ -21,9 +21,10 @@ import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from 
 const USAGE = `Agent CLI — a bounded local agent harness (V0.2).
 
 Usage:
+  agent                          Start an interactive session (REPL) in the current directory
   agent "<task>"                 Run a one-shot task in the current directory
-  agent --continue "<task>"      Resume the latest session with a follow-up task
-  agent resume <id> "<task>"     Resume a specific session with a follow-up task
+  agent --continue ["<task>"]    Resume the latest session (REPL without a task, one-shot with)
+  agent resume <id> ["<task>"]   Resume a specific session (REPL without a task, one-shot with)
   agent undo [--all]             Undo the last file change (or all changes) of a session
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
   agent sessions                 List sessions for this workspace
@@ -43,7 +44,8 @@ Options:
   --trust-this-workspace   Proceed in an untrusted workspace for THIS invocation only (not recorded)
   -h, --help               Show this help
 
-Exit codes: 0 ok · 1 error · 2 denials or stopped · 3 workspace not trusted.
+Exit codes: 0 ok · 1 error · 2 denials or stopped (one-shot only; the REPL reports denials
+inline and exits 0 on a clean quit) · 3 workspace not trusted.
 
 Security: V0.2 has NO OS sandbox. The only control is the approval prompt. An approved command
 runs with your full privileges and is not undoable. Workspace trust is recorded consent, not
@@ -80,25 +82,6 @@ function parse(argv: string[]): Args {
       help: { type: 'boolean', short: 'h' },
     },
   }) as Args;
-}
-
-/**
- * The trust gate for every session-starting command. The consent prompt is offered only on a
- * REAL TTY — a piped "t" answered into a prompt nobody read is not consent, so forced-interactive
- * (piped) runs must pass --trust-this-workspace or pre-record consent with `agent trust`.
- */
-async function checkTrust(values: CliValues, ws: string): Promise<TrustDecision> {
-  const stateRoot = resolveStateRoot();
-  const trustFlag = values['trust-this-workspace'] === true;
-  if (!process.stdin.isTTY || values['no-input']) {
-    return await ensureTrusted({ workspaceReal: ws, stateRoot, trustFlag });
-  }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return await ensureTrusted({ workspaceReal: ws, stateRoot, trustFlag, question: (q) => rl.question(q) });
-  } finally {
-    rl.close();
-  }
 }
 
 /** Shared run/resume tail: run one task turn, end the session, print a verdict. */
@@ -276,9 +259,16 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === 'resume') {
       const id = positionals[1];
       const task = positionals[2];
-      if (!id || !task) {
-        process.stderr.write('usage: agent resume <id> "<task>"\n');
+      if (!id) {
+        process.stderr.write('usage: agent resume <id> ["<task>"]\n');
         return 1;
+      }
+      if (!task) {
+        if (!process.stdin.isTTY && !values.interactive) {
+          process.stderr.write('agent resume <id> without a task starts the REPL; that needs a terminal (or --interactive)\n');
+          return 1;
+        }
+        return await runRepl(values, { resumeId: id });
       }
       return await runTask(values, task, { resumeId: id });
     }
@@ -290,7 +280,7 @@ export async function main(argv: string[]): Promise<number> {
       }
       return await runTask(values, task, {});
     }
-    // Bare task, or --continue.
+    // Bare task, --continue, or the bare-invocation REPL.
     if (values.continue) {
       const ws = workspaceRoot(values);
       const layout = resolveLayout(ws);
@@ -300,12 +290,18 @@ export async function main(argv: string[]): Promise<number> {
         return 1;
       }
       if (!cmd) {
-        process.stderr.write('usage: agent --continue "<task>"\n');
-        return 1;
+        if (!process.stdin.isTTY && !values.interactive) {
+          process.stderr.write('agent --continue without a task starts the REPL; that needs a terminal (or --interactive)\n');
+          return 1;
+        }
+        return await runRepl(values, { resumeId: id });
       }
       return await runTask(values, cmd, { resumeId: id });
     }
     if (cmd && !KNOWN.has(cmd)) return await runTask(values, cmd, {});
+    if (!cmd && (process.stdin.isTTY || values.interactive)) {
+      return await runRepl(values, {});
+    }
     process.stdout.write(USAGE + '\n');
     return 0;
   } catch (e) {
