@@ -51,9 +51,9 @@ V0.1's deny-&-stop); a mid-stream abort leaves consecutive user-role messages on
 
 ### Verification evidence
 
-- `npm run typecheck` clean; `npm run build` clean; `npm test`: **196 passing, 1 skipped**
-  across 18 files (was 143+1). New suites: runtime.abort (8), trust (12), config (9), repl (12),
-  store liveness (4), report exclusions, and 7 new CLI smoke tests.
+- `npm run typecheck` clean; `npm run build` clean; `npm test`: **204 passing, 1 skipped**
+  across 18 files (was 143+1). New suites: runtime.abort, trust/consent, config, repl (+io
+  integrity), store liveness, report exclusions, and 7 new CLI smoke tests.
 - **Live E2E round 1** (real Opus 4.8 through the system proxy, expect-style driver, isolated
   `Desktop\agent-cli-e2e\ws`): `agent trust` → piped `--interactive` REPL → 3 natural-language
   instructions built a working `wordstats` utility (README + tests). Human-proxy driver DENIED
@@ -69,6 +69,25 @@ V0.1's deny-&-stop); a mid-stream abort leaves consecutive user-role messages on
 - **Live E2E round 3**: interactive resume (`agent --continue`) replayed the conversation
   against the real API and extended the file correctly (also exercising coalesceUserMessages
   wire-shape acceptance on a resumed history).
+
+### Final adversarial review (post-E2E)
+
+A second multi-agent review over the complete session diff (safety / correctness / Windows-io
+lenses; the verify fan-out was cut short by a subagent spend limit, so the eight candidate
+findings were verified by hand against the code). Four were real and are fixed + tested:
+
+- **Type-ahead could answer approval prompts on a TTY** — a buffered next-instruction line
+  starting with 's' would grant a *session-wide* allow for a prompt the user never saw.
+  Approval questions now only accept a line typed after the prompt is visible.
+- **Approval prompt printed model-controlled text unsanitized** — embedded ANSI/bidi could
+  visually rewrite the very prompt that gates shell execution. Now sanitized (also `agent map`).
+- **Abort-skipped commands appeared under "Commands run"** in the report as if they executed.
+- **Ctrl+D/Ctrl+C at the trust consent prompt exited 0** (dangling question promise drained the
+  event loop) — a script would read an aborted consent as success. Now settles as declined.
+
+Plus two hardening fixes: full-terminal mode requires both stdin AND stderr TTYs (else typing
+was invisible with stderr redirected), and the readline gate passes terminal columns through.
+Post-fix gate: typecheck/build clean, **204 passing, 1 skipped**.
 
 ### Decisions (and why)
 
