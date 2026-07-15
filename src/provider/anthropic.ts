@@ -29,18 +29,40 @@ export class AnthropicProvider implements Provider {
     this.transport = transport.describe();
   }
 
-  async complete(req: ProviderRequest, onText?: (delta: string) => void): Promise<ProviderTurn> {
-    const stream = this.client.messages.stream({
-      model: req.model,
-      max_tokens: req.maxTokens,
-      system: req.system,
-      messages: req.messages.map(toApiMessage),
-      tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema as Anthropic.Tool.InputSchema })),
-    });
+  async complete(req: ProviderRequest, onText?: (delta: string) => void, signal?: AbortSignal): Promise<ProviderTurn> {
+    const stream = this.client.messages.stream(
+      {
+        model: req.model,
+        max_tokens: req.maxTokens,
+        system: req.system,
+        messages: coalesceUserMessages(req.messages).map(toApiMessage),
+        tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema as Anthropic.Tool.InputSchema })),
+      },
+      signal ? { signal } : undefined,
+    );
     if (onText) stream.on('text', (delta) => onText(delta));
     const msg = await stream.finalMessage();
     return toProviderTurn(msg);
   }
+}
+
+/**
+ * Merge consecutive same-role messages into one (concatenating their content blocks). An aborted
+ * turn — and a crash-resume before the first assistant reply — legitimately leaves consecutive
+ * user messages in the history; the Messages API requires alternating roles, so this is the wire
+ * normalization. Pure; the harness's own history is left untouched.
+ */
+export function coalesceUserMessages(messages: readonly ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    const prev = out[out.length - 1];
+    if (prev && prev.role === m.role) {
+      out[out.length - 1] = { role: prev.role, content: [...prev.content, ...m.content] };
+    } else {
+      out.push(m);
+    }
+  }
+  return out;
 }
 
 export function toApiMessage(m: ChatMessage): Anthropic.MessageParam {

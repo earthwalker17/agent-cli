@@ -131,8 +131,12 @@ export interface ProviderTurn {
 
 export interface Provider {
   readonly name: string;
-  /** `onText` receives assistant text deltas for live rendering; optional. */
-  complete(req: ProviderRequest, onText?: (delta: string) => void): Promise<ProviderTurn>;
+  /**
+   * `onText` receives assistant text deltas for live rendering; optional.
+   * `signal` aborts an in-flight request (the caller detects an abort via `signal.aborted`
+   * after a throw — never via provider-specific error classes).
+   */
+  complete(req: ProviderRequest, onText?: (delta: string) => void, signal?: AbortSignal): Promise<ProviderTurn>;
 }
 
 // ── Event log ──────────────────────────────────────────────────────────────────────────────
@@ -217,6 +221,11 @@ export type EventBody =
       target: 'last' | 'all';
       restored: { path: string; toSha256: string | null }[];
       refused: { path: string; reason: string }[];
+    }
+  | {
+      /** The user aborted the turn: during the model call ('model') or the tool phase ('tools'). */
+      type: 'turn.aborted';
+      phase: 'model' | 'tools';
     }
   | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
 

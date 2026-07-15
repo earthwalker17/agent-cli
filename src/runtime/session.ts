@@ -51,8 +51,10 @@ export interface TurnResult {
   stopReason: StopReason;
   denials: number;
   steps: number;
-  /** True when the user chose "deny & stop" or the step budget was exhausted. */
+  /** True when the user chose "deny & stop", the turn was aborted, or the step budget was exhausted. */
   stopped: boolean;
+  /** True when the turn ended because the caller's AbortSignal fired (e.g. Ctrl+C in the REPL). */
+  aborted: boolean;
 }
 
 export interface StartOptions {
@@ -217,12 +219,18 @@ export function endSession(session: Session, reason: 'completed' | 'user-quit' |
   session.log.close();
 }
 
+export interface TurnOptions {
+  /** Abort the turn: the model stream is cancelled and pending tool calls are skipped. */
+  signal?: AbortSignal;
+}
+
 /**
  * Run the agent loop for one user message until the model stops calling tools (or the step budget
  * is spent). Every tool call is gated through the single policy engine, mutations are snapshotted,
  * and structured evidence is appended to the log.
  */
-export async function runTurn(session: Session, userText: string): Promise<TurnResult> {
+export async function runTurn(session: Session, userText: string, opts: TurnOptions = {}): Promise<TurnResult> {
+  const signal = opts.signal;
   session.log.append({ type: 'user.message', text: userText });
   session.messages.push({ role: 'user', content: [{ type: 'text', text: userText }] });
 
@@ -232,7 +240,13 @@ export async function runTurn(session: Session, userText: string): Promise<TurnR
   let finalText = '';
   let lastStop: StopReason = 'end_turn';
 
+  const abortedResult = (phase: 'model' | 'tools', stepsRun: number): TurnResult => {
+    session.log.append({ type: 'turn.aborted', phase });
+    return { finalText, stopReason: lastStop, denials, steps: stepsRun, stopped: true, aborted: true };
+  };
+
   for (; steps < session.maxSteps; steps++) {
+    if (signal?.aborted) return abortedResult('model', steps);
     const req: ProviderRequest = {
       model: session.model,
       system: session.system,
@@ -240,7 +254,16 @@ export async function runTurn(session: Session, userText: string): Promise<TurnR
       tools: session.tools.map(toToolSchema),
       maxTokens: session.maxTokens,
     };
-    const turn = await session.provider.complete(req, session.onText);
+    let turn;
+    try {
+      turn = await session.provider.complete(req, session.onText, signal);
+    } catch (err) {
+      // Abort is detected via the signal, never via provider-specific error classes. Nothing has
+      // been appended for this step, so the log and message history end at the last complete
+      // exchange (a trailing user message; the wire coalesces consecutive user messages).
+      if (signal?.aborted) return abortedResult('model', steps);
+      throw err;
+    }
     lastStop = turn.stopReason;
 
     const text = turn.blocks
@@ -261,20 +284,78 @@ export async function runTurn(session: Session, userText: string): Promise<TurnR
 
     if (turn.stopReason !== 'tool_use' || toolUses.length === 0) break;
 
+    // Pre-gate: once the turn is aborted or the user chose deny-&-stop, NO further call may
+    // execute — including auto-allowed in-workspace writes, which never reach an approver.
     const toolResults: ContentBlock[] = [];
     let stopRequested = false;
+    let sawAbort = false;
     for (const tu of toolUses) {
-      const r = await executeCall(session, ctx, tu, stopRequested);
+      if (signal?.aborted || stopRequested) {
+        sawAbort = sawAbort || (signal?.aborted ?? false);
+        toolResults.push(
+          recordSkippedCall(session, tu, signal?.aborted ? 'interrupted by user' : 'skipped: session stopped by user'),
+        );
+        continue;
+      }
+      const r = await executeCall(session, ctx, tu);
       toolResults.push(r.toolResult);
       if (r.denied) denials++;
       if (r.stop) stopRequested = true;
     }
     session.messages.push({ role: 'user', content: toolResults });
-    if (stopRequested) return { finalText, stopReason: lastStop, denials, steps: steps + 1, stopped: true };
+    if (sawAbort || signal?.aborted) return abortedResult('tools', steps + 1);
+    if (stopRequested) return { finalText, stopReason: lastStop, denials, steps: steps + 1, stopped: true, aborted: false };
   }
 
   const stopped = steps >= session.maxSteps;
-  return { finalText, stopReason: lastStop, denials, steps, stopped };
+  return { finalText, stopReason: lastStop, denials, steps, stopped, aborted: false };
+}
+
+/** Record a tool call that was never executed (turn aborted / session stopped) with a terminal result. */
+function recordSkippedCall(
+  session: Session,
+  tu: Extract<ContentBlock, { type: 'tool_use' }>,
+  message: string,
+): ContentBlock {
+  session.log.append({ type: 'tool.requested', callId: tu.id, tool: tu.name, input: tu.input });
+  session.log.append({ type: 'tool.completed', callId: tu.id, ok: false, outputPreview: message, durationMs: 0, truncated: false });
+  return toolResultBlock(tu.id, message, true);
+}
+
+/**
+ * Repair the in-memory conversation after a turn threw mid-loop: if the last message is an
+ * assistant message whose tool_use blocks were never answered, synthesize their tool_result
+ * blocks so the next provider request stays API-valid (an unanswered tool_use is a 400 on every
+ * later turn). Calls that DID complete before the throw are answered from their recorded
+ * `tool.completed` (mirroring what a resume would replay); the rest get an error result.
+ * Returns true when a repair was applied.
+ */
+export function repairDanglingToolUses(session: Session): boolean {
+  const last = session.messages[session.messages.length - 1];
+  if (!last || last.role !== 'assistant') return false;
+  const uses = last.content.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use');
+  if (uses.length === 0) return false;
+
+  const completedBy = new Map<string, Extract<SessionEvent, { type: 'tool.completed' }>>();
+  for (const e of session.log.events) {
+    if (e.type === 'tool.completed') completedBy.set(e.callId, e);
+  }
+
+  const results = uses.map((u) => {
+    const done = completedBy.get(u.id);
+    if (done) return toolResultBlock(u.id, done.outputPreview, !done.ok);
+    session.log.append({
+      type: 'tool.completed',
+      callId: u.id,
+      ok: false,
+      outputPreview: 'interrupted: the turn failed before this call ran',
+      durationMs: 0,
+      truncated: false,
+    });
+    return toolResultBlock(u.id, 'interrupted: the turn failed before this call ran', true);
+  });
+  session.messages.push({ role: 'user', content: results });
+  return true;
 }
 
 interface CallOutcome {
@@ -294,7 +375,6 @@ async function executeCall(
   session: Session,
   ctx: ToolContext,
   tu: Extract<ContentBlock, { type: 'tool_use' }>,
-  forceDeny: boolean,
 ): Promise<CallOutcome> {
   const callId = tu.id;
   const tool = session.tools.find((t) => t.name === tu.name);
@@ -331,11 +411,6 @@ async function executeCall(
   }
 
   if (decision.decision === 'ask') {
-    if (forceDeny) {
-      session.log.append({ type: 'approval.resolved', callId, decision: 'deny', scope: 'once', source: 'user' });
-      session.log.append({ type: 'tool.completed', callId, ok: false, outputPreview: 'skipped (session stopped)', durationMs: 0, truncated: false });
-      return { toolResult: toolResultBlock(callId, 'denied: session stopped by user', true), denied: true, stop: false };
-    }
     const req = buildApprovalRequest(tool, input, decision, callId);
     const outcome = await session.approver(req);
     session.log.append({ type: 'approval.resolved', callId, decision: outcome.decision, scope: outcome.scope, source: outcome.source });

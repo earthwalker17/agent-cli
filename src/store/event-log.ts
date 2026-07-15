@@ -73,7 +73,7 @@ export class EventLog {
    * Set by the session owner (the REPL renderer). A throwing observer is swallowed: rendering
    * must never be able to fail an already-persisted append.
    */
-  onAppend?: (e: SessionEvent) => void;
+  onAppend: ((e: SessionEvent) => void) | undefined = undefined;
 
   private constructor(
     private readonly file: string,
