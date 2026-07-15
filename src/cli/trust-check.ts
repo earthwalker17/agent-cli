@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { resolveStateRoot } from '../store/layout.js';
-import { ensureTrusted, type TrustDecision } from '../trust/gate.js';
+import { askConsent, ensureTrusted, type TrustDecision } from '../trust/gate.js';
 import type { CliValues } from './context.js';
 
 /**
@@ -17,7 +17,9 @@ export async function checkTrust(values: CliValues, ws: string): Promise<TrustDe
   }
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
   try {
-    return await ensureTrusted({ workspaceReal: ws, stateRoot, trustFlag, question: (q) => rl.question(q) });
+    // askConsent settles on Ctrl+D/Ctrl+C too ('' = declined) — a dangling question promise
+    // would otherwise drain the event loop and exit 0, which a script reads as success.
+    return await ensureTrusted({ workspaceReal: ws, stateRoot, trustFlag, question: (q) => askConsent(rl, q) });
   } finally {
     rl.close();
   }

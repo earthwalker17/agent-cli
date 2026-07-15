@@ -52,6 +52,23 @@ export function trustPrompt(workspaceReal: string): string {
 }
 
 /**
+ * Ask one consent question on a readline that may be closed (Ctrl+D) or interrupted (Ctrl+C)
+ * while pending. Any of those resolves to '' → "declined": the question promise must never be
+ * left unsettled, or the process would drain its event loop and exit 0 — a silent success in
+ * the eyes of a calling script.
+ */
+export async function askConsent(
+  rl: { question(q: string): Promise<string>; once(ev: string, cb: () => void): unknown },
+  q: string,
+): Promise<string> {
+  return await new Promise<string>((resolve) => {
+    rl.question(q).then(resolve, () => resolve(''));
+    rl.once('close', () => resolve(''));
+    rl.once('SIGINT', () => resolve(''));
+  });
+}
+
+/**
  * Decide whether this run may operate in the workspace. Ordering is load-bearing: the
  * state-root-inside-workspace refusal comes FIRST, because a state root planted inside an
  * untrusted folder would let that folder's own trust.json grant itself consent.

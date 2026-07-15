@@ -21,8 +21,10 @@ describe('buildReport CHECKED/UNCHECKED', () => {
       evt({ seq: 4, type: 'file.mutated', callId: 'c1', path: 'C:\\ws\\a.ts', kind: 'modify', beforeSha256: 'aa', afterSha256: 'bb', createdDirs: [] }),
       evt({ seq: 5, type: 'tool.completed', callId: 'c1', ok: true, outputPreview: 'edited', durationMs: 3, truncated: false }),
       evt({ seq: 6, type: 'tool.requested', callId: 'c2', tool: 'run_command', input: { command: 'npm test' } }),
-      evt({ seq: 7, type: 'tool.completed', callId: 'c2', ok: true, outputPreview: 'ok', exitCode: 0, durationMs: 100, truncated: false }),
-      evt({ seq: 8, type: 'session.ended', reason: 'completed' }),
+      evt({ seq: 7, type: 'policy.decision', callId: 'c2', classification: 'observe', decision: 'ask', rule: 'cmd.always-ask', reason: 'r' }),
+      evt({ seq: 8, type: 'approval.resolved', callId: 'c2', decision: 'allow', scope: 'once', source: 'user' }),
+      evt({ seq: 9, type: 'tool.completed', callId: 'c2', ok: true, outputPreview: 'ok', exitCode: 0, durationMs: 100, truncated: false }),
+      evt({ seq: 10, type: 'session.ended', reason: 'completed' }),
     ];
     const { json, md } = buildReport({ events });
     expect(json.filesChanged[0]).toMatchObject({ path: 'C:\\ws\\a.ts', checked: true, checkedBy: 'npm test' });
@@ -91,6 +93,19 @@ describe('buildReport determinism & honesty', () => {
     expect(json.commands[0]).toMatchObject({ command: 'echo ok', exitCode: 0 });
     // The denied call is still fully visible as an action.
     expect(json.actions.find((a) => a.callId === 'c1')).toMatchObject({ decision: 'ask', ok: false });
+  });
+
+  it('excludes abort-skipped commands (requested + completed, but never gated) from "Commands run"', () => {
+    const events: SessionEvent[] = [
+      started,
+      // The shape recordSkippedCall produces: no policy.decision, no approval.resolved.
+      evt({ seq: 2, type: 'tool.requested', callId: 'c1', tool: 'run_command', input: { command: 'echo skipped' } }),
+      evt({ seq: 3, type: 'tool.completed', callId: 'c1', ok: false, outputPreview: 'interrupted by user', durationMs: 0, truncated: false }),
+      evt({ seq: 4, type: 'turn.aborted', phase: 'tools' }),
+    ];
+    const { json } = buildReport({ events });
+    expect(json.commands).toHaveLength(0);
+    expect(json.actions.find((a) => a.callId === 'c1')).toMatchObject({ ok: false });
   });
 
   it('surfaces a corrupt-log banner and still renders prior events', () => {

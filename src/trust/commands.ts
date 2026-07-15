@@ -1,7 +1,7 @@
 import readline from 'node:readline/promises';
 import { sanitizeLine } from '../shared/text.js';
 import { grantTrust, revokeTrust, listTrusted, isTrusted } from './store.js';
-import { trustPrompt } from './gate.js';
+import { askConsent, trustPrompt } from './gate.js';
 
 export interface TrustCommandValues {
   revoke?: boolean;
@@ -43,7 +43,7 @@ export async function cmdTrust(values: TrustCommandValues, stateRoot: string, wo
   if (process.stdin.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
     try {
-      const answer = (await rl.question(trustPrompt(workspaceReal))).trim().toLowerCase();
+      const answer = (await askConsent(rl, trustPrompt(workspaceReal))).trim().toLowerCase();
       if (answer !== 't' && answer !== 'y') {
         process.stdout.write('not trusted (declined)\n');
         return 1;

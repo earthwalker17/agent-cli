@@ -128,8 +128,9 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     const cmd = commandByCall.get(e.callId);
     if (cmd === undefined) continue;
     // "Commands run" means commands that EXECUTED. A denied call is visible under Actions and
-    // Approvals; listing it here would read as if it ran.
-    if (neverRan.has(e.callId)) continue;
+    // Approvals; listing it here would read as if it ran. A call with NO policy.decision at all
+    // never reached the gate (skipped by an abort/stop) and equally never ran.
+    if (neverRan.has(e.callId) || !decisionByCall.has(e.callId)) continue;
     commands.push({ command: cmd, ok: e.ok, durationMs: e.durationMs, ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}) });
     commandCompletions.push({ command: cmd, seq: e.seq, ok: e.ok, ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}) });
   }

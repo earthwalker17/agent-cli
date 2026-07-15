@@ -123,6 +123,49 @@ describe('trust gate', () => {
   });
 });
 
+describe('askConsent (the consent question must always settle)', () => {
+  function fakeRl(): {
+    rl: { question: (q: string) => Promise<string>; once: (ev: string, cb: () => void) => void };
+    fire: (ev: string) => void;
+    answer: (a: string) => void;
+  } {
+    const handlers = new Map<string, () => void>();
+    let resolveQ: ((a: string) => void) | undefined;
+    return {
+      rl: {
+        question: () => new Promise<string>((res) => (resolveQ = res)),
+        once: (ev, cb) => handlers.set(ev, cb),
+      },
+      fire: (ev) => handlers.get(ev)?.(),
+      answer: (a) => resolveQ?.(a),
+    };
+  }
+
+  it('resolves the typed answer normally', async () => {
+    const { rl, answer } = fakeRl();
+    const { askConsent } = await import('../src/trust/gate.js');
+    const p = askConsent(rl, 'q');
+    answer('t');
+    expect(await p).toBe('t');
+  });
+
+  it('Ctrl+D (close) resolves as declined instead of leaving the promise unsettled (exit-0 hazard)', async () => {
+    const { rl, fire } = fakeRl();
+    const { askConsent } = await import('../src/trust/gate.js');
+    const p = askConsent(rl, 'q');
+    fire('close');
+    expect(await p).toBe('');
+  });
+
+  it('Ctrl+C (SIGINT) resolves as declined', async () => {
+    const { rl, fire } = fakeRl();
+    const { askConsent } = await import('../src/trust/gate.js');
+    const p = askConsent(rl, 'q');
+    fire('SIGINT');
+    expect(await p).toBe('');
+  });
+});
+
 describe('sanitizeLine', () => {
   it('escapes bidi, zero-width, and control characters; flattens newlines', () => {
     expect(sanitizeLine('a‮b')).toBe('a\\u{202e}b');
