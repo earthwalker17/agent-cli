@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { grantTrust } from '../src/trust/store.js';
 
 const CLI = path.resolve('dist/cli/index.js');
 const hasBuild = fs.existsSync(CLI);
@@ -16,6 +17,9 @@ beforeEach(() => {
   ws = path.join(tmp, 'ws');
   state = path.join(tmp, 'state');
   fs.mkdirSync(ws);
+  // Session-starting commands require workspace trust; the suite pre-records consent
+  // through the real store (dedicated untrusted-refusal tests skip this seeding).
+  grantTrust(state, ws, 'command');
 });
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -103,5 +107,73 @@ d('CLI end-to-end via the built binary', () => {
     const res = run(['--help']);
     expect(res.code).toBe(0);
     expect(res.stdout).toMatch(/NO OS sandbox/);
+  });
+
+  it('refuses an untrusted workspace non-interactively with exit 3', () => {
+    const other = path.join(tmp, 'untrusted-ws');
+    fs.mkdirSync(other);
+    const script = path.join(tmp, 'script.json');
+    fs.writeFileSync(script, JSON.stringify([{ say: 'never reached' }]));
+    const r = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+      cwd: other,
+      env: { ...process.env, AGENT_CLI_STATE_DIR: state },
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(3);
+    expect(r.stderr).toMatch(/not trusted/);
+    // The refusal must not create per-project state for the untrusted folder.
+    const projects = path.join(state, 'projects');
+    const slugs = fs.existsSync(projects) ? fs.readdirSync(projects) : [];
+    expect(slugs.some((s) => s.startsWith('untrusted-ws'))).toBe(false);
+  });
+
+  it('--trust-this-workspace runs once without recording trust', () => {
+    const other = path.join(tmp, 'once-ws');
+    fs.mkdirSync(other);
+    const script = path.join(tmp, 'script.json');
+    fs.writeFileSync(script, JSON.stringify([{ say: 'ran once' }]));
+    const once = spawnSync(
+      process.execPath,
+      [CLI, '--provider', 'mock', '--script', script, '--no-input', '--trust-this-workspace', 'task'],
+      { cwd: other, env: { ...process.env, AGENT_CLI_STATE_DIR: state }, encoding: 'utf8' },
+    );
+    expect(once.status).toBe(0);
+    // Not persisted: the same run WITHOUT the flag refuses again.
+    const r2 = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+      cwd: other,
+      env: { ...process.env, AGENT_CLI_STATE_DIR: state },
+      encoding: 'utf8',
+    });
+    expect(r2.status).toBe(3);
+  });
+
+  it('agent trust records consent; trust --revoke withdraws it', () => {
+    const other = path.join(tmp, 'trust-cmd-ws');
+    fs.mkdirSync(other);
+    const env = { ...process.env, AGENT_CLI_STATE_DIR: state };
+    const trust = spawnSync(process.execPath, [CLI, 'trust'], { cwd: other, env, encoding: 'utf8' });
+    expect(trust.status).toBe(0);
+    expect(trust.stdout).toMatch(/trusted:/);
+
+    const list = spawnSync(process.execPath, [CLI, 'trust', '--list'], { cwd: other, env, encoding: 'utf8' });
+    expect(list.stdout).toMatch(/trust-cmd-ws/);
+
+    const script = path.join(tmp, 'script.json');
+    fs.writeFileSync(script, JSON.stringify([{ say: 'hello from trusted ws' }]));
+    const r = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+      cwd: other,
+      env,
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(0);
+
+    const revoke = spawnSync(process.execPath, [CLI, 'trust', '--revoke'], { cwd: other, env, encoding: 'utf8' });
+    expect(revoke.status).toBe(0);
+    const r2 = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+      cwd: other,
+      env,
+      encoding: 'utf8',
+    });
+    expect(r2.status).toBe(3);
   });
 });

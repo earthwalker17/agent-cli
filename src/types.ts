@@ -227,6 +227,11 @@ export type EventBody =
       type: 'turn.aborted';
       phase: 'model' | 'tools';
     }
+  | {
+      /** How the workspace-trust gate was satisfied for this run (consent provenance). */
+      type: 'trust.verified';
+      source: 'store' | 'prompt-remember' | 'prompt-once' | 'flag';
+    }
   | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
 
 export type SessionEvent = { v: number; seq: number; ts: string } & EventBody;

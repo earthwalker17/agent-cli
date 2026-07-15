@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import readline from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { resolveLayout, type ProjectLayout } from '../store/layout.js';
+import { resolveLayout, resolveStateRoot, type ProjectLayout } from '../store/layout.js';
+import { ensureTrusted, type TrustDecision } from '../trust/gate.js';
+import { cmdTrust } from '../trust/commands.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
 import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, type Session } from '../runtime/session.js';
@@ -24,6 +27,7 @@ Usage:
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
+  agent trust [--revoke|--list]  Manage recorded workspace trust (consent, not a sandbox)
 
 Options:
   -C <dir>                 Workspace root (default: current directory)
@@ -35,12 +39,16 @@ Options:
   --max-turns <n>          Maximum agent steps per task (default: 20)
   --dangerously-allow-all  Bypass approvals (loud; every auto-allow is logged). No isolation whatsoever.
   --session <id>           Target session for undo (default: latest)
+  --trust-this-workspace   Proceed in an untrusted workspace for THIS invocation only (not recorded)
   -h, --help               Show this help
 
-Security: V0.2 has NO OS sandbox. The only control is the approval prompt. An approved command
-runs with your full privileges and is not undoable. See README "Security model & honest limitations".`;
+Exit codes: 0 ok · 1 error · 2 denials or stopped · 3 workspace not trusted.
 
-const KNOWN = new Set(['run', 'resume', 'undo', 'report', 'sessions', 'map']);
+Security: V0.2 has NO OS sandbox. The only control is the approval prompt. An approved command
+runs with your full privileges and is not undoable. Workspace trust is recorded consent, not
+isolation. See README "Security model & honest limitations".`;
+
+const KNOWN = new Set(['run', 'resume', 'undo', 'report', 'sessions', 'map', 'trust']);
 
 interface Args {
   values: CliValues;
@@ -61,6 +69,8 @@ function parse(argv: string[]): Args {
       'max-turns': { type: 'string' },
       'dangerously-allow-all': { type: 'boolean' },
       'trust-this-workspace': { type: 'boolean' },
+      revoke: { type: 'boolean' },
+      list: { type: 'boolean' },
       session: { type: 'string' },
       budget: { type: 'string' },
       json: { type: 'boolean' },
@@ -71,9 +81,33 @@ function parse(argv: string[]): Args {
   }) as Args;
 }
 
+/**
+ * The trust gate for every session-starting command. The consent prompt is offered only on a
+ * REAL TTY — a piped "t" answered into a prompt nobody read is not consent, so forced-interactive
+ * (piped) runs must pass --trust-this-workspace or pre-record consent with `agent trust`.
+ */
+async function checkTrust(values: CliValues, ws: string): Promise<TrustDecision> {
+  const stateRoot = resolveStateRoot();
+  const trustFlag = values['trust-this-workspace'] === true;
+  if (!process.stdin.isTTY || values['no-input']) {
+    return await ensureTrusted({ workspaceReal: ws, stateRoot, trustFlag });
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return await ensureTrusted({ workspaceReal: ws, stateRoot, trustFlag, question: (q) => rl.question(q) });
+  } finally {
+    rl.close();
+  }
+}
+
 /** Shared run/resume tail: run one task turn, end the session, print a verdict. */
 async function runTask(values: CliValues, task: string, opts: { resumeId?: string }): Promise<number> {
   const ctx = buildRunContext(values);
+  const trust = await checkTrust(values, ctx.ws);
+  if (!trust.trusted) {
+    process.stderr.write(`refusing to run: ${trust.reason}\n`);
+    return 3;
+  }
   const layout = resolveLayout(ctx.ws, { ensure: true });
   const map = buildWorkspaceMap(ctx.ws);
   const system = buildSystemPrompt(ctx.ws, map);
@@ -107,6 +141,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   } else {
     session = startSession({ ...common, argv: process.argv.slice(2) });
   }
+  session.log.append({ type: 'trust.verified', source: trust.source });
   recordWorkspaceMap(session, map);
 
   try {
@@ -228,6 +263,9 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === 'sessions') return cmdSessions(values);
     if (cmd === 'map') return cmdMap(values);
     if (cmd === 'undo') return await cmdUndo(values);
+    if (cmd === 'trust') {
+      return await cmdTrust({ ...(values.revoke !== undefined ? { revoke: values.revoke } : {}), ...(values.list !== undefined ? { list: values.list } : {}) }, resolveStateRoot(), workspaceRoot(values));
+    }
     if (cmd === 'resume') {
       const id = positionals[1];
       const task = positionals[2];

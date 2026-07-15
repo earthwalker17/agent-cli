@@ -38,6 +38,11 @@ function projectSlug(workspaceReal: string): string {
   return `${sani || 'ws'}-${sha256(caseFold(workspaceReal)).slice(0, 8)}`;
 }
 
+/** The root of all Agent CLI state (no directory creation, no workspace knowledge). */
+export function resolveStateRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return path.resolve(env['AGENT_CLI_STATE_DIR'] ?? path.join(os.homedir(), '.agent-cli'));
+}
+
 /**
  * Resolve (and, if `ensure`, create) the state layout for a workspace. Refuses if the state
  * root resolves to be equal-to or inside the workspace — otherwise the file tools' protected-path
@@ -49,7 +54,7 @@ export function resolveLayout(
 ): ProjectLayout {
   const env = opts.env ?? process.env;
   const workspaceReal = realIfExists(workspaceRoot);
-  const stateRoot = path.resolve(env['AGENT_CLI_STATE_DIR'] ?? path.join(os.homedir(), '.agent-cli'));
+  const stateRoot = resolveStateRoot(env);
 
   if (isInside(workspaceReal, stateRoot)) {
     throw new ConfigError(

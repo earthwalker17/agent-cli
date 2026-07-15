@@ -18,6 +18,8 @@ export interface CliValues {
   'max-turns'?: string;
   'dangerously-allow-all'?: boolean;
   'trust-this-workspace'?: boolean;
+  revoke?: boolean;
+  list?: boolean;
   session?: string;
   budget?: string;
   json?: boolean;
