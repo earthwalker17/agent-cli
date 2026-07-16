@@ -4,6 +4,87 @@ Session-by-session evolution of Agent CLI. Newest first.
 
 ---
 
+## Session 3 (2026-07-16) — Recorded live E2E demo + two defects it surfaced
+
+### Objective
+
+Not a product increment: produce a truthful, continuous, Playwright-recorded demonstration of
+the V0.2 loop — launch in an empty folder, on-camera trust consent, natural-language build of a
+complete web app with inline approvals, in-session `/report`, quit, interactive resume
+(`agent --continue`) with a follow-up change, starting the generated server, and driving the
+finished app in the browser. Fix Agent CLI only where the E2E genuinely exposed a defect.
+
+### Demo result (artifacts live OUTSIDE this repo)
+
+`C:\Users\A\Desktop\agent-cli-demo-20260716\` — isolated demo root: `ws/` (agent workspace),
+`state/` (isolated `AGENT_CLI_STATE_DIR`), `video/agent-cli-live-demo.webm` (**11m20s**, one
+continuous recording), `artifacts/` (full PTY byte log, stripped transcript, keystroke +
+approval log, screenshots, export download, `agent report` md+json, `verification.md`),
+`harness/` (the transparent companion: xterm.js page bridged to a real ConPTY running
+PowerShell; Playwright drives keystrokes through the page and records it — documented
+honesty notes in the demo README).
+
+The agent (real `claude-opus-4-8` through the proxy) built **FlowBoard** — a dark-themed
+Kanban board (7 files, ~865 lines: pure-logic `store.mjs` + 15 `node --test` unit tests, DOM
+wiring, static `server.mjs` with root-containment, README) — in one 128s turn plus one 35s
+resumed follow-up turn (Export-JSON feature + test), 2 approvals (both `node --test`), zero
+denials, zero budget hits, all 7 files CHECKED in the evidence report.
+
+### Agent CLI changes (the E2E's product yield — both committed pre-recording)
+
+1. **fix(cli): entry guard never ran under npm link** — Node realpaths the main module's
+   `import.meta.url`, but the guard compared it to `pathToFileURL(argv[1])` verbatim, so the
+   README-documented `npm link` shim exited 0 silently with no output. Now realpaths argv[1];
+   regression test spawns the built CLI through a junction (`test/cli.smoke.test.ts`).
+2. **test: vitest `testTimeout` raised to a 60s hang backstop** — the 5s default kept
+   producing the spurious subprocess-test timeouts already noted twice in this file (measured:
+   one bare Node spawn can take multiple seconds under real machine load).
+
+### Verification evidence
+
+- Post-fix gate: typecheck/build clean; **205 passed, 1 skipped** (was 204+1; +1 regression).
+- Live API smoke (`AGENT_LIVE_TEST=1`, anthropic.test.ts): 5/5 through the system proxy.
+- The recorded session's own evidence chain was independently audited by a 4-agent
+  verification workflow (app / evidence-log / isolation / completeness-critic lenses): report
+  ↔ raw JSONL consistent (85 events; trust `prompt-remember` then `store` on resume; exactly
+  2 `approval.resolved`, both allow-by-user; every mutation snapshot re-hashes to its content
+  address; final files re-hash to the report's after-hashes); app 15/15 tests + live HTTP
+  checks + traversal probes safe + browser console clean; isolation: no `.git` in the demo ws,
+  repo tree clean with zero demo references, real `%USERPROFILE%\.agent-cli` untouched.
+  Full detail: `artifacts/verification.md` in the demo folder.
+
+### Decisions (and why)
+
+- **Record a browser-hosted real terminal (xterm.js ↔ ConPTY bridge)** instead of faking
+  terminal output in a page: Playwright can only record pages, but the CLI must run in a real
+  TTY to exercise the true interactive surface (raw-mode readline, on-camera trust prompt,
+  Unicode glyphs). Every displayed byte comes from the PTY; the one injected setup line
+  (UTF-8 codepage + PSReadLine hygiene) is logged and disclosed.
+- **PSReadLine predictions disabled for recordings** — ghost-text renders the developer's
+  private global command history into the video (observed live before the fix).
+- **Approvals answered by an explicit, logged human-proxy policy** in the driver (deny-list
+  regex, else allow), so the recording's approval answers are auditable rather than ad hoc.
+
+### Open issues / findings for V0.3
+
+- **Approval-prompt labeling UX nit:** `run_command` prompts show the best-effort command
+  class (`[observe]` for `node --test`) beside the "NOT undoable" warning — deliberate V0.1
+  design (label informs the human), but visually contradictory on camera; worth a clearer
+  presentation (e.g. `[shell command — labeled observe]`).
+- The report's "Files changed" uses last-mutation-per-path semantics, so a file created then
+  edited in one session renders as `modify` — correct but can read as if the file pre-existed;
+  presentation nuance noted by the audit.
+- Session 2's manual Ctrl+C console smoke remains open (the demo used /quit paths, not
+  interrupts).
+
+### Recommended next step
+
+Unchanged from Session 2 (this session added no product surface): (1) first non-coding
+workflow pack (documents/PDF), or (2) context management for long REPL sessions. The demo
+also suggests a small V0.3 UX batch: approval-prompt label clarity + prompt-history niceties.
+
+---
+
 ## Session 2 (2026-07-15) — V0.2: interactive REPL, workspace trust, narrowing-only config
 
 ### Objective
