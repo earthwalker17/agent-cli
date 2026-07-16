@@ -128,6 +128,24 @@ d('CLI end-to-end via the built binary', () => {
     expect(res.stdout).toMatch(/NO OS sandbox/);
   });
 
+  it('runs when invoked through a symlinked path (npm link bin shim)', () => {
+    // npm link points the global bin at <prefix>/node_modules/agent-cli -> repo junction.
+    // Node realpaths the main module's import.meta.url, so the entry guard must realpath
+    // argv[1] too — without that the CLI exits silently with code 0 and no output (the
+    // V0.2 defect this test pins).
+    const linkRoot = path.join(tmp, 'node_modules');
+    fs.mkdirSync(linkRoot, { recursive: true });
+    const link = path.join(linkRoot, 'agent-cli');
+    fs.symlinkSync(path.resolve('.'), link, 'junction');
+    const r = spawnSync(process.execPath, [path.join(link, 'dist', 'cli', 'index.js'), '--help'], {
+      cwd: ws,
+      env: { ...process.env, AGENT_CLI_STATE_DIR: state },
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Usage:/);
+  });
+
   it('drives a full piped REPL session: real approver, clean stdout, user-quit', () => {
     const script = path.join(tmp, 'script.json');
     fs.writeFileSync(

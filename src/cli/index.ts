@@ -314,7 +314,20 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 // Auto-run only when invoked as the program entry (not when imported by tests).
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// argv[1] must be realpath'd before comparing: Node resolves the main module's
+// import.meta.url through symlinks, so a bin shim invoking the SYMLINKED path
+// (npm link / linked global installs) would never match and the CLI would exit
+// silently with code 0.
+function isProgramEntry(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync.native(entry)).href;
+  } catch {
+    return false;
+  }
+}
+if (isProgramEntry()) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (err) => {
