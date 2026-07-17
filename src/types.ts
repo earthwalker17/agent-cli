@@ -11,6 +11,12 @@ export type ActionClass = 'observe' | 'reversible' | 'external' | 'destructive' 
 
 export type SessionMode = 'interactive' | 'non-interactive';
 
+/**
+ * How a managed command actually ended. 'exited' is the only termination with a real exit code;
+ * killed commands (timeout/aborted) have NO exit code and must never read as a completed check.
+ */
+export type CommandTermination = 'exited' | 'timeout' | 'aborted' | 'spawn-error';
+
 // ── Tools ──────────────────────────────────────────────────────────────────────────────────
 /** Absolute paths a tool will change. Declarable ⇒ snapshottable ⇒ reversible. */
 export interface MutationPlan {
