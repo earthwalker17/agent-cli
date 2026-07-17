@@ -31,11 +31,34 @@ export interface PolicyRules {
   secretPatterns: string[];
 }
 
+/**
+ * Structured facts about a command execution, reported by the executing tool through
+ * `ToolContext.reportCommand`. The runtime binds the callId when persisting, so a tool can
+ * only ever produce evidence for its own call.
+ */
+export type CommandEvidence =
+  | { kind: 'started'; pid: number; shell: string; cwd: string; timeoutMs: number }
+  | {
+      kind: 'ended';
+      termination: CommandTermination;
+      /** null unless the process genuinely exited (killed commands have no exit code). */
+      exitCode: number | null;
+      durationMs: number;
+      killDetail?: string;
+      drainTimedOut?: boolean;
+    };
+
 export interface ToolContext {
   workspaceRoot: string;
   stateDir: string;
   /** Present when configuration narrowed policy; read by the engine and the search tool. */
   rules?: PolicyRules;
+  /** Turn cancellation. A long-running tool must observe it and terminate its own work. */
+  signal?: AbortSignal;
+  /** Live output chunks for RENDERING only — never persisted per-chunk; evidence is the completed result. */
+  onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void;
+  /** Evidence channel for command lifecycle facts (spawn/termination); persisted by the runtime. */
+  reportCommand?: (e: CommandEvidence) => void;
 }
 
 export interface ToolResult {
@@ -48,6 +71,10 @@ export interface ToolResult {
   truncated: boolean;
   /** sha256 of the full untruncated output, present only when truncated. */
   fullOutputSha256?: string;
+  /** How a command actually ended (run_command only). Absent exitCode + 'timeout'/'aborted' = killed. */
+  termination?: CommandTermination;
+  /** Honest kill mechanics when a kill was attempted (best-effort tree kill + verification probe). */
+  killDetail?: string;
 }
 
 export interface Tool<I = unknown> {
@@ -231,6 +258,25 @@ export type EventBody =
       durationMs: number;
       truncated: boolean;
       fullOutputSha256?: string;
+    }
+  | {
+      /** A shell command actually spawned (post-approval). Distinct from tool.requested: this is execution. */
+      type: 'command.started';
+      callId: string;
+      pid: number;
+      shell: string;
+      cwd: string;
+      timeoutMs: number;
+    }
+  | {
+      /** How the spawned command ended. Killed commands (timeout/aborted) have exitCode null. */
+      type: 'command.ended';
+      callId: string;
+      termination: CommandTermination;
+      exitCode: number | null;
+      durationMs: number;
+      killDetail?: string;
+      drainTimedOut?: boolean;
     }
   | {
       type: 'undo.applied';

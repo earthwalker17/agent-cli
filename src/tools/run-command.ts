@@ -1,7 +1,8 @@
-import { spawn, spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import type { Tool } from '../types.js';
+import type { Tool, ToolResult } from '../types.js';
 import { truncateForModel } from '../shared/hash.js';
+import { buildChildEnv } from '../exec/env.js';
+import { runManaged } from '../exec/run.js';
 
 const RunInput = z
   .object({
@@ -26,96 +27,79 @@ function shellInvocation(command: string): { file: string; args: string[] } {
   return { file: '/bin/sh', args: ['-c', command] };
 }
 
-function killTree(pid: number): void {
-  if (isWin) {
-    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
-  } else {
-    try {
-      process.kill(-pid, 'SIGKILL'); // process group (requires detached); best effort
-    } catch {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }
-  }
-}
-
 /**
- * run_command executes a shell command with full user privilege. It is `command`-typed so the
- * policy gate always asks. HONEST LIMITATIONS (documented in README): no OS sandbox; side effects
- * are NOT snapshotted or undoable; output is captured and NOT scrubbed for secrets; the timeout
- * kills the direct process tree but detached grandchildren may survive.
+ * run_command executes a shell command with full user privilege through the managed exec
+ * substrate. It is `command`-typed so the policy gate always asks. HONEST LIMITATIONS
+ * (documented in README): no OS sandbox; side effects are NOT snapshotted or undoable; output is
+ * NOT scrubbed for secrets; tree termination is BEST EFFORT (orphaned grandchildren of an
+ * already-dead intermediate parent are unreachable). The child env drops variables whose names
+ * look secret-like; proxy variables pass through.
  */
 export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
   name: 'run_command',
   description:
-    'Run a shell command in the workspace root and return combined stdout+stderr and the exit code. ' +
-    'Runs with your full privileges; it is NOT sandboxed and its effects are NOT undoable.',
+    'Run a shell command in the workspace root and return its output and exit code. ' +
+    'Runs with full user privileges; it is NOT sandboxed and its effects are NOT undoable. ' +
+    'stdin is not connected: commands must be non-interactive. The child environment omits ' +
+    'variables whose names look secret-like (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL) — do not ' +
+    'write commands that expect them. Commands time out (default 120s; set timeoutMs up to ' +
+    '600000) and the user can interrupt a running command. A killed command reports how it ' +
+    'terminated and has NO exit code — never treat a killed command as evidence a check passed.',
   schema: RunInput,
   mutates: () => null,
   command: (i) => i.command,
   async execute(input, ctx) {
-    const started = Date.now();
     const { file, args } = shellInvocation(input.command);
     const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT;
 
-    return await new Promise((resolve) => {
-      const child = spawn(file, args, {
-        cwd: ctx.workspaceRoot,
-        detached: !isWin,
-        windowsHide: true,
-      });
-      const chunks: Buffer[] = [];
-      let timedOut = false;
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        if (child.pid !== undefined) killTree(child.pid);
-      }, timeoutMs);
-
-      child.stdout?.on('data', (d: Buffer) => chunks.push(d));
-      child.stderr?.on('data', (d: Buffer) => chunks.push(d));
-
-      child.on('error', (err) => {
-        clearTimeout(timer);
-        resolve({
-          ok: false,
-          output: '',
-          error: `failed to spawn shell: ${err.message}`,
-          truncated: false,
-          durationMs: Date.now() - started,
-        });
-      });
-
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        const raw = Buffer.concat(chunks).toString('utf8');
-        const t = truncateForModel(raw);
-        const durationMs = Date.now() - started;
-        if (timedOut) {
-          resolve({
-            ok: false,
-            output: t.text,
-            error: `timed out after ${timeoutMs}ms; process tree killed`,
-            exitCode: -1,
-            truncated: t.truncated,
-            durationMs,
-            ...(t.fullSha256 ? { fullOutputSha256: t.fullSha256 } : {}),
-          });
-          return;
-        }
-        const exitCode = code ?? -1;
-        resolve({
-          ok: exitCode === 0,
-          output: t.text,
-          exitCode,
-          truncated: t.truncated,
-          durationMs,
-          ...(t.fullSha256 ? { fullOutputSha256: t.fullSha256 } : {}),
-        });
-      });
+    const outcome = await runManaged({
+      file,
+      args,
+      cwd: ctx.workspaceRoot,
+      env: buildChildEnv(process.env),
+      timeoutMs,
+      signal: ctx.signal,
+      ...(ctx.onOutput ? { onOutput: ctx.onOutput } : {}),
+      onSpawn: (pid) => ctx.reportCommand?.({ kind: 'started', pid, shell: file, cwd: ctx.workspaceRoot, timeoutMs }),
     });
+
+    ctx.reportCommand?.({
+      kind: 'ended',
+      termination: outcome.termination,
+      exitCode: outcome.exitCode,
+      durationMs: outcome.durationMs,
+      ...(outcome.killDetail !== undefined ? { killDetail: outcome.killDetail } : {}),
+      ...(outcome.drainTimedOut ? { drainTimedOut: true } : {}),
+    });
+
+    const drainNote = outcome.drainTimedOut
+      ? '\n[output may be incomplete: stream drain timed out after the process ended]'
+      : '';
+    const t = truncateForModel(outcome.combined + drainNote);
+
+    const base: ToolResult = {
+      ok: false,
+      output: t.text,
+      durationMs: outcome.durationMs,
+      truncated: t.truncated || outcome.captureTruncated,
+      termination: outcome.termination,
+      ...(t.fullSha256 ? { fullOutputSha256: t.fullSha256 } : {}),
+      ...(outcome.killDetail !== undefined ? { killDetail: outcome.killDetail } : {}),
+    };
+
+    switch (outcome.termination) {
+      case 'exited':
+        return {
+          ...base,
+          ok: outcome.exitCode === 0,
+          ...(outcome.exitCode !== null ? { exitCode: outcome.exitCode } : {}),
+        };
+      case 'timeout':
+        return { ...base, error: `timed out after ${timeoutMs}ms; process tree force-killed (best effort); no exit code` };
+      case 'aborted':
+        return { ...base, error: `aborted by user after ${outcome.durationMs}ms; process tree force-killed (best effort); no exit code` };
+      case 'spawn-error':
+        return { ...base, error: outcome.spawnError ?? 'failed to spawn shell' };
+    }
   },
 };
