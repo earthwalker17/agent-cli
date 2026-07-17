@@ -1,4 +1,4 @@
-import type { SessionEvent } from '../types.js';
+import type { CommandTermination, SessionEvent } from '../types.js';
 
 /**
  * The deterministic evidence report: a PURE function from the event log to a structured object
@@ -32,6 +32,10 @@ export interface ReportCommand {
   ok: boolean;
   exitCode?: number;
   durationMs: number;
+  /** How the command ended, when the log carries command.ended evidence (V0.3+ logs). */
+  termination?: CommandTermination;
+  /** True when command.started exists but the call never completed (session died while it ran). */
+  neverCompleted?: boolean;
 }
 export interface ReportJson {
   session: {
@@ -90,6 +94,8 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
 
   const decisionByCall = new Map<string, Extract<SessionEvent, { type: 'policy.decision' }>>();
   const completedByCall = new Map<string, Extract<SessionEvent, { type: 'tool.completed' }>>();
+  const startedByCall = new Map<string, Extract<SessionEvent, { type: 'command.started' }>>();
+  const endedByCall = new Map<string, Extract<SessionEvent, { type: 'command.ended' }>>();
   const snapshotCalls = new Set<string>();
   const neverRan = new Set<string>(); // denied by policy or by the human — the call never executed
   for (const e of events) {
@@ -99,6 +105,8 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     } else if (e.type === 'approval.resolved') {
       if (e.decision !== 'allow') neverRan.add(e.callId);
     } else if (e.type === 'tool.completed') completedByCall.set(e.callId, e);
+    else if (e.type === 'command.started') startedByCall.set(e.callId, e);
+    else if (e.type === 'command.ended') endedByCall.set(e.callId, e);
     else if (e.type === 'snapshot.created') snapshotCalls.add(e.callId);
   }
 
@@ -121,7 +129,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   }
 
   // Command completions with their seq, for CHECKED correlation.
-  const commandCompletions: { command: string; seq: number; exitCode?: number; ok: boolean }[] = [];
+  const commandCompletions: { command: string; seq: number; exitCode?: number; ok: boolean; termination?: CommandTermination }[] = [];
   const commands: ReportCommand[] = [];
   for (const e of events) {
     if (e.type !== 'tool.completed') continue;
@@ -131,8 +139,29 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     // Approvals; listing it here would read as if it ran. A call with NO policy.decision at all
     // never reached the gate (skipped by an abort/stop) and equally never ran.
     if (neverRan.has(e.callId) || !decisionByCall.has(e.callId)) continue;
-    commands.push({ command: cmd, ok: e.ok, durationMs: e.durationMs, ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}) });
-    commandCompletions.push({ command: cmd, seq: e.seq, ok: e.ok, ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}) });
+    const term = endedByCall.get(e.callId)?.termination;
+    commands.push({
+      command: cmd,
+      ok: e.ok,
+      durationMs: e.durationMs,
+      ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
+      ...(term !== undefined ? { termination: term } : {}),
+    });
+    commandCompletions.push({
+      command: cmd,
+      seq: e.seq,
+      ok: e.ok,
+      ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
+      ...(term !== undefined ? { termination: term } : {}),
+    });
+  }
+  // Commands that SPAWNED but never completed: the session died while they ran. Their side
+  // effects are unknown — that must be visible, not silently absent.
+  for (const callId of startedByCall.keys()) {
+    if (completedByCall.has(callId)) continue;
+    const cmd = commandByCall.get(callId);
+    if (cmd === undefined) continue;
+    commands.push({ command: cmd, ok: false, durationMs: 0, neverCompleted: true });
   }
 
   // Files changed: last mutation per path, then CHECKED if a command exited 0 after it.
@@ -141,7 +170,11 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     if (e.type === 'file.mutated') lastMutation.set(e.path, e);
   }
   const filesChanged: ReportFile[] = [...lastMutation.values()].map((m) => {
-    const check = commandCompletions.find((cc) => cc.seq > m.seq && cc.exitCode === 0);
+    // A check must have genuinely EXITED with 0. A killed command has no exit code by contract;
+    // for V0.3+ logs the termination evidence enforces this even against a stray exitCode.
+    const check = commandCompletions.find(
+      (cc) => cc.seq > m.seq && cc.exitCode === 0 && (cc.termination === undefined || cc.termination === 'exited'),
+    );
     const file: ReportFile = {
       path: m.path,
       kind: m.kind,
@@ -232,7 +265,19 @@ function renderMarkdown(r: ReportJson): string {
   if (r.commands.length === 0) {
     L.push('(none)');
   } else {
-    for (const c of r.commands) L.push(`- \`${c.command}\`  → exit ${c.exitCode ?? '—'} (${c.durationMs} ms)`);
+    for (const c of r.commands) {
+      if (c.neverCompleted) {
+        L.push(`- \`${c.command}\`  → STARTED but never completed (the session ended while it ran); effects unknown`);
+      } else if (c.termination === 'timeout') {
+        L.push(`- \`${c.command}\`  → killed: timed out (${c.durationMs} ms); no exit code`);
+      } else if (c.termination === 'aborted') {
+        L.push(`- \`${c.command}\`  → killed: aborted by user (${c.durationMs} ms); no exit code`);
+      } else if (c.termination === 'spawn-error') {
+        L.push(`- \`${c.command}\`  → failed to spawn`);
+      } else {
+        L.push(`- \`${c.command}\`  → exit ${c.exitCode ?? '—'} (${c.durationMs} ms)`);
+      }
+    }
   }
   L.push('');
 
@@ -261,5 +306,11 @@ function renderMarkdown(r: ReportJson): string {
   L.push(`---`);
   L.push(`Assistant narrative is not evidence; the sections above are compiled only from recorded tool events.`);
   L.push(`Undo covers only write_file/edit_file changes. run_command side effects, out-of-workspace edits, and external modifications are NOT captured. There is no OS sandbox — an approved command ran with full user privilege.`);
+  if (r.commands.some((c) => c.neverCompleted)) {
+    L.push(`A command marked "STARTED but never completed" was executing when the session ended abnormally; its process may have kept running and its side effects are unknown.`);
+  }
+  if (r.commands.some((c) => c.termination === 'timeout' || c.termination === 'aborted')) {
+    L.push(`Killed commands were force-terminated best-effort (process tree kill); a detached descendant may have survived, and a killed command has no exit code and never counts as a passing check.`);
+  }
   return L.join('\n');
 }

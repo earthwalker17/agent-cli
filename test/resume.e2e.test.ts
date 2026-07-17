@@ -118,4 +118,24 @@ describe('reconstruct crash reconciliation', () => {
     const r = reconstruct(events, ws);
     expect(JSON.stringify(r.messages)).toContain('edited f.txt (1 replacement)');
   });
+
+  it('a command that was EXECUTING at the crash resumes with an unknown-effects message', () => {
+    const events: SessionEvent[] = [
+      { v: 1, seq: 1, ts: 't', type: 'user.message', text: 'run the build' },
+      {
+        v: 1, seq: 2, ts: 't', type: 'assistant.message', text: 'running',
+        toolCalls: [{ id: 'c1', name: 'run_command', input: { command: 'npm run build' } }],
+        stopReason: 'tool_use', usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      { v: 1, seq: 3, ts: 't', type: 'tool.requested', callId: 'c1', tool: 'run_command', input: { command: 'npm run build' } },
+      { v: 1, seq: 4, ts: 't', type: 'command.started', callId: 'c1', pid: 777, shell: 'powershell.exe', cwd: ws, timeoutMs: 120000 },
+      // Crash: no command.ended, no tool.completed.
+    ];
+    const r = reconstruct(events, ws);
+    expect(r.orphanedCallIds).toContain('c1');
+    const rendered = JSON.stringify(r.messages);
+    expect(rendered).toContain('the command was executing when the session crashed');
+    expect(rendered).toContain('effects are unknown');
+    expect(rendered).not.toContain('"interrupted by session crash"');
+  });
 });

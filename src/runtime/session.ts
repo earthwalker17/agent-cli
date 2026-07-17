@@ -146,10 +146,12 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   const completedBy = new Map<string, Extract<SessionEvent, { type: 'tool.completed' }>>();
   const mutatedBy = new Map<string, Extract<SessionEvent, { type: 'file.mutated' }>[]>();
   const snapBy = new Set<string>();
+  const commandStartedBy = new Set<string>();
   for (const e of events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
     else if (e.type === 'file.mutated') (mutatedBy.get(e.callId) ?? mutatedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
+    else if (e.type === 'command.started') commandStartedBy.add(e.callId);
   }
 
   const orphanedCallIds: string[] = [];
@@ -172,6 +174,11 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
       return toolResultBlock(id, 'interrupted after snapshot but before writing; disk state unverified', true);
     }
     orphanedCallIds.push(id);
+    if (commandStartedBy.has(id)) {
+      // The command had SPAWNED (command.started recorded) — its side effects are unknown and
+      // the process may even have kept running past the crash.
+      return toolResultBlock(id, 'interrupted: the command was executing when the session crashed; its effects are unknown', true);
+    }
     return toolResultBlock(id, 'interrupted by session crash', true);
   };
 

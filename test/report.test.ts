@@ -108,6 +108,60 @@ describe('buildReport determinism & honesty', () => {
     expect(json.actions.find((a) => a.callId === 'c1')).toMatchObject({ ok: false });
   });
 
+  it('renders a killed command honestly and never counts it as a check', () => {
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'tool.requested', callId: 'c1', tool: 'write_file', input: {} }),
+      evt({ seq: 3, type: 'file.mutated', callId: 'c1', path: 'C:\\ws\\a.ts', kind: 'modify', beforeSha256: 'aa', afterSha256: 'bb', createdDirs: [] }),
+      evt({ seq: 4, type: 'tool.completed', callId: 'c1', ok: true, outputPreview: '', durationMs: 1, truncated: false }),
+      evt({ seq: 5, type: 'tool.requested', callId: 'c2', tool: 'run_command', input: { command: 'npm test' } }),
+      evt({ seq: 6, type: 'policy.decision', callId: 'c2', classification: 'observe', decision: 'ask', rule: 'cmd.always-ask', reason: 'r' }),
+      evt({ seq: 7, type: 'approval.resolved', callId: 'c2', decision: 'allow', scope: 'once', source: 'user' }),
+      evt({ seq: 8, type: 'command.started', callId: 'c2', pid: 123, shell: 'powershell.exe', cwd: 'C:\\ws', timeoutMs: 400 }),
+      evt({ seq: 9, type: 'command.ended', callId: 'c2', termination: 'aborted', exitCode: null, durationMs: 350, killDetail: 'taskkill exit 0; probe: dead' }),
+      evt({ seq: 10, type: 'tool.completed', callId: 'c2', ok: false, outputPreview: 'aborted by user after 350ms', durationMs: 350, truncated: false }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.commands).toHaveLength(1);
+    expect(json.commands[0]).toMatchObject({ command: 'npm test', termination: 'aborted' });
+    expect(md).toContain('killed: aborted by user');
+    expect(md).toContain('no exit code');
+    expect(md).toContain('never counts as a passing check');
+    expect(json.filesChanged[0]!.checked).toBe(false); // a killed check can never CHECK a file
+  });
+
+  it('a stray exit-0 completion cannot count as a check when termination says killed', () => {
+    // Contrived defense-in-depth: even if a tool.completed carried exitCode 0, termination
+    // evidence of a kill must veto the CHECKED label.
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'tool.requested', callId: 'c1', tool: 'write_file', input: {} }),
+      evt({ seq: 3, type: 'file.mutated', callId: 'c1', path: 'C:\\ws\\a.ts', kind: 'modify', beforeSha256: 'aa', afterSha256: 'bb', createdDirs: [] }),
+      evt({ seq: 4, type: 'tool.requested', callId: 'c2', tool: 'run_command', input: { command: 'npm test' } }),
+      evt({ seq: 5, type: 'policy.decision', callId: 'c2', classification: 'observe', decision: 'ask', rule: 'cmd.always-ask', reason: 'r' }),
+      evt({ seq: 6, type: 'approval.resolved', callId: 'c2', decision: 'allow', scope: 'once', source: 'user' }),
+      evt({ seq: 7, type: 'command.ended', callId: 'c2', termination: 'timeout', exitCode: null, durationMs: 400 }),
+      evt({ seq: 8, type: 'tool.completed', callId: 'c2', ok: true, outputPreview: '', exitCode: 0, durationMs: 400, truncated: false }),
+    ];
+    expect(buildReport({ events }).json.filesChanged[0]!.checked).toBe(false);
+  });
+
+  it('a command that STARTED but never completed is visible with unknown effects', () => {
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'tool.requested', callId: 'c1', tool: 'run_command', input: { command: 'npm run deploy' } }),
+      evt({ seq: 3, type: 'policy.decision', callId: 'c1', classification: 'external', decision: 'ask', rule: 'cmd.always-ask', reason: 'r' }),
+      evt({ seq: 4, type: 'approval.resolved', callId: 'c1', decision: 'allow', scope: 'once', source: 'user' }),
+      evt({ seq: 5, type: 'command.started', callId: 'c1', pid: 4242, shell: 'powershell.exe', cwd: 'C:\\ws', timeoutMs: 120000 }),
+      // Session crashed here: no command.ended, no tool.completed, no session.ended.
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.commands).toHaveLength(1);
+    expect(json.commands[0]).toMatchObject({ command: 'npm run deploy', neverCompleted: true });
+    expect(md).toContain('STARTED but never completed');
+    expect(md).toContain('effects are unknown');
+  });
+
   it('surfaces a corrupt-log banner and still renders prior events', () => {
     const events: SessionEvent[] = [started, evt({ seq: 2, type: 'user.message', text: 'do a thing' })];
     const { md } = buildReport({ events, corruptAt: { line: 5, kind: 'json' } });
