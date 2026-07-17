@@ -3,6 +3,7 @@ import path from 'node:path';
 import type {
   ApprovalRequest,
   ChatMessage,
+  CommandEvidence,
   ContentBlock,
   PolicyDecision,
   PolicyRules,
@@ -44,6 +45,8 @@ export interface Session {
   saltHex: string;
   messages: ChatMessage[];
   onText?: (delta: string) => void;
+  /** Live command output for rendering (callId-scoped). Render-only; evidence is the event log. */
+  onCommandOutput?: (callId: string, chunk: string, stream: 'stdout' | 'stderr') => void;
   /** Narrowing-only policy additions from config; passed to every tool/policy context. */
   rules?: PolicyRules;
   clock: Clock;
@@ -71,6 +74,7 @@ export interface StartOptions {
   maxSteps?: number;
   maxTokens?: number;
   onText?: (delta: string) => void;
+  onCommandOutput?: (callId: string, chunk: string, stream: 'stdout' | 'stderr') => void;
   argv?: string[];
   tools?: Tool[];
   rules?: PolicyRules;
@@ -119,6 +123,7 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
     clock,
   };
   if (opts.onText) base.onText = opts.onText;
+  if (opts.onCommandOutput) base.onCommandOutput = opts.onCommandOutput;
   if (opts.rules) base.rules = opts.rules;
   return base;
 }
@@ -306,7 +311,7 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
         );
         continue;
       }
-      const r = await executeCall(session, ctx, tu);
+      const r = await executeCall(session, ctx, tu, signal);
       toolResults.push(r.toolResult);
       if (r.denied) denials++;
       if (r.stop) stopRequested = true;
@@ -384,6 +389,7 @@ async function executeCall(
   session: Session,
   ctx: ToolContext,
   tu: Extract<ContentBlock, { type: 'tool_use' }>,
+  signal?: AbortSignal,
 ): Promise<CallOutcome> {
   const callId = tu.id;
   const tool = session.tools.find((t) => t.name === tu.name);
@@ -430,7 +436,24 @@ async function executeCall(
     if (outcome.scope === 'session') session.grants.add(tool.name, decision.classification);
   }
 
-  return await runExecution(session, ctx, tool, input, decision, callId);
+  return await runExecution(session, ctx, tool, input, decision, callId, signal);
+}
+
+/** Persist a tool-reported command lifecycle fact under the runtime-bound callId. */
+function recordCommandEvidence(session: Session, callId: string, e: CommandEvidence): void {
+  if (e.kind === 'started') {
+    session.log.append({ type: 'command.started', callId, pid: e.pid, shell: e.shell, cwd: e.cwd, timeoutMs: e.timeoutMs });
+    return;
+  }
+  session.log.append({
+    type: 'command.ended',
+    callId,
+    termination: e.termination,
+    exitCode: e.exitCode,
+    durationMs: e.durationMs,
+    ...(e.killDetail !== undefined ? { killDetail: e.killDetail } : {}),
+    ...(e.drainTimedOut !== undefined ? { drainTimedOut: e.drainTimedOut } : {}),
+  });
 }
 
 function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecision, callId: string): ApprovalRequest {
@@ -469,6 +492,7 @@ async function runExecution<I>(
   input: I,
   decision: PolicyDecision,
   callId: string,
+  signal?: AbortSignal,
 ): Promise<CallOutcome> {
   let snapshot: CapturedFile[] | null = null;
   let missingDirsBefore = new Set<string>();
@@ -505,7 +529,17 @@ async function runExecution<I>(
     missingDirsBefore = new Set(paths.flatMap((p) => missingAncestors(p, session.workspaceRoot)));
   }
 
-  const result = await tool.execute(input, ctx);
+  // Per-call context: the cancellation signal plus callId-bound evidence/output channels
+  // (the binding means a tool can only ever report facts about its own call).
+  const callCtx: ToolContext = {
+    ...ctx,
+    ...(signal ? { signal } : {}),
+    reportCommand: (e) => recordCommandEvidence(session, callId, e),
+    ...(session.onCommandOutput
+      ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
+      : {}),
+  };
+  const result = await tool.execute(input, callCtx);
 
   if (snapshot) {
     for (const cf of snapshot) {
