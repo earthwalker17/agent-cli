@@ -393,9 +393,10 @@ describe('one-shot SIGINT wiring', () => {
       process.emit('SIGINT');
       expect(exits).toEqual([130]);
       off();
-      const c2 = new AbortController();
-      process.emit('SIGINT'); // detached: nothing listens, nothing aborts
-      expect(c2.signal.aborted).toBe(false);
+      // Non-vacuous detach check: after off(), OUR handler is gone, so a further SIGINT must not
+      // invoke the injected exit again (a third press would push another 130 if still attached).
+      process.emit('SIGINT');
+      expect(exits).toEqual([130]);
     } finally {
       for (const l of prior) process.on('SIGINT', l as NodeJS.SignalsListener);
     }

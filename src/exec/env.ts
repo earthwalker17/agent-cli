@@ -71,18 +71,24 @@ export function buildChildEnv(parent: NodeJS.ProcessEnv, policy: ChildEnvPolicy 
     .map((s) => s.toLowerCase())
     .filter((s) => s.length > 0);
 
-  // Case-insensitive dedupe: lexicographically-first key wins (mirrors documented Node behavior).
+  // Case-insensitive dedupe applies ONLY on Windows, where env names are case-insensitive and
+  // Node passes the child only the lexicographically-first case-insensitive match. On POSIX,
+  // names are case-sensitive and `http_proxy` / `HTTP_PROXY` are genuinely distinct — folding
+  // there would silently drop one, so POSIX keys pass through unfolded.
+  const foldNames = process.platform === 'win32';
   const byFold = new Map<string, { name: string; value: string }>();
   for (const name of Object.keys(parent).sort()) {
     const value = parent[name];
     if (value === undefined) continue;
-    const fold = name.toLowerCase();
+    const fold = foldNames ? name.toLowerCase() : name;
     if (!byFold.has(fold)) byFold.set(fold, { name, value });
   }
 
+  // The floor and secret-name matching are always case-insensitive (keys may be unfolded on POSIX).
   const env: Record<string, string> = {};
-  for (const [fold, entry] of byFold) {
-    if (!KEEP_ALWAYS.has(fold) && excludes.some((sub) => fold.includes(sub))) continue;
+  for (const entry of byFold.values()) {
+    const lower = entry.name.toLowerCase();
+    if (!KEEP_ALWAYS.has(lower) && excludes.some((sub) => lower.includes(sub))) continue;
     env[entry.name] = entry.value;
   }
   env['AGENT_CLI'] = '1';

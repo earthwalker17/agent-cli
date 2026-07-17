@@ -152,6 +152,41 @@ describe('runManaged kill paths', () => {
     expect(await waitDead(gcPid!)).toBe(true);
   }, 45000);
 
+  it('a late abort during the post-exit drain window does NOT relabel a completed command', async () => {
+    // The command exits 0 on its own, but a pipe-holding grandchild keeps 'close' from firing, so
+    // the outcome sits in the drain window. An abort that lands THERE must not fabricate a kill or
+    // destroy the real exit code (the evidence-falsification race caught in review).
+    const controller = new AbortController();
+    let gcPid: number | undefined;
+    let buf = '';
+    const script = `
+      const cp = require('child_process');
+      const c = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true });
+      c.unref();
+      console.log('GC:' + c.pid);
+      process.exit(0);
+    `;
+    const r = await runManaged(
+      spec(script, {
+        drainTimeoutMs: 2000,
+        signal: controller.signal,
+        onOutput: (chunk) => {
+          buf += chunk;
+          const m = buf.match(/GC:(\d+)/);
+          if (m && gcPid === undefined) {
+            gcPid = Number(m[1]);
+            leaked.push(gcPid);
+            // Fire the abort AFTER the parent has certainly exited but well within the 2s drain.
+            setTimeout(() => controller.abort(), 400);
+          }
+        },
+      }),
+    );
+    expect(r.termination).toBe('exited'); // NOT 'aborted'
+    expect(r.exitCode).toBe(0); // real exit code preserved, not nulled
+    expect(r.drainTimedOut).toBe(true);
+  }, 30000);
+
   it('drain regression: a pipe-holding grandchild cannot hang the outcome (#21960 class)', async () => {
     let gcPid: number | undefined;
     let buf = '';

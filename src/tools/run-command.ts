@@ -90,6 +90,12 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
       ...(outcome.killDetail !== undefined ? { killDetail: outcome.killDetail } : {}),
     };
 
+    // Report the kill HONESTLY: surface what the liveness probe actually verified rather than
+    // asserting "force-killed" even when killDetail says the process is STILL ALIVE, and don't
+    // claim a tree kill for a pre-aborted signal where nothing ever spawned.
+    const killNote = outcome.killDetail
+      ? `; process tree kill (best effort): ${outcome.killDetail}`
+      : '; no process was spawned';
     switch (outcome.termination) {
       case 'exited':
         return {
@@ -98,9 +104,9 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
           ...(outcome.exitCode !== null ? { exitCode: outcome.exitCode } : {}),
         };
       case 'timeout':
-        return { ...base, error: `timed out after ${timeoutMs}ms; process tree force-killed (best effort); no exit code` };
+        return { ...base, error: `timed out after ${timeoutMs}ms; no exit code${killNote}` };
       case 'aborted':
-        return { ...base, error: `aborted by user after ${outcome.durationMs}ms; process tree force-killed (best effort); no exit code` };
+        return { ...base, error: `aborted by user after ${outcome.durationMs}ms; no exit code${killNote}` };
       case 'spawn-error':
         return { ...base, error: outcome.spawnError ?? 'failed to spawn shell' };
     }

@@ -89,9 +89,13 @@ class CappedCapture {
     }
   }
   text(): string {
+    // When nothing was dropped, decode ONE contiguous buffer so a multibyte rune split across the
+    // head/tail chunk seam is not corrupted to U+FFFD while we claim full fidelity. Only when
+    // truncated (an unrecoverable middle gap already exists) do we decode the two sides separately.
+    if (!this.truncated) return Buffer.concat([...this.head, ...this.tail]).toString('utf8');
     const head = Buffer.concat(this.head).toString('utf8');
     const tail = Buffer.concat(this.tail).toString('utf8');
-    return this.truncated ? `${head}\n…[output capture truncated]…\n${tail}` : head + tail;
+    return `${head}\n…[output capture truncated]…\n${tail}`;
   }
 }
 
@@ -168,8 +172,11 @@ export function runManaged(spec: ExecSpec): Promise<ExecOutcome> {
     };
 
     // First cause wins: a timeout kill already in flight is not relabeled by a later Ctrl+C.
+    // Once the child has exited on its own, a late timeout/abort must NOT relabel a genuinely
+    // completed command as killed (that would destroy its real exit code and fabricate a kill in
+    // the evidence log) — the drain window between 'exit' and 'close' can be up to drainTimeoutMs.
     const initiateKill = (reason: 'timeout' | 'aborted'): void => {
-      if (settled || killedFor !== null) return;
+      if (settled || killedFor !== null || exitFired) return;
       killedFor = reason;
       const pid = child.pid;
       const afterKill = (): void => {
@@ -227,6 +234,10 @@ export function runManaged(spec: ExecSpec): Promise<ExecOutcome> {
       exitFired = true;
       exitCode = code;
       if (killWaitTimer) clearTimeout(killWaitTimer);
+      // The command reached its own exit: a later timeout/abort is no longer a kill of THIS
+      // command, so disarm both so they cannot relabel it during the stdio drain window.
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      spec.signal?.removeEventListener('abort', onAbort);
       if (settled) return;
       if (closeFired) {
         settle();
