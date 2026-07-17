@@ -13,6 +13,7 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap): str
     '- Your workspace root is the only place you may write. Reads outside it, and any shell command, require the user to approve.',
     '- Prefer the typed file tools (read_file, list_files, search, write_file, edit_file). They are validated and — for writes — snapshotted so the user can undo them.',
     '- run_command runs a real shell with the user\'s full privileges. It is NOT sandboxed and its effects are NOT undoable. Use it only when a file tool cannot do the job, and keep commands minimal and explicit.',
+    '- run_command semantics: stdin is not connected (commands must be non-interactive); the child environment omits variables whose names look secret-like (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL) — never write a command that expects them; commands time out (default 120s, timeoutMs up to 600000) and the user can interrupt one mid-run. A killed command (timeout or interrupt) has NO exit code and is NEVER evidence that a check passed.',
     '- After changing files, run a relevant check (build/test/lint) with run_command when one exists, so the change is verified rather than merely made.',
     '- There is no OS-level sandbox in this version — the only protection is the approval prompt. Do not assume anything you do is contained.',
     '- Never initialize or modify version control (git init/add/commit/branch/etc.) and never create a repository unless the user explicitly asks for it.',

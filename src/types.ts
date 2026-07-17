@@ -29,6 +29,8 @@ export interface PolicyRules {
   protectedPaths: string[];
   /** Literal lowercase basename substrings marking files as secret-like. */
   secretPatterns: string[];
+  /** Extra lowercase name substrings dropped from child-process environments (cannot drop the core floor). */
+  envExcludePatterns: string[];
 }
 
 /**
@@ -119,6 +121,8 @@ export interface ApprovalRequest {
   callId: string;
   tool: string;
   classification: ActionClass;
+  /** 'command' = a shell command: the classification is only a best-effort LABEL, and the prompt must say so. */
+  kind?: 'command';
   /** One-line summary (command string or "edit src/x.ts"). */
   summary: string;
   /** Multi-line detail (edit preview, full command). */

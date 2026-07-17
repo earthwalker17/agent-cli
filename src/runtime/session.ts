@@ -469,6 +469,7 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
     callId,
     tool: tool.name,
     classification: decision.classification,
+    ...(tool.command !== undefined ? { kind: 'command' as const } : {}),
     summary,
     detail,
     reason: decision.reason,

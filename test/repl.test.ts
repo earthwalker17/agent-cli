@@ -258,6 +258,33 @@ describe('approval prompt display safety', () => {
     expect(prompt).toContain('\\u{1b}');
     expect(prompt).toContain('\\u{202e}');
   });
+
+  it('labels a shell command as a label, not a verdict (the [observe]-vs-NOT-undoable nit)', async () => {
+    const { formatApprovalPrompt } = await import('../src/runtime/approvals.js');
+    const prompt = formatApprovalPrompt({
+      callId: 'c1',
+      tool: 'run_command',
+      classification: 'observe',
+      kind: 'command',
+      summary: 'run: node --test',
+      detail: 'node --test',
+      reason: 'r',
+      noUndoWarning: true,
+    });
+    expect(prompt).toContain('[shell command — labeled observe]');
+    expect(prompt).not.toContain('  [observe]  ');
+    expect(prompt).toContain('NOT undoable');
+    // Non-command requests keep the plain class header.
+    const filePrompt = formatApprovalPrompt({
+      callId: 'c2',
+      tool: 'read_file',
+      classification: 'sensitive',
+      summary: 'read_file ../outside.txt',
+      detail: '',
+      reason: 'r',
+    });
+    expect(filePrompt).toContain('[sensitive]');
+  });
 });
 
 describe('REPL: resilience', () => {

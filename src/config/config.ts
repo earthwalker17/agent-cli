@@ -29,6 +29,8 @@ const narrowing = {
   protectedPaths: z.array(z.string().min(1).max(260)).max(64).optional(),
   /** LITERAL lowercase basename substrings (never regex) marking files as secret-like. */
   secretPatterns: z.array(z.string().min(1).max(100)).max(64).optional(),
+  /** LITERAL name substrings dropped from child-process environments (narrowing; the core floor stays). */
+  envExcludePatterns: z.array(z.string().min(1).max(100)).max(64).optional(),
 };
 
 const UserConfigSchema = z
@@ -88,6 +90,9 @@ export function loadConfig(stateRoot: string, workspaceRoot: string): ResolvedCo
   const rules: PolicyRules = {
     protectedPaths: [...(user?.data.protectedPaths ?? []), ...(ws?.data.protectedPaths ?? [])],
     secretPatterns: [...(user?.data.secretPatterns ?? []), ...(ws?.data.secretPatterns ?? [])].map((s) =>
+      s.toLowerCase(),
+    ),
+    envExcludePatterns: [...(user?.data.envExcludePatterns ?? []), ...(ws?.data.envExcludePatterns ?? [])].map((s) =>
       s.toLowerCase(),
     ),
   };

@@ -22,9 +22,13 @@ export const dangerousApprover: Approver = async () => ({
  * ANSI/bidi/control characters cannot visually rewrite the very prompt that gates execution.
  */
 export function formatApprovalPrompt(req: ApprovalRequest): string {
+  // For a shell command the class is only a best-effort LABEL (string matching over untrusted
+  // model output, bypassable by design) — the header must say so, not present it as a verdict
+  // that visually contradicts the NOT-undoable warning ("[observe]" next to "NOT undoable").
+  const cls = req.kind === 'command' ? `[shell command — labeled ${req.classification}]` : `[${req.classification}]`;
   const lines = [
     '',
-    `  ⚠ approval required  [${req.classification}]  ${req.tool}`,
+    `  ⚠ approval required  ${cls}  ${req.tool}`,
     `  ${sanitizeLine(req.summary)}`,
   ];
   if (req.detail && req.detail !== req.summary) {

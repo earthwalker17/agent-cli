@@ -56,7 +56,10 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
       file,
       args,
       cwd: ctx.workspaceRoot,
-      env: buildChildEnv(process.env),
+      env: buildChildEnv(
+        process.env,
+        ctx.rules && ctx.rules.envExcludePatterns.length > 0 ? { extraExcludeSubstrings: ctx.rules.envExcludePatterns } : {},
+      ),
       timeoutMs,
       signal: ctx.signal,
       ...(ctx.onOutput ? { onOutput: ctx.onOutput } : {}),
