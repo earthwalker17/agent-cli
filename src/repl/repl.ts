@@ -75,6 +75,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     maxTokens: ctx.maxTokens,
     saltHex: randomSaltHex(),
     onText: (t: string) => renderer.onText(t),
+    onCommandOutput: (_callId: string, chunk: string, stream: 'stdout' | 'stderr') => renderer.onCommandOutput(chunk, stream),
     rules: config.rules,
   };
 

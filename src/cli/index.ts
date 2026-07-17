@@ -85,6 +85,32 @@ function parse(argv: string[]): Args {
   }) as Args;
 }
 
+/**
+ * Wire Ctrl+C to a turn abort for the one-shot path. First press aborts the turn (the running
+ * command is tree-killed and the session ends with evidence intact); a second press force-exits.
+ * Returns the uninstaller. Exported for tests (drivable via process.emit('SIGINT')).
+ */
+export function installSigintAbort(
+  controller: AbortController,
+  out: NodeJS.WritableStream = process.stderr,
+  exit: (code: number) => void = process.exit,
+): () => void {
+  let presses = 0;
+  const onSigint = (): void => {
+    presses++;
+    if (presses === 1) {
+      out.write('\ninterrupt: stopping the turn (press Ctrl+C again to force-quit)\n');
+      controller.abort();
+    } else {
+      exit(130);
+    }
+  };
+  process.on('SIGINT', onSigint);
+  return () => {
+    process.off('SIGINT', onSigint);
+  };
+}
+
 /** Shared run/resume tail: run one task turn, end the session, print a verdict. */
 async function runTask(values: CliValues, task: string, opts: { resumeId?: string }): Promise<number> {
   // Order is load-bearing: trust gate BEFORE the workspace config file is read, before
@@ -135,8 +161,10 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   session.log.append({ type: 'config.loaded', sources: config.sources });
   recordWorkspaceMap(session, map);
 
+  const controller = new AbortController();
+  const offSigint = installSigintAbort(controller);
   try {
-    const result = await runTurn(session, task);
+    const result = await runTurn(session, task, { signal: controller.signal });
     endSession(session, result.stopped && result.steps >= ctx.maxSteps ? 'max-steps' : result.stopped ? 'user-quit' : 'completed');
     process.stdout.write('\n');
     printVerdict(layout, session.id);
@@ -145,6 +173,8 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     endSession(session, 'error', (err as Error).message);
     process.stderr.write(`\nerror: ${(err as Error).message}\n`);
     return 1;
+  } finally {
+    offSigint();
   }
 }
 

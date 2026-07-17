@@ -15,6 +15,8 @@ import { fmtDuration, fmtTokens, toolLabel, type Style } from './format.js';
 
 export interface Renderer {
   onText(delta: string): void;
+  /** Live command output (render-only preview; the persisted evidence is the completed result). */
+  onCommandOutput(chunk: string, stream: 'stdout' | 'stderr'): void;
   onEvent(e: SessionEvent): void;
   beginTurn(): void;
   endTurn(result: TurnResult, maxSteps: number): void;
@@ -55,6 +57,47 @@ export function createRenderer(opts: {
   let toolOpen = false; // an unterminated tool line open on chromeOut
   let counters: Counters = { files: new Set(), commands: 0, denials: 0, inTokens: 0, outTokens: 0, steps: 0 };
 
+  // Live command-output preview state (per command; reset on command.started).
+  const CMD_FLUSH_MS = 100;
+  const CMD_DISPLAY_CAP = 8 * 1024;
+  const CMD_LINE_CAP = 200;
+  let cmdBuf = '';
+  let cmdShown = 0;
+  let cmdSuppressed = false;
+  let lastCmdFlush = 0;
+
+  const flushCmdOutput = (final: boolean): void => {
+    lastCmdFlush = Date.now();
+    let text = cmdBuf;
+    let rest = '';
+    if (!final) {
+      const idx = text.lastIndexOf('\n');
+      if (idx === -1) {
+        if (text.length <= 2048) return; // wait for a newline unless the line is oversized
+      } else {
+        rest = text.slice(idx + 1);
+        text = text.slice(0, idx);
+      }
+    }
+    cmdBuf = rest;
+    if (text.length === 0 || cmdSuppressed) return;
+    if (toolOpen) {
+      chromeOut.write('\n');
+      toolOpen = false;
+    }
+    for (const line of text.split('\n')) {
+      const shown = sanitizeLine(line);
+      chromeOut.write(style.dim(`    ${shown.slice(0, CMD_LINE_CAP)}${shown.length > CMD_LINE_CAP ? '…' : ''}`) + '\n');
+      cmdShown += line.length;
+      if (cmdShown > CMD_DISPLAY_CAP) {
+        chromeOut.write(style.dim('    … live output display capped (the full output is in the tool result)') + '\n');
+        cmdSuppressed = true;
+        cmdBuf = '';
+        return;
+      }
+    }
+  };
+
   const flush = (): void => {
     if (textOpen) {
       modelOut.write('\n');
@@ -82,6 +125,12 @@ export function createRenderer(opts: {
       }
       modelOut.write(delta);
       textOpen = !delta.endsWith('\n');
+    },
+
+    onCommandOutput(chunk) {
+      if (cmdSuppressed || chunk.length === 0) return;
+      cmdBuf += chunk;
+      if (Date.now() - lastCmdFlush >= CMD_FLUSH_MS || cmdBuf.length > 2048) flushCmdOutput(false);
     },
 
     onEvent(e) {
@@ -122,6 +171,24 @@ export function createRenderer(opts: {
           counters.steps++;
           counters.inTokens += e.usage.inputTokens;
           counters.outTokens += e.usage.outputTokens;
+          break;
+        }
+        case 'command.started': {
+          cmdBuf = '';
+          cmdShown = 0;
+          cmdSuppressed = false;
+          lastCmdFlush = Date.now();
+          // For an asked command the approval line already closed the tool line; give the pid its own line.
+          if (toolOpen) chromeOut.write(style.dim(`(pid ${e.pid}) `));
+          else chromeLine(style.dim(`  ${g.arrow} running (pid ${e.pid})`));
+          break;
+        }
+        case 'command.ended': {
+          flushCmdOutput(true);
+          if (e.termination === 'timeout' || e.termination === 'aborted') {
+            const why = e.termination === 'timeout' ? `timed out after ${fmtDuration(e.durationMs)}` : 'aborted by user';
+            chromeLine(style.yellow(`  ${g.warn} command ${why} — process tree force-killed (best effort); no exit code`));
+          }
           break;
         }
         case 'turn.aborted': {

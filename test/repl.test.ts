@@ -4,6 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { runRepl } from '../src/repl/repl.js';
+import { createRenderer } from '../src/repl/render.js';
+import { detectStyle } from '../src/repl/format.js';
+import { installSigintAbort } from '../src/cli/index.js';
 import { resolveLayout } from '../src/store/layout.js';
 import { EventLog } from '../src/store/event-log.js';
 import { grantTrust } from '../src/trust/store.js';
@@ -286,5 +289,88 @@ describe('REPL: resilience', () => {
     expect(r.code).toBe(0);
     expect(r.chromeOut).toContain('step budget reached');
     expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
+  });
+});
+
+describe('REPL: live command output', () => {
+  it('streams command output to chrome (never stdout) with the pid marker', async () => {
+    const r = await drive(
+      [{ calls: [{ name: 'run_command', input: { command: 'echo repl-live-ok' } }] }, { say: 'after' }],
+      ['run it\n', 'y\n', '/quit\n'],
+    );
+    expect(r.chromeOut).toContain('repl-live-ok'); // live preview line
+    expect(r.chromeOut).toMatch(/\(pid \d+\)/);
+    expect(r.modelOut).not.toContain('repl-live-ok'); // stdout stays model-text-only
+    expect(r.modelOut).toContain('after');
+  });
+});
+
+describe('renderer: live command output unit behavior', () => {
+  let seq = 0;
+  function ev(body: Record<string, unknown>): SessionEvent {
+    return { v: 1, seq: ++seq, ts: 't', ...body } as unknown as SessionEvent;
+  }
+  function makeRenderer() {
+    const chunks: Buffer[] = [];
+    const chrome = new PassThrough();
+    chrome.on('data', (c: Buffer) => chunks.push(c));
+    const r = createRenderer({ modelOut: new PassThrough(), chromeOut: chrome, style: detectStyle({ isTTY: false }) });
+    return { r, text: () => Buffer.concat(chunks).toString('utf8') };
+  }
+
+  it('sanitizes live lines (ANSI/bidi cannot reach the terminal) and closes the tool line', () => {
+    const { r, text } = makeRenderer();
+    r.onEvent(ev({ type: 'tool.requested', callId: 'c1', tool: 'run_command', input: { command: 'x' } }));
+    r.onEvent(ev({ type: 'command.started', callId: 'c1', pid: 1234, shell: 'powershell.exe', cwd: 'w', timeoutMs: 1000 }));
+    r.onCommandOutput('evil\x1b[2Jwipe‮bidi\n', 'stdout');
+    r.onEvent(ev({ type: 'command.ended', callId: 'c1', termination: 'exited', exitCode: 0, durationMs: 5 }));
+    expect(text()).toContain('(pid 1234)');
+    expect(text()).toContain('evil');
+    expect(text()).not.toContain('\x1b[2J');
+    expect(text()).not.toContain('‮');
+  });
+
+  it('caps the live display and suppresses further output', () => {
+    const { r, text } = makeRenderer();
+    r.onEvent(ev({ type: 'command.started', callId: 'c1', pid: 1, shell: 's', cwd: 'w', timeoutMs: 1000 }));
+    for (let i = 0; i < 5; i++) r.onCommandOutput(('line-' + i + '-' + 'x'.repeat(120) + '\n').repeat(24), 'stdout');
+    r.onEvent(ev({ type: 'command.ended', callId: 'c1', termination: 'exited', exitCode: 0, durationMs: 5 }));
+    const out = text();
+    expect(out).toContain('display capped');
+    expect(out.indexOf('line-4')).toBe(-1); // suppressed after the cap
+  });
+
+  it('a killed command renders the honest termination line', () => {
+    const { r, text } = makeRenderer();
+    r.onEvent(ev({ type: 'command.started', callId: 'c1', pid: 1, shell: 's', cwd: 'w', timeoutMs: 400 }));
+    r.onEvent(ev({ type: 'command.ended', callId: 'c1', termination: 'timeout', exitCode: null, durationMs: 400 }));
+    expect(text()).toContain('timed out');
+    expect(text()).toContain('force-killed (best effort)');
+    expect(text()).toContain('no exit code');
+  });
+});
+
+describe('one-shot SIGINT wiring', () => {
+  it('first press aborts, second press force-exits via the injected exit', () => {
+    // Isolate from vitest's own SIGINT listeners while emitting synthetically.
+    const prior = process.listeners('SIGINT');
+    for (const l of prior) process.off('SIGINT', l as NodeJS.SignalsListener);
+    try {
+      const controller = new AbortController();
+      const out = new PassThrough();
+      const exits: number[] = [];
+      const off = installSigintAbort(controller, out, (code) => exits.push(code));
+      process.emit('SIGINT');
+      expect(controller.signal.aborted).toBe(true);
+      expect(exits).toEqual([]);
+      process.emit('SIGINT');
+      expect(exits).toEqual([130]);
+      off();
+      const c2 = new AbortController();
+      process.emit('SIGINT'); // detached: nothing listens, nothing aborts
+      expect(c2.signal.aborted).toBe(false);
+    } finally {
+      for (const l of prior) process.on('SIGINT', l as NodeJS.SignalsListener);
+    }
   });
 });
