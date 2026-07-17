@@ -73,6 +73,24 @@ policy has already authorized them.
 - Add regression tests for important defects, especially safety, persistence, recovery, and boundary failures.
 - Never claim a check was run when it was not run.
 
+### Review-workflow cost discipline
+
+Multi-agent adversarial review is valuable, but keep it BOUNDED — do not launch large fan-out
+review workflows that can spawn dozens of agents and burn through a session's token budget.
+Concretely:
+
+- Cap total review agents at roughly a dozen. A fixed, small finder pool (about 3–5 lenses) is
+  the workhorse; do not multiply a per-finding verifier fan-out on top of it (N findings × M
+  verifiers is the trap that explodes cost, since N is unknown up front).
+- Prefer verifying findings **by hand** against the code. The finders are where the leverage is;
+  confirming a concrete claim against a few lines rarely needs its own agent, let alone three.
+- If findings genuinely warrant agent verification, run ONE small batch (single verifier per
+  finding, only the high/critical ones), never a per-finding panel.
+- Scale effort to the change: a normal session diff is a low/medium review, not a "comprehensive
+  audit". Reserve larger fan-outs for explicit, user-approved deep audits.
+- Salvage before relaunching: if a review is interrupted, read the workflow journal for completed
+  finder results and continue from them rather than re-running the whole thing.
+
 ## Git and Change Hygiene
 
 - Keep each change set understandable and reviewable.
@@ -94,10 +112,20 @@ The repository uses four primary context documents with distinct responsibilitie
 - **PROJECT.md** — detailed long-term product thesis, background, goals, principles, and reference context.
 - **ROADMAP.md** — chronological evolution and current project state: what each session attempted, changed, verified, decided, left open, and should do next.
 - **ARCHITECTURE.md** — current system shape: modules, boundaries, data flows, execution logic, persistence, safety model, and important implementation contracts.
+- **BLUEPRINT.md** — rolling near-term horizon: the direction for the next several sessions, revised as repository evidence accumulates.
 
 ROADMAP describes **how the project evolved and where it is going next**.
 ARCHITECTURE describes **how the current system works**.
 Do not duplicate large sections between them.
+
+**Rolling-docs policy (apply at the end of every substantial session):** `ROADMAP.md` is a
+rolling execution record, not a growing diary — keep only the latest one or two sessions in full
+detail and compress older sessions into an "Earlier Milestones" section that preserves their
+objective, lasting architectural decisions, key verification evidence, and still-relevant
+limitations, while dropping superseded detail and long narratives. `BLUEPRINT.md` is a rolling
+horizon — replace the completed section with a short outcome note once the result is fully
+recorded in ROADMAP/ARCHITECTURE, advance the next unresolved direction to the top, and revise
+later sections that repository evidence has invalidated.
 
 CLAUDE.md and PROJECT.md should remain stable. Change them only when the project's enduring
 mission, principles, or documentation contract genuinely changes. Do not use them as session logs.

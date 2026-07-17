@@ -1,6 +1,145 @@
 # ROADMAP
 
-Session-by-session evolution of Agent CLI. Newest first.
+Rolling execution record: the latest one or two sessions in full detail, older sessions
+compressed under **Earlier Milestones** (per the rolling-docs policy in `CLAUDE.md`). Newest first.
+
+---
+
+## Session 4 (2026-07-17) — V0.3: execution kernel hardening
+
+### Objective
+
+BLUEPRINT Session 4: make shell execution explicit, controllable, observable, and composable —
+real mid-command cancellation, structured termination semantics, environment hygiene, and
+lifecycle evidence — without adding an OS sandbox (Session 5) and while preserving the single
+runtime, the single policy choke point, and the additive v1 event schema. The design followed a
+7-agent recon workflow (3 repo explorers + 4 reference researchers over OpenAI Codex CLI, Claude
+Code, OpenCode/Goose, and Node-on-Windows process internals) plus a Plan-agent design pass.
+
+### What was implemented (7 commits, one per verified stage)
+
+1. **`src/exec/` substrate** (policy-free, log-free; reusable for future workflow-pack renderer
+   processes): `env.ts` (child-env hygiene: case-insensitive dedupe, default drop of names
+   containing key/secret/token/password/credential, non-excludable core floor — never strip
+   `SystemRoot`/`windir` (WinError 10106) — proxy passthrough, `AGENT_CLI=1` marker), `kill.ts`
+   (verified best-effort tree kill: async `taskkill /T /F`, exit 0|128 both benign, bounded
+   liveness probes), `run.ts` (`runManaged` → typed `ExecOutcome`; kill/drain state machine:
+   settle on `'exit'`, race `'close'` against a bounded drain, destroy streams — fixes the
+   nodejs/node#21960-class hang where a surviving grandchild holding inherited pipes stalls the
+   outcome forever; head+tail byte-capped capture; stdin never connected).
+2. **`run_command` rebuilt on the substrate**: `CommandTermination` (`exited|timeout|aborted|
+   spawn-error`), killed commands have **no exit code** (was: timeout conflated with −1),
+   distinct model-facing message per termination path; `ToolContext` gained `signal`/`onOutput`/
+   `reportCommand` (all optional, additive).
+3. **Runtime cancellation + evidence**: per-call context binds the turn AbortSignal and
+   callId-bound evidence channels (a tool cannot forge another call's evidence); new additive
+   events `command.started {pid,…}` (actual spawn — execution ground truth) and `command.ended
+   {termination, exitCode|null, killDetail, drainTimedOut}`. The V0.2 limitation "a running
+   run_command is not interruptible" is gone.
+4. **Ctrl+C end-to-end**: REPL Ctrl+C now kills the running command (same signal path); the
+   one-shot CLI gained SIGINT wiring (`installSigintAbort`: first press aborts, second
+   force-exits). Live render-only command-output preview in the REPL (sanitized, rate-limited,
+   8 KiB display cap, `(pid N)` marker, honest kill lines).
+5. **Termination-aware report/resume**: killed commands render `killed: … no exit code`; a
+   `command.ended` kill vetoes CHECKED even against a stray exit-0; `command.started` without
+   completion renders `STARTED but never completed … effects unknown` (+ honesty footer); resume
+   replays an executing-at-crash command with an unknown-effects message.
+6. **Config + policy UX**: narrowing-only `envExcludePatterns` (both layers, lowercased union;
+   core floor structurally non-excludable); approval prompts present command class as a label —
+   `[shell command — labeled observe]` — closing Session 3's UX finding; system prompt + tool
+   description teach the model the new semantics (no stdin; secret-name env filtering; a killed
+   command is never evidence a check passed).
+
+### Verification evidence
+
+- Gate: `npm run typecheck` + `npm run build` clean; `npm test` **240 passed, 1 skipped** across
+  24 files (was 205+1; +35, including the tree-kill fixture with a *detached* grandchild — proving
+  our `taskkill /T` did the work, not libuv's job object — and the pipe-holding-grandchild drain
+  regression).
+- **Live E2E** (real `claude-opus-4-8` through the system proxy; isolated
+  `Desktop\agent-cli-e2e-s4` workspace + state):
+  - Run 1 (env hygiene): the model's approved command echoed the child env — output `K=;A=1;`
+    (API key stripped, harness marker present) while the agent itself still reached the API; the
+    approval prompt showed the new `[shell command — labeled observe]` header on camera.
+  - Run 2 (real interrupt): agent launched in its own hidden console; after `command.started`
+    (pid recorded in evidence) a **genuine console CTRL_C** was delivered via a sacrificial
+    `AttachConsole`+`GenerateConsoleCtrlEvent` helper. Observed: `interrupt: stopping the turn` →
+    `command.ended {termination:'aborted', exitCode:null, killDetail:'taskkill exit 0; probe:
+    dead'}` → spawned shell verified dead → `turn.aborted` → `session.ended user-quit`, exit 2;
+    the report renders `killed: aborted by user (1902 ms); no exit code` with the honesty footer.
+    This closes the one-shot half of Session 2's open Ctrl+C smoke with a real keystroke-level
+    signal.
+- Adversarial review: 4 finder lenses (safety / correctness / windows-io / test-honesty) →
+  19 findings, verified **by hand** against the source (the per-finding agent verifier fan-out was
+  aborted for cost and is now prohibited — see the cost lesson below and the new CLAUDE.md rule).
+  Five real defects fixed + regression-tested in commit `fix(exec,...)`:
+  1. **[high] drain-window relabel race** — a timeout/abort landing in the post-`exit`/pre-`close`
+     drain window (largest exactly in the pipe-holding-grandchild case) relabeled a genuinely
+     exited command as killed and nulled its real exit code; now `initiateKill` is guarded on
+     `exitFired` and the timeout/abort are disarmed at exit. New deterministic regression test.
+  2. **[med] POSIX env dedupe** dropped genuinely distinct vars (`http_proxy` vs `HTTP_PROXY`);
+     case-insensitive folding is now Windows-only.
+  3. **[med] multibyte seam** — `CappedCapture.text` decoded head/tail separately even when nothing
+     was truncated, corrupting a rune split across the seam; now decodes one contiguous buffer.
+  4. **[med] kill-honesty** — the model-facing message said "process tree force-killed" even when
+     the liveness probe reported STILL ALIVE; it now surfaces the actual `killDetail`.
+  5. **[low] never-spawned pre-abort** claimed a tree kill for a command that never spawned; the
+     message is now conditional on a kill having been attempted.
+  Remaining low findings (append-inside-spawn-listener robustness; live-preview per-chunk decode;
+  one-shot approval-prompt Ctrl+C) are noted below as not-yet-addressed.
+- Mid-session live validation of the premise: the session's own recon workflow hung for ~36
+  minutes on an in-flight API call with no timeout behind a `parallel()` barrier — precisely the
+  unkillable-in-flight-work failure class this session removed from `run_command`.
+
+### Decisions (and why)
+
+- **Force-kill only, labeled best-effort.** Research consensus (Codex, OpenCode, Node/libuv
+  internals): no graceful kill exists for console children from stock Node on Windows;
+  `taskkill /T` cannot reach grandchildren orphaned by a dead intermediate parent (Windows never
+  reparents); Job Objects are the only race-free tree kill but have no maintained Node binding.
+  So the code, messages, and docs say "best effort" — never "tree terminated".
+- **Never await `'close'` after a kill** — settle on `'exit'`, bounded drain (1500ms), destroy
+  streams, record `drainTimedOut` honestly (Goose's 500ms / Codex's 2s pattern).
+- **Killed commands have no exit code, everywhere.** The report additionally vetoes CHECKED on
+  kill evidence — defense in depth against a stray exit-0.
+- **Env hygiene is default-on** (stronger than Claude Code's opt-in scrub, mirroring Codex's
+  default excludes) with a structurally non-excludable functional floor; proxy variables pass
+  through (documented honest limitation, not a boundary claim).
+- **Evidence channels are callId-bound by the runtime**, so the capability contract grew without
+  creating a forgeable evidence path; live output is render-only (`onText`-parallel), the
+  persisted truth stays `tool.completed`.
+- **`'interrupted by user'` stays reserved for never-spawned calls**; `turn.aborted` (turn) and
+  `command.ended {termination:'aborted'}` (process) remain distinct facts.
+
+### Open issues / not verified
+
+- The REPL raw-mode **interactive** Ctrl+C keypress (readline 'SIGINT' on a real console) still
+  wants one quick manual smoke on Windows Terminal/conhost; the one-shot path is now proven with
+  a genuine CTRL_C, and io.ts's SIGINT path is unit-covered.
+- Grandchild survival when an intermediate parent dies first is structural (documented); a Job
+  Objects native helper would close it (deliberately out of scope this session).
+- Three low-severity review findings left unaddressed (small, non-load-bearing): `command.started`
+  append happens inside the child `'spawn'` listener (an append throw would surface as an
+  uncaughtException rather than a handled turn error); the live-output preview and `onOutput`
+  decode each pipe chunk independently (cosmetic U+FFFD on a multibyte split — render-only, the
+  persisted capture is now seam-safe); a one-shot Ctrl+C *during an interactive approval prompt*
+  is handled by the approver's own readline, not `installSigintAbort` (one-shot is normally
+  non-interactive/auto-deny, so this path is rare).
+- **Cost lesson (now a CLAUDE.md rule):** the adversarial-review workflow was authored with a
+  per-finding 3-verifier fan-out on top of 4 finders — 19 findings turned into ~57 verifier
+  agents and blew the session token budget before completing. The finders had already produced
+  all 19 findings and were salvaged from the workflow journal; verification was then done by hand.
+  Rule added: cap review workflows at ~a dozen agents, no per-finding verifier panels, verify by
+  hand by default, salvage journals before relaunching.
+
+### Recommended next step
+
+BLUEPRINT Session 5: **enforced isolation and honest safety modes**, research-first and
+Windows-first. Codex's native Windows sandbox (restricted tokens, ACLs, WFP; honest failure
+modes) and Anthropic's open-sourced sandbox-runtime are the reference points. V0.3's exec
+substrate is the natural seam: a sandbox backend would transform the `ExecSpec` (argv/env) at
+spawn time, and the mode must be reported truthfully (policy-and-approval-only where no
+enforcement exists).
 
 ---
 
@@ -67,313 +206,70 @@ denials, zero budget hits, all 7 files CHECKED in the evidence report.
 
 ### Open issues / findings for V0.3
 
-- **Approval-prompt labeling UX nit:** `run_command` prompts show the best-effort command
-  class (`[observe]` for `node --test`) beside the "NOT undoable" warning — deliberate V0.1
-  design (label informs the human), but visually contradictory on camera; worth a clearer
-  presentation (e.g. `[shell command — labeled observe]`).
+- ~~Approval-prompt labeling UX nit~~ — **closed in Session 4** (`[shell command — labeled …]`).
 - The report's "Files changed" uses last-mutation-per-path semantics, so a file created then
   edited in one session renders as `modify` — correct but can read as if the file pre-existed;
   presentation nuance noted by the audit.
-- Session 2's manual Ctrl+C console smoke remains open (the demo used /quit paths, not
-  interrupts).
-
-### Recommended next step
-
-Unchanged from Session 2 (this session added no product surface): (1) first non-coding
-workflow pack (documents/PDF), or (2) context management for long REPL sessions. The demo
-also suggests a small V0.3 UX batch: approval-prompt label clarity + prompt-history niceties.
+- ~~Session 2's manual Ctrl+C console smoke~~ — **one-shot half closed in Session 4** with a
+  genuine delivered CTRL_C; the interactive-REPL keypress smoke remains open.
 
 ---
 
-## Session 2 (2026-07-15) — V0.2: interactive REPL, workspace trust, narrowing-only config
+## Earlier Milestones (Sessions 1, 1b, 2 — compressed 2026-07-17 per the rolling-docs policy)
 
-### Objective
+### Session 2 (2026-07-15) — V0.2: interactive REPL, workspace trust, narrowing-only config
 
-Evolve the one-shot CLI into a practical interactive REPL (Claude Code-like: launch in any
-folder, converse continuously, live tool activity, inline approvals) WITHOUT weakening the
-safety model — shipping the workspace-trust gate and policy-config file that V0.1 deliberately
-deferred, and keeping trust (consent), approval (human gate), logical policy, and sandboxing
-(nonexistent, stated honestly) separated.
+One-shot CLI evolved into a practical interactive REPL sharing the exact same runtime (one
+`runTurn`, no parallel loop), with turn abort at tool boundaries, a live `EventLog.onAppend`
+renderer, and subprocess smoke tests. **Lasting decisions:** workspace trust is recorded consent
+(never a sandbox) — prompt only on a real TTY, `--trust-this-workspace` never persists, a folder
+cannot self-grant (state-root-inside-workspace refusal), corrupt trust store is a hard error;
+workspace config narrows only (strict schemas structurally cannot widen; no allowlists) and
+carries no preferences; the screen renders from the persisted log, stdout stays model-text-only;
+`user-quit` for every human-initiated end; approval questions accept only lines typed after the
+prompt is visible (type-ahead cannot answer a security prompt); approval prompts sanitize
+model-controlled text (ANSI/bidi). **Evidence:** 204 passed/1 skipped; three live E2E rounds
+(build + deny-adapt + `/undo` + interactive resume) with three real defects found and
+regression-tested (in-session `/report` status, denied command listed as run, piped transcripts
+losing dialogue); post-E2E adversarial review found four more real defects, all fixed + tested
+(type-ahead approval, unsanitized approval prompt, abort-skipped commands under "Commands run",
+trust-consent Ctrl+D exiting 0). **Still relevant:** `agent map` stays ungated pre-trust
+(documented exception); V0.2's "abort lands at the next tool boundary" limitation was removed in
+Session 4.
 
-The design came from a 3-designer + 3-adversarial-critic workflow (as in Session 1). The
-critics — verifying claims against source — caught real pre-implementation defects that shaped
-the build: `EventLog.events` was a frozen open-time snapshot (in-session /undo would have
-restored a PRIOR session's mutation while claiming success); the `forceDeny` path cannot stop
-auto-allowed writes (the planned interrupt wouldn't interrupt — and the same gap existed in
-V0.1's deny-&-stop); a mid-stream abort leaves consecutive user-role messages on the wire; and
-`--interactive` without a mode override would have paired the REPL with the auto-deny approver.
+### Session 1b (2026-07-14) — Automatic proxy support + verified live E2E
 
-### What was implemented (9 commits, one per verified stage)
+Reusable proxy-aware transport (`net/transport.ts`): pure `resolveProxy` over standard env vars
+with correct precedence/`NO_PROXY` bypass; per-request undici `ProxyAgent` dispatcher (never
+`setGlobalDispatcher`); credentials redacted from descriptions and never persisted; no `--proxy`
+flag (argv is logged — a credential-bearing URL must not land in `session.started`). Closed
+Session 1's one unverified surface: the full live loop (create + edit + undo) verified against
+the real API through the system proxy; 143 passed/1 skipped.
 
-1. **Live, observable EventLog** — `events` getter over a live array + `onAppend` observer
-   (fired post-write, throws swallowed): the single point the REPL renders from.
-2. **Turn abort** — `runTurn(…, {signal})` / `Provider.complete(…, signal)`; pre-gate skips
-   every pending call once aborted or deny-&-stopped (fixes the V0.1 deny-&-stop gap,
-   regression-tested); `turn.aborted {phase}` event; `coalesceUserMessages` at the Anthropic
-   wire; `repairDanglingToolUses` for turn errors; MockProvider `hang` turns.
-3. **CLI split** — `src/cli/{index,context,trust-check}.ts`; ONE `buildRunContext` for both
-   interfaces; mode precedence `--no-input` > `--interactive` > isTTY (conflict = error);
-   read-only commands stop creating state dirs.
-4. **Workspace trust** — `<state>/trust.json` + `trust.log` audit; gate before any workspace
-   byte is read; hoisted state-root-inside-workspace refusal (a folder cannot self-grant);
-   prompt only on a real TTY; exit 3 fail-safe; `--trust-this-workspace` never persists;
-   `agent trust [--revoke|--list]`; `trust.verified` event; bidi-sanitized prompt paths.
-5. **Narrowing-only config** — user prefs + workspace narrowing knobs (`protectedPaths`,
-   `secretPatterns` as literal substrings); strict schemas that cannot express widening; read
-   only post-trust; `.agent-cli/` write-protected from the agent; `config.loaded` provenance.
-6. **REPL** — bare `agent` (TTY or `--interactive`) / `--continue` / `resume <id>`; one
-   persistent readline shared with approvals (EOF at an approval → deny-&-stop); live render
-   from the log; stdout = model text only, chrome on stderr; ASCII glyph fallback for legacy
-   consoles; slash commands over the live log; Ctrl+C aborts the turn / twice quits;
-   `user-quit` for every human-initiated end; system prompt: never touch git unless asked.
-7. **Subprocess smoke tests** for the piped REPL (real approver over pipes, stream purity,
-   trust refusal, flag conflict).
-8. **Live E2E fixes** (below) and **docs**.
+### Session 1 (2026-07-14) — V0.1: the bounded local agent loop
 
-### Verification evidence
-
-- `npm run typecheck` clean; `npm run build` clean; `npm test`: **204 passing, 1 skipped**
-  across 18 files (was 143+1). New suites: runtime.abort, trust/consent, config, repl (+io
-  integrity), store liveness, report exclusions, and 7 new CLI smoke tests.
-- **Live E2E round 1** (real Opus 4.8 through the system proxy, expect-style driver, isolated
-  `Desktop\agent-cli-e2e\ws`): `agent trust` → piped `--interactive` REPL → 3 natural-language
-  instructions built a working `wordstats` utility (README + tests). Human-proxy driver DENIED
-  the model's first compound shell command; the model adapted and verified with `node --test`
-  (3/3 pass, exit 0 — files CHECKED in the report). Verified after the run: the utility works
-  (`lines=47 words=161 chars=1021`), no `.git` created, zero writes to the Agent CLI repo,
-  state only under the isolated state dir.
-- Round 1 surfaced **3 real defects, fixed + tested**: in-session `/report` labeled a running
-  session CRASHED/UNKNOWN; "Commands run" listed a denied command as if executed; piped
-  transcripts lost the dialogue (no echo of piped input).
-- **Live E2E round 2**: `/undo` live (created file restored), the `[[harness note]]` reached
-  the model on the next turn (it recreated the file), fixed transcript confirmed.
-- **Live E2E round 3**: interactive resume (`agent --continue`) replayed the conversation
-  against the real API and extended the file correctly (also exercising coalesceUserMessages
-  wire-shape acceptance on a resumed history).
-
-### Final adversarial review (post-E2E)
-
-A second multi-agent review over the complete session diff (safety / correctness / Windows-io
-lenses; the verify fan-out was cut short by a subagent spend limit, so the eight candidate
-findings were verified by hand against the code). Four were real and are fixed + tested:
-
-- **Type-ahead could answer approval prompts on a TTY** — a buffered next-instruction line
-  starting with 's' would grant a *session-wide* allow for a prompt the user never saw.
-  Approval questions now only accept a line typed after the prompt is visible.
-- **Approval prompt printed model-controlled text unsanitized** — embedded ANSI/bidi could
-  visually rewrite the very prompt that gates shell execution. Now sanitized (also `agent map`).
-- **Abort-skipped commands appeared under "Commands run"** in the report as if they executed.
-- **Ctrl+D/Ctrl+C at the trust consent prompt exited 0** (dangling question promise drained the
-  event loop) — a script would read an aborted consent as success. Now settles as declined.
-
-Plus two hardening fixes: full-terminal mode requires both stdin AND stderr TTYs (else typing
-was invisible with stderr redirected), and the readline gate passes terminal columns through.
-Post-fix gate: typecheck/build clean, **204 passing, 1 skipped**.
-
-### Decisions (and why)
-
-- **Trust prompt only on a real TTY.** A piped "t" into a prompt nobody read is ambient consent;
-  piped runs must use the explicit flag or `agent trust`. `--trust-this-workspace` deliberately
-  never persists — a CI flag must not silently pre-authorize future interactive runs.
-- **Workspace config carries no preferences.** A folder is attacker-influencable ground; it may
-  narrow policy but never choose the model, provider, or budgets. Config schemas structurally
-  cannot express widening (no allowlists — the V0.1 always-ask command decision stands).
-- **The screen renders from the log** (`EventLog.onAppend`), not from a parallel narrative —
-  and stdout stays model-text-only so piped transcripts are clean evidence.
-- **`user-quit` for /quit, EOF, and double-Ctrl+C** — human departure is not task completion.
-- **Abort at boundaries only.** A running `run_command` is not killable in V0.2; the abort
-  lands at the next tool boundary and the limitation is printed and documented.
-
-### Open issues / not verified
-
-- **Ctrl+C on a real console (raw-mode readline SIGINT + echo-mute) is manually unverified** —
-  Windows cannot deliver a genuine ^C to a piped child, so the abort path is proven at the
-  runtime level (in-process tests) but the end-to-end keypress needs one manual smoke on
-  Windows Terminal and conhost: run `agent`, start a long turn, press Ctrl+C (expect "turn
-  interrupted" + prompt), press it twice at idle (expect exit).
-- Approval-prompt Ctrl+C resolves the pending question via stream close/EOF mapping in piped
-  mode; on a real TTY the 'SIGINT' path resolves it as interrupt → abort (unit-covered, same
-  manual smoke applies).
-- The pre-existing V0.1 flakiness of subprocess tests under heavy parallel load (PowerShell
-  spawn latency) was observed once early in the session and not reproduced after; no timeout
-  changes were made.
-- `agent map` remains ungated pre-trust (reads .gitignore + prints file names locally, nothing
-  sent to a model) — documented exception.
-
-### Deferred to V0.3+
-
-Adaptive thinking with block preservation; killing an in-flight run_command on abort; per-action
-/ `--to` / `--steps` undo; tree-sitter ranked repo map; network/web tools; MCP and workflow
-packs; SQLite index over the JSONL; conversation rewind; session pruning/sanitized export;
-prompt-history persistence and line editing niceties in the REPL; OS-level sandboxing research.
-
-### Recommended next step
-
-Two candidates, in order: (1) **first non-coding workflow pack** (documents/PDF per PROJECT.md
-§9) to prove the small-kernel/broad-workflow thesis now that the interactive loop exists;
-(2) **context management for long REPL sessions** (token budgeting + history compaction with
-evidence-faithful summaries), which multi-turn interactive use will hit first in practice.
+The seven-pillar foundation, all tested (121 passed/1 skipped + dogfood run): typed contracts
+(`types.ts`), append-only JSONL event log (atomic lock, tail repair, corruption refusal,
+versioned schema), one pure policy choke point + Windows-first path validator (device/UNC/ADS/
+reserved rejects, junction escape, sibling-prefix containment), five file tools + `run_command`
+(PowerShell `$LASTEXITCODE` propagation), content-addressed snapshots with drift-refusing
+restore + undo, resume with postHash crash reconciliation, bounded gitignore-aware workspace map,
+deterministic evidence report (mechanical CHECKED/UNCHECKED), Mock + streaming Anthropic
+providers. **Lasting decisions:** no command allowlist — every shell command asks (allowlists are
+trivially smuggled; the class label only informs the human); in-workspace writes auto-allow but
+snapshot first; sandbox vs approval kept separate and only approval shipped (documented
+honestly); one path validator for policy and tools; secret reads redacted in the log via
+salted HMAC (model still sees real bytes; redacted reads deliberately cannot replay on resume);
+state lives outside the workspace; `thinking` omitted pending block-preservation work.
+**Still-true limitations:** no OS sandbox; command output not scrubbed for secrets; path checks
+TOCTOU-racy; undo is file-only; single-user lock assumption.
 
 ---
 
-## Session 1b (2026-07-14) — Automatic proxy support + verified live E2E
+## Deferred pool (accumulated, still open)
 
-### Objective
-
-Close the one surface Session 1 left unproven: the live Anthropic path (previously a `403` from a
-filtered direct egress). Add clean, automatic proxy support so the harness works behind a system
-proxy, then run a real end-to-end of the complete V0.1 loop with the authorized credentials.
-
-### What was implemented
-
-- **Reusable transport factory** (`src/net/transport.ts`). A pure `resolveProxy` that detects
-  `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case) with correct precedence and
-  bypass rules, and `createTransport` which returns a per-request-proxied `fetch` (undici
-  `ProxyAgent` dispatcher, no global side effects) or nothing at all for direct connections.
-  Credentials are redacted from the description and never persisted.
-- **Provider decoupled from networking.** `AnthropicProvider` now takes a `Transport` from the
-  factory and exposes a redacted `transport` description; it holds no proxy logic, so future
-  providers reuse the same infrastructure. The CLI logs the (redacted) network path to stderr.
-- **`undici`** added as a dependency for `ProxyAgent`.
-
-### Verification evidence
-
-- `npm run typecheck` clean; `npm run build` clean.
-- `npm test`: **143 passing, 1 skipped** (the skipped one is the opt-in live test). The new
-  `test/transport.test.ts` covers direct mode, HTTPS/HTTP/ALL_PROXY detection, lowercase vars,
-  precedence, all NO_PROXY bypass forms, explicit override, credential redaction, per-request
-  dispatcher routing, and provider integration (the SDK routes through the injected fetch to an
-  `anthropic.com` URL).
-- **Live unit smoke** (`AGENT_LIVE_TEST=1`): the real API call that returned `403` in Session 1
-  now **succeeds through the proxy** — 5/5 pass.
-- **Live full-loop E2E** through the built CLI against real Opus 4.8:
-  - Run 1 (create): the model read `service.yaml` and wrote `SUMMARY.md`; the file was created on
-    disk with correct content; the CLI reported `network: proxy http://127.0.0.1:7897/ (via
-    https_proxy)` and `1 file(s) changed`.
-  - Run 2 (edit + recover): the model used `edit_file` to change `beta`→`BETA` in `data.txt` (edit
-    landed on disk); the evidence report showed `modify … [undo-recorded] UNCHECKED`; `agent undo`
-    then restored the file to its original bytes.
-  - This exercises the complete loop with real credentials: proxy transport → streaming provider →
-    agent loop → policy gate (observe allow / reversible auto-allow) → snapshot → tool execution →
-    event log → report → undo recovery.
-
-### Decisions
-
-- **Per-request dispatcher, never `setGlobalDispatcher`** — no process-wide side effects, and
-  `NO_PROXY` is evaluated per target host so the transport is correct for any provider/host.
-- **No custom `fetch` in pure-direct mode** — when no proxy is configured the SDK keeps its own
-  default fetch, so nothing changes for users without a proxy.
-- **No `--proxy` CLI flag** — proxy config comes from the environment (or the factory API);
-  keeping it out of argv avoids any risk of a credential-bearing proxy URL landing in the logged
-  `session.started` argv.
-
----
-
-## Session 1 (2026-07-14) — V0.1 bounded local agent loop
-
-### Objective
-
-Build the first implementation: a clean, trustworthy V0.1 foundation around the bounded local
-agent loop — workspace understanding, explicit typed capabilities, one central policy/approval
-engine, an append-only evidence log with resume, snapshot/undo recovery, and a deterministic
-verification report. Windows-first, TypeScript strict + ESM + Node 22.
-
-The design was chosen after researching six reference agents (OpenAI Codex CLI, CodeWhale, aider,
-OpenCode, Goose, Claude Code) and running three independent architecture proposals through
-adversarial review. The critiques drove several concrete decisions (below).
-
-### What was implemented
-
-The whole seven-pillar loop, all tested:
-
-- **Kernel & contracts** — `src/types.ts` (all shared discriminated-union contracts), injectable
-  clock/id/hash primitives (determinism levers).
-- **Event log** — append-only JSONL with an atomic lock (`{pid, startedAt, token}`), partial-tail
-  repair before append, strict corruption refusal, and newer-schema-version rejection. A lenient
-  reader backs the report and session listing.
-- **Policy engine** — one pure choke point classifying every call into
-  observe/reversible/external/destructive/sensitive and returning allow/ask/deny, plus a
-  Windows-first path validator (device/UNC/reserved/ADS/trailing-dot rejects, junction/symlink
-  escape detection, sibling-prefix-safe containment).
-- **Tools** — read_file, list_files, search (ReDoS-bounded, secret-file-skipping), write_file,
-  edit_file (unique-match), run_command (PowerShell `$LASTEXITCODE` propagation, timeout,
-  process-tree kill). One zod schema per tool; the model-facing JSON Schema is derived from it.
-- **Snapshots & undo** — content-addressed pre-image store; drift-refusing restore; `undo` /
-  `undo --all`.
-- **Runtime loop** — gates each tool call, streams assistant text, snapshots mutations (escalating
-  to a no-undo ask on capture failure), and records structured evidence. Interactive / auto-deny /
-  dangerous approvers.
-- **Resume** — faithful conversation reconstruction with crash reconciliation against
-  `file.mutated`/postHash.
-- **Workspace map & system prompt** — bounded gitignore-aware map fed to the model, with the
-  honest no-sandbox statement.
-- **Evidence report** — pure `Event[] → { md, json }`, mechanical CHECKED/UNCHECKED, honest
-  footers.
-- **Providers** — offline scripted `MockProvider`; streaming `AnthropicProvider`.
-- **CLI** — run / resume / undo / report / sessions / map, with a `#!/usr/bin/env node` binary.
-- **Docs** — this file, `ARCHITECTURE.md`, and `README.md` (with the security-honesty section).
-
-### Verification evidence
-
-- `npm run typecheck` (tsc strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`):
-  clean.
-- `npm test`: **121 passing, 1 skipped** across 14 files. Coverage targets the spine — path
-  boundary table (sibling-prefix, `..`, junction, UNC, ADS, reserved names); event-log
-  corruption/lock/version; snapshot capture-failure-blocks-mutation, drift-refuse, binary
-  fidelity; policy decision table; runtime e2e (happy path, grants + redaction, deny-stop,
-  non-interactive, refusal); resume postHash reconciliation; report goldens; and a **CLI
-  subprocess smoke suite** driving the built binary.
-- `npm run build`: clean emit to `dist/`.
-- **Dogfood** against this repo: `agent map` lists the source tree gitignore-aware; a scripted run
-  read `CLAUDE.md` (allowed), was denied an out-of-workspace write, and had a shell command
-  auto-denied in non-interactive mode (exit 2); `agent report` rendered the evidence with the
-  correct allow/deny classifications and honest footer; `agent sessions` listed it as completed.
-
-### Decisions (and why)
-
-- **No command allowlist — every shell command is `ask`.** The adversarial review showed any
-  allowlist is trivially smuggled (`;`, `|`, `$()`, backtick, `iex`, `-EncodedCommand`) and that a
-  shell can write files (bypassing snapshot/undo). Auto-allowing commands is the single biggest
-  hole, so V0.1 gates all of them. The class label only informs the human prompt.
-- **In-workspace writes auto-allow but are snapshotted; commands gate.** "Reversible → auto,
-  undeclarable side effects → gate" is the clean, defensible mapping. Undo + the report are the
-  safety net.
-- **Sandbox vs approval kept separate; V0.1 ships only approval.** Documented as logical policy,
-  never implied as OS isolation (constitution principles 4 & 5).
-- **Secret redaction vs faithful resume.** Secret-file read *contents* are redacted in the log
-  (HMAC + per-session salt); the model still sees the real bytes. The deliberate consequence: a
-  resumed session cannot replay a redacted secret. Every other tool result replays byte-faithfully.
-- **One path validator for policy and tools** eliminates the "two resolvers diverge" defect.
-- **`thinking` omitted in the Anthropic provider** to avoid the thinking-block round-trip a
-  tool-use loop must otherwise preserve. Adaptive thinking with block preservation is a V0.2 item.
-- **State lives outside the workspace**, and startup refuses if it resolves inside — with the
-  honest caveat that an approved shell command can still reach it.
-
-### Open issues / not verified
-
-- **Live Anthropic call — RESOLVED in Session 1b.** The `403` was a filtered direct egress: the
-  authorized path is a system proxy. Session 1b added automatic proxy support and verified the
-  full live loop end-to-end. (The original speculation that the key might be unauthorized was
-  wrong; the request simply needed to go through `HTTPS_PROXY`.)
-- **Not a git repository yet.** `git init` was intentionally not run (the constitution says commit
-  only when asked). `.gitignore` is in place.
-- **Known honest limitations** (documented in README): no OS sandbox; `run_command` output is not
-  scrubbed for secrets; path checks are TOCTOU-racy; undo is file-only; the two-process lock refuse
-  is unit-tested via a foreign pid but same-process reopen steals the lock (single-user assumption).
-
-### Deferred to V0.2+ (the next increment)
-
-Interactive REPL and in-place status rendering; adaptive thinking with thinking-block
-preservation; per-action / `--to` / `--steps` undo and `--force` (with clobbered-byte capture); a
-policy config file **plus** the workspace-trust gate that must precede it; tree-sitter ranked repo
-map; network/web tools; MCP and workflow packs; a SQLite index over the JSONL; conversation
-rewind; a model-based approval reviewer; git-aware features; session pruning / sanitized export.
-The event schema carries `v`, so an index or new event types are mechanical.
-
-### Recommended next step
-
-Re-run the live Anthropic path with an authorized key to close the one unverified surface, then
-build the **interactive REPL** on top of the existing `runTurn` (the runtime already supports
-multiple turns per session) — it is the highest-value UX gap and needs no kernel changes. In
-parallel, the **policy config file + workspace-trust gate** is the most valuable safety increment,
-since it was deliberately cut from V0.1 for lacking a trust story.
+Adaptive thinking with block preservation; per-action / `--to` / `--steps` undo; tree-sitter
+ranked repo map; network/web tools; MCP and workflow packs; SQLite index over the JSONL;
+conversation rewind; session pruning/sanitized export; prompt-history persistence + line-editing
+niceties; OS-level sandboxing (Session 5 next); background/long-running process sessions; PTY
+support; Job Objects tree-kill helper; output spill-to-file for huge command output.

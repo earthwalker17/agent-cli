@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI V0.2 is actually built. This describes the implemented system, not aspirations —
+How Agent CLI V0.3 is actually built. This describes the implemented system, not aspirations —
 see `ROADMAP.md` for what is deferred.
 
 ## Shape
@@ -30,9 +30,17 @@ src/
     event-log.ts           Append-only JSONL log: lock, tail-repair, corruption/version handling.
                            `events` is LIVE (appends visible immediately) and observable via onAppend.
     snapshots.ts           Content-addressed pre-image blob store; capture/restore with drift refuse.
+  exec/
+    env.ts                 buildChildEnv — child-process env hygiene: ci dedupe, secret-name drops,
+                           non-excludable core floor + proxy passthrough, AGENT_CLI=1 marker.
+    kill.ts                killTree — verified best-effort tree kill (taskkill /T /F, 0|128 benign,
+                           bounded liveness probes) + isAlive.
+    run.ts                 runManaged — the managed-subprocess runner: structured ExecOutcome,
+                           kill/drain state machine, head+tail capped capture. Policy- and log-free.
   tools/
     index.ts               read_file, list_files, search, write_file, edit_file + registry + JSON-Schema derivation.
-    run-command.ts         Shell exec: PowerShell $LASTEXITCODE propagation, timeout, tree-kill.
+    run-command.ts         Shell tool on runManaged: PowerShell $LASTEXITCODE wrapper, filtered env,
+                           stdin ignored, per-termination model messages, lifecycle evidence.
   net/
     transport.ts           Reusable proxy-aware transport factory (pure resolver + custom fetch).
   provider/
@@ -95,9 +103,13 @@ crash). On `ask`, call the approver and record `approval.resolved`; a `session`-
 grant. On `allow`/approved, run `runExecution`.
 
 `runExecution` captures a pre-mutation snapshot when required (a capture failure escalates to a
-no-undo ask — never a silent proceed), executes the tool, records `file.mutated` (kind, before/
-after hashes, created dirs) for snapshotted paths, and records `tool.completed`. The **model sees
-the real tool output**; the **persisted log redacts** secret-classified reads.
+no-undo ask — never a silent proceed), then executes the tool with a **per-call context**: the
+turn's AbortSignal plus two callId-bound channels — `reportCommand` (structured lifecycle facts,
+persisted as `command.started`/`command.ended` under the runtime-chosen callId, so a tool can
+never forge another call's evidence) and `onOutput` (live chunks to `Session.onCommandOutput`,
+render-only). It records `file.mutated` (kind, before/after hashes, created dirs) for snapshotted
+paths, and `tool.completed`. The **model sees the real tool output**; the **persisted log
+redacts** secret-classified reads.
 
 ### Abort and repair
 
@@ -106,8 +118,41 @@ executes — including auto-allowed in-workspace writes, which never reach an ap
 calls get synthesized `tool.requested`/`tool.completed` events and error `tool_result` blocks so
 the wire history stays API-valid; the turn records `turn.aborted {phase}`. An abort during model
 streaming appends nothing partial (the history ends at the trailing user message; the Anthropic
-provider's `coalesceUserMessages` merges consecutive same-role messages at the wire). A tool
-already executing (`run_command`) is NOT interruptible — abort lands at the next boundary.
+provider's `coalesceUserMessages` merges consecutive same-role messages at the wire). An
+**executing `run_command` IS interruptible** (V0.3): the signal reaches the child through the
+exec substrate, which tree-kills, verifies, drains bounded, and reports `termination: 'aborted'`
+— distinct evidence from `turn.aborted` (process vs turn). `'interrupted by user'` remains
+reserved for calls that never spawned. The one-shot CLI path wires SIGINT to the same signal
+(`installSigintAbort`: first press aborts, second force-exits).
+
+## Managed execution (`exec/`)
+
+`runManaged(spec) → ExecOutcome` is the substrate every shell execution goes through (and future
+workflow-pack renderer processes will reuse). It is policy-free and log-free: policy stays in the
+engine, evidence stays in the runtime.
+
+- **Termination is typed**: `exited | timeout | aborted | spawn-error`. Only `exited` carries an
+  exit code — a killed command has `exitCode: null` by contract and can never read as a passing
+  check anywhere downstream (report, model message, renderer).
+- **Kill/drain state machine**: timeout or abort → `killTree` (async `taskkill /PID /T /F`; exit
+  0 and 128 both mean "gone"; bounded liveness probes; result recorded in `killDetail`, honest
+  when unverified) → settle on `'exit'` with a bounded wait → race `'close'` against a drain
+  timeout, then destroy streams. Never awaits `'close'` unconditionally: a detached grandchild
+  holding inherited pipe handles cannot hang the outcome (nodejs/node#21960 class; regression-
+  tested with a real surviving-grandchild fixture). Settling awaits an in-flight `killTree` so
+  kill evidence is never lost to the child's own exit racing ahead. Tree kill is BEST EFFORT and
+  says so: grandchildren orphaned by a dead intermediate parent are structurally unreachable
+  without Job Objects (no maintained Node binding; documented gap).
+- **Capture**: stdin `'ignore'` (interactive children fail fast, never hang the turn); stdout and
+  stderr captured separately and interleaved, head+tail under byte caps (stderr-prioritized 1/3–
+  2/3 split of 512 KiB default) from raw buffers, decoded once. `truncateForModel` remains the
+  final model-facing truncation contract on top.
+- **Env hygiene** (`env.ts`): children get the parent env minus names containing
+  `key/secret/token/password/credential` (case-insensitive; config `envExcludePatterns` may add
+  more), deduped case-insensitively (lexicographically-first, Node's own child rule), with a
+  non-excludable floor (`SystemRoot`/`windir` etc. — WinError 10106) and proxy variables passed
+  through (children need the proxy for network; embedded proxy credentials remain visible — an
+  honest, documented limitation, NOT a security boundary). `AGENT_CLI=1` marks harness children.
 
 `repairDanglingToolUses(session)` is the REPL's recovery after a mid-turn throw: unanswered
 `tool_use` blocks in the in-memory history are answered from their recorded completions (or an
@@ -120,6 +165,12 @@ The load-bearing types (`src/types.ts`):
 - `Tool<I>` declares `schema` (one zod source), `mutates(input, ctx)` (write paths, or `null` =
   undeclarable side effects), optional `readsPaths` and `command`, and `execute`. Policy reads
   these facts; tools contain no policy logic.
+- `ToolContext` optionally carries `signal` (turn cancellation — a long-running tool must observe
+  it), `onOutput` (render-only live chunks), and `reportCommand` (structured `CommandEvidence`;
+  the runtime binds the callId). All optional: plain read tools ignore them.
+- `ToolResult` gained additive `termination` (`CommandTermination`) and `killDetail`;
+  `ApprovalRequest` gained `kind: 'command'` so the prompt can present the command class as a
+  best-effort LABEL (`[shell command — labeled observe]`), never as a verdict.
 - `PolicyDecision` = `{ classification, decision: allow|ask|deny, rule, reason, requiresSnapshot,
   noUndo?, redactOutput? }`.
 - `SessionEvent` = `{ v, seq, ts } & EventBody`, a discriminated union of every event type. `v`
@@ -144,8 +195,10 @@ never persisted; `agent trust` records a deliberate grant. Displayed paths pass 
 Two strict-schema layers merged narrowing-only: user `<state>/config.json` (prefs `model`,
 `maxSteps` + narrowing) and workspace `<ws>/.agent-cli/config.json` (narrowing ONLY — no prefs,
 since a workspace is attacker-influencable). Narrowing knobs: `protectedPaths` (extra write-deny
-roots into `validatePath`) and `secretPatterns` (literal lowercase basename substrings extending
-`isSecretName` for both the policy gate and the search tool's skip-list). The schemas cannot
+roots into `validatePath`), `secretPatterns` (literal lowercase basename substrings extending
+`isSecretName` for both the policy gate and the search tool's skip-list), and `envExcludePatterns`
+(literal name substrings dropped from command-child environments; the exec core floor and proxy
+variables are structurally non-excludable, so the knob can narrow but never break or widen). The schemas cannot
 express widening; unknown keys/bad JSON are hard `ConfigError`s. Rules travel on `ToolContext`;
 provenance is recorded as `config.loaded {sources: [{path, sha256}]}`. The `.agent-cli/`
 directory is write-protected from the agent's file tools by the path validator.
@@ -157,8 +210,12 @@ persistent readline — the idle prompt and every approval question share it (vi
 injectable `question` seam); readline echo is muted during turns (input keeps flowing so Ctrl+C
 still arrives as the 'SIGINT' event); typed-ahead lines are buffered; EOF at a pending approval
 resolves null → deny-&-stop. `render.ts` subscribes to `EventLog.onAppend`, so the screen is a
-live view of the persisted evidence (tool lines, approval outcomes, per-turn
-files/commands/steps/token summaries). Stream split: **stdout = model text + requested artifacts
+live view of the persisted evidence (tool lines, approval outcomes, `(pid N)` on spawn, honest
+kill lines for killed commands, per-turn files/commands/steps/token summaries). Two — and only
+two — render-only incremental channels exist alongside the event view: `onText` (model deltas)
+and the V0.3 live command-output preview (`Session.onCommandOutput` → sanitized dim lines,
+100ms cadence, 8 KiB/command display cap); for both, the persisted truth remains the recorded
+events. Stream split: **stdout = model text + requested artifacts
 only; stderr = all chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs and
 echoes accepted input lines for readable transcripts). Slash commands operate on the session's
 own live log (`/undo` → `applyUndo` + `undo.applied` on the same open log; the model learns of
@@ -201,8 +258,12 @@ and `/status` depend on this) — and observable via `onAppend`, fired after the
 with observer throws swallowed (the single point the REPL renders from). `readLenient` is a
 lock-free, never-throwing reader for the report and session listing.
 
-Event schema stays v1; V0.2 adds three additive event types: `turn.aborted {phase}`,
-`trust.verified {source}`, and `config.loaded {sources}`.
+Event schema stays v1; V0.2 added three additive event types (`turn.aborted {phase}`,
+`trust.verified {source}`, `config.loaded {sources}`) and V0.3 adds two more:
+`command.started {callId, pid, shell, cwd, timeoutMs}` (actual spawn — execution evidence,
+distinct from `tool.requested`) and `command.ended {callId, termination, exitCode|null,
+durationMs, killDetail?, drainTimedOut?}`. Additive types are lenient-reader-safe; bumping the
+version would lock old binaries out of new logs, so v stays 1.
 
 ## Recovery (`store/snapshots.ts`, `runtime/undo.ts`)
 
@@ -220,16 +281,23 @@ tool result except redacted secret reads (which, by design, are not persisted an
 replayed). Crash recovery reconciles against `file.mutated`/postHash: a completed edit whose
 `tool.completed` was lost to a truncated tail is recognized as **applied** (post-hash matches
 disk), a snapshot without a matching mutation is flagged **unknown post-state**, and a bare
-`tool.requested` is a true **orphan**. Grants and the system prompt/map are regenerated fresh —
+`tool.requested` is a true **orphan** — unless `command.started` shows the command had spawned,
+in which case the replay says the command was executing at the crash and its effects are unknown. Grants and the system prompt/map are regenerated fresh —
 current state outranks stale context.
 
 ## Verification (`report/report.ts`)
 
 `buildReport` is a pure function `Event[] → { json, md }` (golden-testable). A changed file is
-labeled **CHECKED** only if a `run_command` exited zero *after* its last mutation — and the report
-prints *which command* — with the exact wording "check ran, exit 0" and **no correctness claim**.
-Everything else is **UNCHECKED**. "Commands run" lists only commands that actually executed
-(calls denied by policy or by the human stay visible under Actions/Approvals); a log without
+labeled **CHECKED** only if a `run_command` genuinely **exited** zero *after* its last mutation —
+and the report prints *which command* — with the exact wording "check ran, exit 0" and **no
+correctness claim**. A `command.ended` recording a kill vetoes CHECKED even against a stray
+exit-0 completion; old logs without command events fall back to the exit-code rule. Everything
+else is **UNCHECKED**. "Commands run" lists only commands that actually executed
+(calls denied by policy or by the human stay visible under Actions/Approvals); killed commands
+render as `killed: timed out/aborted by user … no exit code`, and a `command.started` with no
+completion renders `STARTED but never completed … effects unknown` (plus honesty-footer lines) —
+the derivation stays anchored on `tool.requested`+`tool.completed`, with command events as
+enrichment only. A log without
 `session.ended` renders as "IN PROGRESS or CRASHED/UNKNOWN" (the in-session `/report` is the
 in-progress case). The report always states that assistant narrative is not evidence and
 restates the undo/sandbox limitations. PowerShell invocations append `; exit $LASTEXITCODE` so a

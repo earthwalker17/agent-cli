@@ -421,15 +421,17 @@ many integrations but weak trust and inconsistent outputs.
 
 ## 16. Documentation Strategy
 
-The repository uses four complementary documents:
+The repository uses five complementary documents:
 
 - `CLAUDE.md`: stable constitution and Claude Code operating rules.
 - `PROJECT.md`: this long-term context, product thesis, principles, and reference material.
-- `ROADMAP.md`: session-by-session evolution, verification, open work, and next steps.
+- `ROADMAP.md`: session-by-session evolution, verification, open work, and next steps — kept as a
+  rolling record (recent sessions in full, older ones compressed to milestones).
 - `ARCHITECTURE.md`: the current implemented system, modules, contracts, data flows, and operational logic.
+- `BLUEPRINT.md`: a rolling near-term development horizon, revised as repository evidence accumulates.
 
-`ROADMAP.md` and `ARCHITECTURE.md` should be updated as the project evolves. `CLAUDE.md` and
-`PROJECT.md` should change only when enduring assumptions genuinely change.
+`ROADMAP.md`, `ARCHITECTURE.md`, and `BLUEPRINT.md` should be updated as the project evolves.
+`CLAUDE.md` and `PROJECT.md` should change only when enduring assumptions genuinely change.
 
 ## 17. Reference Projects and Reading
 
