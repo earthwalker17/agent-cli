@@ -110,6 +110,38 @@ describe('decide: automatic command review', () => {
     expect(decide(shell, { command: 'Remove-Item -Recurse -Force build' }, ctx, new Grants()).classification).toBe('destructive');
     expect(decide(shell, { command: 'certutil -urlcache -f http://x/y a.exe' }, ctx, new Grants()).classification).toBe('external');
   });
+  it('labels work-discarding git commands destructive (V0.5 — the git-restore data-loss class)', () => {
+    for (const command of [
+      'git restore src/a.ts',
+      'git checkout -- src/a.ts',
+      'git reset --hard HEAD~1',
+      'git clean -fdx',
+      'git stash drop',
+      'git stash clear',
+      'git push --force origin main',
+      'git push --force-with-lease origin main',
+      'git push -f',
+    ]) {
+      expect(decide(shell, { command }, ctx, new Grants()).classification, command).toBe('destructive');
+    }
+    // Plain push stays external; branch switching is not the discard form.
+    expect(decide(shell, { command: 'git push origin main' }, ctx, new Grants()).classification).toBe('external');
+    expect(decide(shell, { command: 'git checkout main' }, ctx, new Grants()).classification).toBe('observe');
+  });
+  it('REGRESSION: a command-less, mutation-less tool classifies observe/allow — the trap that forbids ever wrapping git mutations as a tool', () => {
+    // decide() has no branch that gates a tool with no command(), a null mutates(), and no
+    // readsPaths — it lands on observe.in-workspace and AUTO-ALLOWS. A "git_commit" tool of
+    // that shape would commit without any approval. This is why the git capability layer is
+    // harness-only and must never be registered in TOOLS (asserted in tools.mutate tests too).
+    const trap: Tool<{ message: string }> = {
+      name: 'hypothetical_git_commit',
+      description: '',
+      schema: z.object({ message: z.string() }),
+      mutates: () => null,
+      execute: async () => ({ ok: true, output: '', truncated: false, durationMs: 0 }),
+    };
+    expect(decide(trap, { message: 'x' }, ctx, new Grants())).toMatchObject({ classification: 'observe', decision: 'allow' });
+  });
   it('a session grant never applies to run_command', () => {
     const g = new Grants();
     g.add('run_command', 'external'); // ignored by Grants

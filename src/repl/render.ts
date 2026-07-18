@@ -35,6 +35,7 @@ export interface BannerInfo {
   stateDir: string;
   network?: string;
   sandbox?: { summary: string; enforced: boolean };
+  git?: { summary: string };
   dangerous: boolean;
 }
 
@@ -245,6 +246,7 @@ export function createRenderer(opts: {
         const line = `  sandbox: ${info.sandbox.summary}`;
         chromeLine(info.sandbox.enforced ? style.dim(line) : style.yellow(line));
       }
+      if (info.git) chromeLine(style.dim(`  git: ${sanitizeLine(info.git.summary)}`));
       if (info.dangerous) chromeLine(style.red(`  ${g.warn} approvals BYPASSED (--dangerously-allow-all)`));
       chromeLine(style.dim(`  /help for commands · Ctrl+C interrupts a running turn · /quit to leave`));
     },

@@ -27,6 +27,7 @@ import { systemIdGen, type IdGen } from '../shared/ids.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Approver, ExecSandbox } from '../types.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
+import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
 
 export interface Session {
@@ -54,6 +55,8 @@ export interface Session {
   /** The session's execution sandbox backend + its probed enforcement facts (both or neither). */
   sandbox?: SandboxBackend;
   sandboxFacts?: EnforcementFacts;
+  /** The probed git context (V0.5); absent when the interface did not run the probe. */
+  gitFacts?: GitFacts;
   clock: Clock;
 }
 
@@ -85,6 +88,7 @@ export interface StartOptions {
   rules?: PolicyRules;
   sandbox?: SandboxBackend;
   sandboxFacts?: EnforcementFacts;
+  gitFacts?: GitFacts;
   clock?: Clock;
   idGen?: IdGen;
   saltHex: string;
@@ -134,7 +138,30 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
   if (opts.rules) base.rules = opts.rules;
   if (opts.sandbox) base.sandbox = opts.sandbox;
   if (opts.sandboxFacts) base.sandboxFacts = opts.sandboxFacts;
+  if (opts.gitFacts) base.gitFacts = opts.gitFacts;
   return base;
+}
+
+/** Record the probed git context for this session (explicit degrades, never guesses). */
+export function recordGitContext(session: Session, facts: GitFacts): void {
+  session.log.append({
+    type: 'git.context',
+    isRepo: facts.isRepo,
+    gitVersion: facts.gitVersion,
+    repoRoot: facts.repoRoot,
+    workspaceIsRepoRoot: facts.workspaceIsRepoRoot,
+    branch: facts.branch,
+    detached: facts.detached,
+    unborn: facts.unborn,
+    head: facts.head,
+    upstream: facts.upstream,
+    ahead: facts.ahead,
+    behind: facts.behind,
+    dirtyCount: facts.dirtyCount,
+    untrackedCount: facts.untrackedCount,
+    probeFailed: facts.probeFailed,
+    detail: facts.detail,
+  });
 }
 
 /** Record the active execution sandbox for this session (consent-provenance style evidence). */

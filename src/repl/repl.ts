@@ -1,6 +1,8 @@
 import { resolveLayout, resolveStateRoot } from '../store/layout.js';
-import { startSession, resumeSession, endSession, runTurn, repairDanglingToolUses, recordWorkspaceMap, recordSandboxStatus, type Session } from '../runtime/session.js';
+import { startSession, resumeSession, endSession, runTurn, repairDanglingToolUses, recordWorkspaceMap, recordSandboxStatus, recordGitContext, type Session } from '../runtime/session.js';
 import { selectSandbox, type SandboxBackend } from '../sandbox/index.js';
+import { detectGitFacts } from '../git/facts.js';
+import type { GitFacts } from '../git/types.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
@@ -35,6 +37,8 @@ export interface ReplOptions {
   streams?: ReplStreams;
   /** Injectable sandbox backend for deterministic, platform-independent tests; defaults to selectSandbox. */
   sandbox?: SandboxBackend;
+  /** Injectable git facts for deterministic tests; defaults to a real detectGitFacts probe. */
+  gitFacts?: GitFacts;
 }
 
 export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promise<number> {
@@ -69,7 +73,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   // report the truth. Tests may inject a backend to stay deterministic and platform-independent.
   const sandbox = opts.sandbox ?? selectSandbox({ stateRoot: layout.stateRoot });
   const sandboxFacts = await sandbox.ensureAvailable();
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts);
+  const gitFacts = opts.gitFacts ?? (await detectGitFacts(ctx.ws));
+  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts);
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -87,6 +92,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     rules: config.rules,
     sandbox,
     sandboxFacts,
+    gitFacts,
   };
 
   let session: Session;
@@ -104,6 +110,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   session.log.append({ type: 'trust.verified', source: trust.source });
   session.log.append({ type: 'config.loaded', sources: config.sources });
   recordSandboxStatus(session, sandboxFacts);
+  recordGitContext(session, gitFacts);
   recordWorkspaceMap(session, map);
 
   renderer.banner({
@@ -114,6 +121,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     stateDir: layout.projectDir,
     ...(ctx.provider instanceof AnthropicProvider ? { network: ctx.provider.transport } : {}),
     sandbox: { summary: sandboxFacts.summary, enforced: sandboxFacts.enforced },
+    ...(gitFacts.isRepo || gitFacts.probeFailed ? { git: { summary: gitFacts.detail } } : {}),
     dangerous: values['dangerously-allow-all'] === true,
   });
 

@@ -46,6 +46,16 @@ export interface ReportSandbox {
   confines: string[];
   doesNotConfine: string[];
 }
+export interface ReportGit {
+  isRepo: boolean;
+  repoRoot: string | null;
+  branch: string | null;
+  head: string | null;
+  dirtyCount: number | null;
+  probeFailed: boolean;
+  /** The probed one-line summary — state AT SESSION START, not at report time. */
+  detail: string;
+}
 export interface ReportJson {
   session: {
     id: string;
@@ -58,6 +68,8 @@ export interface ReportJson {
     usage: { inputTokens: number; outputTokens: number };
     /** The active execution sandbox for the session (V0.4+ logs). */
     sandbox?: ReportSandbox;
+    /** The probed git context at session start (V0.5+ logs). */
+    git?: ReportGit;
   };
   tasks: string[];
   actions: ReportAction[];
@@ -84,6 +96,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   const started = events.find((e) => e.type === 'session.started');
   const ended = events.find((e) => e.type === 'session.ended');
   const sandboxEvent = events.find((e) => e.type === 'sandbox.status');
+  const gitEvent = events.find((e) => e.type === 'git.context');
   const commandByCall = new Map<string, string>();
   const toolByCall = new Map<string, string>();
   const usage = { inputTokens: 0, outputTokens: 0 };
@@ -234,6 +247,19 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
             },
           }
         : {}),
+      ...(gitEvent?.type === 'git.context'
+        ? {
+            git: {
+              isRepo: gitEvent.isRepo,
+              repoRoot: gitEvent.repoRoot,
+              branch: gitEvent.branch,
+              head: gitEvent.head,
+              dirtyCount: gitEvent.dirtyCount,
+              probeFailed: gitEvent.probeFailed,
+              detail: gitEvent.detail,
+            },
+          }
+        : {}),
     },
     tasks,
     actions,
@@ -273,6 +299,10 @@ function renderMarkdown(r: ReportJson): string {
     L.push(`- sandbox: ${s.mode} (${s.enforced ? 'ENFORCED' : 'not enforced'}) — ${s.summary}`);
     for (const c of s.confines) L.push(`    confines: ${c}`);
     for (const c of s.doesNotConfine) L.push(`    does NOT confine: ${c}`);
+  }
+  if (r.session.git) {
+    const g = r.session.git;
+    L.push(g.isRepo ? `- git (at session start): ${g.detail}` : `- git: ${g.detail}`);
   }
   L.push('');
 

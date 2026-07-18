@@ -59,6 +59,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           `  workspace: ${sanitizeLine(s.workspaceRoot)}`,
           `  model: ${s.model} · provider: ${s.provider.name}`,
           `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out`,
+          ...(s.gitFacts?.isRepo ? [`  git (at session start): ${sanitizeLine(s.gitFacts.detail)}`] : []),
           `  state: ${sanitizeLine(s.stateDir)}`,
         ].join('\n'),
       );

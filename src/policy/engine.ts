@@ -82,7 +82,12 @@ export function classifyCommand(command: string, workspaceRoot: string): Command
     /\b(rm|del|rmdir|rd)\b/i.test(c) && recursiveForce.test(c)
       ? true
       : /remove-item\b[\s\S]*-(recurse|force)/i.test(c) ||
-        /\bgit\s+(reset\s+--hard|clean)\b/i.test(c) ||
+        // git commands that discard or destroy work: reset --hard / clean / restore /
+        // checkout -- <path> (the discard form) / stash drop|clear / force pushes.
+        // The Codex `git restore` data-loss incident is why these read as destructive,
+        // never as benign "observe" — the label still only informs the human.
+        /\bgit\s+(reset\s+--hard|clean|restore\b|checkout\s+--(\s|$)|stash\s+(drop|clear)\b)/i.test(c) ||
+        /\bgit\s+push\b[\s\S]*(\s--force(-with-lease)?\b|\s-f\b)/i.test(c) ||
         /\b(format|dd|mkfs)\b/i.test(c);
   const external =
     /\b(curl|wget|iwr|invoke-webrequest|invoke-restmethod|scp|ssh|nc|ncat|telnet|ftp|tftp)\b/i.test(c) ||

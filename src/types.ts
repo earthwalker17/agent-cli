@@ -350,6 +350,29 @@ export type EventBody =
       doesNotConfine: string[];
       detail: string;
     }
+  | {
+      /**
+       * The probed git context for this session (read-only probe at session start; V0.5).
+       * Every degrade path is explicit — git absent, not a repository, probe failed/timed out —
+       * with nulls, never guesses. Additive v1 event.
+       */
+      type: 'git.context';
+      isRepo: boolean;
+      gitVersion: string | null;
+      repoRoot: string | null;
+      workspaceIsRepoRoot: boolean;
+      branch: string | null;
+      detached: boolean;
+      unborn: boolean;
+      head: string | null;
+      upstream: string | null;
+      ahead: number | null;
+      behind: number | null;
+      dirtyCount: number | null;
+      untrackedCount: number | null;
+      probeFailed: boolean;
+      detail: string;
+    }
   | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
 
 export type SessionEvent = { v: number; seq: number; ts: string } & EventBody;

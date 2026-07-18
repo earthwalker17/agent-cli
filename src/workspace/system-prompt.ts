@@ -1,5 +1,6 @@
 import type { WorkspaceMap } from './map.js';
 import type { EnforcementFacts } from '../sandbox/index.js';
+import type { GitFacts } from '../git/types.js';
 
 /**
  * Build the system prompt. The honesty statement is load-bearing, not decoration: the model is told
@@ -7,7 +8,7 @@ import type { EnforcementFacts } from '../sandbox/index.js';
  * unsnapshotted and irreversible, so it reaches for the typed, snapshot-backed file tools first and
  * understands the automatic-review flow (constitution principles 4 & 5).
  */
-export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sandbox?: EnforcementFacts): string {
+export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sandbox?: EnforcementFacts, git?: GitFacts): string {
   const sandboxLines =
     sandbox?.enforced && sandbox.mode === 'windows-lowil'
       ? [
@@ -27,7 +28,14 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
     ...sandboxLines,
     '- run_command semantics: stdin is not connected (commands must be non-interactive); the child environment omits variables whose names look secret-like (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL) — never write a command that expects them; commands time out (default 120s, timeoutMs up to 600000) and the user can interrupt one mid-run. A killed command (timeout or interrupt) has NO exit code and is NEVER evidence that a check passed.',
     '- After changing files, run a relevant check (build/test/lint) with run_command when one exists, so the change is verified rather than merely made.',
-    '- Never initialize or modify version control (git init/add/commit/branch/etc.) and never create a repository unless the user explicitly asks for it.',
+    ...(git?.isRepo
+      ? [
+          `- The workspace is inside a git repository: ${git.detail}. Read-only git commands (status/log/diff/show) are the right way to inspect it.`,
+          '- Never stage, commit, or otherwise modify version-control state (git add/commit/branch/checkout/restore/stash/…) unless the user explicitly asks you to in this session.',
+        ]
+      : [
+          '- Never initialize or modify version control (git init/add/commit/branch/etc.) and never create a repository unless the user explicitly asks for it.',
+        ]),
     '- The user may be in an interactive session and can send follow-up instructions after each result; treat each instruction in the context of the whole conversation. Text inside [[harness note: …]] at the start of a user message comes from the harness (e.g. the user reverted files), not from the user.',
     '- Be concise. Report what you did and what you verified; do not claim a check passed unless a command actually exited zero.',
     '',

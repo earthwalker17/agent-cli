@@ -9,8 +9,9 @@ import { loadConfig } from '../config/config.js';
 import { runRepl } from '../repl/repl.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
-import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, recordSandboxStatus, type Session } from '../runtime/session.js';
+import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, recordSandboxStatus, recordGitContext, type Session } from '../runtime/session.js';
 import { selectSandbox } from '../sandbox/index.js';
+import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
@@ -138,7 +139,8 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   // model (via the system prompt) exactly what the active boundary does and does not confine.
   const sandbox = selectSandbox({ stateRoot: layout.stateRoot });
   const sandboxFacts = await sandbox.ensureAvailable();
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts);
+  const gitFacts = await detectGitFacts(ctx.ws);
+  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts);
 
   if (values['dangerously-allow-all']) {
     process.stderr.write('⚠ --dangerously-allow-all: approvals are bypassed. No isolation whatsoever.\n');
@@ -147,6 +149,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     process.stderr.write(`network: ${ctx.provider.transport}\n`);
   }
   process.stderr.write(`sandbox: ${sandboxFacts.summary}\n`);
+  if (gitFacts.isRepo || gitFacts.probeFailed) process.stderr.write(`git: ${gitFacts.detail}\n`);
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -163,6 +166,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     rules: config.rules,
     sandbox,
     sandboxFacts,
+    gitFacts,
   };
   let session: Session;
   if (opts.resumeId) {
@@ -173,6 +177,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   session.log.append({ type: 'trust.verified', source: trust.source });
   session.log.append({ type: 'config.loaded', sources: config.sources });
   recordSandboxStatus(session, sandboxFacts);
+  recordGitContext(session, gitFacts);
   recordWorkspaceMap(session, map);
 
   const controller = new AbortController();
