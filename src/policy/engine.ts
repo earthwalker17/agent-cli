@@ -3,6 +3,7 @@ import type { ActionClass, MutationPlan, PolicyDecision, Tool, ToolContext } fro
 import { validatePath } from './paths.js';
 import { PathError } from '../shared/errors.js';
 import { caseFold } from '../shared/pathutil.js';
+import { analyzeCommand } from './command-review.js';
 
 /**
  * The single policy choke point. `decide()` classifies every tool call and returns
@@ -80,15 +81,21 @@ export function classifyCommand(command: string, workspaceRoot: string): Command
   const destructive =
     /\b(rm|del|rmdir|rd)\b/i.test(c) && recursiveForce.test(c)
       ? true
-      : /remove-item\b[^\n]*-(recurse|force)/i.test(c) ||
+      : /remove-item\b[\s\S]*-(recurse|force)/i.test(c) ||
         /\bgit\s+(reset\s+--hard|clean)\b/i.test(c) ||
         /\b(format|dd|mkfs)\b/i.test(c);
   const external =
-    /\b(curl|wget|iwr|invoke-webrequest|invoke-restmethod|scp|ssh)\b/i.test(c) ||
+    /\b(curl|wget|iwr|invoke-webrequest|invoke-restmethod|scp|ssh|nc|ncat|telnet|ftp|tftp)\b/i.test(c) ||
     /\bgit\s+(push|pull|fetch|clone)\b/i.test(c) ||
     /\b(npm|pnpm|yarn)\s+(install|i|ci|add|publish)\b/i.test(c) ||
     /\bnpx\b/i.test(c) ||
-    /\b(pip|pip3)\s+install\b/i.test(c);
+    /\b(pip|pip3)\s+install\b/i.test(c) ||
+    // LOLBAS download / proxy-exec / persistence — string matching only INFORMS the human (these
+    // are bypassable by obfuscation and are NOT auto-runnable regardless; the label helps the human
+    // and prevents these from reading as benign "observe").
+    /\b(certutil|bitsadmin|start-bitstransfer|mshta|rundll32|regsvr32|wmic|msiexec|installutil|cscript|wscript|schtasks|New-Service|sc)\b/i.test(c) ||
+    // Encoded / runtime-constructed commands (obfuscation): never benign to a reviewer.
+    /(-e(nc|ncodedcommand)?\b)|(\biex\b)|(\binvoke-expression\b)/i.test(c);
 
   const label: ActionClass = destructive ? 'destructive' : external ? 'external' : 'observe';
   return { label, circuitBreaker };
@@ -111,7 +118,13 @@ export function decide<I>(
     ...(ctx.rules && ctx.rules.protectedPaths.length > 0 ? { extraProtected: ctx.rules.protectedPaths } : {}),
   };
 
-  // 1. Shell command → always ask (no allowlist). Label informs the human only.
+  // 1. Shell command → AUTOMATIC REVIEW (the single default flow; no separate "mode").
+  //    - circuit-breaker → deny (absolute; never overridden by anything downstream).
+  //    - a command the deterministic analyzer PROVES safe MAY auto-run, but ONLY inside an active
+  //      OS boundary that contains a misjudgment. The model's opinion is never consulted; the label
+  //      only informs the human prompt (it is bypassable string matching, not a boundary).
+  //    - everything else → ask. No enforced sandbox ⇒ auto-run is disabled and every command asks
+  //      (fail closed) — Agent CLI never auto-runs a command with nothing enforcing the boundary.
   const command = tool.command?.(input);
   if (command !== undefined) {
     const { label, circuitBreaker } = classifyCommand(command, ctx.workspaceRoot);
@@ -123,12 +136,19 @@ export function decide<I>(
         'matches a hardcoded catastrophic pattern (workspace/drive deletion or format); refused',
       );
     }
+    const analysis = analyzeCommand(command);
+    if (analysis.autoAllowable && ctx.sandbox?.enforced) {
+      return decision(label, 'allow', 'cmd.auto-review-allow', analysis.reason, { execBoundary: 'sandbox' });
+    }
+    const why = analysis.autoAllowable
+      ? 'demonstrably read-only, but no enforced sandbox is active, so it cannot auto-run'
+      : analysis.reason;
     return decision(
       label,
       'ask',
-      'cmd.always-ask',
-      'shell commands run with full user privilege and are NOT snapshotted or undoable',
-      { noUndo: true },
+      'cmd.auto-review-ask',
+      `${why}; approval required. Approved commands run with full user privilege and are NOT snapshotted or undoable`,
+      { noUndo: true, execBoundary: 'unsandboxed' },
     );
   }
 

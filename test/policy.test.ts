@@ -82,26 +82,41 @@ describe('decide: writes', () => {
   });
 });
 
-describe('decide: commands are always ask (no allowlist)', () => {
-  it('a read-only command still asks', () => {
+describe('decide: automatic command review', () => {
+  // A ctx whose sandbox reports genuine enforcement — the precondition for auto-run. Built PER TEST
+  // (ctx is populated in beforeEach; a describe-body constant would capture it undefined).
+  const enforced = (): ToolContext => ({ ...ctx, sandbox: { mode: 'windows-lowil', enforced: true, active: false, wrap: (s) => s } });
+
+  it('WITHOUT an enforced sandbox, a read-only command still ASKS (fail closed)', () => {
     const d = decide(shell, { command: 'git status' }, ctx, new Grants());
-    expect(d).toMatchObject({ decision: 'ask', rule: 'cmd.always-ask', classification: 'observe', noUndo: true });
+    expect(d).toMatchObject({ decision: 'ask', rule: 'cmd.auto-review-ask', classification: 'observe', noUndo: true });
+    expect(d.execBoundary).toBe('unsandboxed');
   });
-  it('a smuggled write (redirection) still asks (never auto-runs)', () => {
-    const d = decide(shell, { command: 'git status > ..\\evil.txt' }, ctx, new Grants());
-    expect(d.decision).toBe('ask');
+  it('WITH an enforced sandbox, a demonstrably read-only command auto-allows (runs sandboxed)', () => {
+    const d = decide(shell, { command: 'git status' }, enforced(), new Grants());
+    expect(d).toMatchObject({ decision: 'allow', rule: 'cmd.auto-review-allow', execBoundary: 'sandbox' });
+  });
+  it('a smuggled write (redirection) still asks even under an enforced sandbox (never auto-runs)', () => {
+    const d = decide(shell, { command: 'git status > ..\\evil.txt' }, enforced(), new Grants());
+    expect(d).toMatchObject({ decision: 'ask', rule: 'cmd.auto-review-ask' });
+  });
+  it('an unknown/interpreter command asks even under an enforced sandbox', () => {
+    expect(decide(shell, { command: 'powershell -EncodedCommand ABCD' }, enforced(), new Grants()).decision).toBe('ask');
+    expect(decide(shell, { command: 'node -e "process.exit(0)"' }, enforced(), new Grants()).decision).toBe('ask');
+    expect(decide(shell, { command: 'somecli --do-thing' }, enforced(), new Grants()).decision).toBe('ask');
   });
   it('labels destructive and external commands (label informs, does not grant)', () => {
     expect(decide(shell, { command: 'git push origin main' }, ctx, new Grants()).classification).toBe('external');
     expect(decide(shell, { command: 'Remove-Item -Recurse -Force build' }, ctx, new Grants()).classification).toBe('destructive');
+    expect(decide(shell, { command: 'certutil -urlcache -f http://x/y a.exe' }, ctx, new Grants()).classification).toBe('external');
   });
   it('a session grant never applies to run_command', () => {
     const g = new Grants();
     g.add('run_command', 'external'); // ignored by Grants
-    expect(decide(shell, { command: 'npm install' }, ctx, g).decision).toBe('ask');
+    expect(decide(shell, { command: 'npm install' }, enforced(), g).decision).toBe('ask');
   });
-  it('circuit-breaker denies a workspace wipe even interactively', () => {
-    const d = decide(shell, { command: `Remove-Item -Recurse -Force ${ctx.workspaceRoot}` }, ctx, new Grants());
+  it('circuit-breaker denies a workspace wipe even under an enforced sandbox', () => {
+    const d = decide(shell, { command: `Remove-Item -Recurse -Force ${ctx.workspaceRoot}` }, enforced(), new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'cmd.circuit-breaker' });
   });
 });
