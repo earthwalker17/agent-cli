@@ -29,6 +29,7 @@ import type { Approver, ExecSandbox } from '../types.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
+import { elideHistory, type ElisionOptions } from './elision.js';
 
 export interface Session {
   id: string;
@@ -57,6 +58,10 @@ export interface Session {
   sandboxFacts?: EnforcementFacts;
   /** The probed git context (V0.5); absent when the interface did not run the probe. */
   gitFacts?: GitFacts;
+  /** Wire-history elision thresholds (V0.5); tests narrow them, production uses defaults. */
+  contextBudget?: ElisionOptions;
+  /** callIds elided from the wire in this process (in-memory; drives context.compacted events). */
+  elidedCallIds?: Set<string>;
   clock: Clock;
 }
 
@@ -89,6 +94,7 @@ export interface StartOptions {
   sandbox?: SandboxBackend;
   sandboxFacts?: EnforcementFacts;
   gitFacts?: GitFacts;
+  contextBudget?: ElisionOptions;
   clock?: Clock;
   idGen?: IdGen;
   saltHex: string;
@@ -139,6 +145,7 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
   if (opts.sandbox) base.sandbox = opts.sandbox;
   if (opts.sandboxFacts) base.sandboxFacts = opts.sandboxFacts;
   if (opts.gitFacts) base.gitFacts = opts.gitFacts;
+  if (opts.contextBudget) base.contextBudget = opts.contextBudget;
   return base;
 }
 
@@ -321,10 +328,26 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
 
   for (; steps < session.maxSteps; steps++) {
     if (signal?.aborted) return abortedResult('model', steps);
+    // Wire-side elision: pure and recomputed per request over the untouched session.messages.
+    // The event records exactly which outputs the model can no longer see (only when the set grows).
+    const elision = elideHistory(session.messages, session.contextBudget);
+    const prevElided = session.elidedCallIds ?? new Set<string>();
+    if (elision.elidedCallIds.length > prevElided.size) {
+      const newly = elision.elidedCallIds.filter((id) => !prevElided.has(id));
+      session.elidedCallIds = new Set(elision.elidedCallIds);
+      session.log.append({
+        type: 'context.compacted',
+        elidedCount: elision.elidedCallIds.length,
+        newlyElidedCallIds: newly,
+        rawChars: elision.rawChars,
+        sentChars: elision.sentChars,
+        exhausted: elision.exhausted,
+      });
+    }
     const req: ProviderRequest = {
       model: session.model,
       system: session.system,
-      messages: session.messages,
+      messages: elision.messages,
       tools: session.tools.map(toToolSchema),
       maxTokens: session.maxTokens,
     };

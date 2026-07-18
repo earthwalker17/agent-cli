@@ -208,6 +208,14 @@ export function createRenderer(opts: {
           if (e.restored.length === 0 && e.refused.length === 0) chromeLine(style.dim('  nothing to undo'));
           break;
         }
+        case 'context.compacted': {
+          const pct = e.rawChars > 0 ? Math.round((100 * e.sentChars) / e.rawChars) : 100;
+          chromeLine(
+            style.dim(`  context compacted: ${e.elidedCount} older tool output(s) elided (history ${e.rawChars} → ${e.sentChars} chars, ${pct}%); full outputs stay in the log`),
+          );
+          if (e.exhausted) chromeLine(style.yellow(`  ${g.warn} history still exceeds the context target after eliding all old tool outputs — consider a fresh session`));
+          break;
+        }
         default:
           break;
       }

@@ -356,6 +356,19 @@ export type EventBody =
     }
   | {
       /**
+       * Older tool outputs were elided from the WIRE history to stay inside the context budget
+       * (V0.5). The event log and the persisted history are untouched — this records exactly
+       * which outputs the model can no longer see verbatim. Additive v1 event.
+       */
+      type: 'context.compacted';
+      elidedCount: number;
+      newlyElidedCallIds: string[];
+      rawChars: number;
+      sentChars: number;
+      exhausted: boolean;
+    }
+  | {
+      /**
        * The probed git context for this session (read-only probe at session start; V0.5).
        * Every degrade path is explicit — git absent, not a repository, probe failed/timed out —
        * with nulls, never guesses. Additive v1 event.
