@@ -25,7 +25,9 @@ import { isInside } from '../shared/pathutil.js';
 import { systemClock, type Clock } from '../shared/clock.js';
 import { systemIdGen, type IdGen } from '../shared/ids.js';
 import type { ProjectLayout } from '../store/layout.js';
-import type { Approver } from '../types.js';
+import type { Approver, ExecSandbox } from '../types.js';
+import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
+import type { ExecSpec } from '../exec/run.js';
 
 export interface Session {
   id: string;
@@ -49,6 +51,9 @@ export interface Session {
   onCommandOutput?: (callId: string, chunk: string, stream: 'stdout' | 'stderr') => void;
   /** Narrowing-only policy additions from config; passed to every tool/policy context. */
   rules?: PolicyRules;
+  /** The session's execution sandbox backend + its probed enforcement facts (both or neither). */
+  sandbox?: SandboxBackend;
+  sandboxFacts?: EnforcementFacts;
   clock: Clock;
 }
 
@@ -78,6 +83,8 @@ export interface StartOptions {
   argv?: string[];
   tools?: Tool[];
   rules?: PolicyRules;
+  sandbox?: SandboxBackend;
+  sandboxFacts?: EnforcementFacts;
   clock?: Clock;
   idGen?: IdGen;
   saltHex: string;
@@ -125,7 +132,22 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
   if (opts.onText) base.onText = opts.onText;
   if (opts.onCommandOutput) base.onCommandOutput = opts.onCommandOutput;
   if (opts.rules) base.rules = opts.rules;
+  if (opts.sandbox) base.sandbox = opts.sandbox;
+  if (opts.sandboxFacts) base.sandboxFacts = opts.sandboxFacts;
   return base;
+}
+
+/** Record the active execution sandbox for this session (consent-provenance style evidence). */
+export function recordSandboxStatus(session: Session, facts: EnforcementFacts): void {
+  session.log.append({
+    type: 'sandbox.status',
+    mode: facts.mode,
+    enforced: facts.enforced,
+    summary: facts.summary,
+    confines: facts.confines,
+    doesNotConfine: facts.doesNotConfine,
+    detail: facts.detail,
+  });
 }
 
 export type ResumeOptions = Omit<StartOptions, 'idGen' | 'argv'> & { sessionId: string };
@@ -255,6 +277,10 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
     workspaceRoot: session.workspaceRoot,
     stateDir: session.stateDir,
     ...(session.rules ? { rules: session.rules } : {}),
+    // Availability-only sandbox view for the policy decision (identity wrap, never active here):
+    // the engine reads `enforced` to gate command auto-run. The per-call enforcing wrap is built
+    // in runExecution once the boundary is known.
+    ...(session.sandboxFacts ? { sandbox: availabilitySandbox(session.sandboxFacts) } : {}),
   };
   let denials = 0;
   let steps = 0;
@@ -446,10 +472,32 @@ async function executeCall(
   return await runExecution(session, ctx, tool, input, decision, callId, signal);
 }
 
+/** A sandbox handle that only reports availability — identity wrap, never active. Used by decide(). */
+function availabilitySandbox(facts: EnforcementFacts): ExecSandbox {
+  return { mode: facts.mode, enforced: facts.enforced, active: false, wrap: (s) => s };
+}
+
+/**
+ * The per-call sandbox handed to a shell tool. When policy chose `execBoundary: 'sandbox'` (an
+ * auto-run command) it is ACTIVE and wraps the spec through the enforcing backend; otherwise it is
+ * an identity pass-through (an approved command the user accepted at full privilege).
+ */
+function callSandbox(session: Session, boundary: 'sandbox' | 'unsandboxed' | undefined): ExecSandbox | undefined {
+  if (!session.sandboxFacts) return undefined;
+  const active = boundary === 'sandbox';
+  const backend = session.sandbox;
+  return {
+    mode: session.sandboxFacts.mode,
+    enforced: session.sandboxFacts.enforced,
+    active,
+    wrap: active && backend ? (s: ExecSpec) => backend.wrapSpec(s) : (s: ExecSpec) => s,
+  };
+}
+
 /** Persist a tool-reported command lifecycle fact under the runtime-bound callId. */
 function recordCommandEvidence(session: Session, callId: string, e: CommandEvidence): void {
   if (e.kind === 'started') {
-    session.log.append({ type: 'command.started', callId, pid: e.pid, shell: e.shell, cwd: e.cwd, timeoutMs: e.timeoutMs });
+    session.log.append({ type: 'command.started', callId, pid: e.pid, shell: e.shell, cwd: e.cwd, timeoutMs: e.timeoutMs, sandbox: e.sandbox });
     return;
   }
   session.log.append({
@@ -538,10 +586,13 @@ async function runExecution<I>(
   }
 
   // Per-call context: the cancellation signal plus callId-bound evidence/output channels
-  // (the binding means a tool can only ever report facts about its own call).
+  // (the binding means a tool can only ever report facts about its own call), and the per-call
+  // sandbox (active + enforcing wrap for an auto-run command; identity for an approved one).
+  const sandbox = callSandbox(session, decision.execBoundary);
   const callCtx: ToolContext = {
     ...ctx,
     ...(signal ? { signal } : {}),
+    ...(sandbox ? { sandbox } : {}),
     reportCommand: (e) => recordCommandEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }

@@ -36,6 +36,15 @@ export interface ReportCommand {
   termination?: CommandTermination;
   /** True when command.started exists but the call never completed (session died while it ran). */
   neverCompleted?: boolean;
+  /** The execution boundary this command actually ran under (V0.4+ logs). */
+  sandbox?: 'none' | 'windows-lowil';
+}
+export interface ReportSandbox {
+  mode: string;
+  enforced: boolean;
+  summary: string;
+  confines: string[];
+  doesNotConfine: string[];
 }
 export interface ReportJson {
   session: {
@@ -47,6 +56,8 @@ export interface ReportJson {
     endedReason: string | null;
     resumes: number;
     usage: { inputTokens: number; outputTokens: number };
+    /** The active execution sandbox for the session (V0.4+ logs). */
+    sandbox?: ReportSandbox;
   };
   tasks: string[];
   actions: ReportAction[];
@@ -72,6 +83,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
 
   const started = events.find((e) => e.type === 'session.started');
   const ended = events.find((e) => e.type === 'session.ended');
+  const sandboxEvent = events.find((e) => e.type === 'sandbox.status');
   const commandByCall = new Map<string, string>();
   const toolByCall = new Map<string, string>();
   const usage = { inputTokens: 0, outputTokens: 0 };
@@ -140,12 +152,14 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     // never reached the gate (skipped by an abort/stop) and equally never ran.
     if (neverRan.has(e.callId) || !decisionByCall.has(e.callId)) continue;
     const term = endedByCall.get(e.callId)?.termination;
+    const sbx = startedByCall.get(e.callId)?.sandbox;
     commands.push({
       command: cmd,
       ok: e.ok,
       durationMs: e.durationMs,
       ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
       ...(term !== undefined ? { termination: term } : {}),
+      ...(sbx !== undefined ? { sandbox: sbx } : {}),
     });
     commandCompletions.push({
       command: cmd,
@@ -209,6 +223,17 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       endedReason: ended?.type === 'session.ended' ? ended.reason : null,
       resumes,
       usage,
+      ...(sandboxEvent?.type === 'sandbox.status'
+        ? {
+            sandbox: {
+              mode: sandboxEvent.mode,
+              enforced: sandboxEvent.enforced,
+              summary: sandboxEvent.summary,
+              confines: sandboxEvent.confines,
+              doesNotConfine: sandboxEvent.doesNotConfine,
+            },
+          }
+        : {}),
     },
     tasks,
     actions,
@@ -243,6 +268,12 @@ function renderMarkdown(r: ReportJson): string {
   L.push(`- ended: ${r.session.endedReason ?? 'IN PROGRESS or CRASHED/UNKNOWN (no session.ended recorded)'}`);
   if (r.session.resumes > 0) L.push(`- resumed ${r.session.resumes} time(s)`);
   L.push(`- tokens: ${r.session.usage.inputTokens} in / ${r.session.usage.outputTokens} out`);
+  if (r.session.sandbox) {
+    const s = r.session.sandbox;
+    L.push(`- sandbox: ${s.mode} (${s.enforced ? 'ENFORCED' : 'not enforced'}) — ${s.summary}`);
+    for (const c of s.confines) L.push(`    confines: ${c}`);
+    for (const c of s.doesNotConfine) L.push(`    does NOT confine: ${c}`);
+  }
   L.push('');
 
   L.push(`## Task`);
@@ -266,16 +297,17 @@ function renderMarkdown(r: ReportJson): string {
     L.push('(none)');
   } else {
     for (const c of r.commands) {
+      const box = c.sandbox === 'windows-lowil' ? ' [sandboxed: windows-lowil]' : c.sandbox === 'none' ? ' [unsandboxed]' : '';
       if (c.neverCompleted) {
-        L.push(`- \`${c.command}\`  → STARTED but never completed (the session ended while it ran); effects unknown`);
+        L.push(`- \`${c.command}\`  → STARTED but never completed (the session ended while it ran); effects unknown${box}`);
       } else if (c.termination === 'timeout') {
-        L.push(`- \`${c.command}\`  → killed: timed out (${c.durationMs} ms); no exit code`);
+        L.push(`- \`${c.command}\`  → killed: timed out (${c.durationMs} ms); no exit code${box}`);
       } else if (c.termination === 'aborted') {
-        L.push(`- \`${c.command}\`  → killed: aborted by user (${c.durationMs} ms); no exit code`);
+        L.push(`- \`${c.command}\`  → killed: aborted by user (${c.durationMs} ms); no exit code${box}`);
       } else if (c.termination === 'spawn-error') {
-        L.push(`- \`${c.command}\`  → failed to spawn`);
+        L.push(`- \`${c.command}\`  → failed to spawn${box}`);
       } else {
-        L.push(`- \`${c.command}\`  → exit ${c.exitCode ?? '—'} (${c.durationMs} ms)`);
+        L.push(`- \`${c.command}\`  → exit ${c.exitCode ?? '—'} (${c.durationMs} ms)${box}`);
       }
     }
   }
@@ -305,7 +337,16 @@ function renderMarkdown(r: ReportJson): string {
 
   L.push(`---`);
   L.push(`Assistant narrative is not evidence; the sections above are compiled only from recorded tool events.`);
-  L.push(`Undo covers only write_file/edit_file changes. run_command side effects, out-of-workspace edits, and external modifications are NOT captured. There is no OS sandbox — an approved command ran with full user privilege.`);
+  const sbx = r.session.sandbox;
+  if (sbx?.enforced && sbx.mode === 'windows-lowil') {
+    L.push(
+      `Undo covers only write_file/edit_file changes. Commands marked [sandboxed: windows-lowil] ran at LOW integrity — the OS denied their writes to the workspace, the profile, system dirs, and the harness state, and the process tree was reaped on kill; but reads and network were NOT confined. Commands marked [unsandboxed] were human-approved and ran with FULL user privilege — their side effects are not snapshotted or undoable.`,
+    );
+  } else {
+    L.push(
+      `Undo covers only write_file/edit_file changes. run_command side effects, out-of-workspace edits, and external modifications are NOT captured. There is no OS sandbox in this mode — an approved command ran with full user privilege.`,
+    );
+  }
   if (r.commands.some((c) => c.neverCompleted)) {
     L.push(`A command marked "STARTED but never completed" was executing when the session ended abnormally; its process may have kept running and its side effects are unknown.`);
   }

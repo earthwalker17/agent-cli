@@ -34,6 +34,7 @@ export interface BannerInfo {
   workspaceRoot: string;
   stateDir: string;
   network?: string;
+  sandbox?: { summary: string; enforced: boolean };
   dangerous: boolean;
 }
 
@@ -178,9 +179,10 @@ export function createRenderer(opts: {
           cmdShown = 0;
           cmdSuppressed = false;
           lastCmdFlush = Date.now();
+          const box = e.sandbox === 'windows-lowil' ? ', sandboxed' : '';
           // For an asked command the approval line already closed the tool line; give the pid its own line.
-          if (toolOpen) chromeOut.write(style.dim(`(pid ${e.pid}) `));
-          else chromeLine(style.dim(`  ${g.arrow} running (pid ${e.pid})`));
+          if (toolOpen) chromeOut.write(style.dim(`(pid ${e.pid}${box}) `));
+          else chromeLine(style.dim(`  ${g.arrow} running (pid ${e.pid}${box})`));
           break;
         }
         case 'command.ended': {
@@ -239,6 +241,10 @@ export function createRenderer(opts: {
       chromeLine(style.dim(`  workspace: ${sanitizeLine(info.workspaceRoot)}`));
       chromeLine(style.dim(`  model: ${info.model} · state: ${sanitizeLine(info.stateDir)}`));
       if (info.network) chromeLine(style.dim(`  network: ${info.network}`));
+      if (info.sandbox) {
+        const line = `  sandbox: ${info.sandbox.summary}`;
+        chromeLine(info.sandbox.enforced ? style.dim(line) : style.yellow(line));
+      }
       if (info.dangerous) chromeLine(style.red(`  ${g.warn} approvals BYPASSED (--dangerously-allow-all)`));
       chromeLine(style.dim(`  /help for commands · Ctrl+C interrupts a running turn · /quit to leave`));
     },

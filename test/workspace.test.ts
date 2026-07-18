@@ -59,11 +59,25 @@ describe('buildWorkspaceMap', () => {
 });
 
 describe('buildSystemPrompt', () => {
-  it('includes the honest no-sandbox statement and the map', () => {
+  it('with no enforced sandbox, states honestly that NO command auto-runs and nothing is contained', () => {
     const map = buildWorkspaceMap(tmp);
     const sys = buildSystemPrompt(tmp, map);
-    expect(sys).toMatch(/no OS-level sandbox/i);
-    expect(sys).toMatch(/NOT sandboxed and its effects are NOT undoable/);
+    expect(sys).toMatch(/NO OS sandbox active/i);
+    expect(sys).toMatch(/NO command auto-runs/i);
+    expect(sys).toContain(tmp);
+  });
+  it('with an enforced windows-lowil sandbox, explains auto-run inside Low integrity and its honest limits', () => {
+    const map = buildWorkspaceMap(tmp);
+    const sys = buildSystemPrompt(tmp, map, {
+      mode: 'windows-lowil',
+      enforced: true,
+      summary: 's',
+      confines: ['writes'],
+      doesNotConfine: ['reads', 'network'],
+      detail: 'ok',
+    });
+    expect(sys).toMatch(/runs AUTOMATICALLY inside an OS sandbox at Low integrity/i);
+    expect(sys).toMatch(/does NOT stop reads or network/i);
     expect(sys).toContain(tmp);
   });
 });

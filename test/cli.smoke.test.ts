@@ -85,7 +85,8 @@ d('CLI end-to-end via the built binary', () => {
     const script = path.join(tmp, 'script.json');
     fs.writeFileSync(
       script,
-      JSON.stringify([{ calls: [{ name: 'run_command', input: { command: 'echo hi' } }] }, { say: 'blocked' }]),
+      // A piped command is never auto-runnable (metacharacter) → it asks → non-interactive auto-denies.
+      JSON.stringify([{ calls: [{ name: 'run_command', input: { command: 'echo hi | findstr hi' } }] }, { say: 'blocked' }]),
     );
     const res = run(['--provider', 'mock', '--script', script, '--no-input', 'try a command']);
     expect(res.code).toBe(2);
@@ -122,10 +123,11 @@ d('CLI end-to-end via the built binary', () => {
     expect(res.stdout).toMatch(/say hi/);
   });
 
-  it('--help prints usage and the security note', () => {
+  it('--help prints usage and the honest security note', () => {
     const res = run(['--help']);
     expect(res.code).toBe(0);
-    expect(res.stdout).toMatch(/NO OS sandbox/);
+    expect(res.stdout).toMatch(/Low integrity/);
+    expect(res.stdout).toMatch(/fail closed/);
   });
 
   it('runs when invoked through a symlinked path (npm link bin shim)', () => {
@@ -151,7 +153,8 @@ d('CLI end-to-end via the built binary', () => {
     fs.writeFileSync(
       script,
       JSON.stringify([
-        { calls: [{ name: 'run_command', input: { command: 'echo smoke' } }] },
+        // Piped → always asks; the real interactive approver consumes the piped 'y'.
+        { calls: [{ name: 'run_command', input: { command: 'echo smoke | findstr smoke' } }] },
         { say: 'finished' },
       ]),
     );

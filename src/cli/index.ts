@@ -9,7 +9,8 @@ import { loadConfig } from '../config/config.js';
 import { runRepl } from '../repl/repl.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
-import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, type Session } from '../runtime/session.js';
+import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, recordSandboxStatus, type Session } from '../runtime/session.js';
+import { selectSandbox } from '../sandbox/index.js';
 import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
@@ -19,7 +20,7 @@ import { randomSaltHex } from '../shared/hash.js';
 import { sanitizeLine } from '../shared/text.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
 
-const USAGE = `Agent CLI — a bounded local agent harness (V0.2).
+const USAGE = `Agent CLI — a bounded local agent harness (V0.4).
 
 Usage:
   agent                          Start an interactive session (REPL) in the current directory
@@ -48,9 +49,12 @@ Options:
 Exit codes: 0 ok · 1 error · 2 denials or stopped (one-shot only; the REPL reports denials
 inline and exits 0 on a clean quit) · 3 workspace not trusted.
 
-Security: V0.2 has NO OS sandbox. The only control is the approval prompt. An approved command
-runs with your full privileges and is not undoable. Workspace trust is recorded consent, not
-isolation. See README "Security model & honest limitations".`;
+Security: command authorization is automatic. On Windows a demonstrably read-only command may
+auto-run inside an OS sandbox at Low integrity (writes to the workspace/system/state are OS-denied
+and the process tree is reaped on kill; reads and network are NOT confined). Every other command
+asks; approved commands run UNSANDBOXED with full privilege and are not undoable. Where no enforced
+sandbox is available, auto-run is disabled and every command asks (fail closed). Workspace trust is
+recorded consent, not isolation. See README "Security model & honest limitations".`;
 
 const KNOWN = new Set(['run', 'resume', 'undo', 'report', 'sessions', 'map', 'trust']);
 
@@ -125,10 +129,16 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const ctx = buildRunContext(values, { config });
   const layout = resolveLayout(ctx.ws, { ensure: true });
   const map = buildWorkspaceMap(ctx.ws);
-  const system = buildSystemPrompt(ctx.ws, map);
   const onText = (t: string): void => {
     process.stdout.write(t);
   };
+
+  // Establish the execution sandbox and PROBE it before any command can run. The probed facts are
+  // reported truthfully, gate command auto-run (no enforcement ⇒ every command asks), and teach the
+  // model (via the system prompt) exactly what the active boundary does and does not confine.
+  const sandbox = selectSandbox({ stateRoot: layout.stateRoot });
+  const sandboxFacts = await sandbox.ensureAvailable();
+  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts);
 
   if (values['dangerously-allow-all']) {
     process.stderr.write('⚠ --dangerously-allow-all: approvals are bypassed. No isolation whatsoever.\n');
@@ -136,6 +146,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   if (ctx.provider instanceof AnthropicProvider) {
     process.stderr.write(`network: ${ctx.provider.transport}\n`);
   }
+  process.stderr.write(`sandbox: ${sandboxFacts.summary}\n`);
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -150,6 +161,8 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     saltHex: randomSaltHex(),
     onText,
     rules: config.rules,
+    sandbox,
+    sandboxFacts,
   };
   let session: Session;
   if (opts.resumeId) {
@@ -159,6 +172,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   }
   session.log.append({ type: 'trust.verified', source: trust.source });
   session.log.append({ type: 'config.loaded', sources: config.sources });
+  recordSandboxStatus(session, sandboxFacts);
   recordWorkspaceMap(session, map);
 
   const controller = new AbortController();

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Tool, ToolResult } from '../types.js';
 import { truncateForModel } from '../shared/hash.js';
 import { buildChildEnv } from '../exec/env.js';
-import { runManaged } from '../exec/run.js';
+import { runManaged, type ExecSpec } from '../exec/run.js';
 
 const RunInput = z
   .object({
@@ -18,11 +18,16 @@ const DEFAULT_TIMEOUT = 120_000;
  * Build the shell invocation. On Windows we wrap in PowerShell and explicitly propagate the
  * inner command's exit code (`exit $LASTEXITCODE`) with `$ErrorActionPreference='Stop'`, so a
  * failing build/test cannot silently surface as exit 0 → a false "CHECKED" in the report.
+ *
+ * The wrapped script is passed via `-EncodedCommand` (base64 UTF-16LE), not `-Command`: it is
+ * immune to all shell quoting, and — critically — it survives the sandbox host's argv→command-line
+ * round-trip (PowerShell's `-Command` re-parsing does not, so a sandboxed command would mangle).
  */
 function shellInvocation(command: string): { file: string; args: string[] } {
   if (isWin) {
     const wrapped = `$ErrorActionPreference='Stop'; ${command}; exit $LASTEXITCODE`;
-    return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', wrapped] };
+    const enc = Buffer.from(wrapped, 'utf16le').toString('base64');
+    return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', enc] };
   }
   return { file: '/bin/sh', args: ['-c', command] };
 }
@@ -51,8 +56,10 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
   async execute(input, ctx) {
     const { file, args } = shellInvocation(input.command);
     const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT;
+    // 'active' means this specific call is auto-run and MUST be OS-confined; report the true boundary.
+    const boundary = ctx.sandbox?.active ? ctx.sandbox.mode : 'none';
 
-    const outcome = await runManaged({
+    const baseSpec: ExecSpec = {
       file,
       args,
       cwd: ctx.workspaceRoot,
@@ -63,8 +70,12 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
       timeoutMs,
       signal: ctx.signal,
       ...(ctx.onOutput ? { onOutput: ctx.onOutput } : {}),
-      onSpawn: (pid) => ctx.reportCommand?.({ kind: 'started', pid, shell: file, cwd: ctx.workspaceRoot, timeoutMs }),
-    });
+      onSpawn: (pid) => ctx.reportCommand?.({ kind: 'started', pid, shell: file, cwd: ctx.workspaceRoot, timeoutMs, sandbox: boundary }),
+    };
+    // Transform-at-spawn: an auto-run call is rewritten to launch inside the enforced boundary; an
+    // approved (unsandboxed) call gets the identity wrap. run_command never branches on policy.
+    const spec = ctx.sandbox ? ctx.sandbox.wrap(baseSpec) : baseSpec;
+    const outcome = await runManaged(spec);
 
     ctx.reportCommand?.({
       kind: 'ended',

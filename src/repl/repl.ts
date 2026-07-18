@@ -1,5 +1,6 @@
 import { resolveLayout, resolveStateRoot } from '../store/layout.js';
-import { startSession, resumeSession, endSession, runTurn, repairDanglingToolUses, recordWorkspaceMap, type Session } from '../runtime/session.js';
+import { startSession, resumeSession, endSession, runTurn, repairDanglingToolUses, recordWorkspaceMap, recordSandboxStatus, type Session } from '../runtime/session.js';
+import { selectSandbox, type SandboxBackend } from '../sandbox/index.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
@@ -32,6 +33,8 @@ export interface ReplOptions {
   resumeId?: string;
   /** Injectable for tests; defaults to process stdio. */
   streams?: ReplStreams;
+  /** Injectable sandbox backend for deterministic, platform-independent tests; defaults to selectSandbox. */
+  sandbox?: SandboxBackend;
 }
 
 export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promise<number> {
@@ -61,7 +64,12 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   const ctx = buildRunContext(values, { config, io: { question: async (q) => (await io.question(q)) ?? 'q' } });
   const layout = resolveLayout(ctx.ws, { ensure: true });
   const map = buildWorkspaceMap(ctx.ws);
-  const system = buildSystemPrompt(ctx.ws, map);
+
+  // Establish + probe the execution sandbox before the first turn, so the banner and system prompt
+  // report the truth. Tests may inject a backend to stay deterministic and platform-independent.
+  const sandbox = opts.sandbox ?? selectSandbox({ stateRoot: layout.stateRoot });
+  const sandboxFacts = await sandbox.ensureAvailable();
+  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts);
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -77,6 +85,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     onText: (t: string) => renderer.onText(t),
     onCommandOutput: (_callId: string, chunk: string, stream: 'stdout' | 'stderr') => renderer.onCommandOutput(chunk, stream),
     rules: config.rules,
+    sandbox,
+    sandboxFacts,
   };
 
   let session: Session;
@@ -93,6 +103,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   session.log.onAppend = (e) => renderer.onEvent(e);
   session.log.append({ type: 'trust.verified', source: trust.source });
   session.log.append({ type: 'config.loaded', sources: config.sources });
+  recordSandboxStatus(session, sandboxFacts);
   recordWorkspaceMap(session, map);
 
   renderer.banner({
@@ -102,6 +113,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     workspaceRoot: ctx.ws,
     stateDir: layout.projectDir,
     ...(ctx.provider instanceof AnthropicProvider ? { network: ctx.provider.transport } : {}),
+    sandbox: { summary: sandboxFacts.summary, enforced: sandboxFacts.enforced },
     dangerous: values['dangerously-allow-all'] === true,
   });
 

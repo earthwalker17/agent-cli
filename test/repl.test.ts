@@ -10,9 +10,25 @@ import { installSigintAbort } from '../src/cli/index.js';
 import { resolveLayout } from '../src/store/layout.js';
 import { EventLog } from '../src/store/event-log.js';
 import { grantTrust } from '../src/trust/store.js';
+import { createNoneSandbox } from '../src/sandbox/none.js';
+import type { SandboxBackend } from '../src/sandbox/index.js';
 import type { CliValues } from '../src/cli/context.js';
 import type { ScriptTurn } from '../src/provider/mock.js';
 import type { SessionEvent } from '../src/types.js';
+
+/** A fake backend that reports enforcement (so auto-run triggers) but wraps as identity: the command
+ *  really runs, letting a test assert auto-run WITHOUT depending on the machine's true Low-IL support. */
+function fakeEnforcedSandbox(): SandboxBackend {
+  const facts = {
+    mode: 'windows-lowil' as const,
+    enforced: true,
+    summary: 'fake enforced sandbox (test)',
+    confines: ['writes'],
+    doesNotConfine: ['reads', 'network'],
+    detail: 'test',
+  };
+  return { mode: 'windows-lowil', async ensureAvailable() { return facts; }, facts() { return facts; }, wrapSpec: (s) => s };
+}
 
 let tmp: string;
 let ws: string;
@@ -40,7 +56,12 @@ interface ReplRun {
   events: SessionEvent[];
 }
 
-async function drive(script: ScriptTurn[], lines: string[], extraValues: Partial<CliValues> = {}): Promise<ReplRun> {
+async function drive(
+  script: ScriptTurn[],
+  lines: string[],
+  extraValues: Partial<CliValues> = {},
+  sandbox: SandboxBackend = createNoneSandbox('test'),
+): Promise<ReplRun> {
   const scriptFile = path.join(tmp, 'script.json');
   fs.writeFileSync(scriptFile, JSON.stringify(script));
   const values: CliValues = {
@@ -63,7 +84,7 @@ async function drive(script: ScriptTurn[], lines: string[], extraValues: Partial
   input.write(lines.join(''));
   input.end();
 
-  const code = await runRepl(values, { streams: { input, modelOut, chromeOut, isTTY: false } });
+  const code = await runRepl(values, { streams: { input, modelOut, chromeOut, isTTY: false }, sandbox });
 
   const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: state } });
   let events: SessionEvent[] = [];
@@ -329,6 +350,42 @@ describe('REPL: live command output', () => {
     expect(r.chromeOut).toMatch(/\(pid \d+\)/);
     expect(r.modelOut).not.toContain('repl-live-ok'); // stdout stays model-text-only
     expect(r.modelOut).toContain('after');
+  });
+});
+
+describe('REPL: automatic command review', () => {
+  it('auto-runs a demonstrably read-only command inside the enforced sandbox (no approval)', async () => {
+    const r = await drive(
+      [{ calls: [{ name: 'run_command', input: { command: 'echo auto-ok' } }] }, { say: 'done' }],
+      ['run it\n', '/quit\n'], // NOTE: no 'y' line — the command must auto-run without asking
+      {},
+      fakeEnforcedSandbox(),
+    );
+    // Never asked; policy chose auto-review-allow; the command ran, marked with its boundary.
+    expect(r.events.some((e) => e.type === 'approval.resolved')).toBe(false);
+    expect(
+      r.events.some((e) => e.type === 'policy.decision' && e.rule === 'cmd.auto-review-allow'),
+    ).toBe(true);
+    expect(r.events.find((e) => e.type === 'command.started')).toMatchObject({ sandbox: 'windows-lowil' });
+    const completed = r.events.filter((e) => e.type === 'tool.completed');
+    expect(completed[0]).toMatchObject({ ok: true });
+    expect(r.modelOut).toContain('done');
+  });
+
+  it('still ASKS for a command with shell metacharacters even under the enforced sandbox', async () => {
+    const r = await drive(
+      [{ calls: [{ name: 'run_command', input: { command: 'echo a; echo b' } }] }, { say: 'x' }],
+      ['run it\n', 'n\n', '/quit\n'],
+      {},
+      fakeEnforcedSandbox(),
+    );
+    expect(r.events.some((e) => e.type === 'policy.decision' && e.rule === 'cmd.auto-review-ask')).toBe(true);
+    expect(r.events.some((e) => e.type === 'approval.resolved')).toBe(true);
+  });
+
+  it('records the sandbox.status for the session', async () => {
+    const r = await drive([{ say: 'hi' }], ['task\n', '/quit\n'], {}, fakeEnforcedSandbox());
+    expect(r.events.find((e) => e.type === 'sandbox.status')).toMatchObject({ mode: 'windows-lowil', enforced: true });
   });
 });
 
