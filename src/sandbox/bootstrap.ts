@@ -22,7 +22,7 @@
  */
 
 /** Bump when the host script changes; the file name and the DLL/probe cache key derive from it. */
-export const SANDBOX_HOST_VERSION = 1;
+export const SANDBOX_HOST_VERSION = 2;
 
 /** Sentinel exit code the host uses when it could NOT establish the boundary (fail-closed marker). */
 export const HOST_FAIL_EXIT = 250;
@@ -214,7 +214,10 @@ try {
     if (-not (Test-Path $probeDir)) { $probeDir = $env:TEMP }
     $medTarget = Join-Path $probeDir ('agentsbx-selftest-' + [guid]::NewGuid().ToString('N') + '.txt')
     if (Test-Path -LiteralPath $medTarget) { Remove-Item -Force -LiteralPath $medTarget }
-    $inner = "whoami /groups | Select-String 'S-1-16-4096' | ForEach-Object { 'AGENTSBX_ISLOW' }; try { Set-Content -LiteralPath '" + $medTarget + "' -Value 'X' -ErrorAction Stop; 'AGENTSBX_WROTE' } catch { 'AGENTSBX_DENIED' }"
+    # Use the FULL Windows whoami path (never a msys/Git whoami earlier on PATH) so the integrity
+    # marker is PATH-independent — it is diagnostic only; the DEFINITIVE proof is the write-deny.
+    $whoami = Join-Path $env:SystemRoot 'System32\whoami.exe'
+    $inner = "& '" + $whoami + "' /groups | Select-String 'S-1-16-4096' | ForEach-Object { 'AGENTSBX_ISLOW' }; try { Set-Content -LiteralPath '" + $medTarget + "' -Value 'X' -ErrorAction Stop; 'AGENTSBX_WROTE' } catch { 'AGENTSBX_DENIED' }"
     $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
     $probe = Get-ArgvString @('powershell.exe','-NoProfile','-NonInteractive','-EncodedCommand',$b64)
     $code = 0
@@ -223,7 +226,10 @@ try {
     $denied = $out -match 'AGENTSBX_DENIED'
     $wrote = Test-Path -LiteralPath $medTarget
     if (Test-Path -LiteralPath $medTarget) { Remove-Item -Force -LiteralPath $medTarget -ErrorAction SilentlyContinue }
-    if ($isLow -and $denied -and -not $wrote) { Write-Output 'AGENTSBX_SELFTEST_OK'; exit 0 }
+    # Enforcement is PROVEN by the write-deny: a fresh, owned, Medium-labeled temp file can only be
+    # write-denied because the child runs at reduced integrity (a Medium child would succeed). The
+    # low marker is reported for diagnostics but does not gate (it is PATH/whoami-fragile).
+    if ($denied -and -not $wrote) { Write-Output 'AGENTSBX_SELFTEST_OK'; exit 0 }
     Write-Output ('AGENTSBX_SELFTEST_FAIL:low=' + $isLow + ';denied=' + $denied + ';wroteMedium=' + $wrote)
     exit 1
   }
