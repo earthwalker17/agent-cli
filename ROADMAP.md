@@ -5,6 +5,113 @@ compressed under **Earlier Milestones** (per the rolling-docs policy in `CLAUDE.
 
 ---
 
+## Session 5 (2026-07-18) — V0.4: enforced isolation + automatic command review
+
+### Objective
+
+BLUEPRINT Session 5: move beyond application-level path checks and approvals by (1) establishing a
+sandbox architecture and implementing at least one genuinely OS-enforced isolation path, reported
+truthfully and failing closed when enforcement cannot be established; and (2) replacing the "every
+shell command asks" default with a single automatic-review flow backed by deterministic policy and
+enforced sandbox constraints — never the model's opinion. Windows-first; no false cross-platform
+parity. Research-first (a bounded 5-agent workflow over Codex CLI, Anthropic sandbox-runtime, the
+Windows OS primitives reachable from stock Node, deterministic safe-command classification, and an
+adversarial escape catalog), and — critically — **feasibility was proven by direct machine probe
+before any code was written**.
+
+### Feasibility evidence gathered first (direct probes on the target machine)
+
+On this Windows 11 box as a standard **non-admin, Medium-integrity** user: a Low-integrity child
+spawned via `CreateProcessAsUser` with a duplicated, integrity-lowered copy of our OWN token works
+with **no admin and no special privilege**; the OS **denies** that child's writes to the workspace,
+`%USERPROFILE%`, and a state-like dir (`UnauthorizedAccessException`); stdout/stderr are captured
+through inherited pipe handles; **reads are NOT blocked**; a Low-labeled scratch dir is writable;
+and `powershell.exe` itself runs correctly at Low IL. The `WRITE_RESTRICTED` restricted-token path
+FAILED (err 1314 — needs a privilege we lack), so **Low IL alone is the mechanism**. Research
+corroborated Low-IL + Job Object as the no-admin sweet spot and confirmed a string reviewer must
+never be a boundary (obfuscation defeats any regex → auto-allow must be positive-proof, fail closed).
+
+### What was implemented (3 feature commits)
+
+1. **`feat(sandbox)`** — `src/sandbox/`: a `SandboxBackend` contract with a `wrapSpec` transform-at-
+   spawn seam; an honest `none` backend; and `windows-lowil` — a real boundary that runs a command
+   at **Low integrity** (MIC write-up denial) inside a **Job Object** (`KILL_ON_JOB_CLOSE` +
+   active-process cap + UI restrictions). `bootstrap.ts` is a small, versioned PowerShell + inline-C#
+   Add-Type P/Invoke host that Node spawns in place of the shell; it re-launches the target at Low IL
+   forwarding its inherited std handles (= Node's pipes) so `runManaged` capture/kill are unchanged.
+   Enforcement is established by a runtime **self-test probe**, never assumed. `EnforcementFacts`
+   carry the honest scope (confines writes+lifecycle; NOT reads/network; Low-labeled scratch writable;
+   service-reparent escapes). Additive `sandbox.status` event + `command.started.sandbox`.
+2. **`feat(policy)`** — `command-review.ts`: `analyzeCommand`, a POSITIVE proof of safety (single
+   simple command, zero shell metacharacters/encoding, curated read-only executable allowlist with
+   normalization, per-executable arg checks, workspace-escape guard). `decide()` for a shell command:
+   circuit-breaker deny (absolute) → auto-review; auto-allow (`execBoundary: 'sandbox'`) requires a
+   proof of safety AND an active OS boundary; otherwise `ask` (`unsandboxed`). No enforced sandbox ⇒
+   auto-run disabled, every command asks (**fail closed**). `classifyCommand` label hardened so LOLBAS
+   (certutil/bitsadmin/mshta/rundll32/regsvr32/wmic/msiexec/schtasks) and encoded/`iex` forms no
+   longer read as benign — the label still only informs the human.
+3. **`feat(runtime,ux)`** — the sandbox threaded through the ONE runtime: `session.ts` takes the
+   backend + probed facts, the base tool ctx carries availability (engine reads `enforced`),
+   `runExecution` builds the per-call `ExecSandbox` (active+enforcing wrap for auto-run, identity for
+   approved). `run-command.ts` switched to `-EncodedCommand` (immune to quoting AND survives the host
+   argv round-trip that `-Command` mangles) and applies `ctx.sandbox.wrap`. CLI + REPL establish and
+   PROBE the sandbox before the first turn, report the real mode (banner/stderr/`sandbox.status`), and
+   feed the facts into the system prompt. `report.ts` renders a sandbox header block, per-command
+   `[sandboxed: windows-lowil]`/`[unsandboxed]` markers, and a mode-aware honesty footer.
+
+### Verification evidence
+
+- **Gate:** `npm run typecheck` + `npm run build` clean; `npm test` **321 passed, 1 skipped** across
+  24 files (was 241+1; +80).
+- **Real-OS integration** (`test/sandbox.windows.test.ts`, 8 tests, win32-gated, through the actual
+  backend + `runManaged`): write to the workspace and to the harness state dir **DENIED**; reads
+  **allowed** (honest limitation); exit code relayed; stdout captured; child confirmed at Low
+  integrity; and a **detached grandchild reaped on kill** via the Job Object — closing Session 4's
+  `taskkill /T` gap with a real fixture.
+- **Adversarial corpus** (`test/policy.command-review.test.ts`, 66 assertions): 20 safe commands
+  auto-allow; a 40+ item catalog (chaining/redirection/substitution/env-substring/caret/glob/encoded/
+  interpreters/LOLBAS/path-escape/non-allowlisted/git-config-injection) **NEVER auto-runs**, even
+  under an enforced sandbox; circuit-breaker stays absolute; normalization + label hardening covered.
+- **REPL** auto-run vs ask tests with injected backends; **live CLI E2E** (built binary): startup
+  probe reports `windows-lowil` ENFORCED, `git status` auto-runs `[sandboxed]`, a piped command asks
+  and is auto-denied non-interactively (exit 2), and `agent report` renders the honest evidence.
+
+### Decisions (and why)
+
+- **Low IL + Job Object, not restricted tokens.** The `WRITE_RESTRICTED` path needs a privilege a
+  standard user lacks (probe: err 1314); Low IL alone is the enforced write boundary and needs none.
+  The Job Object supplies guaranteed reaping (and a fork-bomb cap), closing a known S4 gap.
+- **Auto-allow is positive-proof and sandbox-backed.** A string reviewer can be obfuscated, so
+  auto-run is granted only to a provably-safe *shape* AND is executed *inside* the boundary as
+  defense-in-depth; with no enforcement it is disabled (fail closed). Approved commands run
+  UNSANDBOXED — the user accepted the risk (Codex's model).
+- **Truth over parity.** The mode is probed, not assumed; reported verbatim everywhere; and the
+  honest limits (reads/network/service-reparent NOT confined) are stated in facts, report, prompt,
+  and README. Non-Windows gets `none`, not a simulated boundary.
+- **`-EncodedCommand` everywhere** for the PowerShell shell: robust quoting and a clean argv
+  round-trip through the sandbox host (which `-Command` mangled).
+
+### Open issues / not verified
+
+- **Latency:** each sandboxed command pays a PowerShell start + `Add-Type` compile (~1.2 s observed).
+  Acceptable for V0.4; a cached compiled assembly (or a persistent host) is the obvious optimization.
+- **`powershell.exe` CLIXML-on-piped-stderr:** when stderr is a pipe, powershell wraps error/progress
+  streams as `#< CLIXML` — a pre-existing `run_command` cosmetic, not sandbox-introduced.
+- **Enforced gaps (documented, by design):** no read/confidentiality boundary, no network egress
+  control, Low-labeled scratch is writable, and service-reparented work (schtasks/sc/wmic/BITS)
+  escapes the Job Object. These are the natural Session-6+/future targets.
+- The self-test probe + `icacls` scratch-labeling run on every Windows session start (~1–2 s one-time).
+
+### Recommended next step
+
+BLUEPRINT Session 6 (Git-native, reviewable, context-efficient coding) is the standing next
+direction. Sandbox follow-ups worth folding in when relevant: a cached/compiled host to cut latency;
+a network-egress story (the honest gap most likely to matter); and — once a subagent runtime exists
+(Session 7) — deciding which boundary a subagent runs inside, for which the Low-IL backend is the
+Windows answer.
+
+---
+
 ## Session 4 (2026-07-17) — V0.3: execution kernel hardening
 
 ### Objective
@@ -143,79 +250,25 @@ enforcement exists).
 
 ---
 
-## Session 3 (2026-07-16) — Recorded live E2E demo + two defects it surfaced
+## Earlier Milestones (Sessions 1–3 — compressed per the rolling-docs policy)
 
-### Objective
+### Session 3 (2026-07-16) — Recorded live E2E demo + two defects it surfaced
 
-Not a product increment: produce a truthful, continuous, Playwright-recorded demonstration of
-the V0.2 loop — launch in an empty folder, on-camera trust consent, natural-language build of a
-complete web app with inline approvals, in-session `/report`, quit, interactive resume
-(`agent --continue`) with a follow-up change, starting the generated server, and driving the
-finished app in the browser. Fix Agent CLI only where the E2E genuinely exposed a defect.
-
-### Demo result (artifacts live OUTSIDE this repo)
-
-`C:\Users\A\Desktop\agent-cli-demo-20260716\` — isolated demo root: `ws/` (agent workspace),
-`state/` (isolated `AGENT_CLI_STATE_DIR`), `video/agent-cli-live-demo.webm` (**11m20s**, one
-continuous recording), `artifacts/` (full PTY byte log, stripped transcript, keystroke +
-approval log, screenshots, export download, `agent report` md+json, `verification.md`),
-`harness/` (the transparent companion: xterm.js page bridged to a real ConPTY running
-PowerShell; Playwright drives keystrokes through the page and records it — documented
-honesty notes in the demo README).
-
-The agent (real `claude-opus-4-8` through the proxy) built **FlowBoard** — a dark-themed
-Kanban board (7 files, ~865 lines: pure-logic `store.mjs` + 15 `node --test` unit tests, DOM
-wiring, static `server.mjs` with root-containment, README) — in one 128s turn plus one 35s
-resumed follow-up turn (Export-JSON feature + test), 2 approvals (both `node --test`), zero
-denials, zero budget hits, all 7 files CHECKED in the evidence report.
-
-### Agent CLI changes (the E2E's product yield — both committed pre-recording)
-
-1. **fix(cli): entry guard never ran under npm link** — Node realpaths the main module's
-   `import.meta.url`, but the guard compared it to `pathToFileURL(argv[1])` verbatim, so the
-   README-documented `npm link` shim exited 0 silently with no output. Now realpaths argv[1];
-   regression test spawns the built CLI through a junction (`test/cli.smoke.test.ts`).
-2. **test: vitest `testTimeout` raised to a 60s hang backstop** — the 5s default kept
-   producing the spurious subprocess-test timeouts already noted twice in this file (measured:
-   one bare Node spawn can take multiple seconds under real machine load).
-
-### Verification evidence
-
-- Post-fix gate: typecheck/build clean; **205 passed, 1 skipped** (was 204+1; +1 regression).
-- Live API smoke (`AGENT_LIVE_TEST=1`, anthropic.test.ts): 5/5 through the system proxy.
-- The recorded session's own evidence chain was independently audited by a 4-agent
-  verification workflow (app / evidence-log / isolation / completeness-critic lenses): report
-  ↔ raw JSONL consistent (85 events; trust `prompt-remember` then `store` on resume; exactly
-  2 `approval.resolved`, both allow-by-user; every mutation snapshot re-hashes to its content
-  address; final files re-hash to the report's after-hashes); app 15/15 tests + live HTTP
-  checks + traversal probes safe + browser console clean; isolation: no `.git` in the demo ws,
-  repo tree clean with zero demo references, real `%USERPROFILE%\.agent-cli` untouched.
-  Full detail: `artifacts/verification.md` in the demo folder.
-
-### Decisions (and why)
-
-- **Record a browser-hosted real terminal (xterm.js ↔ ConPTY bridge)** instead of faking
-  terminal output in a page: Playwright can only record pages, but the CLI must run in a real
-  TTY to exercise the true interactive surface (raw-mode readline, on-camera trust prompt,
-  Unicode glyphs). Every displayed byte comes from the PTY; the one injected setup line
-  (UTF-8 codepage + PSReadLine hygiene) is logged and disclosed.
-- **PSReadLine predictions disabled for recordings** — ghost-text renders the developer's
-  private global command history into the video (observed live before the fix).
-- **Approvals answered by an explicit, logged human-proxy policy** in the driver (deny-list
-  regex, else allow), so the recording's approval answers are auditable rather than ad hoc.
-
-### Open issues / findings for V0.3
-
-- ~~Approval-prompt labeling UX nit~~ — **closed in Session 4** (`[shell command — labeled …]`).
-- The report's "Files changed" uses last-mutation-per-path semantics, so a file created then
-  edited in one session renders as `modify` — correct but can read as if the file pre-existed;
-  presentation nuance noted by the audit.
-- ~~Session 2's manual Ctrl+C console smoke~~ — **one-shot half closed in Session 4** with a
-  genuine delivered CTRL_C; the interactive-REPL keypress smoke remains open.
-
----
-
-## Earlier Milestones (Sessions 1, 1b, 2 — compressed 2026-07-17 per the rolling-docs policy)
+Not a product increment: a truthful, continuous **11m20s Playwright-recorded** demonstration of
+the V0.2 loop (empty-folder launch, on-camera trust consent, natural-language build of a complete
+web app with inline approvals, in-session `/report`, quit, interactive resume with a follow-up
+change, starting the generated server, driving it in the browser). Artifacts live OUTSIDE this repo
+(`C:\Users\A\Desktop\agent-cli-demo-20260716\`). The agent (real `claude-opus-4-8`) built
+**FlowBoard** (7 files, ~865 lines, 15 unit tests) in one 128s turn + a 35s resumed turn, 2
+approvals, all files CHECKED. **Product yield (2 fixes, both regression-tested):** the CLI entry
+guard now realpaths `argv[1]` so the `npm link` shim no longer exits 0 silently (Node realpaths the
+main module URL); vitest `testTimeout` raised to a 60s hang backstop (bare Node spawns can take
+seconds under load). **Lasting decision:** record a browser-hosted real terminal (xterm.js ↔ ConPTY
+bridge) since the CLI needs a real TTY; every displayed byte comes from the PTY, injected setup
+lines disclosed. **Evidence:** 205 passed/1 skipped; the recorded session's evidence chain was
+independently audited by a 4-agent workflow (report ↔ raw JSONL consistent, snapshots re-hash,
+isolation clean). **Still-relevant nuance:** the report's "Files changed" uses last-mutation-per-path
+semantics, so a create-then-edit renders as `modify`.
 
 ### Session 2 (2026-07-15) — V0.2: interactive REPL, workspace trust, narrowing-only config
 
@@ -255,14 +308,16 @@ reserved rejects, junction escape, sibling-prefix containment), five file tools 
 (PowerShell `$LASTEXITCODE` propagation), content-addressed snapshots with drift-refusing
 restore + undo, resume with postHash crash reconciliation, bounded gitignore-aware workspace map,
 deterministic evidence report (mechanical CHECKED/UNCHECKED), Mock + streaming Anthropic
-providers. **Lasting decisions:** no command allowlist — every shell command asks (allowlists are
-trivially smuggled; the class label only informs the human); in-workspace writes auto-allow but
-snapshot first; sandbox vs approval kept separate and only approval shipped (documented
-honestly); one path validator for policy and tools; secret reads redacted in the log via
-salted HMAC (model still sees real bytes; redacted reads deliberately cannot replay on resume);
-state lives outside the workspace; `thinking` omitted pending block-preservation work.
-**Still-true limitations:** no OS sandbox; command output not scrubbed for secrets; path checks
-TOCTOU-racy; undo is file-only; single-user lock assumption.
+providers. **Lasting decisions:** no *widenable* allowlist config — the label only informs the
+human (V0.1 asked on every command; **superseded in S5** by deterministic automatic review, where
+a positive-proof-safe command auto-runs *inside* the enforced sandbox); in-workspace writes
+auto-allow but snapshot first; sandbox vs approval kept separate — V0.1 shipped approval only and
+said so, **and S5 added the enforced Windows sandbox axis**; one path validator for policy and
+tools; secret reads redacted in the log via salted HMAC (model still sees real bytes; redacted
+reads deliberately cannot replay on resume); state lives outside the workspace; `thinking` omitted
+pending block-preservation work. **Still-true limitations:** command output not scrubbed for
+secrets; path checks TOCTOU-racy; undo is file-only; single-user lock assumption. (V0.1's "no OS
+sandbox" limitation is closed on Windows in S5 — writes only; reads/network remain unconfined.)
 
 ---
 
@@ -271,5 +326,8 @@ TOCTOU-racy; undo is file-only; single-user lock assumption.
 Adaptive thinking with block preservation; per-action / `--to` / `--steps` undo; tree-sitter
 ranked repo map; network/web tools; MCP and workflow packs; SQLite index over the JSONL;
 conversation rewind; session pruning/sanitized export; prompt-history persistence + line-editing
-niceties; OS-level sandboxing (Session 5 next); background/long-running process sessions; PTY
-support; Job Objects tree-kill helper; output spill-to-file for huge command output.
+niceties; background/long-running process sessions; PTY support; output spill-to-file for huge
+command output. **Sandbox follow-ups (post-S5):** network-egress control and a read/confidentiality
+boundary (the two enforced gaps that most matter); a cached/compiled sandbox host to cut per-command
+Add-Type latency; macOS/Linux enforcement backends; containment of service-reparented work
+(schtasks/sc/wmic/BITS) that escapes the Job Object.

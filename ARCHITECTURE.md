@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI V0.3 is actually built. This describes the implemented system, not aspirations —
+How Agent CLI V0.4 is actually built. This describes the implemented system, not aspirations —
 see `ROADMAP.md` for what is deferred.
 
 ## Shape
@@ -25,6 +25,7 @@ src/
     paths.ts               validatePath — Windows-first boundary/hard-reject gate (+ config-declared
                            extraProtected roots).
     engine.ts              classify + decide + Grants. Pure. The single policy choke point.
+    command-review.ts      analyzeCommand — deterministic positive-proof auto-run gate (see below).
   store/
     layout.ts              State-dir resolution (resolveStateRoot) + refuse-if-inside-workspace.
     event-log.ts           Append-only JSONL log: lock, tail-repair, corruption/version handling.
@@ -37,10 +38,17 @@ src/
                            bounded liveness probes) + isAlive.
     run.ts                 runManaged — the managed-subprocess runner: structured ExecOutcome,
                            kill/drain state machine, head+tail capped capture. Policy- and log-free.
+  sandbox/
+    types.ts               SandboxBackend + EnforcementFacts contracts (re-exports ExecSandbox).
+    bootstrap.ts           The versioned PowerShell + inline-C# (Add-Type P/Invoke) Low-IL host script.
+    windows-lowil.ts       The enforced Windows backend: transform-at-spawn (wrapSpec) + probe.
+    none.ts                Honest no-enforcement backend (non-Windows / probe failed); identity wrap.
+    index.ts               selectSandbox — platform → backend (no probe; caller runs ensureAvailable).
   tools/
     index.ts               read_file, list_files, search, write_file, edit_file + registry + JSON-Schema derivation.
-    run-command.ts         Shell tool on runManaged: PowerShell $LASTEXITCODE wrapper, filtered env,
-                           stdin ignored, per-termination model messages, lifecycle evidence.
+    run-command.ts         Shell tool on runManaged: PowerShell -EncodedCommand $LASTEXITCODE wrapper,
+                           filtered env, stdin ignored, per-termination messages, lifecycle + sandbox
+                           evidence; applies ctx.sandbox.wrap at spawn time.
   net/
     transport.ts           Reusable proxy-aware transport factory (pure resolver + custom fetch).
   provider/
@@ -80,9 +88,10 @@ For every session-starting command (one-shot and REPL), the order is:
 workspace realpath → **state-root-inside-workspace refusal** (also checked in `ensureTrusted`,
 so a folder cannot plant a `trust.json` that grants itself consent) → **trust gate** → config
 load (the workspace file is untrusted bytes until trust passes) → per-project state creation →
-workspace map → provider. Read-only commands (`report`/`sessions`/`undo`/`map`) are ungated and
-never create state dirs; `map` reads workspace bytes but sends nothing to a model (documented
-exception).
+**sandbox select + probe** (`selectSandbox` then `ensureAvailable`, before the first turn so the
+banner, `sandbox.status` event, and system prompt report the *probed* truth) → workspace map →
+provider. Read-only commands (`report`/`sessions`/`undo`/`map`) are ungated and never create state
+dirs; `map` reads workspace bytes but sends nothing to a model (documented exception).
 
 ## The core loop (`runtime/session.ts`)
 
@@ -166,13 +175,17 @@ The load-bearing types (`src/types.ts`):
   undeclarable side effects), optional `readsPaths` and `command`, and `execute`. Policy reads
   these facts; tools contain no policy logic.
 - `ToolContext` optionally carries `signal` (turn cancellation — a long-running tool must observe
-  it), `onOutput` (render-only live chunks), and `reportCommand` (structured `CommandEvidence`;
-  the runtime binds the callId). All optional: plain read tools ignore them.
+  it), `onOutput` (render-only live chunks), `reportCommand` (structured `CommandEvidence`; the
+  runtime binds the callId), and `sandbox` (`ExecSandbox`). All optional: plain read tools ignore them.
+- `ExecSandbox` = `{ mode, enforced, active, wrap(spec) }`: `enforced` (availability) is read by
+  the engine to gate auto-run; `active` marks a call actually confined; `wrap` is the enforcing
+  transform for an auto-run call and identity otherwise. `CommandEvidence.started` gained `sandbox`.
 - `ToolResult` gained additive `termination` (`CommandTermination`) and `killDetail`;
   `ApprovalRequest` gained `kind: 'command'` so the prompt can present the command class as a
   best-effort LABEL (`[shell command — labeled observe]`), never as a verdict.
 - `PolicyDecision` = `{ classification, decision: allow|ask|deny, rule, reason, requiresSnapshot,
-  noUndo?, redactOutput? }`.
+  noUndo?, redactOutput?, execBoundary? }`. `execBoundary` (`'sandbox' | 'unsandboxed'`) records
+  where a shell command must run — the runtime uses it to pick the per-call `ExecSandbox.wrap`.
 - `SessionEvent` = `{ v, seq, ts } & EventBody`, a discriminated union of every event type. `v`
   is the schema version; the log is a versioned public contract.
 - `Provider.complete(req, onText?, signal?)` returns `{ blocks, stopReason, usage }`; abort is
@@ -234,17 +247,66 @@ protectedPath }`; the engine decides.
 
 `decide(tool, input, ctx, grants)` — deny-first, first match wins:
 
-- **Shell command** (`tool.command` present) → always `ask` (no allowlist; a best-effort label
-  only informs the human). A hardcoded circuit-breaker denies workspace/drive wipes and `format`.
+- **Shell command** (`tool.command` present) → **automatic review** (the single default; not a
+  selectable "mode"). A hardcoded circuit-breaker denies workspace/drive wipes and `format`
+  (absolute). Otherwise `analyzeCommand` decides: a command it PROVES safe **and** an active OS
+  boundary (`ctx.sandbox.enforced`) together yield `allow` with `execBoundary: 'sandbox'` (auto-run
+  *inside* the boundary); anything else is `ask` with `execBoundary: 'unsandboxed'`. With no
+  enforced sandbox, a provably-safe command still asks — auto-run is disabled (**fail closed**). A
+  best-effort label (hardened to stop mislabeling LOLBAS/encoded forms as benign) only informs the
+  human; it never grants.
 - **Declared write** → validate each target; out-of-workspace or protected (`.git`, the state
   dir, any `.agent-cli` segment, config `protectedPaths`) → `deny`; else `reversible` / `allow`
   with `requiresSnapshot`.
 - **Reads** → out-of-workspace or secret-named → `sensitive` / `ask` (secret reads also flag
   redaction); else `observe` / `allow`.
 
+**`analyzeCommand` (`policy/command-review.ts`)** is a POSITIVE proof of safety, deterministic over
+the command string alone (the model's opinion is never consulted). `autoAllowable` requires all of:
+(1) a single simple command with NO shell metacharacters/encoding/control chars — chaining,
+redirection, substitution, expansion sigils (`$ % @` backtick), quotes, and the `--%` stop-parse
+token all disqualify; (2) an executable on a small curated read-only allowlist (basename,
+`.exe/.cmd/.bat/.com/.ps1` stripped, NFKC-normalized, casefolded); (3) per-executable arg checks
+(e.g. only read-only `git` subcommands) with no argument that escapes the workspace. Everything else
+returns false → `ask`. This mirrors Codex's structural exec policy: obfuscation defeats any string
+reviewer, so safety is *proven*, not pattern-matched — and the reviewer is a prompt-skip gate, never
+the boundary (the sandbox is).
+
 `Grants` are in-memory, session-scoped, keyed `(tool, class)`, and store only grantable classes
 (`sensitive`/`external`) — never `run_command`, never `destructive`. They are not persisted or
 restored on resume.
+
+## Sandbox and enforced isolation (`sandbox/`)
+
+Sandbox (what a process *can technically do*) is a separate axis from approval (when the agent must
+ask) — constitution principle 4. A `SandboxBackend` is selected once per session, PROBED, and
+reported truthfully; the runtime never assumes enforcement from the platform name.
+
+- **`windows-lowil`** is a genuinely OS-enforced boundary. `wrapSpec` is a *transform at spawn time*
+  (Codex's `SandboxManager::transform` seam on the V0.3 `ExecSpec`): it rewrites the spec so
+  `runManaged` spawns a versioned PowerShell + inline-C# (`Add-Type` P/Invoke) **host** instead of
+  the shell. The host duplicates the caller's own token, lowers it to **Low integrity**
+  (`SetTokenInformation` with the `S-1-16-4096` label — no admin, no privilege needed for a lowered
+  copy of your own token), creates a **Job Object** (`KILL_ON_JOB_CLOSE` + active-process cap + UI
+  restrictions), and `CreateProcessAsUser`-launches the real command **forwarding its inherited std
+  handles** (= Node's pipes), so output capture and the kill/drain state machine are unchanged. The
+  child's `TEMP`/`TMP` point at a Low-labeled scratch dir under the state root.
+- **What it enforces** (verified against the live OS, `test/sandbox.windows.test.ts`): Mandatory
+  Integrity Control **denies the child's writes** to Medium+ objects — the workspace, the user
+  profile, system dirs, and the **harness state dir** — at the kernel; and the Job Object's
+  kill-on-close **reaps the whole tree on kill**, including a detached grandchild that `taskkill /T`
+  cannot reach (closing the Session-4 gap). **What it does NOT enforce** (stated verbatim in
+  `EnforcementFacts.doesNotConfine`): reads (a sandboxed command can still read secrets), network,
+  writes to Low-labeled locations, and service-reparented work (schtasks/sc/wmic/BITS).
+- **Probe + fail-closed.** `ensureAvailable()` runs a self-test that spawns a Low-IL child and
+  confirms *both* Low integrity *and* an actual write-deny; only then is `enforced: true`. On any
+  non-Windows platform, or on probe failure, the backend degrades to `none` semantics
+  (`enforced: false`), and the engine disables auto-run — every command asks. The host itself never
+  falls back to unsandboxed: it either runs the child at Low IL or exits with a fail marker.
+- **Boundary selection per call.** `PolicyDecision.execBoundary` (from `decide`) drives which wrap
+  the runtime hands the tool: `runExecution` builds an ACTIVE `ExecSandbox` (the enforcing wrap) for
+  an auto-run command and an identity wrap for an approved one. `run_command` applies
+  `ctx.sandbox.wrap` unconditionally and records the actual boundary in `command.started.sandbox`.
 
 ## Event log (`store/event-log.ts`)
 
@@ -259,11 +321,13 @@ with observer throws swallowed (the single point the REPL renders from). `readLe
 lock-free, never-throwing reader for the report and session listing.
 
 Event schema stays v1; V0.2 added three additive event types (`turn.aborted {phase}`,
-`trust.verified {source}`, `config.loaded {sources}`) and V0.3 adds two more:
-`command.started {callId, pid, shell, cwd, timeoutMs}` (actual spawn — execution evidence,
-distinct from `tool.requested`) and `command.ended {callId, termination, exitCode|null,
-durationMs, killDetail?, drainTimedOut?}`. Additive types are lenient-reader-safe; bumping the
-version would lock old binaries out of new logs, so v stays 1.
+`trust.verified {source}`, `config.loaded {sources}`), V0.3 added `command.started {callId, pid,
+shell, cwd, timeoutMs}` (actual spawn — execution evidence, distinct from `tool.requested`) and
+`command.ended {callId, termination, exitCode|null, durationMs, killDetail?, drainTimedOut?}`, and
+V0.4 adds `sandbox.status {mode, enforced, summary, confines, doesNotConfine, detail}` (the probed
+boundary for the session) plus an additive `sandbox` field on `command.started` (the boundary that
+command actually ran under). Additive types/fields are lenient-reader-safe; bumping the version
+would lock old binaries out of new logs, so v stays 1.
 
 ## Recovery (`store/snapshots.ts`, `runtime/undo.ts`)
 
@@ -297,10 +361,14 @@ else is **UNCHECKED**. "Commands run" lists only commands that actually executed
 render as `killed: timed out/aborted by user … no exit code`, and a `command.started` with no
 completion renders `STARTED but never completed … effects unknown` (plus honesty-footer lines) —
 the derivation stays anchored on `tool.requested`+`tool.completed`, with command events as
-enrichment only. A log without
+enrichment only. Each command carries its actual boundary marker (`[sandboxed: windows-lowil]` /
+`[unsandboxed]`), and a header block renders the session's `sandbox.status` — mode, whether it was
+ENFORCED, and the verbatim `confines`/`doesNotConfine` scope. A log without
 `session.ended` renders as "IN PROGRESS or CRASHED/UNKNOWN" (the in-session `/report` is the
-in-progress case). The report always states that assistant narrative is not evidence and
-restates the undo/sandbox limitations. PowerShell invocations append `; exit $LASTEXITCODE` so a
+in-progress case). The report always states that assistant narrative is not evidence and the
+footer is mode-aware: it explains what a `[sandboxed]` command was OS-prevented from doing (and
+what it was not — reads/network) and that an `[unsandboxed]` command ran at full privilege.
+PowerShell invocations are passed via `-EncodedCommand` and append `; exit $LASTEXITCODE` so a
 failing inner command cannot masquerade as exit 0 → a false CHECKED.
 
 ## Providers

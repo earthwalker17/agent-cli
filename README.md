@@ -3,11 +3,17 @@
 A local-first, terminal-native agent harness. V0.1 proved a **bounded local agent loop**:
 the agent understands a workspace, plans, acts through explicit typed tools, has every action
 gated by one policy engine, records attributable evidence to an append-only log, can undo its
-file changes, resumes across runs, and produces a deterministic evidence report. V0.2 adds the
-**interactive REPL**, a **workspace-trust consent gate**, **narrowing-only policy
-configuration**, and **turn interruption**.
+file changes, resumes across runs, and produces a deterministic evidence report. V0.2 added the
+**interactive REPL**, a **workspace-trust consent gate**, and **narrowing-only policy
+configuration**. V0.3 added a **managed execution kernel** — real mid-command cancellation, typed
+termination (a killed command has no exit code), best-effort tree kill, and command-lifecycle
+evidence. V0.4 adds a **genuinely OS-enforced Windows sandbox** (Low integrity + Job Object) and
+**automatic command review**: demonstrably read-only commands auto-run *inside* the sandbox, and
+everything else asks — a single default, fail-closed, backed by enforcement rather than the
+model's opinion.
 
-> **Status:** core loop + interactive experience complete and tested (196 tests, plus a live
+> **Status:** core loop + interactive experience + execution kernel + enforced Windows isolation,
+> complete and tested (322 tests incl. real-OS sandbox and adversarial-review suites, plus live
 > end-to-end against the real API). This is an open, build-in-public engineering effort — see
 > `PROJECT.md` for the thesis and `ROADMAP.md` for what is done, deferred, and next.
 
@@ -97,9 +103,10 @@ not what a process *can technically* do. Untrusted + non-interactive runs refuse
 - `<workspace>/.agent-cli/config.json` (workspace): **narrowing knobs only** — a workspace
   cannot choose your model or budgets, and the agent's file tools cannot write to `.agent-cli/`.
 
-Narrowing knobs: `protectedPaths` (extra write-deny roots) and `secretPatterns` (literal
-lowercase basename substrings treated as secret-like). Config can only *restrict* the agent —
-there is no allowlist field, no auto-approval field, and no way to relax the command gate.
+Narrowing knobs: `protectedPaths` (extra write-deny roots), `secretPatterns` (literal lowercase
+basename substrings treated as secret-like), and `envExcludePatterns` (extra name substrings
+dropped from command-child environments). Config can only *restrict* the agent — there is no
+allowlist field, no auto-approval field, and no way to relax the command gate or widen the sandbox.
 Unknown keys or invalid JSON are hard errors. CLI flags > user config > defaults; narrowing
 merges as a union across layers.
 
@@ -108,43 +115,73 @@ merges as a union across layers.
 Six typed tools: `read_file`, `list_files`, `search`, `write_file`, `edit_file`, `run_command`.
 Every call passes through the policy engine before it runs. Reads and searches inside the
 workspace run automatically; in-workspace writes run automatically **and are snapshotted so they
-can be undone**; reads outside the workspace or of secret-looking files require approval; and
-**every shell command requires approval** (there is no command allowlist).
+can be undone**; reads outside the workspace or of secret-looking files require approval.
+
+Shell commands go through **automatic review** (the single default — there is no permission
+"mode" to pick). A deterministic analyzer decides, over the command text alone (never the model's
+opinion): a *demonstrably* read-only command — a single simple command with no shell
+metacharacters/encoding, whose program is on a small read-only allowlist (`git status/log/diff`,
+`--version` probes, `ls`, …) with non-escaping args — may **auto-run**, but only *inside* the OS
+sandbox so a misjudgment can't do damage. Everything else — writes, installs, network, anything
+with pipes/redirection/encoding/chaining, an unrecognized program, or a path that escapes the
+workspace — **requires approval**. A few catastrophic forms are hard-denied outright. Where no
+enforced sandbox is available, auto-run is **disabled** and every command asks (fail closed).
 
 ## Security model & honest limitations
 
 Read this before trusting the harness with anything sensitive.
 
-- **There is NO OS sandbox.** The only control is the approval prompt (a *logical*
-  policy, not OS isolation). There is no restricted token, AppContainer, Job Object, firewall
-  rule, or seccomp/Seatbelt analog. An approved `run_command` runs with **your full
-  privileges** — it can touch any file, reach any network endpoint, and its effects are **not
-  snapshotted and not undoable**.
-- **Trust, approval, and sandbox are three different controls; only the first two exist here.**
-  Trust records that you consented to the agent operating in a folder; approval asks before
-  consequential actions; neither technically confines a process.
+- **Trust, approval, and sandbox are three different controls — and now all three exist, but the
+  sandbox is narrow and Windows-only.** Trust records that you consented to the agent operating in
+  a folder; approval asks before consequential actions; the sandbox is the OS *technically*
+  confining a process.
+- **The Windows sandbox (`windows-lowil`) is a real, OS-enforced boundary — with honest limits.**
+  When Agent CLI runs on Windows and its startup probe passes, an **auto-run** command executes at
+  **Low integrity** inside a **Job Object**. What that *does* enforce (verified by tests against
+  the live OS): the command **cannot write** to the workspace, your profile, system directories,
+  or the harness state — Mandatory Integrity Control denies the write at the kernel; and its whole
+  process tree (including a detached grandchild that `taskkill /T` would miss) is **reaped on
+  kill** via the Job Object's kill-on-close. What it does **NOT** enforce: it does **not stop
+  reads** (a sandboxed command can still read files, including secrets — so read approval and log
+  redaction still matter), it does **not gate the network** (Low integrity does not restrict
+  sockets or DNS), it lets the child write **Low-labeled** locations (its scratch `TEMP`,
+  `%USERPROFILE%\AppData\LocalLow`), and **service-reparented** work (schtasks/sc/wmic/BITS) can
+  leave the Job. It needs **no admin** and no special privilege.
+- **Approved commands run UNSANDBOXED.** When you approve a command, you accepted the risk: it
+  runs with **your full privileges** and its effects are **not snapshotted and not undoable**. The
+  sandbox backs the *auto-run* decision (defense in depth for a misjudged read-only command); it
+  is not applied to commands you explicitly allow.
+- **Fail closed, never fake.** The mode is established by a runtime probe and reported truthfully
+  in the banner, the report, and the system prompt. On any non-Windows platform, or if the probe
+  fails, the mode is `none` (no enforcement) and **auto-run is disabled — every command asks**.
+  Agent CLI never auto-runs a command with nothing enforcing the boundary, and never claims
+  cross-platform parity it doesn't have.
 - **Undo is file-only.** It reverts `write_file` / `edit_file` changes via content-addressed
   snapshots, and refuses to overwrite a file that drifted (external edit) rather than clobber it.
   It does **not** cover `run_command` side effects, out-of-workspace edits, or external changes.
 - **Command output is not scrubbed.** Secret-looking *file reads* (`.env`, `*.pem`, …) are
   redacted in the event log, but `run_command` stdout is captured verbatim — a command that
   echoes a credential will record it in the log, and `agent report --json` may surface it.
-- **Path checks are TOCTOU-racy.** The workspace-boundary check validates a path at decision
-  time; a junction created between check and use is not caught. It is logical policy, not
-  enforcement.
-- **A running shell command cannot be interrupted** by Ctrl+C in V0.2; the abort lands at the
-  next tool boundary (the command's own timeout still applies).
-- **Legacy console note:** on Windows PowerShell 5.1, piping or redirecting the CLI's output can
-  re-encode it through the OEM code page and mangle non-ASCII text; PowerShell 7+ and Windows
-  Terminal handle UTF-8 correctly. Piped/non-TTY output uses ASCII status glyphs for this reason.
-- **The path to real isolation** (WSL2, containers, or OS primitives) is future work — see
-  `ROADMAP.md`.
+- **Path checks (file tools) are TOCTOU-racy.** The workspace-boundary check validates a path at
+  decision time; a junction created between check and use is not caught. It is logical policy, not
+  enforcement — and it guards the typed file tools, not arbitrary shell text (which the sandbox,
+  not a path model, is what confines for an auto-run command).
+- **The automatic reviewer is a prompt-skip gate, not a boundary.** It is a *positive* proof of
+  safety over the command string, so obfuscation (encoding, `%VAR:~%` reconstruction, glob
+  invocation, alternate interpreters) lands in "ask", not "auto-run". But a string reviewer can
+  never be a security boundary; the sandbox is what actually contains an auto-run command.
+- **Legacy console note:** on Windows PowerShell 5.1, piping or redirecting the CLI's output (or a
+  command's own output) can re-encode it through the OEM code page and mangle non-ASCII text;
+  PowerShell 7+ and Windows Terminal handle UTF-8 correctly. Piped/non-TTY output uses ASCII
+  status glyphs for this reason.
+- **Stronger isolation** (network egress control, a read/confidentiality boundary, containers/VM,
+  macOS/Linux enforcement) is future work — see `ROADMAP.md`.
 
 State (event logs, snapshots, trust) lives **outside** the workspace at
-`%USERPROFILE%\.agent-cli\` (override with `AGENT_CLI_STATE_DIR`). The startup
-check refuses to run if the state dir resolves inside the workspace. Note the honest caveat: an
-approved shell command can still reach that state dir — the protection holds only against the
-file tools.
+`%USERPROFILE%\.agent-cli\` (override with `AGENT_CLI_STATE_DIR`). The startup check refuses to
+run if the state dir resolves inside the workspace. An *approved* (unsandboxed) shell command can
+still reach that state dir — but an *auto-run* (sandboxed) command **cannot** write it (the state
+dir is Medium integrity; the Low-IL child is OS-denied).
 
 ## Development
 

@@ -13,59 +13,35 @@ The central near-term decision stands:
 > Deepen the execution kernel and its enforced safety boundaries before expanding horizontally
 > into document, PDF, image, or video workflow packs.
 
-## 2. Current Starting Point (post-Session 4, V0.3)
+## 2. Current Starting Point (post-Session 5, V0.4)
 
-The runtime spine now includes a hardened execution kernel: one shared `runTurn`; a practical
-REPL; central policy choke point; recorded consent + narrowing-only config; append-only evidence
-with crash repair and deterministic reports; and — new in V0.3 — a managed exec substrate
-(`src/exec/`) with real mid-command cancellation (REPL and one-shot), typed termination semantics
-(killed commands have no exit code), verified best-effort tree kill, bounded drain (no
-grandchild pipe-hangs), default-on child-env hygiene, and `command.started`/`command.ended`
-lifecycle evidence consumed by report and resume.
+The runtime spine now includes a hardened execution kernel AND a genuinely OS-enforced Windows
+boundary: one shared `runTurn`; a practical REPL; central policy choke point; recorded consent +
+narrowing-only config; append-only evidence with crash repair and deterministic reports; the V0.3
+managed exec substrate (real cancellation, typed termination, best-effort tree kill, env hygiene,
+lifecycle evidence); and — new in V0.4 — `src/sandbox/` with a `windows-lowil` backend that runs an
+auto-run command at Low integrity inside a Job Object (OS-denied writes to Medium+ objects;
+guaranteed tree reaping via kill-on-close), plus **automatic command review** (a deterministic
+positive-proof gate) that replaced "every command asks", is fail-closed, and is backed by the
+enforced sandbox rather than the model's opinion.
 
 The remaining structural gaps, in rough order of load-bearing-ness:
 
-- there is **no OS-enforced isolation** of any kind — policy and approval are the only controls,
-  and this is stated rather than solved;
-- `run_command` remains a full-privilege escape hatch by design; nothing constrains what an
-  approved command may touch;
+- the enforced boundary is **write + lifecycle only, and Windows only** — it does NOT confine
+  reads, does NOT gate the network, and has no macOS/Linux analog; these are the honest next
+  isolation targets (network egress control and a read/confidentiality boundary matter most);
+- `run_command` when APPROVED remains a full-privilege escape hatch by design (the user accepted
+  the risk); nothing constrains what an approved command may touch;
+- per-sandboxed-command latency (a PowerShell start + `Add-Type` compile, ~1.2 s) wants a cached
+  compiled host; service-reparented work (schtasks/sc/wmic/BITS) escapes the Job Object;
 - no background/long-running process sessions (a dev server can only live inside one command's
-  lifetime); no PTY; no Job-Objects-grade tree kill;
+  lifetime); no PTY;
 - repository context, long-session token management, Git-native review, and isolated parallel
   work are still immature — prerequisites for dependable subagents.
 
 ## 3. Indicative Session Sequence
 
-### Session 5 (next) — Enforced Isolation and Honest Safety Modes
-
-Establish a sandbox architecture and prove at least one genuinely enforced isolation path,
-starting with targeted research and threat modeling rather than a "sandbox" label. Distinguish:
-workspace/path policy; approval policy; process containment; filesystem isolation; network
-isolation; privilege reduction; container/VM/OS-native backends.
-
-Evidence-informed anchors from Session 4's research (verify against current sources when the
-session starts):
-
-- **Codex CLI ships a real native Windows sandbox** — elevated mode (dedicated sandbox users +
-  ACLs + WFP firewall) and unelevated mode (restricted token: write requires BOTH user ACL and
-  restricted-SID checks; env-level network suppression, documented as weaker) — with honest,
-  documented failure modes. This is the strongest existence proof that Windows-first enforcement
-  is achievable, and its docs model the honesty posture this project requires.
-- **Claude Code has no native Windows sandbox at all** (bubblewrap/Seatbelt only; WSL2 required)
-  — a warning about the gap, not a license to overclaim.
-- The V0.3 exec substrate is the intended seam: a sandbox backend should be a **transform on
-  `ExecSpec` (argv/env) at spawn time** (Codex's `SandboxManager::transform` pattern), so policy,
-  approval, and evidence do not change shape when a mode is enforced.
-- A likely honest Windows starting point: restricted-token / low-privilege spawn for
-  *unapproved-class* work, explicit `mode` reporting in the banner/report, and reduced authority
-  when no enforcement is available. Any native helper must fail closed and visibly.
-
-Completion criterion (unchanged): a clear architecture, an enforced boundary on at least one
-supported path, and tests or adversarial E2E evidence demonstrating what the boundary does and
-does not prevent. May span more than one session. Cross-platform uniformity must not be simulated
-by weakening terminology.
-
-### Session 6 — Git-Native, Reviewable, Context-Efficient Coding
+### Session 6 (next) — Git-Native, Reviewable, Context-Efficient Coding
 
 Unchanged in intent: precise patch/diff editing, Git status and change review, optional
 checkpoints and delivery-boundary commits, isolated worktrees where they solve real problems, a
@@ -77,9 +53,10 @@ silently replace the snapshot model or the no-Git-unless-asked rule.
 
 Unchanged: small bounded subagents with explicit inputs/outputs, isolated context, scoped tools,
 inherited-or-narrowed permissions, independent lifecycle/cancellation/budget, and attributable
-evidence lineage. Session 4's cancellation work supplies the per-call signal plumbing this
-requires; Session 5 must answer which boundary a subagent actually runs inside. Read-only roles
-first. A subagent result is evidence, not accepted truth.
+evidence lineage. Session 4's cancellation work supplies the per-call signal plumbing; Session 5
+answered which boundary a subagent runs inside on Windows (the `windows-lowil` sandbox) — a
+read-only subagent could execute confined today, with the honest caveat that reads/network are not
+yet confined. Read-only roles first. A subagent result is evidence, not accepted truth.
 
 ### Session 8+ — Coordinated Agent Teams
 
@@ -122,10 +99,12 @@ Google Workspace CLI: typed operations over shell composition for future externa
 
 ## 6. Readiness Gates
 
-**Before broad multi-agent work** — still needed: enforced boundary per platform (Session 5);
-task permission inheritance/narrowing; collision-free concurrent workspaces; context/budget
-bounds; parent/child evidence lineage; reviewable integration + final verification.
-Now satisfied by V0.3: process cancellation and reaping semantics.
+**Before broad multi-agent work** — still needed: task permission inheritance/narrowing;
+collision-free concurrent workspaces; context/budget bounds; parent/child evidence lineage;
+reviewable integration + final verification. Now satisfied by V0.3: process cancellation and
+reaping semantics. Now partially satisfied by V0.4: an enforced boundary EXISTS on Windows
+(Low-IL + Job Object) and a subagent could run inside it — but only Windows, and writes/lifecycle
+only (no read or network confinement yet), so "enforced boundary per platform" remains open.
 
 **Before the first workflow pack** — still needed: capability/dependency declarations; artifact
 identity and metadata in evidence; structured validator results; targeted-revision flow.
@@ -133,6 +112,16 @@ Now satisfied by V0.3: managed subprocess execution with clear cleanup and evide
 
 ## 7. Recently Completed (outcome notes)
 
+- **Session 5 (2026-07-18) — Enforced isolation + automatic command review: COMPLETE (scoped).**
+  A real, OS-enforced Windows boundary (`windows-lowil`: Low integrity + Job Object) proven by
+  direct machine probe and 8 real-OS tests — writes to the workspace/profile/system/state DENIED,
+  detached grandchild reaped on kill; established by a fail-closed runtime probe and reported
+  truthfully everywhere (never assumed, no cross-platform parity). Automatic command review
+  (deterministic positive-proof `analyzeCommand`) replaced "every command asks": a provably-safe
+  command auto-runs *inside* the sandbox, everything else asks, and with no enforcement auto-run is
+  disabled — backed by policy + enforcement, never the model's opinion (66-assertion adversarial
+  corpus). Honest scope: writes + lifecycle only; reads/network NOT confined. Full detail:
+  `ROADMAP.md` Session 5; contracts: `ARCHITECTURE.md` "Sandbox and enforced isolation".
 - **Session 4 (2026-07-17) — Execution kernel hardening: COMPLETE.** Managed exec substrate;
   real mid-command cancellation (REPL + one-shot, proven with a genuine delivered console
   CTRL_C against the live API); typed termination with no-exit-code-when-killed enforced through
