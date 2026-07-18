@@ -82,6 +82,8 @@ export interface ReportJson {
   undos: { target: string; restored: number; refused: { path: string; reason: string }[] }[];
   /** Deliberate user-commanded commits recorded during the session (V0.5 logs). */
   gitCommits: { oid: string; subject: string; files: number; scope: string; trailer: boolean }[];
+  /** User-commanded recovery checkpoints (hidden refs) captured during the session (V0.5 logs). */
+  gitCheckpoints: { ref: string; oid: string; label: string | null; filesChanged: number }[];
   integrity: { truncatedTail: boolean; corruptAt?: { line: number; kind: string } };
 }
 
@@ -250,6 +252,10 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     .filter((e): e is Extract<SessionEvent, { type: 'git.commit' }> => e.type === 'git.commit')
     .map((e) => ({ oid: e.oid, subject: e.subject, files: e.files.length, scope: e.scope, trailer: e.trailer }));
 
+  const gitCheckpoints = events
+    .filter((e): e is Extract<SessionEvent, { type: 'git.checkpoint' }> => e.type === 'git.checkpoint')
+    .map((e) => ({ ref: e.ref, oid: e.oid, label: e.label, filesChanged: e.filesChanged }));
+
   const tasks = events
     .filter((e): e is Extract<SessionEvent, { type: 'user.message' }> => e.type === 'user.message')
     .map((e) => e.text);
@@ -296,6 +302,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     approvals,
     undos,
     gitCommits,
+    gitCheckpoints,
     integrity: {
       truncatedTail: input.truncatedTail ?? false,
       ...(input.corruptAt ? { corruptAt: input.corruptAt } : {}),
@@ -394,6 +401,14 @@ function renderMarkdown(r: ReportJson): string {
     L.push(`## Commits (user-commanded)`);
     for (const c of r.gitCommits) {
       L.push(`- ${c.oid.slice(0, 12)} "${c.subject}" — ${c.files} file(s), scope: ${c.scope}${c.trailer ? '' : ', no trailer'}`);
+    }
+    L.push('');
+  }
+
+  if (r.gitCheckpoints.length > 0) {
+    L.push(`## Checkpoints (hidden refs, user-commanded)`);
+    for (const c of r.gitCheckpoints) {
+      L.push(`- ${c.oid.slice(0, 12)} ${c.ref}${c.label ? ` "${c.label}"` : ''} — ${c.filesChanged} file(s) differ from HEAD`);
     }
     L.push('');
   }

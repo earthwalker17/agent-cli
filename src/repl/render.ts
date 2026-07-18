@@ -212,6 +212,12 @@ export function createRenderer(opts: {
           chromeLine(`  ${style.green(g.ok)} committed ${e.oid.slice(0, 12)} — ${e.files.length} file(s): ${sanitizeLine(e.subject)}`);
           break;
         }
+        case 'git.checkpoint': {
+          chromeLine(
+            `  ${style.green(g.ok)} checkpoint ${e.oid.slice(0, 12)}${e.label ? ` (${sanitizeLine(e.label)})` : ''} — ${e.filesChanged} file(s) differ from HEAD; hidden ref, no history touched`,
+          );
+          break;
+        }
         case 'context.compacted': {
           const pct = e.rawChars > 0 ? Math.round((100 * e.sentChars) / e.rawChars) : 100;
           chromeLine(

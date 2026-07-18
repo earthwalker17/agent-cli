@@ -395,6 +395,18 @@ export type EventBody =
     }
   | {
       /**
+       * A user-commanded recovery checkpoint was captured to a hidden ref (V0.5). The user's
+       * index/HEAD/worktree are untouched; the ref keeps the objects alive until pruned.
+       */
+      type: 'git.checkpoint';
+      ref: string;
+      oid: string;
+      label: string | null;
+      /** Files differing between HEAD (or the empty tree when unborn) and the checkpoint. */
+      filesChanged: number;
+    }
+  | {
+      /**
        * A deliberate user-commanded commit (/commit, `agent commit`) succeeded (V0.5).
        * Consent provenance: this event exists only for flows the user explicitly invoked.
        */

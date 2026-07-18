@@ -2,6 +2,7 @@ import { applyUndo } from '../runtime/undo.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
+import { createCheckpoint, listCheckpoints, type CheckpointContext } from '../git/checkpoint.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
@@ -31,6 +32,8 @@ export const HELP = [
   '  /diff           show what this session changed (unified diff vs the session pre-images)',
   '  /commit [-m "msg"] [--all] [--no-trailer]',
   '                  commit session-attributed changes (or --all) after a preview + confirmation',
+  '  /checkpoint [label | list]',
+  '                  capture the workspace to a hidden git ref (recovery point; no history touched)',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -160,6 +163,36 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           trailer: !flags.noTrailer,
         });
         ctx.pendingNotes.push(`the user committed ${outcome.result.files.length} file(s) as ${outcome.result.oid.slice(0, 12)} ("${outcome.subject}")`);
+      }
+      return 'continue';
+    }
+
+    case 'checkpoint': {
+      const g = ctx.session.gitFacts;
+      if (!g?.isRepo || g.gitPath === null || g.repoRoot === null) {
+        ctx.renderer.chromeLine('  /checkpoint needs a git repository (this workspace is not inside one)');
+        return 'continue';
+      }
+      const cctx: CheckpointContext = { gitPath: g.gitPath, repoRoot: g.repoRoot, workspaceRoot: ctx.session.workspaceRoot, stateDir: ctx.session.stateDir };
+      if (arg.trim().toLowerCase() === 'list') {
+        const list = await listCheckpoints(cctx);
+        if (list.length === 0) ctx.renderer.chromeLine('  no checkpoints in this repository');
+        for (const c of list) ctx.renderer.chromeLine(`  ${c.oid.slice(0, 12)}  ${sanitizeLine(c.subject)}  (${c.createdAt})`);
+        return 'continue';
+      }
+      const label = arg.trim().length > 0 ? arg.trim() : undefined;
+      const r = await createCheckpoint(cctx, ctx.session.id, {
+        ...(label !== undefined ? { label } : {}),
+        confirmLargeUntracked: async (count) => {
+          if (!ctx.question) return false;
+          const a = await ctx.question(`  capture ${count} untracked files too? (is something big not gitignored?) [y/N] `);
+          return a !== null && /^y(es)?$/i.test(a.trim());
+        },
+      });
+      if (r.ok && r.ref && r.oid) {
+        ctx.session.log.append({ type: 'git.checkpoint', ref: r.ref, oid: r.oid, label: label ?? null, filesChanged: r.filesChanged ?? 0 });
+      } else {
+        ctx.renderer.chromeLine(`  checkpoint not created: ${r.error}`);
       }
       return 'continue';
     }

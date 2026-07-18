@@ -18,6 +18,7 @@ import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
+import { createCheckpoint, listCheckpoints, pruneCheckpoints, type CheckpointContext } from '../git/checkpoint.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { randomSaltHex } from '../shared/hash.js';
 import { sanitizeLine } from '../shared/text.js';
@@ -35,6 +36,9 @@ Usage:
   agent commit [-m "msg"] [--all] [--yes] [--no-trailer]
                                  Commit session-attributed changes (preview + confirmation;
                                  --all = every workspace change; requires workspace trust)
+  agent checkpoint [label]       Capture the workspace to a hidden git ref (recovery point)
+  agent checkpoint list|prune    List checkpoints, or delete this session's refs so git gc
+                                 can collect them (prune takes --all / --yes)
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
@@ -63,7 +67,7 @@ asks; approved commands run UNSANDBOXED with full privilege and are not undoable
 sandbox is available, auto-run is disabled and every command asks (fail closed). Workspace trust is
 recorded consent, not isolation. See README "Security model & honest limitations".`;
 
-const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'report', 'sessions', 'map', 'trust']);
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'sessions', 'map', 'trust']);
 
 interface Args {
   values: CliValues;
@@ -306,6 +310,87 @@ async function cmdCommit(values: CliValues): Promise<number> {
   }
 }
 
+/** `agent checkpoint [list|prune|<label>]` — trust-gated (it executes git against the repo). */
+async function cmdCheckpoint(values: CliValues, sub?: string): Promise<number> {
+  const ws = workspaceRoot(values);
+  const trust = await checkTrust(values, ws);
+  if (!trust.trusted) {
+    process.stderr.write(`refusing: ${trust.reason}\n`);
+    return 3;
+  }
+  const gitFacts = await detectGitFacts(ws);
+  if (!gitFacts.isRepo || gitFacts.gitPath === null || gitFacts.repoRoot === null) {
+    process.stderr.write(`agent checkpoint needs a git repository: ${gitFacts.detail}\n`);
+    return 1;
+  }
+  const layout = resolveLayout(ws);
+  const cctx: CheckpointContext = { gitPath: gitFacts.gitPath, repoRoot: gitFacts.repoRoot, workspaceRoot: ws, stateDir: layout.projectDir };
+
+  if (sub === 'list') {
+    const list = await listCheckpoints(cctx);
+    if (list.length === 0) process.stdout.write('no checkpoints in this repository\n');
+    for (const c of list) process.stdout.write(`${c.oid.slice(0, 12)}  ${sanitizeLine(c.subject)}  (${c.createdAt})\n`);
+    return 0;
+  }
+
+  const sessionId = values.session ?? latestSessionId(layout);
+  if (sub === 'prune') {
+    const target = values.all ? undefined : sessionId;
+    if (!values.all && !target) {
+      process.stderr.write('no session to prune checkpoints for (use --all for every session)\n');
+      return 1;
+    }
+    const refs = await listCheckpoints(cctx, target);
+    if (refs.length === 0) {
+      process.stdout.write('no checkpoint refs to prune\n');
+      return 0;
+    }
+    if (values.yes !== true) {
+      const isTty = process.stdin.isTTY === true && process.stderr.isTTY === true;
+      if (!isTty) {
+        process.stderr.write('pruning deletes recovery points; non-interactive prune requires --yes\n');
+        return 2;
+      }
+      const a = await askOnTty(`delete ${refs.length} checkpoint ref(s)${values.all ? ' across ALL sessions' : ''}? [y/N] `);
+      if (a === null || !/^y(es)?$/i.test(a.trim())) {
+        process.stderr.write('prune cancelled\n');
+        return 2;
+      }
+    }
+    const r = await pruneCheckpoints(cctx, target);
+    process.stdout.write(`pruned ${r.deleted.length} checkpoint ref(s)${r.failed.length > 0 ? `; ${r.failed.length} failed` : ''}\n`);
+    return r.failed.length > 0 ? 1 : 0;
+  }
+
+  // create (sub, when present and not a subcommand, is the label)
+  if (!sessionId) {
+    process.stderr.write('no recorded session for this workspace — a checkpoint is filed under a session\n');
+    return 1;
+  }
+  const log = EventLog.open({ file: layout.sessionFile(sessionId), lockFile: layout.lockFile(sessionId) });
+  try {
+    const isTty = process.stdin.isTTY === true && process.stderr.isTTY === true;
+    const r = await createCheckpoint(cctx, sessionId, {
+      ...(sub !== undefined ? { label: sub } : {}),
+      confirmLargeUntracked: async (count) => {
+        if (values.yes === true) return true;
+        if (!isTty) return false;
+        const a = await askOnTty(`capture ${count} untracked files too? (is something big not gitignored?) [y/N] `);
+        return a !== null && /^y(es)?$/i.test(a.trim());
+      },
+    });
+    if (!r.ok || !r.ref || !r.oid) {
+      process.stderr.write(`checkpoint not created: ${r.error}\n`);
+      return r.declined ? 2 : 1;
+    }
+    log.append({ type: 'git.checkpoint', ref: r.ref, oid: r.oid, label: sub ?? null, filesChanged: r.filesChanged ?? 0 });
+    process.stdout.write(`checkpoint ${r.ref} @ ${r.oid.slice(0, 12)} (${r.filesChanged} file(s) differ from HEAD)\n`);
+    return 0;
+  } finally {
+    log.close();
+  }
+}
+
 async function askOnTty(q: string): Promise<string | null> {
   const readline = await import('node:readline/promises');
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
@@ -400,6 +485,7 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === 'report') return cmdReport(values, positionals[1]);
     if (cmd === 'diff') return cmdDiff(values, positionals[1]);
     if (cmd === 'commit') return await cmdCommit(values);
+    if (cmd === 'checkpoint') return await cmdCheckpoint(values, positionals[1]);
     if (cmd === 'sessions') return cmdSessions(values);
     if (cmd === 'map') return cmdMap(values);
     if (cmd === 'undo') return await cmdUndo(values);
