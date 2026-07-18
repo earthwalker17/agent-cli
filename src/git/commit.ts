@@ -232,7 +232,8 @@ export async function runCommitFlow(
     io.info(`  commit failed: ${result.error}`);
     return { committed: false, result, preview, subject };
   }
-  io.info(`  committed ${result.oid?.slice(0, 12)} — ${result.files.length} file(s): ${subject}`);
+  // Success is announced by the caller (the REPL renders the git.commit event; the CLI prints
+  // its own stdout line) — an info line here would duplicate it.
   return { committed: true, result, preview, subject };
 }
 
