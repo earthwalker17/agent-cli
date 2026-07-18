@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runGit } from './client.js';
+import { caseFold } from '../shared/pathutil.js';
+import type { SnapshotStore } from '../store/snapshots.js';
+import type { EventBody } from '../types.js';
 
 /**
  * Manual recovery checkpoints (V0.5): a point-in-time capture of the workspace subtree as a
@@ -163,4 +166,207 @@ export async function pruneCheckpoints(cctx: CheckpointContext, sessionId?: stri
 
 function firstLine(s: string): string {
   return s.split(/\r?\n/).find((l) => l.trim().length > 0) ?? '(no output)';
+}
+
+// ── Restore ────────────────────────────────────────────────────────────────────────────────
+//
+// "Restore to checkpoint N" = make the WORKSPACE SUBTREE byte-identical to the checkpoint,
+// including DELETING files the checkpoint predates — a half-restore that leaves later
+// creations behind is not the checkpointed state (the failure mode that burned Codex).
+// Never `git restore`/`git checkout` against the user's worktree: the affected set is computed
+// tree-to-tree (current temp tree vs checkpoint tree, workspace-scoped), content is
+// materialized through a SECOND temp index with `checkout-index --prefix` into a state-dir
+// staging area (smudge filters/CRLF apply; binary-safe — file bytes never pass through a
+// captured pipe). Restored content is therefore the git-native WORKTREE FORM under the repo's
+// current filter config — exactly what `git checkout` would produce; a file whose original
+// bytes were in a non-canonical form (e.g. LF on disk under autocrlf=true) comes back
+// canonicalized, the same lossy round-trip git itself has. Every write goes through the
+// harness's own snapshot-first flow:
+// pre-images captured under ONE synthetic callId (+ snapshot.created + file.mutated events),
+// so the whole restore is one atomically-undoable batch under the existing applyUndo contract.
+
+export interface RestorePlanEntry {
+  /** Repo-root-relative POSIX path. */
+  relPath: string;
+  absPath: string;
+  /** write = create/overwrite with checkpoint content; delete = the checkpoint predates it. */
+  action: 'write' | 'delete';
+}
+
+export interface RestorePlan {
+  checkpoint: CheckpointInfo;
+  entries: RestorePlanEntry[];
+  error?: string;
+}
+
+export async function planRestore(cctx: CheckpointContext, checkpoint: CheckpointInfo): Promise<RestorePlan> {
+  const g = (argv: string[], env?: Record<string, string>, cwd?: string) =>
+    runGit({ gitPath: cctx.gitPath, argv, cwd: cwd ?? cctx.repoRoot, ...(env ? { env } : {}) });
+
+  // Current-state tree via the same temp-index construction the checkpoint used.
+  const indexFile = path.join(cctx.stateDir, `restore-index-${process.pid}`);
+  fs.rmSync(indexFile, { force: true });
+  const env = { GIT_INDEX_FILE: indexFile };
+  let currentTree: string;
+  try {
+    const head = await g(['rev-parse', '--verify', '-q', 'HEAD']);
+    if (head.ok) {
+      const read = await g(['read-tree', 'HEAD'], env);
+      if (!read.ok) return { checkpoint, entries: [], error: `read-tree failed: ${firstLine(read.stderr)}` };
+    }
+    const add = await g(['add', '-A', '--', '.'], env, cctx.workspaceRoot);
+    if (!add.ok) return { checkpoint, entries: [], error: `add failed: ${firstLine(add.stderr)}` };
+    const tree = await g(['write-tree'], env);
+    if (!tree.ok) return { checkpoint, entries: [], error: `write-tree failed: ${firstLine(tree.stderr)}` };
+    currentTree = tree.stdout.trim();
+  } finally {
+    fs.rmSync(indexFile, { force: true });
+  }
+
+  // Affected set, current → checkpoint. D = delete on disk; A/M/T = write checkpoint content.
+  const diff = await g(['diff-tree', '-r', '-z', '--name-status', currentTree, checkpoint.oid]);
+  if (!diff.ok) return { checkpoint, entries: [], error: `diff-tree failed: ${firstLine(diff.stderr)}` };
+
+  // Workspace-subtree guard: HEAD may have moved since the checkpoint, which makes files
+  // OUTSIDE the workspace differ between the two trees — restore must never touch those.
+  const wsRel = path.relative(cctx.repoRoot, cctx.workspaceRoot).split(path.sep).join('/');
+  const wsPrefix = wsRel.length > 0 ? `${wsRel}/` : '';
+
+  const entries: RestorePlanEntry[] = [];
+  const tokens = diff.stdout.split('\0').filter((t) => t.length > 0);
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const status = tokens[i]![0]!;
+    const relPath = tokens[i + 1]!;
+    if (wsPrefix.length > 0 && !caseFold(relPath + '/').startsWith(caseFold(wsPrefix))) continue;
+    if (status === 'D') entries.push({ relPath, absPath: path.join(cctx.repoRoot, relPath), action: 'delete' });
+    else entries.push({ relPath, absPath: path.join(cctx.repoRoot, relPath), action: 'write' });
+  }
+  return { checkpoint, entries };
+}
+
+export interface RestoreDeps {
+  snapshots: SnapshotStore;
+  appendEvent: (e: EventBody) => void;
+  /** One synthetic callId binding the whole batch (snapshot + mutations = one undo unit). */
+  callId: string;
+  info: (line: string) => void;
+  /** Confirmation; null = non-interactive (restore then requires assumeYes). */
+  question: ((q: string) => Promise<string | null>) | null;
+  assumeYes: boolean;
+}
+
+export interface RestoreResult {
+  performed: boolean;
+  restored: string[];
+  refused: { path: string; reason: string }[];
+}
+
+export async function runRestoreFlow(cctx: CheckpointContext, checkpoint: CheckpointInfo, deps: RestoreDeps): Promise<RestoreResult> {
+  const plan = await planRestore(cctx, checkpoint);
+  if (plan.error) {
+    deps.info(`  restore failed: ${plan.error}`);
+    return { performed: false, restored: [], refused: [] };
+  }
+  if (plan.entries.length === 0) {
+    deps.info('  workspace already matches the checkpoint — nothing to restore');
+    return { performed: false, restored: [], refused: [] };
+  }
+
+  deps.info(`  restoring to ${checkpoint.oid.slice(0, 12)} (${checkpoint.subject}) affects ${plan.entries.length} file(s):`);
+  for (const e of plan.entries) deps.info(`    ${e.action === 'delete' ? 'delete' : 'write '}  ${e.relPath}`);
+  deps.info('  current bytes are snapshotted first: the restore is one undoable batch (/undo reverts it)');
+  if (!deps.assumeYes) {
+    if (deps.question === null) {
+      deps.info('  refusing: non-interactive restore requires --yes');
+      return { performed: false, restored: [], refused: [] };
+    }
+    const a = await deps.question(`  restore ${plan.entries.length} file(s)? [y/N] `);
+    if (a === null || !/^y(es)?$/i.test(a.trim())) {
+      deps.info('  restore cancelled');
+      return { performed: false, restored: [], refused: [] };
+    }
+  }
+
+  // Snapshot-first, ALL paths — a failure here refuses the WHOLE restore (a partially
+  // undoable restore would be worse than none).
+  let captured;
+  try {
+    captured = deps.snapshots.capture(plan.entries.map((e) => e.absPath));
+    deps.appendEvent({
+      type: 'snapshot.created',
+      callId: deps.callId,
+      files: captured.map((f) => ({ path: f.path, beforeSha256: f.beforeSha256, bytes: f.bytes })),
+    });
+  } catch (e) {
+    deps.info(`  restore refused: cannot snapshot current state (${(e as Error).message}) — nothing was changed`);
+    return { performed: false, restored: [], refused: [] };
+  }
+  const beforeByFold = new Map(captured.map((f) => [caseFold(f.path), f.beforeSha256]));
+
+  // Materialize checkpoint content into a staging dir via checkout-index (binary-safe, smudge
+  // filters applied — bytes never pass through a captured pipe).
+  const writes = plan.entries.filter((e) => e.action === 'write');
+  const staging = path.join(cctx.stateDir, `restore-stage-${process.pid}`);
+  const indexFile = path.join(cctx.stateDir, `restore-index2-${process.pid}`);
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.rmSync(indexFile, { force: true });
+  fs.mkdirSync(staging, { recursive: true }); // checkout-index will not create the prefix dir itself
+  const env = { GIT_INDEX_FILE: indexFile };
+  const restored: string[] = [];
+  const refused: { path: string; reason: string }[] = [];
+  try {
+    if (writes.length > 0) {
+      const read = await runGit({ gitPath: cctx.gitPath, argv: ['read-tree', checkpoint.oid], cwd: cctx.repoRoot, env });
+      if (!read.ok) {
+        deps.info(`  restore failed before any change: read-tree ${firstLine(read.stderr)}`);
+        return { performed: false, restored: [], refused: [] };
+      }
+      for (let i = 0; i < writes.length; i += 100) {
+        const batch = writes.slice(i, i + 100);
+        const co = await runGit({
+          gitPath: cctx.gitPath,
+          argv: ['checkout-index', '-f', `--prefix=${staging}${path.sep}`, '--', ...batch.map((e) => e.relPath)],
+          cwd: cctx.repoRoot,
+          env,
+        });
+        if (!co.ok) {
+          deps.info(`  restore failed before any change: checkout-index ${firstLine(co.stderr)}`);
+          return { performed: false, restored: [], refused: [] };
+        }
+      }
+    }
+
+    const { sha256 } = await import('../shared/hash.js');
+    for (const e of plan.entries) {
+      const before = beforeByFold.get(caseFold(e.absPath)) ?? null;
+      try {
+        if (e.action === 'delete') {
+          fs.rmSync(e.absPath, { force: true });
+          deps.appendEvent({ type: 'file.mutated', callId: deps.callId, path: e.absPath, kind: 'delete', beforeSha256: before, afterSha256: null, createdDirs: [] });
+        } else {
+          const bytes = fs.readFileSync(path.join(staging, e.relPath));
+          fs.mkdirSync(path.dirname(e.absPath), { recursive: true });
+          fs.writeFileSync(e.absPath, bytes);
+          deps.appendEvent({
+            type: 'file.mutated',
+            callId: deps.callId,
+            path: e.absPath,
+            kind: before === null ? 'create' : 'modify',
+            beforeSha256: before,
+            afterSha256: sha256(bytes),
+            createdDirs: [],
+          });
+        }
+        restored.push(e.relPath);
+      } catch (err) {
+        refused.push({ path: e.relPath, reason: (err as Error).message });
+      }
+    }
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+    fs.rmSync(indexFile, { force: true });
+  }
+
+  deps.appendEvent({ type: 'git.restore', ref: checkpoint.ref, oid: checkpoint.oid, restored, refused });
+  return { performed: true, restored, refused };
 }

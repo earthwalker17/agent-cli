@@ -2,7 +2,7 @@ import { applyUndo } from '../runtime/undo.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
-import { createCheckpoint, listCheckpoints, type CheckpointContext } from '../git/checkpoint.js';
+import { createCheckpoint, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
@@ -32,8 +32,9 @@ export const HELP = [
   '  /diff           show what this session changed (unified diff vs the session pre-images)',
   '  /commit [-m "msg"] [--all] [--no-trailer]',
   '                  commit session-attributed changes (or --all) after a preview + confirmation',
-  '  /checkpoint [label | list]',
-  '                  capture the workspace to a hidden git ref (recovery point; no history touched)',
+  '  /checkpoint [label | list | restore <n>]',
+  '                  capture the workspace to a hidden git ref (recovery point; no history',
+  '                  touched); restore <n> returns to a checkpoint as one undoable batch',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -178,6 +179,34 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         const list = await listCheckpoints(cctx);
         if (list.length === 0) ctx.renderer.chromeLine('  no checkpoints in this repository');
         for (const c of list) ctx.renderer.chromeLine(`  ${c.oid.slice(0, 12)}  ${sanitizeLine(c.subject)}  (${c.createdAt})`);
+        return 'continue';
+      }
+      const restoreMatch = /^restore\s+(\d+)$/i.exec(arg.trim());
+      if (restoreMatch || /^restore\b/i.test(arg.trim())) {
+        const n = restoreMatch ? Number(restoreMatch[1]) : NaN;
+        if (!Number.isInteger(n) || n < 1) {
+          ctx.renderer.chromeLine('  usage: /checkpoint restore <n>  (see /checkpoint list)');
+          return 'continue';
+        }
+        const mine = await listCheckpoints(cctx, ctx.session.id);
+        const ckpt = mine.find((c) => c.n === n);
+        if (!ckpt) {
+          ctx.renderer.chromeLine(`  no checkpoint ${n} for THIS session (use /checkpoint list; cross-session restore: agent checkpoint restore <n> --session <id>)`);
+          return 'continue';
+        }
+        const r = await runRestoreFlow(cctx, ckpt, {
+          snapshots: ctx.session.snapshots,
+          appendEvent: (e) => ctx.session.log.append(e),
+          callId: `git-restore-${ctx.session.log.events.length}`,
+          info: (l) => ctx.renderer.chromeLine(sanitizeLine(l)),
+          question: ctx.question ?? null,
+          assumeYes: false,
+        });
+        if (r.performed && r.restored.length > 0) {
+          ctx.pendingNotes.push(
+            `the user restored ${r.restored.length} file(s) to checkpoint ${n} (${ckpt.oid.slice(0, 12)}). Re-read files before editing them again.`,
+          );
+        }
         return 'continue';
       }
       const label = arg.trim().length > 0 ? arg.trim() : undefined;

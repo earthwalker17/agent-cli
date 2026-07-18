@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findGitOnPath, runGit } from '../src/git/client.js';
-import { createCheckpoint, listCheckpoints, pruneCheckpoints, EMPTY_TREE, type CheckpointContext } from '../src/git/checkpoint.js';
+import { createCheckpoint, listCheckpoints, pruneCheckpoints, runRestoreFlow, EMPTY_TREE, type CheckpointContext, type RestoreDeps } from '../src/git/checkpoint.js';
+import { SnapshotStore } from '../src/store/snapshots.js';
+import { applyUndo } from '../src/runtime/undo.js';
+import type { EventBody, SessionEvent } from '../src/types.js';
 
 /** Stage-9 tests: checkpoint plumbing against real repositories (skipped when git is absent). */
 
@@ -13,15 +16,30 @@ const hasGit = REAL_GIT !== null;
 let tmp: string;
 let repo: string;
 let stateDir: string;
+let savedEnv: Record<string, string | undefined>;
 
+// Host git config (identity, core.autocrlf, signing…) must not leak into these tests:
+// restore materializes the git-native worktree form, so a host-global autocrlf=true would
+// legitimately turn LF fixtures into CRLF and make assertions machine-dependent.
 beforeEach(() => {
   tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'agitckpt-')));
   repo = path.join(tmp, 'repo');
   stateDir = path.join(tmp, 'state');
   fs.mkdirSync(repo);
   fs.mkdirSync(stateDir);
+  const emptyCfg = path.join(tmp, 'empty-gitconfig');
+  fs.writeFileSync(emptyCfg, '');
+  savedEnv = { GIT_CONFIG_GLOBAL: process.env['GIT_CONFIG_GLOBAL'], GIT_CONFIG_SYSTEM: process.env['GIT_CONFIG_SYSTEM'] };
+  process.env['GIT_CONFIG_GLOBAL'] = emptyCfg;
+  process.env['GIT_CONFIG_SYSTEM'] = emptyCfg;
 });
-afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+afterEach(() => {
+  for (const [k, v] of Object.entries(savedEnv)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
 
 async function git(cwd: string, ...argv: string[]) {
   return runGit({ gitPath: REAL_GIT!, argv, cwd });
@@ -152,6 +170,150 @@ describe.skipIf(!hasGit)('createCheckpoint', () => {
     });
     expect(accepted.ok).toBe(true);
     expect(asked).toBe(12);
+  });
+});
+
+describe.skipIf(!hasGit)('runRestoreFlow', () => {
+  /** In-memory event sink + real SnapshotStore so applyUndo can run against the batch. */
+  function restoreDeps(answers: (string | null)[] = ['y'], assumeYes = false) {
+    const events: SessionEvent[] = [];
+    let seq = 0;
+    let i = 0;
+    const objectsDir = path.join(stateDir, 'objects');
+    fs.mkdirSync(objectsDir, { recursive: true });
+    const snapshots = new SnapshotStore(objectsDir);
+    const lines: string[] = [];
+    const deps: RestoreDeps = {
+      snapshots,
+      appendEvent: (e: EventBody) => void events.push({ v: 1, seq: ++seq, ts: 't', ...e } as SessionEvent),
+      callId: 'git-restore-1',
+      info: (l) => lines.push(l),
+      question: async () => answers[i++] ?? null,
+      assumeYes,
+    };
+    return { deps, events, snapshots, lines };
+  }
+
+  async function checkpointOf(sessionId: string): Promise<Parameters<typeof runRestoreFlow>[1]> {
+    const list = await listCheckpoints(cctx(), sessionId);
+    return list[list.length - 1]!;
+  }
+
+  it('returns the workspace to the checkpoint — including DELETING later files — as one undoable batch', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'v1\n');
+    await commitAll(repo, 'base');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'v2-at-checkpoint\n');
+    fs.writeFileSync(path.join(repo, 'extra.txt'), 'exists at checkpoint\n');
+    expect((await createCheckpoint(cctx(), 's1')).ok).toBe(true);
+
+    // Post-checkpoint divergence: modify, delete, create.
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'v3-after\n');
+    fs.rmSync(path.join(repo, 'extra.txt'));
+    fs.writeFileSync(path.join(repo, 'later.txt'), 'created after checkpoint\n');
+
+    const { deps, events } = restoreDeps(['y']);
+    const r = await runRestoreFlow(cctx(), await checkpointOf('s1'), deps);
+    expect(r.performed).toBe(true);
+    expect(r.refused).toEqual([]);
+    expect(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('v2-at-checkpoint\n');
+    expect(fs.readFileSync(path.join(repo, 'extra.txt'), 'utf8')).toBe('exists at checkpoint\n');
+    expect(fs.existsSync(path.join(repo, 'later.txt'))).toBe(false); // the half-restore trap, closed
+
+    // Evidence: one snapshot batch + one file.mutated per file + git.restore, sharing the callId.
+    expect(events.filter((e) => e.type === 'snapshot.created')).toHaveLength(1);
+    const muts = events.filter((e) => e.type === 'file.mutated');
+    expect(muts).toHaveLength(3);
+    expect(new Set(muts.map((m) => (m.type === 'file.mutated' ? m.callId : '')))).toEqual(new Set(['git-restore-1']));
+    expect(events.at(-1)).toMatchObject({ type: 'git.restore', restored: expect.arrayContaining(['a.txt', 'extra.txt', 'later.txt']) });
+
+    // And the WHOLE restore is one applyUndo('last') unit: back to the pre-restore state.
+    const undo = applyUndo(events, deps.snapshots, 'last');
+    expect(undo.refused).toEqual([]);
+    expect(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('v3-after\n');
+    expect(fs.existsSync(path.join(repo, 'extra.txt'))).toBe(false);
+    expect(fs.readFileSync(path.join(repo, 'later.txt'), 'utf8')).toBe('created after checkpoint\n');
+  });
+
+  it('round-trips CRLF content through the clean/smudge filters (raw-blob restore would corrupt it)', async () => {
+    await initRepo(repo);
+    expect((await git(repo, 'config', 'core.autocrlf', 'true')).ok).toBe(true);
+    const crlf = 'line one\r\nline two\r\n';
+    fs.writeFileSync(path.join(repo, 'win.txt'), crlf);
+    expect((await createCheckpoint(cctx(), 's1')).ok).toBe(true);
+    fs.rmSync(path.join(repo, 'win.txt'));
+
+    const { deps } = restoreDeps(['y']);
+    const r = await runRestoreFlow(cctx(), await checkpointOf('s1'), deps);
+    expect(r.performed).toBe(true);
+    expect(fs.readFileSync(path.join(repo, 'win.txt'), 'utf8')).toBe(crlf);
+  });
+
+  it('restores binary content byte-identically (no pipe capture in the content path)', async () => {
+    await initRepo(repo);
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0xff, 0xfe, 0x00, 0x7f]);
+    fs.writeFileSync(path.join(repo, 'img.bin'), bytes);
+    expect((await createCheckpoint(cctx(), 's1')).ok).toBe(true);
+    fs.writeFileSync(path.join(repo, 'img.bin'), 'corrupted');
+
+    const { deps } = restoreDeps(['y']);
+    const r = await runRestoreFlow(cctx(), await checkpointOf('s1'), deps);
+    expect(r.performed).toBe(true);
+    expect(fs.readFileSync(path.join(repo, 'img.bin'))).toEqual(bytes);
+  });
+
+  it('never touches files outside the workspace subtree even after HEAD moved', async () => {
+    await initRepo(repo);
+    const sub = path.join(repo, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(repo, 'root.txt'), 'root-v1\n');
+    fs.writeFileSync(path.join(sub, 'inner.txt'), 'inner-v1\n');
+    await commitAll(repo, 'base');
+
+    fs.writeFileSync(path.join(sub, 'inner.txt'), 'inner-v2-checkpointed\n');
+    expect((await createCheckpoint(cctx(sub), 's1')).ok).toBe(true);
+
+    // HEAD moves via a user commit touching an OUTSIDE file; then the inner file diverges.
+    fs.writeFileSync(path.join(repo, 'root.txt'), 'root-v2-user-committed\n');
+    await commitAll(repo, 'user moves HEAD');
+    fs.writeFileSync(path.join(sub, 'inner.txt'), 'inner-v3\n');
+
+    const { deps } = restoreDeps(['y']);
+    const r = await runRestoreFlow(cctx(sub), await checkpointOf('s1'), deps);
+    expect(r.performed).toBe(true);
+    expect(r.restored).toEqual(['packages/app/inner.txt']);
+    expect(fs.readFileSync(path.join(sub, 'inner.txt'), 'utf8')).toBe('inner-v2-checkpointed\n');
+    expect(fs.readFileSync(path.join(repo, 'root.txt'), 'utf8')).toBe('root-v2-user-committed\n'); // untouched
+  });
+
+  it('refuses non-interactively without --yes, and a declined confirm changes nothing', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'at-checkpoint\n');
+    expect((await createCheckpoint(cctx(), 's1')).ok).toBe(true);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'after\n');
+
+    const nonInteractive = restoreDeps([], false);
+    nonInteractive.deps.question = null;
+    const r1 = await runRestoreFlow(cctx(), await checkpointOf('s1'), nonInteractive.deps);
+    expect(r1.performed).toBe(false);
+    expect(nonInteractive.lines.some((l) => l.includes('requires --yes'))).toBe(true);
+
+    const declined = restoreDeps(['n']);
+    const r2 = await runRestoreFlow(cctx(), await checkpointOf('s1'), declined.deps);
+    expect(r2.performed).toBe(false);
+    expect(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('after\n');
+    expect(declined.events).toEqual([]); // nothing recorded, nothing snapshotted
+  });
+
+  it('reports "already matches" when there is nothing to restore', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'same\n');
+    expect((await createCheckpoint(cctx(), 's1')).ok).toBe(true);
+    const { deps, lines, events } = restoreDeps(['y']);
+    const r = await runRestoreFlow(cctx(), await checkpointOf('s1'), deps);
+    expect(r.performed).toBe(false);
+    expect(lines.some((l) => l.includes('already matches'))).toBe(true);
+    expect(events).toEqual([]);
   });
 });
 

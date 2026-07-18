@@ -407,6 +407,17 @@ export type EventBody =
     }
   | {
       /**
+       * A user-commanded checkpoint restore ran (V0.5). The batch shares one synthetic callId
+       * with its snapshot.created + file.mutated events, so /undo reverts it as a unit.
+       */
+      type: 'git.restore';
+      ref: string;
+      oid: string;
+      restored: string[];
+      refused: { path: string; reason: string }[];
+    }
+  | {
+      /**
        * A deliberate user-commanded commit (/commit, `agent commit`) succeeded (V0.5).
        * Consent provenance: this event exists only for flows the user explicitly invoked.
        */

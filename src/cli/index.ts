@@ -18,7 +18,7 @@ import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
-import { createCheckpoint, listCheckpoints, pruneCheckpoints, type CheckpointContext } from '../git/checkpoint.js';
+import { createCheckpoint, listCheckpoints, pruneCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { randomSaltHex } from '../shared/hash.js';
 import { sanitizeLine } from '../shared/text.js';
@@ -39,6 +39,8 @@ Usage:
   agent checkpoint [label]       Capture the workspace to a hidden git ref (recovery point)
   agent checkpoint list|prune    List checkpoints, or delete this session's refs so git gc
                                  can collect them (prune takes --all / --yes)
+  agent checkpoint restore <n>   Return the workspace to checkpoint <n> (snapshot-first,
+                                 one undoable batch; deletes files the checkpoint predates)
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
@@ -310,8 +312,8 @@ async function cmdCommit(values: CliValues): Promise<number> {
   }
 }
 
-/** `agent checkpoint [list|prune|<label>]` — trust-gated (it executes git against the repo). */
-async function cmdCheckpoint(values: CliValues, sub?: string): Promise<number> {
+/** `agent checkpoint [list|prune|restore <n>|<label>]` — trust-gated (it executes git against the repo). */
+async function cmdCheckpoint(values: CliValues, sub?: string, subArg?: string): Promise<number> {
   const ws = workspaceRoot(values);
   const trust = await checkTrust(values, ws);
   if (!trust.trusted) {
@@ -360,6 +362,42 @@ async function cmdCheckpoint(values: CliValues, sub?: string): Promise<number> {
     const r = await pruneCheckpoints(cctx, target);
     process.stdout.write(`pruned ${r.deleted.length} checkpoint ref(s)${r.failed.length > 0 ? `; ${r.failed.length} failed` : ''}\n`);
     return r.failed.length > 0 ? 1 : 0;
+  }
+
+  if (sub === 'restore') {
+    const n = Number(subArg);
+    if (!Number.isInteger(n) || n < 1) {
+      process.stderr.write('usage: agent checkpoint restore <n> [--session <id>] [--yes]\n');
+      return 1;
+    }
+    if (!sessionId) {
+      process.stderr.write('no session to restore a checkpoint for\n');
+      return 1;
+    }
+    const mine = await listCheckpoints(cctx, sessionId);
+    const ckpt = mine.find((c) => c.n === n);
+    if (!ckpt) {
+      process.stderr.write(`no checkpoint ${n} for session ${sessionId} (agent checkpoint list)\n`);
+      return 1;
+    }
+    const log = EventLog.open({ file: layout.sessionFile(sessionId), lockFile: layout.lockFile(sessionId) });
+    try {
+      const isTty = process.stdin.isTTY === true && process.stderr.isTTY === true;
+      const r = await runRestoreFlow(cctx, ckpt, {
+        snapshots: new SnapshotStore(layout.objectsDir),
+        appendEvent: (e) => void log.append(e),
+        callId: `git-restore-${log.events.length}`,
+        info: (l) => process.stderr.write(sanitizeLine(l) + '\n'),
+        question: isTty ? askOnTty : null,
+        assumeYes: values.yes === true,
+      });
+      if (!r.performed) return 2;
+      process.stdout.write(`restored ${r.restored.length} file(s) to ${ckpt.ref}${r.refused.length > 0 ? `; ${r.refused.length} refused` : ''}\n`);
+      process.stdout.write('undo this restore with: agent undo\n');
+      return r.refused.length > 0 ? 1 : 0;
+    } finally {
+      log.close();
+    }
   }
 
   // create (sub, when present and not a subcommand, is the label)
@@ -485,7 +523,7 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === 'report') return cmdReport(values, positionals[1]);
     if (cmd === 'diff') return cmdDiff(values, positionals[1]);
     if (cmd === 'commit') return await cmdCommit(values);
-    if (cmd === 'checkpoint') return await cmdCheckpoint(values, positionals[1]);
+    if (cmd === 'checkpoint') return await cmdCheckpoint(values, positionals[1], positionals[2]);
     if (cmd === 'sessions') return cmdSessions(values);
     if (cmd === 'map') return cmdMap(values);
     if (cmd === 'undo') return await cmdUndo(values);

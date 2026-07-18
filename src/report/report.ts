@@ -84,6 +84,8 @@ export interface ReportJson {
   gitCommits: { oid: string; subject: string; files: number; scope: string; trailer: boolean }[];
   /** User-commanded recovery checkpoints (hidden refs) captured during the session (V0.5 logs). */
   gitCheckpoints: { ref: string; oid: string; label: string | null; filesChanged: number }[];
+  /** User-commanded checkpoint restores (each an undoable batch; V0.5 logs). */
+  gitRestores: { ref: string; oid: string; restored: number; refused: { path: string; reason: string }[] }[];
   integrity: { truncatedTail: boolean; corruptAt?: { line: number; kind: string } };
 }
 
@@ -256,6 +258,10 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     .filter((e): e is Extract<SessionEvent, { type: 'git.checkpoint' }> => e.type === 'git.checkpoint')
     .map((e) => ({ ref: e.ref, oid: e.oid, label: e.label, filesChanged: e.filesChanged }));
 
+  const gitRestores = events
+    .filter((e): e is Extract<SessionEvent, { type: 'git.restore' }> => e.type === 'git.restore')
+    .map((e) => ({ ref: e.ref, oid: e.oid, restored: e.restored.length, refused: e.refused }));
+
   const tasks = events
     .filter((e): e is Extract<SessionEvent, { type: 'user.message' }> => e.type === 'user.message')
     .map((e) => e.text);
@@ -303,6 +309,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     undos,
     gitCommits,
     gitCheckpoints,
+    gitRestores,
     integrity: {
       truncatedTail: input.truncatedTail ?? false,
       ...(input.corruptAt ? { corruptAt: input.corruptAt } : {}),
@@ -409,6 +416,15 @@ function renderMarkdown(r: ReportJson): string {
     L.push(`## Checkpoints (hidden refs, user-commanded)`);
     for (const c of r.gitCheckpoints) {
       L.push(`- ${c.oid.slice(0, 12)} ${c.ref}${c.label ? ` "${c.label}"` : ''} — ${c.filesChanged} file(s) differ from HEAD`);
+    }
+    L.push('');
+  }
+
+  if (r.gitRestores.length > 0) {
+    L.push(`## Checkpoint restores (user-commanded)`);
+    for (const c of r.gitRestores) {
+      L.push(`- restored ${c.restored} file(s) to ${c.oid.slice(0, 12)} (${c.ref})${c.refused.length > 0 ? `, refused ${c.refused.length}` : ''}`);
+      for (const ref of c.refused) L.push(`    refused ${ref.path}: ${ref.reason}`);
     }
     L.push('');
   }

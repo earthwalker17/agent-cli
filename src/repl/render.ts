@@ -212,6 +212,13 @@ export function createRenderer(opts: {
           chromeLine(`  ${style.green(g.ok)} committed ${e.oid.slice(0, 12)} — ${e.files.length} file(s): ${sanitizeLine(e.subject)}`);
           break;
         }
+        case 'git.restore': {
+          chromeLine(
+            `  ${style.green(g.ok)} restored ${e.restored.length} file(s) to checkpoint ${e.oid.slice(0, 12)}${e.refused.length > 0 ? `; ${e.refused.length} refused` : ''} (undo with /undo)`,
+          );
+          for (const r of e.refused) chromeLine(`  ${style.red(g.fail)} refused ${sanitizeLine(r.path)}: ${r.reason}`);
+          break;
+        }
         case 'git.checkpoint': {
           chromeLine(
             `  ${style.green(g.ok)} checkpoint ${e.oid.slice(0, 12)}${e.label ? ` (${sanitizeLine(e.label)})` : ''} — ${e.filesChanged} file(s) differ from HEAD; hidden ref, no history touched`,
