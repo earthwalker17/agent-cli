@@ -46,19 +46,24 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       const s = ctx.session;
       let inTok = 0;
       let outTok = 0;
+      let cacheRead = 0;
+      let cacheWrite = 0;
       let turns = 0;
       for (const e of s.log.events) {
         if (e.type === 'assistant.message') {
           inTok += e.usage.inputTokens;
           outTok += e.usage.outputTokens;
+          cacheRead += e.usage.cacheReadInputTokens ?? 0;
+          cacheWrite += e.usage.cacheCreationInputTokens ?? 0;
         } else if (e.type === 'user.message') turns++;
       }
+      const cache = cacheRead + cacheWrite > 0 ? ` (cache: ${cacheRead} read / ${cacheWrite} written)` : '';
       ctx.renderer.chromeLine(
         [
           `session ${s.id} (${s.mode})`,
           `  workspace: ${sanitizeLine(s.workspaceRoot)}`,
           `  model: ${s.model} · provider: ${s.provider.name}`,
-          `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out`,
+          `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out${cache}`,
           ...(s.gitFacts?.isRepo ? [`  git (at session start): ${sanitizeLine(s.gitFacts.detail)}`] : []),
           `  state: ${sanitizeLine(s.stateDir)}`,
         ].join('\n'),

@@ -65,7 +65,7 @@ export interface ReportJson {
     providerName: string;
     endedReason: string | null;
     resumes: number;
-    usage: { inputTokens: number; outputTokens: number };
+    usage: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number };
     /** The active execution sandbox for the session (V0.4+ logs). */
     sandbox?: ReportSandbox;
     /** The probed git context at session start (V0.5+ logs). */
@@ -99,7 +99,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   const gitEvent = events.find((e) => e.type === 'git.context');
   const commandByCall = new Map<string, string>();
   const toolByCall = new Map<string, string>();
-  const usage = { inputTokens: 0, outputTokens: 0 };
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
   let resumes = 0;
 
   for (const e of events) {
@@ -112,6 +112,8 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     } else if (e.type === 'assistant.message') {
       usage.inputTokens += e.usage.inputTokens;
       usage.outputTokens += e.usage.outputTokens;
+      usage.cacheReadInputTokens += e.usage.cacheReadInputTokens ?? 0;
+      usage.cacheCreationInputTokens += e.usage.cacheCreationInputTokens ?? 0;
     } else if (e.type === 'session.resumed') {
       resumes++;
     }
@@ -293,7 +295,11 @@ function renderMarkdown(r: ReportJson): string {
   L.push(`- model: ${r.session.model} (provider: ${r.session.providerName}, mode: ${r.session.mode})`);
   L.push(`- ended: ${r.session.endedReason ?? 'IN PROGRESS or CRASHED/UNKNOWN (no session.ended recorded)'}`);
   if (r.session.resumes > 0) L.push(`- resumed ${r.session.resumes} time(s)`);
-  L.push(`- tokens: ${r.session.usage.inputTokens} in / ${r.session.usage.outputTokens} out`);
+  {
+    const u = r.session.usage;
+    const cache = (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0) > 0 ? ` (cache: ${u.cacheReadInputTokens} read / ${u.cacheCreationInputTokens} written)` : '';
+    L.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out${cache}`);
+  }
   if (r.session.sandbox) {
     const s = r.session.sandbox;
     L.push(`- sandbox: ${s.mode} (${s.enforced ? 'ENFORCED' : 'not enforced'}) — ${s.summary}`);

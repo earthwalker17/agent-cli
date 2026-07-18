@@ -197,8 +197,12 @@ export interface ProviderRequest {
 export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'refusal' | 'pause_turn' | 'other';
 
 export interface Usage {
+  /** Uncached input tokens billed for the request (the API excludes cache reads from this). */
   inputTokens: number;
   outputTokens: number;
+  /** Prompt-cache accounting (V0.5, additive): absent on providers/logs without caching. */
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
 }
 
 export interface ProviderTurn {

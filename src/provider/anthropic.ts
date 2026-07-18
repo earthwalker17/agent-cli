@@ -30,20 +30,39 @@ export class AnthropicProvider implements Provider {
   }
 
   async complete(req: ProviderRequest, onText?: (delta: string) => void, signal?: AbortSignal): Promise<ProviderTurn> {
-    const stream = this.client.messages.stream(
-      {
-        model: req.model,
-        max_tokens: req.maxTokens,
-        system: req.system,
-        messages: coalesceUserMessages(req.messages).map(toApiMessage),
-        tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema as Anthropic.Tool.InputSchema })),
-      },
-      signal ? { signal } : undefined,
-    );
+    const stream = this.client.messages.stream(buildApiParams(req), signal ? { signal } : undefined);
     if (onText) stream.on('text', (delta) => onText(delta));
     const msg = await stream.finalMessage();
     return toProviderTurn(msg);
   }
+}
+
+/**
+ * Build the wire request — pure and unit-testable. Prompt caching (V0.5): two ephemeral
+ * cache_control breakpoints (of the API's four): one on the system block (tools + system form
+ * the stable prefix) and a MOVING one on the last content block of the final message, so each
+ * step re-reads the whole prior conversation from cache and pays uncached price only for the
+ * newest message. The marker must be attached AFTER coalescing — coalescing merges consecutive
+ * same-role messages, and a pre-attached marker could end up mid-message, silently caching a
+ * shorter prefix.
+ */
+export function buildApiParams(req: ProviderRequest): Anthropic.MessageCreateParamsStreaming {
+  const messages = coalesceUserMessages(req.messages).map(toApiMessage);
+  const last = messages[messages.length - 1];
+  const lastBlock = last?.content[last.content.length - 1];
+  if (lastBlock && typeof lastBlock === 'object') {
+    (lastBlock as { cache_control?: Anthropic.CacheControlEphemeral }).cache_control = { type: 'ephemeral' };
+  }
+  return {
+    model: req.model,
+    max_tokens: req.maxTokens,
+    stream: true,
+    ...(req.system.length > 0
+      ? { system: [{ type: 'text' as const, text: req.system, cache_control: { type: 'ephemeral' as const } }] }
+      : {}),
+    messages,
+    tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema as Anthropic.Tool.InputSchema })),
+  };
 }
 
 /**
@@ -65,7 +84,7 @@ export function coalesceUserMessages(messages: readonly ChatMessage[]): ChatMess
   return out;
 }
 
-export function toApiMessage(m: ChatMessage): Anthropic.MessageParam {
+export function toApiMessage(m: ChatMessage): { role: 'user' | 'assistant'; content: Anthropic.ContentBlockParam[] } {
   const content = m.content.map((b): Anthropic.ContentBlockParam => {
     switch (b.type) {
       case 'text':
@@ -91,7 +110,13 @@ export function toProviderTurn(msg: Anthropic.Message): ProviderTurn {
   return {
     blocks,
     stopReason: mapStopReason(msg.stop_reason),
-    usage: { inputTokens: msg.usage.input_tokens, outputTokens: msg.usage.output_tokens },
+    usage: {
+      inputTokens: msg.usage.input_tokens,
+      outputTokens: msg.usage.output_tokens,
+      // The SDK reports null when caching did not apply; record explicit zeros (additive fields).
+      cacheReadInputTokens: msg.usage.cache_read_input_tokens ?? 0,
+      cacheCreationInputTokens: msg.usage.cache_creation_input_tokens ?? 0,
+    },
   };
 }
 
