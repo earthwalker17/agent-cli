@@ -3,6 +3,9 @@
  * place the kernel's interfaces are defined so modules depend on shapes, not on each other.
  */
 import type { ZodType } from 'zod';
+// Type-only import (erased at runtime): lets ExecSandbox.wrap be concretely typed without a
+// runtime cycle with the exec substrate (which type-only-imports CommandTermination from here).
+import type { ExecSpec } from './exec/run.js';
 
 // ── Action taxonomy ────────────────────────────────────────────────────────────────────────
 // Consequence classes from the constitution's safety policy. This is the "approval" axis only;
@@ -39,7 +42,7 @@ export interface PolicyRules {
  * only ever produce evidence for its own call.
  */
 export type CommandEvidence =
-  | { kind: 'started'; pid: number; shell: string; cwd: string; timeoutMs: number }
+  | { kind: 'started'; pid: number; shell: string; cwd: string; timeoutMs: number; sandbox: 'none' | 'windows-lowil' }
   | {
       kind: 'ended';
       termination: CommandTermination;
@@ -61,6 +64,28 @@ export interface ToolContext {
   onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void;
   /** Evidence channel for command lifecycle facts (spawn/termination); persisted by the runtime. */
   reportCommand?: (e: CommandEvidence) => void;
+  /**
+   * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
+   * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
+   * its ExecSpec at spawn time. The runtime supplies an identity `wrap` for unsandboxed (approved)
+   * calls, so tool code never branches on policy. Absent ⇒ no sandbox concept (e.g. file tools).
+   */
+  sandbox?: ExecSandbox;
+}
+
+/**
+ * Per-call sandbox handle on ToolContext. Structurally minimal so `types.ts` stays logic-free;
+ * the concrete backend lives in `src/sandbox/`. `ExecSpec` is intentionally referenced by shape
+ * (Record) here to avoid a type cycle with the exec substrate.
+ */
+export interface ExecSandbox {
+  mode: 'none' | 'windows-lowil';
+  /** True only when a runtime probe confirmed the OS CAN confine sandboxed children (availability). */
+  enforced: boolean;
+  /** True when THIS call is actually running confined (an auto-run command inside the boundary). */
+  active: boolean;
+  /** Transform a managed-exec spec to run under the boundary; identity when this call is unsandboxed. */
+  wrap(spec: ExecSpec): ExecSpec;
 }
 
 export interface ToolResult {
@@ -114,6 +139,12 @@ export interface PolicyDecision {
   noUndo?: boolean;
   /** True when the model's read result must be redacted before persistence. */
   redactOutput?: boolean;
+  /**
+   * For a shell command: where it must run. 'sandbox' = an auto-run command that MUST be OS-confined
+   * (the enforcement backing an auto-allow — never run unconfined). 'unsandboxed' = a human-approved
+   * command that runs with full privilege (the user accepted the risk). Absent for non-command tools.
+   */
+  execBoundary?: 'sandbox' | 'unsandboxed';
 }
 
 // ── Approval ───────────────────────────────────────────────────────────────────────────────
@@ -271,6 +302,8 @@ export type EventBody =
       shell: string;
       cwd: string;
       timeoutMs: number;
+      /** The execution boundary this command actually ran under (evidence of enforcement per command). */
+      sandbox?: 'none' | 'windows-lowil';
     }
   | {
       /** How the spawned command ended. Killed commands (timeout/aborted) have exitCode null. */
@@ -302,6 +335,20 @@ export type EventBody =
       /** Which config files were loaded (post-trust) and their content hashes. */
       type: 'config.loaded';
       sources: { path: string; sha256: string }[];
+    }
+  | {
+      /**
+       * The active execution sandbox for this session, established by a real runtime probe.
+       * `enforced` is true only when the OS is actually confining sandboxed children — never
+       * assumed from the platform. `confines`/`doesNotConfine` are the honesty surface.
+       */
+      type: 'sandbox.status';
+      mode: 'none' | 'windows-lowil';
+      enforced: boolean;
+      summary: string;
+      confines: string[];
+      doesNotConfine: string[];
+      detail: string;
     }
   | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
 
