@@ -30,6 +30,7 @@ import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
 import { elideHistory, type ElisionOptions } from './elision.js';
+import { DIFF_MAX_BYTES, isProbablyBinary, lineDiffStat } from '../shared/diff.js';
 
 export interface Session {
   id: string;
@@ -591,6 +592,30 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
   return { summary: `${tool.name} ${String(i['path'] ?? '')}`.trim(), detail: '' };
 }
 
+/**
+ * Line diffstat for one mutation, computed while both sides are at hand (the report stays a
+ * pure function of events). Skipped — fields absent — for no-ops, binary content, and files
+ * over the diff size cap; evidence enrichment must never fail or stall a mutation.
+ */
+function mutationDiffStat(
+  session: Session,
+  beforeSha256: string | null,
+  afterSha256: string | null,
+  afterBytes: Buffer | null,
+): { linesAdded?: number; linesRemoved?: number } {
+  if (beforeSha256 === afterSha256) return {};
+  try {
+    const before = beforeSha256 !== null ? session.snapshots.getBlob(beforeSha256) : Buffer.alloc(0);
+    const after = afterBytes ?? Buffer.alloc(0);
+    if (before.length > DIFF_MAX_BYTES || after.length > DIFF_MAX_BYTES) return {};
+    if (isProbablyBinary(before) || isProbablyBinary(after)) return {};
+    const stat = lineDiffStat(before.toString('utf8'), after.toString('utf8'));
+    return { linesAdded: stat.added, linesRemoved: stat.removed };
+  } catch {
+    return {};
+  }
+}
+
 async function runExecution<I>(
   session: Session,
   ctx: ToolContext,
@@ -653,10 +678,12 @@ async function runExecution<I>(
   if (snapshot) {
     for (const cf of snapshot) {
       const exists = fs.existsSync(cf.path);
-      const afterSha256 = exists ? sha256(fs.readFileSync(cf.path)) : null;
+      const afterBytes = exists ? fs.readFileSync(cf.path) : null;
+      const afterSha256 = afterBytes !== null ? sha256(afterBytes) : null;
       const kind = cf.beforeSha256 === null ? 'create' : afterSha256 === null ? 'delete' : 'modify';
       const createdDirs = [...missingDirsBefore].filter((d) => fs.existsSync(d));
-      session.log.append({ type: 'file.mutated', callId, path: cf.path, kind, beforeSha256: cf.beforeSha256, afterSha256, createdDirs });
+      const stat = mutationDiffStat(session, cf.beforeSha256, afterSha256, afterBytes);
+      session.log.append({ type: 'file.mutated', callId, path: cf.path, kind, beforeSha256: cf.beforeSha256, afterSha256, createdDirs, ...stat });
     }
   }
 

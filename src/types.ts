@@ -287,6 +287,9 @@ export type EventBody =
       beforeSha256: string | null;
       afterSha256: string | null;
       createdDirs: string[];
+      /** Line diffstat for this mutation (V0.5, additive; absent for binary/huge/no-op changes). */
+      linesAdded?: number;
+      linesRemoved?: number;
     }
   | {
       type: 'tool.completed';

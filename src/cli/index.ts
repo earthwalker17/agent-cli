@@ -16,6 +16,7 @@ import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap, buildWorkspaceMapAuto } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { buildReport } from '../report/report.js';
+import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { randomSaltHex } from '../shared/hash.js';
 import { sanitizeLine } from '../shared/text.js';
@@ -29,6 +30,7 @@ Usage:
   agent --continue ["<task>"]    Resume the latest session (REPL without a task, one-shot with)
   agent resume <id> ["<task>"]   Resume a specific session (REPL without a task, one-shot with)
   agent undo [--all]             Undo the last file change (or all changes) of a session
+  agent diff [<id>]              Show what a session changed (unified diff; default: latest)
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
@@ -57,7 +59,7 @@ asks; approved commands run UNSANDBOXED with full privilege and are not undoable
 sandbox is available, auto-run is disabled and every command asks (fail closed). Workspace trust is
 recorded consent, not isolation. See README "Security model & honest limitations".`;
 
-const KNOWN = new Set(['run', 'resume', 'undo', 'report', 'sessions', 'map', 'trust']);
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'report', 'sessions', 'map', 'trust']);
 
 interface Args {
   values: CliValues;
@@ -222,6 +224,21 @@ function cmdReport(values: CliValues, id?: string): number {
   return 0;
 }
 
+function cmdDiff(values: CliValues, id?: string): number {
+  const ws = workspaceRoot(values);
+  const layout = resolveLayout(ws);
+  const sessionId = id ?? values.session ?? latestSessionId(layout);
+  if (!sessionId) {
+    process.stderr.write('no sessions found for this workspace\n');
+    return 1;
+  }
+  const { events } = EventLog.readLenient(layout.sessionFile(sessionId));
+  const files = buildSessionDiff(events, new SnapshotStore(layout.objectsDir), ws);
+  // Diff lines are workspace bytes — untrusted content headed for a terminal; sanitize each line.
+  process.stdout.write(renderSessionDiff(files).split('\n').map(sanitizeLine).join('\n') + '\n');
+  return 0;
+}
+
 function cmdSessions(values: CliValues): number {
   const ws = workspaceRoot(values);
   const layout = resolveLayout(ws);
@@ -302,6 +319,7 @@ export async function main(argv: string[]): Promise<number> {
   try {
     const cmd = positionals[0];
     if (cmd === 'report') return cmdReport(values, positionals[1]);
+    if (cmd === 'diff') return cmdDiff(values, positionals[1]);
     if (cmd === 'sessions') return cmdSessions(values);
     if (cmd === 'map') return cmdMap(values);
     if (cmd === 'undo') return await cmdUndo(values);

@@ -1,5 +1,6 @@
 import { applyUndo } from '../runtime/undo.js';
 import { buildReport } from '../report/report.js';
+import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
@@ -24,6 +25,7 @@ export const HELP = [
   '  /help           this help',
   '  /status         session, model, workspace, token usage',
   '  /undo [all]     revert the last (or all) file-tool change(s) of this session',
+  '  /diff           show what this session changed (unified diff vs the session pre-images)',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -83,6 +85,14 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         );
         ctx.renderer.chromeLine('  note: undo covers only file-tool changes; run_command side effects are not captured.');
       }
+      return 'continue';
+    }
+
+    case 'diff': {
+      const files = buildSessionDiff(ctx.session.log.events, ctx.session.snapshots, ctx.session.workspaceRoot);
+      ctx.renderer.flush();
+      // Diff lines are workspace bytes — untrusted content headed for a terminal; sanitize each line.
+      ctx.modelOut.write(renderSessionDiff(files).split('\n').map(sanitizeLine).join('\n') + '\n');
       return 'continue';
     }
 

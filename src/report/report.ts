@@ -26,6 +26,9 @@ export interface ReportFile {
   snapshotRecorded: boolean;
   checked: boolean;
   checkedBy?: string;
+  /** Session churn on this path, summed across its mutations (V0.5 logs; absent for binary/huge). */
+  linesAdded?: number;
+  linesRemoved?: number;
 }
 export interface ReportCommand {
   command: string;
@@ -194,9 +197,21 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   }
 
   // Files changed: last mutation per path, then CHECKED if a command exited 0 after it.
+  // The diffstat is the SUM across the session's mutations of that path (its churn), from the
+  // per-mutation evidence recorded at write time (V0.5 logs; absent for binary/huge changes).
   const lastMutation = new Map<string, Extract<SessionEvent, { type: 'file.mutated' }>>();
+  const churn = new Map<string, { added: number; removed: number; seen: boolean }>();
   for (const e of events) {
-    if (e.type === 'file.mutated') lastMutation.set(e.path, e);
+    if (e.type === 'file.mutated') {
+      lastMutation.set(e.path, e);
+      const c = churn.get(e.path) ?? { added: 0, removed: 0, seen: false };
+      if (e.linesAdded !== undefined || e.linesRemoved !== undefined) {
+        c.added += e.linesAdded ?? 0;
+        c.removed += e.linesRemoved ?? 0;
+        c.seen = true;
+      }
+      churn.set(e.path, c);
+    }
   }
   const filesChanged: ReportFile[] = [...lastMutation.values()].map((m) => {
     // A check must have genuinely EXITED with 0. A killed command has no exit code by contract;
@@ -213,6 +228,11 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       checked: check !== undefined,
     };
     if (check) file.checkedBy = check.command;
+    const c = churn.get(m.path);
+    if (c?.seen) {
+      file.linesAdded = c.added;
+      file.linesRemoved = c.removed;
+    }
     return file;
   });
 
@@ -323,7 +343,8 @@ function renderMarkdown(r: ReportJson): string {
   } else {
     for (const f of r.filesChanged) {
       const status = f.checked ? `CHECKED (check ran, exit 0: \`${f.checkedBy}\`)` : 'UNCHECKED (no passing check ran after the last change)';
-      L.push(`- ${f.kind} ${f.path}  ${short(f.beforeSha256)} → ${short(f.afterSha256)}  [${f.snapshotRecorded ? 'undo-recorded' : 'NOT undoable'}]  ${status}`);
+      const stat = f.linesAdded !== undefined || f.linesRemoved !== undefined ? `  +${f.linesAdded ?? 0}/−${f.linesRemoved ?? 0}` : '';
+      L.push(`- ${f.kind} ${f.path}  ${short(f.beforeSha256)} → ${short(f.afterSha256)}${stat}  [${f.snapshotRecorded ? 'undo-recorded' : 'NOT undoable'}]  ${status}`);
     }
   }
   L.push('');
