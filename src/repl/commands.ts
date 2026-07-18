@@ -1,6 +1,7 @@
 import { applyUndo } from '../runtime/undo.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
+import { runCommitFlow } from '../git/commit.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
@@ -18,6 +19,8 @@ export interface CommandContext {
   /** Notes to prepend (clearly delimited) to the next user message so the model learns of
    *  out-of-band changes like /undo. Logged verbatim inside user.message — attributable. */
   pendingNotes: string[];
+  /** Interactive confirmation seam (the REPL's shared readline); null answer = EOF = decline. */
+  question?: (q: string) => Promise<string | null>;
 }
 
 export const HELP = [
@@ -26,6 +29,8 @@ export const HELP = [
   '  /status         session, model, workspace, token usage',
   '  /undo [all]     revert the last (or all) file-tool change(s) of this session',
   '  /diff           show what this session changed (unified diff vs the session pre-images)',
+  '  /commit [-m "msg"] [--all] [--no-trailer]',
+  '                  commit session-attributed changes (or --all) after a preview + confirmation',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -34,6 +39,29 @@ export const HELP = [
 ].join('\n');
 
 export type SlashOutcome = 'continue' | 'quit';
+
+/** Parse `/commit` arguments: [-m "msg"] [--all] [--no-trailer]. Exported for tests. */
+export function parseCommitArgs(arg: string): { all: boolean; noTrailer: boolean; message?: string; error?: string } {
+  let all = false;
+  let noTrailer = false;
+  let message: string | undefined;
+  const tokens = arg.match(/"[^"]*"|\S+/g) ?? [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t === '--all') all = true;
+    else if (t === '--no-trailer') noTrailer = true;
+    else if (t === '-m') {
+      const rest = tokens
+        .slice(i + 1)
+        .join(' ')
+        .replace(/^"|"$/g, '');
+      if (rest.length === 0) return { all, noTrailer, error: 'usage: /commit [-m "msg"] [--all] [--no-trailer] — -m needs a message' };
+      message = rest;
+      break;
+    } else return { all, noTrailer, error: `unknown /commit argument: ${t}` };
+  }
+  return { all, noTrailer, ...(message !== undefined ? { message } : {}) };
+}
 
 export async function dispatchSlash(line: string, ctx: CommandContext): Promise<SlashOutcome> {
   const [cmd, ...rest] = line.slice(1).trim().split(/\s+/);
@@ -93,6 +121,46 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       ctx.renderer.flush();
       // Diff lines are workspace bytes — untrusted content headed for a terminal; sanitize each line.
       ctx.modelOut.write(renderSessionDiff(files).split('\n').map(sanitizeLine).join('\n') + '\n');
+      return 'continue';
+    }
+
+    case 'commit': {
+      const g = ctx.session.gitFacts;
+      if (!g?.isRepo || g.gitPath === null || g.repoRoot === null) {
+        ctx.renderer.chromeLine('  /commit needs a git repository (this workspace is not inside one)');
+        return 'continue';
+      }
+      const flags = parseCommitArgs(arg);
+      if (flags.error) {
+        ctx.renderer.chromeLine(`  ${flags.error}`);
+        return 'continue';
+      }
+      const outcome = await runCommitFlow(
+        { gitPath: g.gitPath, repoRoot: g.repoRoot, workspaceRoot: ctx.session.workspaceRoot, messageDir: ctx.session.stateDir },
+        ctx.session.log.events,
+        {
+          scope: flags.all ? 'all' : 'session',
+          ...(flags.message !== undefined ? { subject: flags.message } : {}),
+          trailer: !flags.noTrailer,
+          sessionId: ctx.session.id,
+          io: {
+            info: (line) => ctx.renderer.chromeLine(sanitizeLine(line)),
+            question: ctx.question ?? null,
+            assumeYes: false,
+          },
+        },
+      );
+      if (outcome.committed && outcome.result?.oid) {
+        ctx.session.log.append({
+          type: 'git.commit',
+          oid: outcome.result.oid,
+          subject: outcome.subject ?? '',
+          files: outcome.result.files,
+          scope: flags.all ? 'all' : 'session',
+          trailer: !flags.noTrailer,
+        });
+        ctx.pendingNotes.push(`the user committed ${outcome.result.files.length} file(s) as ${outcome.result.oid.slice(0, 12)} ("${outcome.subject}")`);
+      }
       return 'continue';
     }
 

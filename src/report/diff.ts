@@ -29,8 +29,15 @@ export interface SessionDiffFile {
   note?: string;
 }
 
-export function buildSessionDiff(events: readonly SessionEvent[], snapshots: SnapshotStore, workspaceRoot: string): SessionDiffFile[] {
-  // First pre-image and last expected state per path, with undo restores folded in.
+/**
+ * Per-path session mutation state from the evidence log: the FIRST recorded pre-image and the
+ * LAST state the session recorded (undo restores folded in). Keys are the recorded absolute
+ * paths. This is the single source of session attribution — /diff and /commit both use it.
+ */
+export function sessionMutationState(events: readonly SessionEvent[]): {
+  firstBefore: Map<string, string | null>;
+  expectedNow: Map<string, string | null>;
+} {
   const firstBefore = new Map<string, string | null>();
   const expectedNow = new Map<string, string | null>();
   for (const e of events) {
@@ -43,6 +50,11 @@ export function buildSessionDiff(events: readonly SessionEvent[], snapshots: Sna
       }
     }
   }
+  return { firstBefore, expectedNow };
+}
+
+export function buildSessionDiff(events: readonly SessionEvent[], snapshots: SnapshotStore, workspaceRoot: string): SessionDiffFile[] {
+  const { firstBefore, expectedNow } = sessionMutationState(events);
 
   const out: SessionDiffFile[] = [];
   for (const [p, baseline] of [...firstBefore.entries()].sort(([a], [b]) => a.localeCompare(b))) {

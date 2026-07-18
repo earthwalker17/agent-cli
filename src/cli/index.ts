@@ -17,6 +17,7 @@ import { buildWorkspaceMap, buildWorkspaceMapAuto } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
+import { runCommitFlow } from '../git/commit.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { randomSaltHex } from '../shared/hash.js';
 import { sanitizeLine } from '../shared/text.js';
@@ -31,6 +32,9 @@ Usage:
   agent resume <id> ["<task>"]   Resume a specific session (REPL without a task, one-shot with)
   agent undo [--all]             Undo the last file change (or all changes) of a session
   agent diff [<id>]              Show what a session changed (unified diff; default: latest)
+  agent commit [-m "msg"] [--all] [--yes] [--no-trailer]
+                                 Commit session-attributed changes (preview + confirmation;
+                                 --all = every workspace change; requires workspace trust)
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
@@ -59,7 +63,7 @@ asks; approved commands run UNSANDBOXED with full privilege and are not undoable
 sandbox is available, auto-run is disabled and every command asks (fail closed). Workspace trust is
 recorded consent, not isolation. See README "Security model & honest limitations".`;
 
-const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'report', 'sessions', 'map', 'trust']);
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'report', 'sessions', 'map', 'trust']);
 
 interface Args {
   values: CliValues;
@@ -87,6 +91,9 @@ function parse(argv: string[]): Args {
       json: { type: 'boolean' },
       all: { type: 'boolean' },
       continue: { type: 'boolean' },
+      m: { type: 'string', short: 'm' },
+      yes: { type: 'boolean' },
+      'no-trailer': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   }) as Args;
@@ -239,6 +246,78 @@ function cmdDiff(values: CliValues, id?: string): number {
   return 0;
 }
 
+/**
+ * `agent commit` — a deliberate delivery action. Trust-gated (it executes repo hooks and
+ * mutates .git), attribution comes from a recorded session's evidence log, and the git.commit
+ * event is appended to that session's log (which requires its lock — a session still running
+ * elsewhere holds it; commit from inside that REPL instead).
+ */
+async function cmdCommit(values: CliValues): Promise<number> {
+  const ws = workspaceRoot(values);
+  const trust = await checkTrust(values, ws);
+  if (!trust.trusted) {
+    process.stderr.write(`refusing to commit: ${trust.reason}\n`);
+    return 3;
+  }
+  const gitFacts = await detectGitFacts(ws);
+  if (!gitFacts.isRepo || gitFacts.gitPath === null || gitFacts.repoRoot === null) {
+    process.stderr.write(`agent commit needs a git repository: ${gitFacts.detail}\n`);
+    return 1;
+  }
+  const layout = resolveLayout(ws);
+  const sessionId = values.session ?? latestSessionId(layout);
+  if (!sessionId) {
+    process.stderr.write('no recorded session for this workspace — agent commit delivers a session\'s work. Use git directly for ordinary commits\n');
+    return 1;
+  }
+  const log = EventLog.open({ file: layout.sessionFile(sessionId), lockFile: layout.lockFile(sessionId) });
+  try {
+    const isTty = process.stdin.isTTY === true && process.stderr.isTTY === true;
+    const outcome = await runCommitFlow(
+      { gitPath: gitFacts.gitPath, repoRoot: gitFacts.repoRoot, workspaceRoot: ws, messageDir: layout.projectDir },
+      log.events,
+      {
+        scope: values.all ? 'all' : 'session',
+        ...(values.m !== undefined ? { subject: values.m } : {}),
+        trailer: values['no-trailer'] !== true,
+        sessionId,
+        io: {
+          info: (line) => process.stderr.write(sanitizeLine(line) + '\n'),
+          question: isTty ? askOnTty : null,
+          assumeYes: values.yes === true,
+        },
+      },
+    );
+    if (outcome.committed && outcome.result?.oid) {
+      log.append({
+        type: 'git.commit',
+        oid: outcome.result.oid,
+        subject: outcome.subject ?? '',
+        files: outcome.result.files,
+        scope: values.all ? 'all' : 'session',
+        trailer: values['no-trailer'] !== true,
+      });
+      process.stdout.write(`committed ${outcome.result.oid.slice(0, 12)} (${outcome.result.files.length} file(s)) — session ${sessionId}\n`);
+      return 0;
+    }
+    return 2;
+  } finally {
+    log.close();
+  }
+}
+
+async function askOnTty(q: string): Promise<string | null> {
+  const readline = await import('node:readline/promises');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return await rl.question(q);
+  } catch {
+    return null;
+  } finally {
+    rl.close();
+  }
+}
+
 function cmdSessions(values: CliValues): number {
   const ws = workspaceRoot(values);
   const layout = resolveLayout(ws);
@@ -320,6 +399,7 @@ export async function main(argv: string[]): Promise<number> {
     const cmd = positionals[0];
     if (cmd === 'report') return cmdReport(values, positionals[1]);
     if (cmd === 'diff') return cmdDiff(values, positionals[1]);
+    if (cmd === 'commit') return await cmdCommit(values);
     if (cmd === 'sessions') return cmdSessions(values);
     if (cmd === 'map') return cmdMap(values);
     if (cmd === 'undo') return await cmdUndo(values);

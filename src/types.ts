@@ -393,6 +393,19 @@ export type EventBody =
       probeFailed: boolean;
       detail: string;
     }
+  | {
+      /**
+       * A deliberate user-commanded commit (/commit, `agent commit`) succeeded (V0.5).
+       * Consent provenance: this event exists only for flows the user explicitly invoked.
+       */
+      type: 'git.commit';
+      oid: string;
+      subject: string;
+      /** Repo-relative files actually in the commit (git diff-tree truth). */
+      files: string[];
+      scope: 'session' | 'all';
+      trailer: boolean;
+    }
   | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
 
 export type SessionEvent = { v: number; seq: number; ts: string } & EventBody;

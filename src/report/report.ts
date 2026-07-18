@@ -80,6 +80,8 @@ export interface ReportJson {
   commands: ReportCommand[];
   approvals: { callId: string; decision: string; scope: string; source: string }[];
   undos: { target: string; restored: number; refused: { path: string; reason: string }[] }[];
+  /** Deliberate user-commanded commits recorded during the session (V0.5 logs). */
+  gitCommits: { oid: string; subject: string; files: number; scope: string; trailer: boolean }[];
   integrity: { truncatedTail: boolean; corruptAt?: { line: number; kind: string } };
 }
 
@@ -244,6 +246,10 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     .filter((e): e is Extract<SessionEvent, { type: 'undo.applied' }> => e.type === 'undo.applied')
     .map((e) => ({ target: e.target, restored: e.restored.length, refused: e.refused }));
 
+  const gitCommits = events
+    .filter((e): e is Extract<SessionEvent, { type: 'git.commit' }> => e.type === 'git.commit')
+    .map((e) => ({ oid: e.oid, subject: e.subject, files: e.files.length, scope: e.scope, trailer: e.trailer }));
+
   const tasks = events
     .filter((e): e is Extract<SessionEvent, { type: 'user.message' }> => e.type === 'user.message')
     .map((e) => e.text);
@@ -289,6 +295,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     commands,
     approvals,
     undos,
+    gitCommits,
     integrity: {
       truncatedTail: input.truncatedTail ?? false,
       ...(input.corruptAt ? { corruptAt: input.corruptAt } : {}),
@@ -380,6 +387,14 @@ function renderMarkdown(r: ReportJson): string {
   if (r.approvals.length > 0) {
     L.push(`## Approvals`);
     for (const a of r.approvals) L.push(`- ${a.callId}: ${a.decision} (${a.scope}, by ${a.source})`);
+    L.push('');
+  }
+
+  if (r.gitCommits.length > 0) {
+    L.push(`## Commits (user-commanded)`);
+    for (const c of r.gitCommits) {
+      L.push(`- ${c.oid.slice(0, 12)} "${c.subject}" — ${c.files} file(s), scope: ${c.scope}${c.trailer ? '' : ', no trailer'}`);
+    }
     L.push('');
   }
 

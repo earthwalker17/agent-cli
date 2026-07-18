@@ -126,7 +126,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   });
 
   const pendingNotes: string[] = [];
-  const commandCtx: CommandContext = { session, renderer, modelOut: streams.modelOut, pendingNotes };
+  const commandCtx: CommandContext = { session, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => io.question(q) };
   let exitCode = 0;
   let consecutiveInterrupts = 0;
 
