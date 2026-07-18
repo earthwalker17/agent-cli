@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI V0.4 is actually built. This describes the implemented system, not aspirations —
+How Agent CLI V0.5 is actually built. This describes the implemented system, not aspirations —
 see `ROADMAP.md` for what is deferred.
 
 ## Shape
@@ -8,9 +8,10 @@ see `ROADMAP.md` for what is deferred.
 A modular monolith in TypeScript (strict, ESM, Node 22). One runtime function (`runTurn`) drives
 the agent loop; both interfaces — the one-shot CLI and the interactive REPL — are thin consumers
 of the same runtime (no parallel execution path). Data is plain JSON-serializable discriminated
-unions; classes appear only where state genuinely lives (`EventLog`, `SnapshotStore`). Three
+unions; classes appear only where state genuinely lives (`EventLog`, `SnapshotStore`). Five
 runtime dependencies: `@anthropic-ai/sdk`, `zod` (v4, one schema source per tool), `ignore`
-(gitignore), plus `undici` for the proxy transport.
+(gitignore fallback walker), `undici` (proxy transport), and `diff` (jsdiff — line diffs for
+review evidence).
 
 ```
 src/
@@ -20,6 +21,7 @@ src/
     hash.ts                sha256, the single truncation contract, HMAC secret redaction.
     pathutil.ts            caseFold + isInside (trailing-separator boundary containment).
     text.ts                sanitizeLine — escapes bidi/zero-width/control chars for display.
+    diff.ts                jsdiff wrapper: lineDiffStat, unifiedDiff, shared binary/size guards.
     errors.ts              Typed error classes (branch on class, never on message).
   policy/
     paths.ts               validatePath — Windows-first boundary/hard-reject gate (+ config-declared
@@ -38,6 +40,14 @@ src/
                            bounded liveness probes) + isAlive.
     run.ts                 runManaged — the managed-subprocess runner: structured ExecOutcome,
                            kill/drain state machine, head+tail capped capture. Policy- and log-free.
+  git/
+    types.ts               GitFacts / GitResult / porcelain contracts (harness capability, NOT tools).
+    client.ts              runGit over runManaged: absolute-path git, fsmonitor off, optional-locks
+                           off, GIT_* scrub, no prompts/stdin, bounded timeouts (see "GitOps").
+    facts.ts               detectGitFacts — the session-start probe; explicit nulls on every degrade.
+    porcelain.ts           Pure `status --porcelain=v2 -z` parser (NUL records, rename pairs).
+    commit.ts              prepareCommit/performCommit/runCommitFlow — the deliberate-commit flow.
+    checkpoint.ts          create/list/prune + planRestore/runRestoreFlow — hidden-ref checkpoints.
   sandbox/
     types.ts               SandboxBackend + EnforcementFacts contracts (re-exports ExecSandbox).
     bootstrap.ts           The versioned PowerShell + inline-C# (Add-Type P/Invoke) Low-IL host script.
@@ -57,6 +67,7 @@ src/
   runtime/
     session.ts             startSession / runTurn (abortable) / resumeSession / reconstruct /
                            repairDanglingToolUses / endSession.
+    elision.ts             elideHistory — pure, monotone wire-history budget (see "Context budget").
     approvals.ts           auto-deny, dangerous, and interactive approvers (injectable io).
     undo.ts                applyUndo (last / all) over the recorded mutations.
   trust/
@@ -72,11 +83,17 @@ src/
     format.ts              Glyph/color tables (ASCII fallback for legacy consoles), pure labels.
     commands.ts            /help /status /undo /report /map /quit over the live log.
   workspace/
-    map.ts                 Bounded, gitignore-aware workspace map + digest.
-    system-prompt.ts       System prompt: honesty statement, no-git-unless-asked rule, the map.
-  report/report.ts         Pure Event[] → { md, json } evidence report.
+    map.ts                 Bounded workspace map + digest: `git ls-files` in trusted repos (nested
+                           gitignore correct), pure walker fallback (and always pre-trust).
+    system-prompt.ts       System prompt: honesty statement, git context + VCS-mutation prohibition
+                           (in-repo) or the original no-git rule (non-repo), the map.
+  report/
+    report.ts              Pure Event[] → { md, json } evidence report.
+    diff.ts                buildSessionDiff/renderSessionDiff — attributable session change review
+                           (+ sessionMutationState, the single attribution source for /diff and /commit).
   cli/
-    index.ts               parseArgs dispatch: REPL / run / resume / undo / report / sessions / map / trust.
+    index.ts               parseArgs dispatch: REPL / run / resume / undo / diff / commit /
+                           checkpoint / report / sessions / map / trust.
     context.ts             buildRunContext — the ONE session-assembly path both interfaces share;
                            mode precedence --no-input > --interactive > isTTY.
     trust-check.ts         The CLI-side trust gate (prompt only on a real TTY).
@@ -88,17 +105,21 @@ For every session-starting command (one-shot and REPL), the order is:
 workspace realpath → **state-root-inside-workspace refusal** (also checked in `ensureTrusted`,
 so a folder cannot plant a `trust.json` that grants itself consent) → **trust gate** → config
 load (the workspace file is untrusted bytes until trust passes) → per-project state creation →
-**sandbox select + probe** (`selectSandbox` then `ensureAvailable`, before the first turn so the
-banner, `sandbox.status` event, and system prompt report the *probed* truth) → workspace map →
-provider. Read-only commands (`report`/`sessions`/`undo`/`map`) are ungated and never create state
-dirs; `map` reads workspace bytes but sends nothing to a model (documented exception).
+**sandbox select + probe** → **git probe** (`detectGitFacts`, post-trust — it executes git
+against the repo) → workspace map (git-backed in a repo, walker otherwise) → provider. The
+probed truths feed the banner, the `sandbox.status`/`git.context` events, and the system prompt.
+Read-only commands (`report`/`sessions`/`undo`/`diff`/`map`) are ungated, never create state
+dirs, and never run git; `agent commit`/`agent checkpoint` ARE trust-gated (they execute repo
+hooks / write `.git`); `map` reads workspace bytes but sends nothing to a model (documented
+exception) and deliberately keeps the pure walker pre-trust.
 
 ## The core loop (`runtime/session.ts`)
 
 `runTurn(session, userText, { signal? })` appends a `user.message`, then loops up to `maxSteps`:
 
-1. Build a `ProviderRequest` (system prompt, full message history, tool schemas derived from the
-   tools' zod schemas) and call `provider.complete(req, onText)`. Text deltas stream to `onText`.
+1. Build a `ProviderRequest` — system prompt, the **elided view** of the message history (see
+   "Context budget"), tool schemas derived from the tools' zod schemas — and call
+   `provider.complete(req, onText)`. Text deltas stream to `onText`.
 2. Record `assistant.message` with **structured** content (text + each tool_use's id/name/input)
    so resume is faithful. Push the assistant turn onto the history.
 3. If the model stopped for tool use, process each tool_use block **sequentially** through
@@ -133,6 +154,20 @@ exec substrate, which tree-kills, verifies, drains bounded, and reports `termina
 — distinct evidence from `turn.aborted` (process vs turn). `'interrupted by user'` remains
 reserved for calls that never spawned. The one-shot CLI path wires SIGINT to the same signal
 (`installSigintAbort`: first press aborts, second force-exits).
+
+## Context budget (`runtime/elision.ts`)
+
+The full conversation is resent every step; old tool outputs are the bulk. `elideHistory` is a
+PURE function recomputed per request: when the RAW history size crosses ~400k chars, the oldest
+tool_result contents are replaced with a marker (char count + sha256 + a pointer to the evidence
+log) until the sent size is ≤ ~200k. The boundary is a function of the raw size — which only
+grows — so the elided set only advances (no oscillation, no stored state, identical
+re-derivation on resume, up to secret-redaction differences in replayed outputs). Only
+tool_result CONTENT is replaced: tool_use/result pairing (API validity), assistant text, user
+messages, and the last 4 assistant steps are untouched; outputs smaller than their marker are
+skipped. `session.messages` and the log are NEVER mutated; an additive `context.compacted`
+event records exactly which outputs the model can no longer see (rendered live, with a warning
+when even full elision exceeds the target — assistant/user text is deliberately not compacted).
 
 ## Managed execution (`exec/`)
 
@@ -308,6 +343,55 @@ reported truthfully; the runtime never assumes enforcement from the platform nam
   an auto-run command and an identity wrap for an approved one. `run_command` applies
   `ctx.sandbox.wrap` unconditionally and records the actual boundary in `command.started.sandbox`.
 
+## GitOps (`git/`) — a harness capability, never a model tool
+
+Git serves review, delivery, recovery, and context — it does not replace the snapshot system,
+and the model cannot reach it. **Why it must not be a tool:** `decide()` classifies a tool with
+no `command()`, a null `mutates()`, and no reads as `observe`/auto-allow — a "git_commit" tool
+of that shape would commit with NO approval (pinned by a policy regression test + a TOOLS
+registry guard). The model keeps `run_command`: read-only git auto-runs inside the sandbox,
+mutations ask, and work-discarding forms (`restore`, `checkout --`, `reset --hard`, `clean`,
+`stash drop|clear`, `push --force*`) are labeled destructive.
+
+**Consent contract** (the `/undo` precedent, explicit): user-typed commands ARE the consent,
+under three conditions — (a) every mutating flow previews and interactively confirms
+(non-interactive requires `--yes`); (b) every operation appends a provenance event
+(`git.commit` / `git.checkpoint` / `git.restore`); (c) `GitClient` is structurally unreachable
+from the model.
+
+**Hardening on every invocation** (`client.ts`): git resolved to an ABSOLUTE path by scanning
+PATH directly — a bare name resolves against the child cwd on Windows, so a `git.exe` planted in
+a workspace must never execute (relative PATH entries skipped; `.cmd`/`.bat` shims rejected);
+`-c core.fsmonitor=false` (a repo's own config must not start a daemon — the malicious-repo RCE
+vector); `GIT_OPTIONAL_LOCKS=0` (a probe never rewrites the user's index); `GIT_TERMINAL_PROMPT=0`
+and no stdin; repo-targeting `GIT_*` env scrubbed; bounded timeouts (a probe degrades honestly,
+never hangs a session). Parsed output is always `-z`/porcelain-v2.
+
+**Deliberate commits** (`commit.ts`): default scope stages ONLY session-attributed paths —
+`sessionMutationState` over `file.mutated` events (undo folded in) intersected with
+`git status --untracked-files=all`, so every stage pathspec provably exists in git's view.
+Blockers where attribution would corrupt: missing identity (never set for the user), pre-staged
+index in session scope. Warnings: externally-modified session files; unattributable
+`run_command` effects (`--all` includes everything deliberately). Ordinary `add` + `commit -F
+<state-dir file>`: hooks run, failures are honest, staged state is stated. Message carries a
+`Session:` line + `Co-authored-by: Agent CLI <agent-cli@localhost>` (disableable).
+
+**Checkpoints** (`checkpoint.ts`): plumbing against a temp `GIT_INDEX_FILE` under the state dir
+(read-tree HEAD → add -A → write-tree → commit-tree → `refs/agent-cli/checkpoints/<session>/<n>`);
+the user-visible git state is byte-identical before/after (tested), unborn repos use the empty
+tree with no parent, plumbing identity is explicit env, gitignored files are never swept, and a
+large untracked set requires confirmation. Honesty: **low-pollution, not zero** — loose objects
++ hidden refs are written; `prune` deletes refs so gc can collect. **Restore**: affected set =
+`diff-tree(current-temp-tree, checkpoint)` filtered to the workspace prefix (a moved HEAD makes
+outside-subtree files differ — those are never touched), INCLUDING deleting files the checkpoint
+predates; content materializes via a second temp index + `checkout-index --prefix` staging
+(binary-safe, git-native worktree form under the repo's filters); all current bytes snapshot
+FIRST under one synthetic callId, so the whole restore is a single `applyUndo('last')` unit.
+`git restore`/`git checkout` are never run against the user's worktree.
+
+**Future isolation seam:** everything is repoRoot/workspace-scoped with no globals — a worktree
+(Session 7+) is just another `GitClient`/`CheckpointContext` instance over its own path.
+
 ## Event log (`store/event-log.ts`)
 
 One JSON object per line at `<state>/projects/<slug>/sessions/<id>.jsonl`, written synchronously.
@@ -323,20 +407,26 @@ lock-free, never-throwing reader for the report and session listing.
 Event schema stays v1; V0.2 added three additive event types (`turn.aborted {phase}`,
 `trust.verified {source}`, `config.loaded {sources}`), V0.3 added `command.started {callId, pid,
 shell, cwd, timeoutMs}` (actual spawn — execution evidence, distinct from `tool.requested`) and
-`command.ended {callId, termination, exitCode|null, durationMs, killDetail?, drainTimedOut?}`, and
-V0.4 adds `sandbox.status {mode, enforced, summary, confines, doesNotConfine, detail}` (the probed
-boundary for the session) plus an additive `sandbox` field on `command.started` (the boundary that
-command actually ran under). Additive types/fields are lenient-reader-safe; bumping the version
-would lock old binaries out of new logs, so v stays 1.
+`command.ended {callId, termination, exitCode|null, durationMs, killDetail?, drainTimedOut?}`,
+V0.4 adds `sandbox.status {mode, enforced, summary, confines, doesNotConfine, detail}` plus an
+additive `sandbox` field on `command.started`, and V0.5 adds `git.context` (the probed repo
+state), `git.commit`, `git.checkpoint`, `git.restore` (user-commanded git provenance),
+`context.compacted` (which tool outputs the wire history elided), additive
+`file.mutated.linesAdded/linesRemoved` (write-time diffstat), and additive
+`usage.cacheRead/CreationInputTokens` on `assistant.message`. Additive types/fields are
+lenient-reader-safe; bumping the version would lock old binaries out of new logs, so v stays 1.
 
 ## Recovery (`store/snapshots.ts`, `runtime/undo.ts`)
 
 Pre-mutation file bytes are stored content-addressed at `<state>/…/objects/<sha256>` (no git
-dependency). `SnapshotStore.restore` verifies the file still holds the recorded post-mutation
-hash and **refuses drifted files** rather than clobber them (no force in V0.1). `applyUndo`
-reverts the last mutating action or all of them in reverse order, chaining a multiply-edited file
-back to its original bytes, and removes directories the mutation created if now empty. Every undo
-is appended as `undo.applied`; the log is never rewritten.
+dependency — undo works with no repository present). `SnapshotStore.restore` verifies the file
+still holds the recorded post-mutation hash and **refuses drifted files** rather than clobber
+them (no force in V0.1). `applyUndo` reverts the last mutating action or all of them in reverse
+order, chaining a multiply-edited file back to its original bytes, and removes directories the
+mutation created if now empty. Every undo is appended as `undo.applied`; the log is never
+rewritten. Git checkpoints LAYER ON TOP: a checkpoint restore snapshots current bytes first and
+records ordinary `file.mutated` events under one synthetic callId, so it is itself one undoable
+unit of this same machinery — git never becomes the undo mechanism.
 
 ## Resume (`runtime/session.ts` → `reconstruct`)
 
@@ -363,7 +453,14 @@ completion renders `STARTED but never completed … effects unknown` (plus hones
 the derivation stays anchored on `tool.requested`+`tool.completed`, with command events as
 enrichment only. Each command carries its actual boundary marker (`[sandboxed: windows-lowil]` /
 `[unsandboxed]`), and a header block renders the session's `sandbox.status` — mode, whether it was
-ENFORCED, and the verbatim `confines`/`doesNotConfine` scope. A log without
+ENFORCED, and the verbatim `confines`/`doesNotConfine` scope — plus the probed `git.context`
+line ("at session start", never live state). V0.5 adds a `+n/−m` churn column per changed file
+(summed from write-time `file.mutated` diffstat evidence, so the report stays a pure event
+function) and, when present, "Commits (user-commanded)", "Checkpoints", and "Checkpoint
+restores" sections from the git provenance events. The reviewable CONTENT lives in a separate
+surface: `report/diff.ts` builds the attributable session diff (first pre-image blob → current
+disk bytes per session-mutated path, undo folded in, external edits flagged DRIFTED), rendered
+by `/diff` and `agent diff` with per-line sanitization. A log without
 `session.ended` renders as "IN PROGRESS or CRASHED/UNKNOWN" (the in-session `/report` is the
 in-progress case). The report always states that assistant narrative is not evidence and the
 footer is mode-aware: it explains what a `[sandboxed]` command was OS-prevented from doing (and
@@ -382,6 +479,14 @@ abort signal through as the SDK request signal), maps messages/blocks/stop-reaso
 consecutive user messages), and omits the `thinking` parameter to avoid the thinking-block
 round-trip a tool-use loop would otherwise have to preserve. It contains no networking logic —
 it obtains a `fetch` from the transport factory and passes it to the SDK client.
+
+**Prompt caching (V0.5):** `buildApiParams` is a pure, unit-tested request builder with two
+ephemeral `cache_control` breakpoints — the system block (tools+system = the stable prefix) and
+a MOVING one on the final content block of the final wire message, attached AFTER coalescing (a
+pre-attached marker could land mid-merged-message and silently cache a shorter prefix). Each
+step re-reads the prior conversation from cache; the pipeline order is fixed as elide →
+coalesce → cache-mark. Cache accounting flows as additive Usage fields into events, `/status`,
+and the report (live evidence: a 3-step session billing 6 uncached input tokens).
 
 ## Networking (`net/transport.ts`)
 

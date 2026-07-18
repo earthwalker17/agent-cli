@@ -7,15 +7,20 @@ file changes, resumes across runs, and produces a deterministic evidence report.
 **interactive REPL**, a **workspace-trust consent gate**, and **narrowing-only policy
 configuration**. V0.3 added a **managed execution kernel** — real mid-command cancellation, typed
 termination (a killed command has no exit code), best-effort tree kill, and command-lifecycle
-evidence. V0.4 adds a **genuinely OS-enforced Windows sandbox** (Low integrity + Job Object) and
+evidence. V0.4 added a **genuinely OS-enforced Windows sandbox** (Low integrity + Job Object) and
 **automatic command review**: demonstrably read-only commands auto-run *inside* the sandbox, and
 everything else asks — a single default, fail-closed, backed by enforcement rather than the
-model's opinion.
+model's opinion. V0.5 makes the harness **Git-native and context-efficient**: probed repository
+context, an attributable session diff (`/diff`), deliberate session-scoped commits (`/commit`),
+hidden-ref recovery checkpoints with undoable restore (`/checkpoint`), prompt caching, and
+deterministic long-session history compaction — the agent itself still never touches version
+control unless you explicitly ask.
 
-> **Status:** core loop + interactive experience + execution kernel + enforced Windows isolation,
-> complete and tested (322 tests incl. real-OS sandbox and adversarial-review suites, plus live
-> end-to-end against the real API). This is an open, build-in-public engineering effort — see
-> `PROJECT.md` for the thesis and `ROADMAP.md` for what is done, deferred, and next.
+> **Status:** core loop + interactive experience + execution kernel + enforced Windows isolation
+> + GitOps layer, complete and tested (398 tests incl. real-OS sandbox, real-repository git, and
+> adversarial-review suites, plus live end-to-end against the real API). This is an open,
+> build-in-public engineering effort — see `PROJECT.md` for the thesis and `ROADMAP.md` for what
+> is done, deferred, and next.
 
 ## Install
 
@@ -53,8 +58,12 @@ agent session 20260715-101730-5d56
 - **Ctrl+C** interrupts the running turn (pending tool calls are skipped and recorded as
   interrupted); at the idle prompt press it twice to quit. **Ctrl+D** on an empty line quits.
 - **Slash commands:** `/help`, `/status`, `/undo [all]` (in-session undo; the model is told via
-  a delimited harness note), `/report`, `/map`, `/quit`.
-- A running `run_command` is NOT interruptible — the abort takes effect at the next boundary.
+  a delimited harness note), `/diff` (what this session changed, as a unified diff),
+  `/commit [-m "msg"] [--all]` (deliver session changes — preview + confirmation),
+  `/checkpoint [label | list | restore <n>]` (recovery points in hidden git refs),
+  `/report`, `/map`, `/quit`.
+- A running `run_command` IS interruptible: Ctrl+C tree-kills it (best effort, verified) and the
+  kill is recorded as evidence — a killed command never reads as a passing check.
 - stdout carries only model text and requested artifacts; all status chrome goes to stderr, so
   `agent --interactive < script > transcript.txt` captures a clean transcript.
 - `agent --continue` (no task) resumes the latest session interactively; `agent resume <id>`
@@ -67,6 +76,13 @@ agent "<task>"                 # run a one-shot task in the current directory
 agent --continue "<task>"      # resume the latest session with a follow-up
 agent resume <id> "<task>"     # resume a specific session
 agent undo [--all]             # undo the last file change (or all) of a session
+agent diff [<id>]              # what a session changed, as a unified diff (default: latest)
+agent commit [-m "msg"]        # commit session-attributed changes (preview + confirmation;
+                               #   --all = everything in the workspace; --yes for non-TTY;
+                               #   --no-trailer omits the Co-authored-by trailer)
+agent checkpoint [label]       # capture the workspace to a hidden git ref (recovery point)
+agent checkpoint list|prune    # list checkpoints / delete refs so git gc can collect them
+agent checkpoint restore <n>   # return to a checkpoint — snapshot-first, undoable via agent undo
 agent report [<id>] [--json]   # print the evidence report (default: latest session)
 agent sessions                 # list this workspace's sessions
 agent map [--budget <n>]       # print the workspace map the model would receive
@@ -112,10 +128,17 @@ merges as a union across layers.
 
 ## What the agent can do
 
-Six typed tools: `read_file`, `list_files`, `search`, `write_file`, `edit_file`, `run_command`.
+Six typed tools: `read_file` (with line paging for large files), `list_files`, `search`,
+`write_file`, `edit_file` (exact-match replace, optionally `replace_all`), `run_command`.
 Every call passes through the policy engine before it runs. Reads and searches inside the
 workspace run automatically; in-workspace writes run automatically **and are snapshotted so they
 can be undone**; reads outside the workspace or of secret-looking files require approval.
+
+Long sessions stay affordable: requests use **prompt caching** (the conversation prefix is
+re-read from cache each step; `/status` and the report show cache read/write tokens), and when
+the history grows very large the oldest tool outputs are **deterministically elided** from the
+wire — replaced by a hash-stamped marker; the full output always remains in the evidence log,
+and a `context.compacted` event records exactly what the model can no longer see.
 
 Shell commands go through **automatic review** (the single default — there is no permission
 "mode" to pick). A deterministic analyzer decides, over the command text alone (never the model's
@@ -126,6 +149,32 @@ sandbox so a misjudgment can't do damage. Everything else — writes, installs, 
 with pipes/redirection/encoding/chaining, an unrecognized program, or a path that escapes the
 workspace — **requires approval**. A few catastrophic forms are hard-denied outright. Where no
 enforced sandbox is available, auto-run is **disabled** and every command asks (fail closed).
+
+## Git integration
+
+Git is a **user surface, not a model tool**. In a repository, the session banner and system
+prompt carry the probed context (branch, HEAD, dirty count), the model may inspect state with
+read-only git commands, and it is told to never stage/commit/modify VCS state unless you
+explicitly ask. Everything deliberate is yours:
+
+- **`/diff` · `agent diff`** — exactly what the session's file tools changed, as unified diffs
+  from the recorded pre-images (works without git too). Files you edited afterwards are flagged
+  DRIFTED; `run_command` side effects are, honestly, not tracked here.
+- **`/commit` · `agent commit`** — by default stages **only session-attributed files** (your own
+  unrelated edits stay out; `--all` is the deliberate opt-in), previews with attribution marks,
+  refuses when the index already has staged work or identity is unset (it never sets identity),
+  runs your hooks, and writes a `Session:` line + `Co-authored-by: Agent CLI` trailer.
+- **`/checkpoint` · `agent checkpoint`** — a point-in-time capture of the workspace into a
+  hidden ref (`refs/agent-cli/checkpoints/…`): your index, HEAD, branches, and log are untouched
+  (low-pollution, not zero: loose objects and the hidden refs are written; `prune` releases them
+  to gc). `restore <n>` returns the workspace subtree to the checkpoint — including deleting
+  files created after it — with every current byte snapshotted first, so the restore itself is
+  one `agent undo` away from being reverted. Recovery order stays: snapshots for undo,
+  checkpoints for bigger jumps, your own git history for delivery.
+
+One consent note: git operations you invoke honor the **trusted repository's own config and
+hooks** (that is what makes commits real); the harness disables only the pieces that would run
+code from a repo *implicitly* (fsmonitor) and never lets the model reach these flows.
 
 ## Security model & honest limitations
 

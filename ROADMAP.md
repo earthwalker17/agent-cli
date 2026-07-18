@@ -5,6 +5,141 @@ compressed under **Earlier Milestones** (per the rolling-docs policy in `CLAUDE.
 
 ---
 
+## Session 6 (2026-07-18) — V0.5: Git-native, reviewable, context-efficient
+
+### Objective
+
+BLUEPRINT Session 6: make Agent CLI Git-native, reviewable, and context-efficient without
+replacing the snapshot system, polluting user history, or breaking the no-git-unless-asked rule.
+Planned via a 3-Explore + 1-Plan-agent recon (repo seams, state/evidence, tests/gaps) plus
+targeted external research; the Plan-agent critique caught two critical design flaws before any
+code (a workspace-planted `git.exe` would have executed unsandboxed at startup; the elision
+trigger as first specified oscillated between requests). Key negative reference: **Codex ghost
+commits were removed upstream (Apr 2026)** after untracked-file sweeps, session bloat, and a
+`git restore` data-loss incident — so git here is a review/delivery/recovery layer, never the
+undo mechanism, and nothing auto-commits.
+
+### What was implemented (10 feature commits + 1 fix)
+
+1. **`feat(git)` substrate** — `src/git/{client,facts,porcelain,types}.ts`: every harness git
+   invocation runs through `runManaged` with an ABSOLUTE git path (PATH scanned directly; bare
+   names resolve against child cwd on Windows — a planted `git.exe` must never execute; `.cmd`
+   shims rejected), `-c core.fsmonitor=false` (malicious-repo config RCE), `GIT_OPTIONAL_LOCKS=0`
+   (probes never rewrite the user index), `GIT_TERMINAL_PROMPT=0` + no stdin, scrubbed
+   repo-targeting `GIT_*` inheritance, bounded timeouts. `detectGitFacts` degrades honestly
+   (git absent / not a repo / probe timeout ⇒ explicit nulls). Porcelain-v2 `-z` parser (pure).
+2. **`feat(runtime,ux)` session git context** — both interfaces probe at assembly → additive
+   `git.context` event; REPL banner + `/status` ("at session start"); report header; system
+   prompt states the repo context in-repo and KEEPS the mutation prohibition (non-repo keeps the
+   old rule verbatim). Policy: `git restore`/`checkout --`/`stash drop|clear`/`push --force*`
+   now label destructive; a REGRESSION test documents that a command-less mutation-less tool
+   auto-allows as observe — why GitClient must never be tool-wrapped (registry guard test).
+3. **`feat(provider)` prompt caching** — pure `buildApiParams`: `cache_control` on the system
+   block + a MOVING breakpoint on the final wire block, attached AFTER coalescing; additive
+   `Usage.cacheRead/CreationInputTokens` (SDK null → 0) through events, `/status`, report.
+4. **`feat(runtime)` deterministic elision** — pure per-request `elideHistory`: boundary is a
+   function of the RAW (only-growing) size ⇒ monotone, no oscillation, no stored state,
+   identical re-derivation on resume; oldest tool_result contents → marker (count+sha+log
+   pointer); last 4 steps protected; pairing preserved; `session.messages`/log never mutated;
+   additive `context.compacted` event (+ live render, exhausted warning).
+5. **`feat(workspace)` git-backed map** — `git ls-files --cached --others --exclude-standard -z`
+   in trusted repos (nested .gitignore correct — walker regression-proven wrong; deleted-tracked
+   subtracted; builtin excludes kept; subtree scoping); walker fallback unchanged. Pre-trust
+   `agent map` deliberately stays on the pure walker (running git against an untrusted `.git`
+   is an attack surface the read-only exception must not take on).
+6. **`feat(tools)` editing precision** — `edit_file.replace_all` (+ occurrence-count refusal
+   naming the flag; empty old_string rejected); `read_file.offset/limit` line paging with a
+   labeled window.
+7. **`feat(review)` attributable session diff** — runtime dep #5 `diff` (jsdiff) wrapped once
+   (binary NUL-8KiB + 1 MiB guards); additive `file.mutated.linesAdded/Removed` computed at
+   write time (report stays pure; +n/−m churn column); `buildSessionDiff`: first pre-image blob
+   → current disk per attributed path, undo folded in (net-unchanged), external edits flagged
+   DRIFTED; surfaced as `/diff` + `agent diff` (sanitized untrusted bytes).
+8. **`feat(git)` deliberate commits** — `/commit [-m] [--all] [--no-trailer]` + trust-gated
+   `agent commit [--yes]`. Session scope stages ONLY attributed paths (status∩attribution with
+   `--untracked-files=all` — collapsed new dirs could never match otherwise); blockers where
+   attribution would corrupt (missing identity — never set for the user; pre-staged index in
+   session scope); drift + unattributable-command-effects warnings; ordinary add + `commit -F
+   <state file>` (hooks run; failures honest, staged state stated); Session line +
+   `Co-authored-by: Agent CLI` trailer; unborn-HEAD + nested-workspace proven; `git.commit`
+   event → render/report/harness-note.
+9. **`feat(git)` checkpoints + restore** — `/checkpoint [label|list|restore <n>]` + trust-gated
+   CLI. Create: temp `GIT_INDEX_FILE` plumbing (read-tree HEAD → add -A → write-tree →
+   commit-tree → `refs/agent-cli/checkpoints/<sessionId>/<n>`), user-visible git state proven
+   BYTE-IDENTICAL before/after; unborn = empty-tree base, no parent; explicit plumbing identity
+   env (user identity never required); gitignored files never swept (regression); >200 untracked
+   requires confirmation; "low-pollution, not zero" wording + prune. Restore: affected set =
+   `diff-tree(current-temp-tree, checkpoint)` filtered to the workspace prefix (moved-HEAD
+   outside-subtree files proven untouched), DELETES checkpoint-postdating files, content via
+   second temp index + `checkout-index --prefix` staging (binary-safe, filter-correct worktree
+   form), snapshot-first under ONE synthetic callId ⇒ one `applyUndo('last')` unit (round-trip
+   proven), `git.restore` event, never invokes `git restore`/`checkout` on the user worktree.
+
+### Verification evidence
+
+- **Gate:** `npm run typecheck` + `npm run build` clean per stage; `npm test` **398 passed,
+  1 skipped** across 31 files (was 321+1; **+77**), including 40+ real-temp-repo git tests with
+  host git config isolated (a global `core.autocrlf=true` legitimately canonicalizes LF
+  fixtures — machine-dependent assertions removed).
+- **Scripted REPL E2E** (built binary, piped `--interactive`, mock provider, real temp repo):
+  banner shows `git: branch main @ …`; task writes a file; `/diff` prints the unified diff;
+  `/commit -m …` previews `?? hello.txt [session]`, confirms, commits; `git log` shows the
+  message + `Session:` line + trailer; `/report` renders the git header, `+1/−0` diffstat, and
+  the Commits section; working tree clean after.
+- **CLI round trip** (built binary): `agent diff` → `agent checkpoint pre-change` → external
+  user edit → `agent checkpoint restore 1 --yes` (file back to checkpoint content) →
+  `agent undo` (file back to the user's edit). Recovery layering works end to end.
+- **Live API E2E** (real `claude-opus-4-8` through the system proxy, temp repo): the model saw
+  the git context line, created `greet.js`, adapted when its verification command auto-denied
+  (`--no-input`, exit 2 by design); `agent commit --yes` delivered it; report correct.
+  **Prompt caching live:** the session's tokens line reads `6 in / 292 out (cache: 5481 read /
+  2904 written)` — the whole multi-step conversation re-read from cache, ~6 uncached input
+  tokens total.
+
+### Decisions (and why)
+
+- **Git is a harness capability, never a model tool.** A command-less, mutation-less tool would
+  auto-allow as `observe` (the engine has no branch for it) — a "git_commit tool" would commit
+  with NO approval. The model keeps run_command (read-only git auto-runs sandboxed; mutations
+  ask); users get deliberate `/commit`, `/diff`, `/checkpoint`.
+- **The /undo consent precedent, made explicit:** user-typed commands ARE the consent, under
+  three recorded contract conditions — preview+confirm on every mutating flow (`--yes` for
+  non-TTY), a provenance event per operation, GitClient structurally unreachable from the model.
+- **Snapshots stay the undo substrate; git layers on top.** Checkpoint restore goes THROUGH
+  SnapshotStore (snapshot-first, one callId) so it is undoable by the existing machinery — git
+  never becomes the undo mechanism (the Codex lesson).
+- **Elision boundary on RAW size** — monotone because raw only grows; recompute-per-request
+  stays deterministic across resume with zero stored state; hysteresis makes each advance the
+  only cache invalidation.
+- **Session-scope commit staging from status∩attribution** — every stage pathspec provably
+  exists in git's view (deleted-tracked appear as D entries; ignored/vanished never appear), so
+  the pathspec-error class is structurally gone.
+
+### Open issues / not verified
+
+- The attribution set structurally UNDER-claims: approved `run_command` file effects are not
+  attributable (by design) — the /commit preview says so and `--all` exists; a future
+  worktree/FS-watch layer could close it.
+- Restore materializes the git-native worktree form: a file stored in non-canonical form (LF on
+  disk under `autocrlf=true`) comes back canonicalized — the same lossy round-trip git itself
+  has (documented in the contract comment).
+- Elision bounds tool outputs only; assistant/user text grows unbounded (loud warning when even
+  full elision exceeds the target). Model-generated compaction remains future work.
+- Auto-run sandboxed `git status/diff` still pays the ~1.2 s Add-Type host start (S5 issue) —
+  the git-native workflow makes the cached-host optimization more valuable.
+- `agent commit`/`checkpoint` need the session log lock — a session running elsewhere blocks
+  them (by design; commit from inside that REPL). Multi-repo workspaces and submodules are out
+  of scope (facts probe reports the containing repo only).
+
+### Recommended next step
+
+BLUEPRINT Session 7: task/subagent runtime primitives. The prerequisites this session added:
+repo-scoped GitClient (a worktree = another instance), per-session checkpoint namespaces,
+attributable evidence lineage, and wire-history budgeting for parallel contexts. Fold in the
+cached sandbox host if command latency starts to matter.
+
+---
+
 ## Session 5 (2026-07-18) — V0.4: enforced isolation + automatic command review
 
 ### Objective
@@ -112,145 +247,29 @@ Windows answer.
 
 ---
 
-## Session 4 (2026-07-17) — V0.3: execution kernel hardening
+## Earlier Milestones (Sessions 1–4 — compressed per the rolling-docs policy)
 
-### Objective
+### Session 4 (2026-07-17) — V0.3: execution kernel hardening
 
-BLUEPRINT Session 4: make shell execution explicit, controllable, observable, and composable —
-real mid-command cancellation, structured termination semantics, environment hygiene, and
-lifecycle evidence — without adding an OS sandbox (Session 5) and while preserving the single
-runtime, the single policy choke point, and the additive v1 event schema. The design followed a
-7-agent recon workflow (3 repo explorers + 4 reference researchers over OpenAI Codex CLI, Claude
-Code, OpenCode/Goose, and Node-on-Windows process internals) plus a Plan-agent design pass.
-
-### What was implemented (7 commits, one per verified stage)
-
-1. **`src/exec/` substrate** (policy-free, log-free; reusable for future workflow-pack renderer
-   processes): `env.ts` (child-env hygiene: case-insensitive dedupe, default drop of names
-   containing key/secret/token/password/credential, non-excludable core floor — never strip
-   `SystemRoot`/`windir` (WinError 10106) — proxy passthrough, `AGENT_CLI=1` marker), `kill.ts`
-   (verified best-effort tree kill: async `taskkill /T /F`, exit 0|128 both benign, bounded
-   liveness probes), `run.ts` (`runManaged` → typed `ExecOutcome`; kill/drain state machine:
-   settle on `'exit'`, race `'close'` against a bounded drain, destroy streams — fixes the
-   nodejs/node#21960-class hang where a surviving grandchild holding inherited pipes stalls the
-   outcome forever; head+tail byte-capped capture; stdin never connected).
-2. **`run_command` rebuilt on the substrate**: `CommandTermination` (`exited|timeout|aborted|
-   spawn-error`), killed commands have **no exit code** (was: timeout conflated with −1),
-   distinct model-facing message per termination path; `ToolContext` gained `signal`/`onOutput`/
-   `reportCommand` (all optional, additive).
-3. **Runtime cancellation + evidence**: per-call context binds the turn AbortSignal and
-   callId-bound evidence channels (a tool cannot forge another call's evidence); new additive
-   events `command.started {pid,…}` (actual spawn — execution ground truth) and `command.ended
-   {termination, exitCode|null, killDetail, drainTimedOut}`. The V0.2 limitation "a running
-   run_command is not interruptible" is gone.
-4. **Ctrl+C end-to-end**: REPL Ctrl+C now kills the running command (same signal path); the
-   one-shot CLI gained SIGINT wiring (`installSigintAbort`: first press aborts, second
-   force-exits). Live render-only command-output preview in the REPL (sanitized, rate-limited,
-   8 KiB display cap, `(pid N)` marker, honest kill lines).
-5. **Termination-aware report/resume**: killed commands render `killed: … no exit code`; a
-   `command.ended` kill vetoes CHECKED even against a stray exit-0; `command.started` without
-   completion renders `STARTED but never completed … effects unknown` (+ honesty footer); resume
-   replays an executing-at-crash command with an unknown-effects message.
-6. **Config + policy UX**: narrowing-only `envExcludePatterns` (both layers, lowercased union;
-   core floor structurally non-excludable); approval prompts present command class as a label —
-   `[shell command — labeled observe]` — closing Session 3's UX finding; system prompt + tool
-   description teach the model the new semantics (no stdin; secret-name env filtering; a killed
-   command is never evidence a check passed).
-
-### Verification evidence
-
-- Gate: `npm run typecheck` + `npm run build` clean; `npm test` **240 passed, 1 skipped** across
-  24 files (was 205+1; +35, including the tree-kill fixture with a *detached* grandchild — proving
-  our `taskkill /T` did the work, not libuv's job object — and the pipe-holding-grandchild drain
-  regression).
-- **Live E2E** (real `claude-opus-4-8` through the system proxy; isolated
-  `Desktop\agent-cli-e2e-s4` workspace + state):
-  - Run 1 (env hygiene): the model's approved command echoed the child env — output `K=;A=1;`
-    (API key stripped, harness marker present) while the agent itself still reached the API; the
-    approval prompt showed the new `[shell command — labeled observe]` header on camera.
-  - Run 2 (real interrupt): agent launched in its own hidden console; after `command.started`
-    (pid recorded in evidence) a **genuine console CTRL_C** was delivered via a sacrificial
-    `AttachConsole`+`GenerateConsoleCtrlEvent` helper. Observed: `interrupt: stopping the turn` →
-    `command.ended {termination:'aborted', exitCode:null, killDetail:'taskkill exit 0; probe:
-    dead'}` → spawned shell verified dead → `turn.aborted` → `session.ended user-quit`, exit 2;
-    the report renders `killed: aborted by user (1902 ms); no exit code` with the honesty footer.
-    This closes the one-shot half of Session 2's open Ctrl+C smoke with a real keystroke-level
-    signal.
-- Adversarial review: 4 finder lenses (safety / correctness / windows-io / test-honesty) →
-  19 findings, verified **by hand** against the source (the per-finding agent verifier fan-out was
-  aborted for cost and is now prohibited — see the cost lesson below and the new CLAUDE.md rule).
-  Five real defects fixed + regression-tested in commit `fix(exec,...)`:
-  1. **[high] drain-window relabel race** — a timeout/abort landing in the post-`exit`/pre-`close`
-     drain window (largest exactly in the pipe-holding-grandchild case) relabeled a genuinely
-     exited command as killed and nulled its real exit code; now `initiateKill` is guarded on
-     `exitFired` and the timeout/abort are disarmed at exit. New deterministic regression test.
-  2. **[med] POSIX env dedupe** dropped genuinely distinct vars (`http_proxy` vs `HTTP_PROXY`);
-     case-insensitive folding is now Windows-only.
-  3. **[med] multibyte seam** — `CappedCapture.text` decoded head/tail separately even when nothing
-     was truncated, corrupting a rune split across the seam; now decodes one contiguous buffer.
-  4. **[med] kill-honesty** — the model-facing message said "process tree force-killed" even when
-     the liveness probe reported STILL ALIVE; it now surfaces the actual `killDetail`.
-  5. **[low] never-spawned pre-abort** claimed a tree kill for a command that never spawned; the
-     message is now conditional on a kill having been attempted.
-  Remaining low findings (append-inside-spawn-listener robustness; live-preview per-chunk decode;
-  one-shot approval-prompt Ctrl+C) are noted below as not-yet-addressed.
-- Mid-session live validation of the premise: the session's own recon workflow hung for ~36
-  minutes on an in-flight API call with no timeout behind a `parallel()` barrier — precisely the
-  unkillable-in-flight-work failure class this session removed from `run_command`.
-
-### Decisions (and why)
-
-- **Force-kill only, labeled best-effort.** Research consensus (Codex, OpenCode, Node/libuv
-  internals): no graceful kill exists for console children from stock Node on Windows;
-  `taskkill /T` cannot reach grandchildren orphaned by a dead intermediate parent (Windows never
-  reparents); Job Objects are the only race-free tree kill but have no maintained Node binding.
-  So the code, messages, and docs say "best effort" — never "tree terminated".
-- **Never await `'close'` after a kill** — settle on `'exit'`, bounded drain (1500ms), destroy
-  streams, record `drainTimedOut` honestly (Goose's 500ms / Codex's 2s pattern).
-- **Killed commands have no exit code, everywhere.** The report additionally vetoes CHECKED on
-  kill evidence — defense in depth against a stray exit-0.
-- **Env hygiene is default-on** (stronger than Claude Code's opt-in scrub, mirroring Codex's
-  default excludes) with a structurally non-excludable functional floor; proxy variables pass
-  through (documented honest limitation, not a boundary claim).
-- **Evidence channels are callId-bound by the runtime**, so the capability contract grew without
-  creating a forgeable evidence path; live output is render-only (`onText`-parallel), the
-  persisted truth stays `tool.completed`.
-- **`'interrupted by user'` stays reserved for never-spawned calls**; `turn.aborted` (turn) and
-  `command.ended {termination:'aborted'}` (process) remain distinct facts.
-
-### Open issues / not verified
-
-- The REPL raw-mode **interactive** Ctrl+C keypress (readline 'SIGINT' on a real console) still
-  wants one quick manual smoke on Windows Terminal/conhost; the one-shot path is now proven with
-  a genuine CTRL_C, and io.ts's SIGINT path is unit-covered.
-- Grandchild survival when an intermediate parent dies first is structural (documented); a Job
-  Objects native helper would close it (deliberately out of scope this session).
-- Three low-severity review findings left unaddressed (small, non-load-bearing): `command.started`
-  append happens inside the child `'spawn'` listener (an append throw would surface as an
-  uncaughtException rather than a handled turn error); the live-output preview and `onOutput`
-  decode each pipe chunk independently (cosmetic U+FFFD on a multibyte split — render-only, the
-  persisted capture is now seam-safe); a one-shot Ctrl+C *during an interactive approval prompt*
-  is handled by the approver's own readline, not `installSigintAbort` (one-shot is normally
-  non-interactive/auto-deny, so this path is rare).
-- **Cost lesson (now a CLAUDE.md rule):** the adversarial-review workflow was authored with a
-  per-finding 3-verifier fan-out on top of 4 finders — 19 findings turned into ~57 verifier
-  agents and blew the session token budget before completing. The finders had already produced
-  all 19 findings and were salvaged from the workflow journal; verification was then done by hand.
-  Rule added: cap review workflows at ~a dozen agents, no per-finding verifier panels, verify by
-  hand by default, salvage journals before relaunching.
-
-### Recommended next step
-
-BLUEPRINT Session 5: **enforced isolation and honest safety modes**, research-first and
-Windows-first. Codex's native Windows sandbox (restricted tokens, ACLs, WFP; honest failure
-modes) and Anthropic's open-sourced sandbox-runtime are the reference points. V0.3's exec
-substrate is the natural seam: a sandbox backend would transform the `ExecSpec` (argv/env) at
-spawn time, and the mode must be reported truthfully (policy-and-approval-only where no
-enforcement exists).
-
----
-
-## Earlier Milestones (Sessions 1–3 — compressed per the rolling-docs policy)
+Managed exec substrate (`src/exec/`: env hygiene with a non-excludable core floor, verified
+best-effort tree kill, `runManaged` kill/drain state machine that never awaits `'close'`
+unconditionally — the nodejs/node#21960 grandchild-pipe hang class, regression-tested); real
+mid-command cancellation end-to-end (REPL + one-shot, proven with a genuine delivered console
+CTRL_C against the live API); typed termination — **a killed command has no exit code,
+everywhere**, and the report vetoes CHECKED on kill evidence; additive `command.started/ended`
+lifecycle events; Ctrl+C wiring + live render-only output preview. **Lasting decisions:**
+force-kill only, labeled best-effort (no graceful console kill from stock Node on Windows;
+`taskkill /T` cannot reach re-orphaned grandchildren — later closed by the S5 Job Object for
+sandboxed runs); `'interrupted by user'` reserved for never-spawned calls; env hygiene
+default-on with proxy passthrough documented as an honest limitation, not a boundary; evidence
+channels are callId-bound by the runtime so tools cannot forge another call's evidence.
+**Evidence:** 240 passed/1 skipped (+35); two live E2E runs (env-hygiene echo; keystroke-level
+CTRL_C interrupt with full evidence chain). **Cost lesson (now a CLAUDE.md rule):** a
+per-finding 3-verifier fan-out exploded (19 findings → ~57 agents) and was aborted; findings
+were salvaged from the workflow journal and verified BY HAND — review workflows stay bounded
+(~a dozen agents), no per-finding verifier panels. Three low-severity review findings remain
+open (append-inside-spawn-listener robustness; live-preview per-chunk decode; one-shot
+approval-prompt Ctrl+C path).
 
 ### Session 3 (2026-07-16) — Recorded live E2E demo + two defects it surfaced
 
@@ -324,10 +343,17 @@ sandbox" limitation is closed on Windows in S5 — writes only; reads/network re
 ## Deferred pool (accumulated, still open)
 
 Adaptive thinking with block preservation; per-action / `--to` / `--steps` undo; tree-sitter
-ranked repo map; network/web tools; MCP and workflow packs; SQLite index over the JSONL;
-conversation rewind; session pruning/sanitized export; prompt-history persistence + line-editing
-niceties; background/long-running process sessions; PTY support; output spill-to-file for huge
-command output. **Sandbox follow-ups (post-S5):** network-egress control and a read/confidentiality
-boundary (the two enforced gaps that most matter); a cached/compiled sandbox host to cut per-command
-Add-Type latency; macOS/Linux enforcement backends; containment of service-reparented work
-(schtasks/sc/wmic/BITS) that escapes the Job Object.
+ranked repo map with selective retrieval (S6 shipped the git-backed file LIST only); network/web
+tools; MCP and workflow packs; SQLite index over the JSONL; conversation rewind; session
+pruning/sanitized export; prompt-history persistence + line-editing niceties; background/
+long-running process sessions; PTY support; output spill-to-file for huge command output.
+**Git follow-ups (post-S6):** patch/multi-edit editing (replace_all + paging shipped; a
+diff/hunk apply format did not); model-generated commit messages; attribution of approved
+run_command file effects (structurally under-claimed today); isolated worktrees (S7 dependency);
+push/PR flows; submodule + multi-repo workspaces. **Context follow-ups (post-S6):** model-
+generated compaction of assistant/user text (deterministic tool-output elision shipped; loud
+warning when even full elision exceeds the target). **Sandbox follow-ups (post-S5):**
+network-egress control and a read/confidentiality boundary (the two enforced gaps that most
+matter); a cached/compiled sandbox host to cut per-command Add-Type latency (~1.2 s — more
+visible now that read-only git auto-runs are a hot path); macOS/Linux enforcement backends;
+containment of service-reparented work (schtasks/sc/wmic/BITS) that escapes the Job Object.
