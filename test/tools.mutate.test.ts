@@ -36,6 +36,27 @@ describe('edit_file', () => {
     expect(r.ok).toBe(true);
     expect(fs.readFileSync(path.join(tmp, 'f.txt'), 'utf8')).toBe('alpha BETA gamma');
   });
+  it('replace_all replaces every occurrence and reports the count', async () => {
+    fs.writeFileSync(path.join(tmp, 'f.txt'), 'x foo y foo z foo');
+    const r = await editFileTool.execute({ path: 'f.txt', old_string: 'foo', new_string: 'bar', replace_all: true }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain('3 replacements');
+    expect(fs.readFileSync(path.join(tmp, 'f.txt'), 'utf8')).toBe('x bar y bar z bar');
+  });
+  it('the non-unique failure reports the occurrence count and suggests replace_all', async () => {
+    fs.writeFileSync(path.join(tmp, 'f.txt'), 'dup dup');
+    const r = await editFileTool.execute({ path: 'f.txt', old_string: 'dup', new_string: 'D' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('occurs 2 times');
+    expect(r.error).toContain('replace_all');
+    expect(fs.readFileSync(path.join(tmp, 'f.txt'), 'utf8')).toBe('dup dup'); // untouched on failure
+  });
+  it('rejects an empty old_string', async () => {
+    fs.writeFileSync(path.join(tmp, 'f.txt'), 'abc');
+    const r = await editFileTool.execute({ path: 'f.txt', old_string: '', new_string: 'x' }, ctx);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('must not be empty');
+  });
   it('fails when old_string is absent', async () => {
     fs.writeFileSync(path.join(tmp, 'f.txt'), 'alpha');
     const r = await editFileTool.execute({ path: 'f.txt', old_string: 'zzz', new_string: 'x' }, ctx);
@@ -46,7 +67,7 @@ describe('edit_file', () => {
     fs.writeFileSync(path.join(tmp, 'f.txt'), 'x x');
     const r = await editFileTool.execute({ path: 'f.txt', old_string: 'x', new_string: 'y' }, ctx);
     expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/not unique/);
+    expect(r.error).toMatch(/occurs 2 times/);
   });
 });
 

@@ -33,10 +33,18 @@ const WALK_EXCLUDES = new Set(['node_modules', '.git', '.agent-cli', 'dist', 'co
 const MAX_READ_BYTES = 20 * 1024 * 1024;
 
 // ── read_file ────────────────────────────────────────────────────────────────────────────────
-const ReadInput = z.object({ path: z.string().describe('File path, relative to the workspace root') }).strict();
+const ReadInput = z
+  .object({
+    path: z.string().describe('File path, relative to the workspace root'),
+    offset: z.number().int().positive().optional().describe('1-indexed line to start reading from (page through large files)'),
+    limit: z.number().int().positive().optional().describe('Maximum number of lines to return (use with offset)'),
+  })
+  .strict();
 export const readFileTool: Tool<z.infer<typeof ReadInput>> = {
   name: 'read_file',
-  description: 'Read a UTF-8 text file from the workspace. Returns file contents (truncated if very large).',
+  description:
+    'Read a UTF-8 text file from the workspace. Whole-file reads of very large files are truncated in the middle — ' +
+    'use offset/limit (line-based) to page through a large file window by window instead.',
   schema: ReadInput,
   mutates: () => null,
   readsPaths: (i) => [i.path],
@@ -50,7 +58,13 @@ export const readFileTool: Tool<z.infer<typeof ReadInput>> = {
     }
     if (stat.isDirectory()) return fail(`${input.path} is a directory; use list_files`);
     if (stat.size > MAX_READ_BYTES) return fail(`file too large to read (${stat.size} bytes)`);
-    return ok(fs.readFileSync(abs, 'utf8'));
+    const content = fs.readFileSync(abs, 'utf8');
+    if (input.offset === undefined && input.limit === undefined) return ok(content);
+    const lines = content.split('\n');
+    const start = (input.offset ?? 1) - 1;
+    if (start >= lines.length) return fail(`offset ${input.offset} is beyond the end of ${input.path} (${lines.length} lines)`);
+    const window = lines.slice(start, input.limit !== undefined ? start + input.limit : undefined);
+    return ok(`[lines ${start + 1}–${start + window.length} of ${lines.length}]\n` + window.join('\n'));
   },
 };
 
@@ -192,19 +206,21 @@ export const writeFileTool: Tool<z.infer<typeof WriteInput>> = {
 const EditInput = z
   .object({
     path: z.string().describe('File to edit, relative to the workspace root'),
-    old_string: z.string().describe('Exact text to replace; must occur exactly once'),
+    old_string: z.string().describe('Exact text to replace; must occur exactly once unless replace_all is set'),
     new_string: z.string().describe('Replacement text'),
+    replace_all: z.boolean().optional().describe('Replace EVERY occurrence of old_string (default: exactly one required)'),
   })
   .strict();
 export const editFileTool: Tool<z.infer<typeof EditInput>> = {
   name: 'edit_file',
   description:
-    'Replace exactly one occurrence of old_string with new_string in a workspace file. ' +
-    'Fails if old_string is missing or not unique. Snapshotted for undo.',
+    'Replace one occurrence of old_string with new_string in a workspace file (exact match; must be unique — ' +
+    'include more surrounding context if not). Set replace_all to replace every occurrence. Snapshotted for undo.',
   schema: EditInput,
   mutates: (i, c) => ({ paths: [resolveForTool(c, i.path)] }),
   async execute(input, ctx) {
     const abs = resolveForTool(ctx, input.path);
+    if (input.old_string.length === 0) return fail('old_string must not be empty');
     let content: string;
     try {
       content = fs.readFileSync(abs, 'utf8');
@@ -213,8 +229,14 @@ export const editFileTool: Tool<z.infer<typeof EditInput>> = {
     }
     const idx = content.indexOf(input.old_string);
     if (idx === -1) return fail(`old_string not found in ${input.path}`);
+    if (input.replace_all) {
+      const parts = content.split(input.old_string);
+      fs.writeFileSync(abs, parts.join(input.new_string), 'utf8');
+      return ok(`edited ${input.path} (${parts.length - 1} replacements)`);
+    }
     if (content.indexOf(input.old_string, idx + 1) !== -1) {
-      return fail(`old_string is not unique in ${input.path}; include more surrounding context`);
+      const count = content.split(input.old_string).length - 1;
+      return fail(`old_string occurs ${count} times in ${input.path}; include more surrounding context, or set replace_all to replace every occurrence`);
     }
     const updated = content.slice(0, idx) + input.new_string + content.slice(idx + input.old_string.length);
     fs.writeFileSync(abs, updated, 'utf8');

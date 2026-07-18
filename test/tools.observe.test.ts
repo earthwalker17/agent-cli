@@ -27,6 +27,20 @@ describe('read_file', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/not found/);
   });
+  it('pages a file with offset/limit and labels the window', async () => {
+    fs.writeFileSync(path.join(tmp, 'lines.txt'), Array.from({ length: 50 }, (_, i) => `line-${i + 1}`).join('\n'));
+    const r = await readFileTool.execute({ path: 'lines.txt', offset: 10, limit: 3 }, ctx);
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe('[lines 10–12 of 50]\nline-10\nline-11\nline-12');
+    const tail = await readFileTool.execute({ path: 'lines.txt', offset: 49 }, ctx);
+    expect(tail.output).toBe('[lines 49–50 of 50]\nline-49\nline-50');
+  });
+  it('fails when offset is beyond the end of the file', async () => {
+    fs.writeFileSync(path.join(tmp, 'short.txt'), 'one\ntwo');
+    const r = await readFileTool.execute({ path: 'short.txt', offset: 10 }, ctx);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('beyond the end');
+  });
   it('refuses to read a directory', async () => {
     fs.mkdirSync(path.join(tmp, 'dir'));
     const r = await readFileTool.execute({ path: 'dir' }, ctx);
