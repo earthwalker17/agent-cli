@@ -1,6 +1,6 @@
 import { applyUndo } from '../runtime/undo.js';
 import { buildReport } from '../report/report.js';
-import { buildWorkspaceMap } from '../workspace/map.js';
+import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
 import type { Renderer } from './render.js';
@@ -94,7 +94,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'map': {
-      const map = buildWorkspaceMap(ctx.session.workspaceRoot);
+      const map = await buildWorkspaceMapAuto(ctx.session.workspaceRoot, {}, ctx.session.gitFacts);
       ctx.renderer.flush();
       ctx.modelOut.write(
         map.text.split('\n').map(sanitizeLine).join('\n') +

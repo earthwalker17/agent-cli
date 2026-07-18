@@ -3,7 +3,7 @@ import { startSession, resumeSession, endSession, runTurn, repairDanglingToolUse
 import { selectSandbox, type SandboxBackend } from '../sandbox/index.js';
 import { detectGitFacts } from '../git/facts.js';
 import type { GitFacts } from '../git/types.js';
-import { buildWorkspaceMap } from '../workspace/map.js';
+import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { randomSaltHex } from '../shared/hash.js';
@@ -67,13 +67,13 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
 
   const ctx = buildRunContext(values, { config, io: { question: async (q) => (await io.question(q)) ?? 'q' } });
   const layout = resolveLayout(ctx.ws, { ensure: true });
-  const map = buildWorkspaceMap(ctx.ws);
 
   // Establish + probe the execution sandbox before the first turn, so the banner and system prompt
   // report the truth. Tests may inject a backend to stay deterministic and platform-independent.
   const sandbox = opts.sandbox ?? selectSandbox({ stateRoot: layout.stateRoot });
   const sandboxFacts = await sandbox.ensureAvailable();
   const gitFacts = opts.gitFacts ?? (await detectGitFacts(ctx.ws));
+  const map = await buildWorkspaceMapAuto(ctx.ws, {}, gitFacts);
   const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts);
 
   const common = {

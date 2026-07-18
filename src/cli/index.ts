@@ -13,7 +13,7 @@ import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, r
 import { selectSandbox } from '../sandbox/index.js';
 import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
-import { buildWorkspaceMap } from '../workspace/map.js';
+import { buildWorkspaceMap, buildWorkspaceMapAuto } from '../workspace/map.js';
 import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { buildReport } from '../report/report.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
@@ -129,7 +129,6 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const config = loadConfig(resolveStateRoot(), ws);
   const ctx = buildRunContext(values, { config });
   const layout = resolveLayout(ctx.ws, { ensure: true });
-  const map = buildWorkspaceMap(ctx.ws);
   const onText = (t: string): void => {
     process.stdout.write(t);
   };
@@ -140,6 +139,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const sandbox = selectSandbox({ stateRoot: layout.stateRoot });
   const sandboxFacts = await sandbox.ensureAvailable();
   const gitFacts = await detectGitFacts(ctx.ws);
+  const map = await buildWorkspaceMapAuto(ctx.ws, {}, gitFacts);
   const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts);
 
   if (values['dangerously-allow-all']) {
