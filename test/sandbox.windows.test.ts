@@ -104,7 +104,11 @@ describe.skipIf(!win)('windows-lowil sandbox: enforced boundary (real OS)', () =
   }, 30_000);
 
   it('runs the confined child at LOW integrity', async () => {
-    const outcome = await runManaged(backend.wrapSpec(psSpec(`whoami /groups | Select-String 'S-1-16-' | ForEach-Object { $_.Line.Trim() }`, ws)));
+    // Full System32 path, like the product probe (bootstrap.ts): a bare `whoami` can resolve to
+    // Git's MSYS whoami.exe when the suite runs from Git Bash (Git\usr\bin first on PATH), and
+    // msys-2.0.dll crashes at Low IL before printing groups.
+    const whoami = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe');
+    const outcome = await runManaged(backend.wrapSpec(psSpec(`& '${whoami}' /groups | Select-String 'S-1-16-' | ForEach-Object { $_.Line.Trim() }`, ws)));
     expect(outcome.combined).toMatch(/S-1-16-4096/); // Low mandatory label
   }, 30_000);
 
