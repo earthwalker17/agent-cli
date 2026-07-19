@@ -334,7 +334,10 @@ reported truthfully; the runtime never assumes enforcement from the platform nam
   `EnforcementFacts.doesNotConfine`): reads (a sandboxed command can still read secrets), network,
   writes to Low-labeled locations, and service-reparented work (schtasks/sc/wmic/BITS).
 - **Probe + fail-closed.** `ensureAvailable()` runs a self-test that spawns a Low-IL child and
-  confirms *both* Low integrity *and* an actual write-deny; only then is `enforced: true`. On any
+  confirms *both* Low integrity *and* an actual write-deny; only then is `enforced: true`. The
+  probe allows 60 s and one bounded retry (measured ~4–11 s normally, ~18 s under heavy spawn
+  contention): a retry can recover a transient false negative but every path to `enforced: true`
+  still requires the positive marker (injectable `ProbeRunner` seam, regression-tested). On any
   non-Windows platform, or on probe failure, the backend degrades to `none` semantics
   (`enforced: false`), and the engine disables auto-run — every command asks. The host itself never
   falls back to unsandboxed: it either runs the child at Low IL or exits with a fail marker.

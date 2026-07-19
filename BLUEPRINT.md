@@ -109,6 +109,17 @@ Now satisfied by V0.3: managed subprocess execution with clear cleanup and evide
 
 ## 7. Recently Completed (outcome notes)
 
+- **Session 6.5 (2026-07-19) — V0.5 capability demo + production-style validation: COMPLETE.**
+  One continuous ~68-min recorded run (real ConPTY → xterm.js → Playwright, byte-truthful,
+  supervisor-driven): Agent CLI built LedgerLite (20 files, 51 tests, esbuild build) from a
+  natural-language brief under live approvals, then demonstrated status/diff/attributed
+  commits/checkpoint/restore/undo/report, sandboxed auto-run `git status`, deny-adapt, harness-
+  note coherence, and 124-uncached-input-token caching — ending with the app driven live in the
+  recorded browser. Two product fixes with regression coverage came out of the foundation
+  review (sandbox probe retry `763032f`; test whoami path `21a8c40`); suite 403+1. Evidence:
+  `C:\Users\A\Desktop\ledgerlite\validation\` (MP4, PTY transcript, session report,
+  VALIDATION.md); full narrative in `ROADMAP.md` Session 6.5. Standing UX finding: a system-
+  prompt hint for the auto-runnable command shape (deferred pool).
 - **Session 6 (2026-07-18) — Git-native, reviewable, context-efficient: COMPLETE (scoped).**
   GitOps as a harness-only capability (a policy regression test pins why it must never be a
   model tool): hardened git substrate (absolute-path resolution, fsmonitor off, optional-locks

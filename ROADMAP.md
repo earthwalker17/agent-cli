@@ -5,6 +5,104 @@ compressed under **Earlier Milestones** (per the rolling-docs policy in `CLAUDE.
 
 ---
 
+## Session 6.5 (2026-07-19) — V0.5 capability demo + production-style validation
+
+### Objective
+
+Not a product increment (Session-3 pattern): one truthful, continuous, recorded demonstration of
+how complete the V0.5 single-agent kernel is — a realistic project built by Agent CLI under live
+human supervision, exercising trust, sandbox, automatic review, approvals, editing, testing,
+building, diff/commit/checkpoint/restore/undo, caching, and the evidence report — plus a
+foundation review that fixes anything unreliable before the run.
+
+### Foundation review → 2 product-repo fixes (both committed with regression coverage)
+
+- **Sandbox probe flakiness (`763032f`)**: during loaded full-suite runs the enforcement probe
+  intermittently reported "not established", silently degrading a genuinely-enforceable session
+  to fail-closed ask-everything. Direct measurement: ~4–11 s normally, **~18 s under 6-way
+  concurrent spawn load**, vs a 30 s timeout. Fix: 60 s timeout + one bounded retry behind an
+  injectable `ProbeRunner` seam; 5 regression tests pin that a retry can recover a transient
+  false NEGATIVE but every path to `enforced: true` still requires the positive self-test marker.
+- **Low-IL test resolved the MSYS whoami (`21a8c40`)**: under Git Bash, `Git\usr\bin` precedes
+  System32, and MSYS binaries crash at Low IL; the test now uses the absolute System32 path as
+  the product probe (bootstrap.ts) always did.
+- Gate after fixes: `npm run typecheck` + `npm run build` clean; **403 passed, 1 skipped (32
+  files)**. (One additional test file failed exactly once in the first loaded run and never
+  reproduced across three later full runs — unidentified, noted honestly.)
+
+### Demo environment (rebuilt from scratch; lives OUTSIDE this repo)
+
+`C:\Users\A\Desktop\agent-cli-demo-20260719\harness\`: a real ConPTY (`@lydell/node-pty` →
+`powershell.exe`) mirrored byte-for-byte into an xterm.js page recorded continuously by
+Playwright (single page = single unedited video), with an HTTP control API (type/keys/wait/
+navigate/click/stop) driven by the supervisor. Truthfulness contract: every displayed byte comes
+from the PTY (raw stream independently saved as a transcript); the page accepts NO local
+keyboard input; the PTY env is normalized (MSYS paths stripped; `TERM_PROGRAM=xterm-web-bridge`
+identifies the bridge, enabling Unicode chrome). Harness lessons: Playwright context.close hung
+on a long recording until page.close-first ordering; undici's ~300 s fetch cap requires chunked
+long-polls; MSYS argv path-mangling requires stdin-passed text + `MSYS2_ARG_CONV_EXCL`.
+
+### The recorded run (session `20260719-054206-9ecc`, live claude-opus-4-8 via proxy)
+
+The supervisor seeded `C:\Users\A\Desktop\ledgerlite` (git repo, one commit: `BRIEF.md` product
+brief granting explicit user-owned git delivery authority) and gave natural-language tasks only.
+On camera, continuously (~68 min): trust consent (`t`) → banner (sandbox ENFORCED, `git: branch
+main @ c7be96a, clean`) → `/map` → **the agent built LedgerLite** (personal finance tracker:
+dashboard, SVG donut + trend charts, CSV import with dedup, localStorage, dark amber UI) — 20
+files, 51 unit tests, esbuild production build, in one 37-step turn with 13 approvals granted
+live; it recovered from PowerShell 5.1 rejecting `&&`, self-caught an HTML/JS id inconsistency,
+and verified its own dist output. Then: `/status` → `/diff` → `/commit` (preview staged ONLY
+session-attributed paths; `package-lock.json` honestly excluded as an unattributable install
+side effect, swept by an explicit `/commit --all`) → `/checkpoint v1-complete` → amber restyle
+turn (targeted `edit_file`s incl. contrast fixes) → deny-adapt beat (2 denials of chained/
+flagged git; the model's fallback summary explicitly labeled itself "not a live diff read") →
+plain `git status` **auto-ran `[sandboxed: windows-lowil]` with no approval** → `/checkpoint
+restore 1` (previewed, snapshot-first, confirmed) → `/undo` (restore reverted; amber back,
+verified out-of-band on disk) → the next turn KNEW about the undo via the harness note and
+re-read before acting → final green verification (51/51, build, dist amber confirmed) →
+`/commit` → `/report` (full evidence chain + honesty footer) → `/quit` → supervisor `npm start`
+→ the recorded page navigated to the app: add-transaction updated balance/charts live, search
+filter isolated the new row. Session totals: **124 uncached input tokens** / 42.1k out,
+cache 2.07M read / 225k written; three commits each carrying `Session:` +
+`Co-authored-by: Agent CLI`.
+
+### Evidence artifacts
+
+`C:\Users\A\Desktop\ledgerlite\validation\`: the continuous MP4, the raw PTY transcript, the
+deterministic `session-report.md` (every file CHECKED with the exact verifying command; the one
+failed pipeline kept as exit 1; per-command boundary markers), and `VALIDATION.md` mapping every
+claim to its evidence — deliberately left uncommitted in the target repo (the deliverable is the
+four clean commits; validation is meta-evidence).
+
+### Decisions
+
+- Validation sessions live outside the product repo; the target repo stays a clean deliverable.
+- The bridge truthfully identifies itself via `TERM_PROGRAM` rather than impersonating Windows
+  Terminal (`WT_SESSION`).
+- The demo task states git authority in the brief ("I handle git myself") so the
+  no-git-unless-asked rule is preserved observably: the agent's only git execution was the
+  sandboxed read-only `git status`.
+
+### Open issues / UX findings (not defects)
+
+- The positive-proof auto-run gate rarely fires for the model's NATURAL command style (chained
+  `;`, extra flags like `--no-pager`) — nearly every command asked. A system-prompt hint
+  describing the auto-runnable shape would raise the hit rate without weakening the gate
+  (added to the deferred pool).
+- Probe cost at session start measured ~4–11 s on this machine (S5 recorded ~1–2 s) — the
+  cached-host optimization grows more attractive.
+- `/diff` is whole-session by design; the "changes since last commit" question is git's job —
+  the demo showed the model answering it via sandboxed `git status` after two denials.
+- `powershell.exe` CLIXML stderr noise remains a visible cosmetic wart in live output.
+
+### Recommended next step
+
+Session 7 (task/subagent runtime primitives) unchanged — the kernel demonstrated end-to-end is
+the stable base it needs. Fold in the auto-run system-prompt hint and consider the cached
+sandbox host when touching that area.
+
+---
+
 ## Session 6 (2026-07-18) — V0.5: Git-native, reviewable, context-efficient
 
 ### Objective
@@ -140,114 +238,34 @@ cached sandbox host if command latency starts to matter.
 
 ---
 
-## Session 5 (2026-07-18) — V0.4: enforced isolation + automatic command review
+## Earlier Milestones (Sessions 1–5 — compressed per the rolling-docs policy)
 
-### Objective
+### Session 5 (2026-07-18) — V0.4: enforced isolation + automatic command review
 
-BLUEPRINT Session 5: move beyond application-level path checks and approvals by (1) establishing a
-sandbox architecture and implementing at least one genuinely OS-enforced isolation path, reported
-truthfully and failing closed when enforcement cannot be established; and (2) replacing the "every
-shell command asks" default with a single automatic-review flow backed by deterministic policy and
-enforced sandbox constraints — never the model's opinion. Windows-first; no false cross-platform
-parity. Research-first (a bounded 5-agent workflow over Codex CLI, Anthropic sandbox-runtime, the
-Windows OS primitives reachable from stock Node, deterministic safe-command classification, and an
-adversarial escape catalog), and — critically — **feasibility was proven by direct machine probe
-before any code was written**.
-
-### Feasibility evidence gathered first (direct probes on the target machine)
-
-On this Windows 11 box as a standard **non-admin, Medium-integrity** user: a Low-integrity child
-spawned via `CreateProcessAsUser` with a duplicated, integrity-lowered copy of our OWN token works
-with **no admin and no special privilege**; the OS **denies** that child's writes to the workspace,
-`%USERPROFILE%`, and a state-like dir (`UnauthorizedAccessException`); stdout/stderr are captured
-through inherited pipe handles; **reads are NOT blocked**; a Low-labeled scratch dir is writable;
-and `powershell.exe` itself runs correctly at Low IL. The `WRITE_RESTRICTED` restricted-token path
-FAILED (err 1314 — needs a privilege we lack), so **Low IL alone is the mechanism**. Research
-corroborated Low-IL + Job Object as the no-admin sweet spot and confirmed a string reviewer must
-never be a boundary (obfuscation defeats any regex → auto-allow must be positive-proof, fail closed).
-
-### What was implemented (3 feature commits)
-
-1. **`feat(sandbox)`** — `src/sandbox/`: a `SandboxBackend` contract with a `wrapSpec` transform-at-
-   spawn seam; an honest `none` backend; and `windows-lowil` — a real boundary that runs a command
-   at **Low integrity** (MIC write-up denial) inside a **Job Object** (`KILL_ON_JOB_CLOSE` +
-   active-process cap + UI restrictions). `bootstrap.ts` is a small, versioned PowerShell + inline-C#
-   Add-Type P/Invoke host that Node spawns in place of the shell; it re-launches the target at Low IL
-   forwarding its inherited std handles (= Node's pipes) so `runManaged` capture/kill are unchanged.
-   Enforcement is established by a runtime **self-test probe**, never assumed. `EnforcementFacts`
-   carry the honest scope (confines writes+lifecycle; NOT reads/network; Low-labeled scratch writable;
-   service-reparent escapes). Additive `sandbox.status` event + `command.started.sandbox`.
-2. **`feat(policy)`** — `command-review.ts`: `analyzeCommand`, a POSITIVE proof of safety (single
-   simple command, zero shell metacharacters/encoding, curated read-only executable allowlist with
-   normalization, per-executable arg checks, workspace-escape guard). `decide()` for a shell command:
-   circuit-breaker deny (absolute) → auto-review; auto-allow (`execBoundary: 'sandbox'`) requires a
-   proof of safety AND an active OS boundary; otherwise `ask` (`unsandboxed`). No enforced sandbox ⇒
-   auto-run disabled, every command asks (**fail closed**). `classifyCommand` label hardened so LOLBAS
-   (certutil/bitsadmin/mshta/rundll32/regsvr32/wmic/msiexec/schtasks) and encoded/`iex` forms no
-   longer read as benign — the label still only informs the human.
-3. **`feat(runtime,ux)`** — the sandbox threaded through the ONE runtime: `session.ts` takes the
-   backend + probed facts, the base tool ctx carries availability (engine reads `enforced`),
-   `runExecution` builds the per-call `ExecSandbox` (active+enforcing wrap for auto-run, identity for
-   approved). `run-command.ts` switched to `-EncodedCommand` (immune to quoting AND survives the host
-   argv round-trip that `-Command` mangles) and applies `ctx.sandbox.wrap`. CLI + REPL establish and
-   PROBE the sandbox before the first turn, report the real mode (banner/stderr/`sandbox.status`), and
-   feed the facts into the system prompt. `report.ts` renders a sandbox header block, per-command
-   `[sandboxed: windows-lowil]`/`[unsandboxed]` markers, and a mode-aware honesty footer.
-
-### Verification evidence
-
-- **Gate:** `npm run typecheck` + `npm run build` clean; `npm test` **321 passed, 1 skipped** across
-  24 files (was 241+1; +80).
-- **Real-OS integration** (`test/sandbox.windows.test.ts`, 8 tests, win32-gated, through the actual
-  backend + `runManaged`): write to the workspace and to the harness state dir **DENIED**; reads
-  **allowed** (honest limitation); exit code relayed; stdout captured; child confirmed at Low
-  integrity; and a **detached grandchild reaped on kill** via the Job Object — closing Session 4's
-  `taskkill /T` gap with a real fixture.
-- **Adversarial corpus** (`test/policy.command-review.test.ts`, 66 assertions): 20 safe commands
-  auto-allow; a 40+ item catalog (chaining/redirection/substitution/env-substring/caret/glob/encoded/
-  interpreters/LOLBAS/path-escape/non-allowlisted/git-config-injection) **NEVER auto-runs**, even
-  under an enforced sandbox; circuit-breaker stays absolute; normalization + label hardening covered.
-- **REPL** auto-run vs ask tests with injected backends; **live CLI E2E** (built binary): startup
-  probe reports `windows-lowil` ENFORCED, `git status` auto-runs `[sandboxed]`, a piped command asks
-  and is auto-denied non-interactively (exit 2), and `agent report` renders the honest evidence.
-
-### Decisions (and why)
-
-- **Low IL + Job Object, not restricted tokens.** The `WRITE_RESTRICTED` path needs a privilege a
-  standard user lacks (probe: err 1314); Low IL alone is the enforced write boundary and needs none.
-  The Job Object supplies guaranteed reaping (and a fork-bomb cap), closing a known S4 gap.
-- **Auto-allow is positive-proof and sandbox-backed.** A string reviewer can be obfuscated, so
-  auto-run is granted only to a provably-safe *shape* AND is executed *inside* the boundary as
-  defense-in-depth; with no enforcement it is disabled (fail closed). Approved commands run
-  UNSANDBOXED — the user accepted the risk (Codex's model).
-- **Truth over parity.** The mode is probed, not assumed; reported verbatim everywhere; and the
-  honest limits (reads/network/service-reparent NOT confined) are stated in facts, report, prompt,
-  and README. Non-Windows gets `none`, not a simulated boundary.
-- **`-EncodedCommand` everywhere** for the PowerShell shell: robust quoting and a clean argv
-  round-trip through the sandbox host (which `-Command` mangled).
-
-### Open issues / not verified
-
-- **Latency:** each sandboxed command pays a PowerShell start + `Add-Type` compile (~1.2 s observed).
-  Acceptable for V0.4; a cached compiled assembly (or a persistent host) is the obvious optimization.
-- **`powershell.exe` CLIXML-on-piped-stderr:** when stderr is a pipe, powershell wraps error/progress
-  streams as `#< CLIXML` — a pre-existing `run_command` cosmetic, not sandbox-introduced.
-- **Enforced gaps (documented, by design):** no read/confidentiality boundary, no network egress
-  control, Low-labeled scratch is writable, and service-reparented work (schtasks/sc/wmic/BITS)
-  escapes the Job Object. These are the natural Session-6+/future targets.
-- The self-test probe + `icacls` scratch-labeling run on every Windows session start (~1–2 s one-time).
-
-### Recommended next step
-
-BLUEPRINT Session 6 (Git-native, reviewable, context-efficient coding) is the standing next
-direction. Sandbox follow-ups worth folding in when relevant: a cached/compiled host to cut latency;
-a network-egress story (the honest gap most likely to matter); and — once a subagent runtime exists
-(Session 7) — deciding which boundary a subagent runs inside, for which the Low-IL backend is the
-Windows answer.
-
----
-
-## Earlier Milestones (Sessions 1–4 — compressed per the rolling-docs policy)
+An OS-enforced Windows boundary plus deterministic automatic command review, **feasibility proven
+by direct machine probe before any code**: as a standard non-admin user, a Low-integrity child
+(duplicated, lowered copy of our own token via `CreateProcessAsUser`) is write-DENIED by MIC to
+the workspace/profile/state dirs while stdout flows through inherited pipes; `WRITE_RESTRICTED`
+restricted tokens FAILED (err 1314) — so Low IL + Job Object (KILL_ON_JOB_CLOSE, process cap) is
+the mechanism. `src/sandbox/`: `SandboxBackend` with a `wrapSpec` transform-at-spawn seam, honest
+`none` backend, and `windows-lowil` — a versioned PowerShell + inline-C# (Add-Type P/Invoke) host
+that re-launches the target at Low IL forwarding inherited std handles, so `runManaged`
+capture/kill are unchanged; enforcement is established by a runtime **self-test probe**, never
+assumed, and degrades fail-closed. `policy/command-review.ts`: `analyzeCommand` is a POSITIVE
+proof of safety (single simple command, zero metacharacters/encoding, curated read-only
+allowlist, per-executable arg checks, escape guard); auto-run requires proof AND an active
+boundary and executes INSIDE it; otherwise ask; no enforcement ⇒ every command asks. Approved
+commands deliberately run unsandboxed (the user accepted the risk — Codex's model). Labels
+hardened (LOLBAS/encoded no longer read benign) but only ever inform the human. `run_command`
+moved to `-EncodedCommand`; report gained the sandbox header + per-command boundary markers +
+mode-aware honesty footer. **Evidence:** 321 passed/1 skipped (+80); 8 real-OS win32 tests
+(write DENIED to workspace+state, reads allowed and stated, child at Low IL, detached grandchild
+reaped on kill — closing the S4 taskkill gap); 66-assertion adversarial corpus (40+ escape forms
+NEVER auto-run); live CLI E2E with sandboxed auto-run + non-interactive auto-deny. **Honest
+scope (unchanged since):** confines writes + lifecycle on Windows only; reads, network,
+Low-labeled locations, and service-reparented work are NOT confined. **Still open from S5:**
+per-command Add-Type host latency (S6.5 measured the probe at ~4–11 s on this machine); CLIXML
+stderr cosmetics.
 
 ### Session 4 (2026-07-17) — V0.3: execution kernel hardening
 
@@ -355,5 +373,10 @@ generated compaction of assistant/user text (deterministic tool-output elision s
 warning when even full elision exceeds the target). **Sandbox follow-ups (post-S5):**
 network-egress control and a read/confidentiality boundary (the two enforced gaps that most
 matter); a cached/compiled sandbox host to cut per-command Add-Type latency (~1.2 s — more
-visible now that read-only git auto-runs are a hot path); macOS/Linux enforcement backends;
-containment of service-reparented work (schtasks/sc/wmic/BITS) that escapes the Job Object.
+visible now that read-only git auto-runs are a hot path, and S6.5 measured the startup probe at
+~4–11 s on this machine); macOS/Linux enforcement backends; containment of service-reparented
+work (schtasks/sc/wmic/BITS) that escapes the Job Object. **Command-review follow-up (S6.5
+finding):** a system-prompt hint describing the auto-runnable command shape (single unchained
+read-only command, no extra global flags) — the model's natural chained/flagged style meant
+nearly every command asked during the demo; the hint raises the auto-run hit rate without
+weakening the positive-proof gate.
