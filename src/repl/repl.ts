@@ -1,15 +1,12 @@
 import { resolveLayout, resolveStateRoot } from '../store/layout.js';
-import { startSession, resumeSession, endSession, runTurn, repairDanglingToolUses, recordWorkspaceMap, recordSandboxStatus, recordGitContext, type Session } from '../runtime/session.js';
-import { selectSandbox, type SandboxBackend } from '../sandbox/index.js';
-import { detectGitFacts } from '../git/facts.js';
+import { endSession, runTurn, repairDanglingToolUses, type Session } from '../runtime/session.js';
+import type { SandboxBackend } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
-import { buildWorkspaceMapAuto } from '../workspace/map.js';
-import { buildSystemPrompt } from '../workspace/system-prompt.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
-import { randomSaltHex } from '../shared/hash.js';
 import { loadConfig } from '../config/config.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from '../cli/context.js';
 import { checkTrust } from '../cli/trust-check.js';
+import { assembleSession, type Assembled } from '../cli/assemble.js';
 import { createReplIO, type ReplIO } from './io.js';
 import { createRenderer, type Renderer } from './render.js';
 import { detectStyle } from './format.js';
@@ -68,50 +65,29 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   const ctx = buildRunContext(values, { config, io: { question: async (q) => (await io.question(q)) ?? 'q' } });
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
-  // Establish + probe the execution sandbox before the first turn, so the banner and system prompt
-  // report the truth. Tests may inject a backend to stay deterministic and platform-independent.
-  const sandbox = opts.sandbox ?? selectSandbox({ stateRoot: layout.stateRoot });
-  const sandboxFacts = await sandbox.ensureAvailable();
-  const gitFacts = opts.gitFacts ?? (await detectGitFacts(ctx.ws));
-  const map = await buildWorkspaceMapAuto(ctx.ws, {}, gitFacts);
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts);
-
-  const common = {
-    workspaceRoot: ctx.ws,
-    layout,
-    model: ctx.model,
-    mode: ctx.mode,
-    provider: ctx.provider,
-    approver: ctx.approver,
-    system,
-    maxSteps: ctx.maxSteps,
-    maxTokens: ctx.maxTokens,
-    saltHex: randomSaltHex(),
-    onText: (t: string) => renderer.onText(t),
-    onCommandOutput: (_callId: string, chunk: string, stream: 'stdout' | 'stderr') => renderer.onCommandOutput(chunk, stream),
-    rules: config.rules,
-    sandbox,
-    sandboxFacts,
-    gitFacts,
-  };
-
-  let session: Session;
+  // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
+  // Tests may inject a sandbox backend / git facts to stay deterministic and platform-independent.
+  let assembled: Assembled;
   try {
-    session = opts.resumeId
-      ? resumeSession({ ...common, sessionId: opts.resumeId })
-      : startSession({ ...common, argv: process.argv.slice(2) });
+    assembled = await assembleSession({
+      trust,
+      config,
+      ctx,
+      layout,
+      ...(opts.resumeId !== undefined ? { resumeId: opts.resumeId } : {}),
+      argv: process.argv.slice(2),
+      onText: (t: string) => renderer.onText(t),
+      onCommandOutput: (_callId: string, chunk: string, stream: 'stdout' | 'stderr') => renderer.onCommandOutput(chunk, stream),
+      onLogEvent: (e) => renderer.onEvent(e),
+      ...(opts.sandbox !== undefined ? { sandbox: opts.sandbox } : {}),
+      ...(opts.gitFacts !== undefined ? { gitFacts: opts.gitFacts } : {}),
+    });
   } catch (err) {
     io.close();
     streams.chromeOut.write(`error: ${(err as Error).message}\n`);
     return 1;
   }
-
-  session.log.onAppend = (e) => renderer.onEvent(e);
-  session.log.append({ type: 'trust.verified', source: trust.source });
-  session.log.append({ type: 'config.loaded', sources: config.sources });
-  recordSandboxStatus(session, sandboxFacts);
-  recordGitContext(session, gitFacts);
-  recordWorkspaceMap(session, map);
+  const { session, sandboxFacts, gitFacts } = assembled;
 
   renderer.banner({
     sessionId: session.id,

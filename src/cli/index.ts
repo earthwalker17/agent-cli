@@ -9,20 +9,18 @@ import { loadConfig } from '../config/config.js';
 import { runRepl } from '../repl/repl.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
-import { startSession, resumeSession, endSession, runTurn, recordWorkspaceMap, recordSandboxStatus, recordGitContext, type Session } from '../runtime/session.js';
-import { selectSandbox } from '../sandbox/index.js';
+import { endSession, runTurn, type Session } from '../runtime/session.js';
 import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
-import { buildWorkspaceMap, buildWorkspaceMapAuto } from '../workspace/map.js';
-import { buildSystemPrompt } from '../workspace/system-prompt.js';
+import { buildWorkspaceMap } from '../workspace/map.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
 import { createCheckpoint, listCheckpoints, pruneCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
-import { randomSaltHex } from '../shared/hash.js';
 import { sanitizeLine } from '../shared/text.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
+import { assembleSession } from './assemble.js';
 
 const USAGE = `Agent CLI — a bounded local agent harness (V0.4).
 
@@ -144,18 +142,19 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const config = loadConfig(resolveStateRoot(), ws);
   const ctx = buildRunContext(values, { config });
   const layout = resolveLayout(ctx.ws, { ensure: true });
-  const onText = (t: string): void => {
-    process.stdout.write(t);
-  };
 
-  // Establish the execution sandbox and PROBE it before any command can run. The probed facts are
-  // reported truthfully, gate command auto-run (no enforcement ⇒ every command asks), and teach the
-  // model (via the system prompt) exactly what the active boundary does and does not confine.
-  const sandbox = selectSandbox({ stateRoot: layout.stateRoot });
-  const sandboxFacts = await sandbox.ensureAvailable();
-  const gitFacts = await detectGitFacts(ctx.ws);
-  const map = await buildWorkspaceMapAuto(ctx.ws, {}, gitFacts);
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts);
+  // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
+  const { session, sandboxFacts, gitFacts } = await assembleSession({
+    trust,
+    config,
+    ctx,
+    layout,
+    ...(opts.resumeId !== undefined ? { resumeId: opts.resumeId } : {}),
+    argv: process.argv.slice(2),
+    onText: (t: string): void => {
+      process.stdout.write(t);
+    },
+  });
 
   if (values['dangerously-allow-all']) {
     process.stderr.write('⚠ --dangerously-allow-all: approvals are bypassed. No isolation whatsoever.\n');
@@ -165,35 +164,6 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   }
   process.stderr.write(`sandbox: ${sandboxFacts.summary}\n`);
   if (gitFacts.isRepo || gitFacts.probeFailed) process.stderr.write(`git: ${gitFacts.detail}\n`);
-
-  const common = {
-    workspaceRoot: ctx.ws,
-    layout,
-    model: ctx.model,
-    mode: ctx.mode,
-    provider: ctx.provider,
-    approver: ctx.approver,
-    system,
-    maxSteps: ctx.maxSteps,
-    maxTokens: ctx.maxTokens,
-    saltHex: randomSaltHex(),
-    onText,
-    rules: config.rules,
-    sandbox,
-    sandboxFacts,
-    gitFacts,
-  };
-  let session: Session;
-  if (opts.resumeId) {
-    session = resumeSession({ ...common, sessionId: opts.resumeId });
-  } else {
-    session = startSession({ ...common, argv: process.argv.slice(2) });
-  }
-  session.log.append({ type: 'trust.verified', source: trust.source });
-  session.log.append({ type: 'config.loaded', sources: config.sources });
-  recordSandboxStatus(session, sandboxFacts);
-  recordGitContext(session, gitFacts);
-  recordWorkspaceMap(session, map);
 
   const controller = new AbortController();
   const offSigint = installSigintAbort(controller);
