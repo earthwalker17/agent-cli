@@ -220,4 +220,55 @@ export class EventLog {
       ? { events: parsed.events, truncatedTail: parsed.truncatedTail, corruptAt: parsed.bad }
       : { events: parsed.events, truncatedTail: parsed.truncatedTail };
   }
+
+  /**
+   * Parse only the FIRST committed line of a log (bounded read; never throws). session.started is
+   * always line 1 — startSession appends it before anything else — so this is the cheap way to
+   * classify a log (e.g. skip subagent child sessions) without parsing the whole file.
+   */
+  static readFirstEvent(file: string): SessionEvent | undefined {
+    return boundedLineEvent(file, 'first');
+  }
+
+  /**
+   * Parse only the LAST complete line of a log (bounded tail read; never throws). A cleanly ended
+   * session's last event is session.ended — nothing appends after it — so this is the cheap
+   * clean-end check for crash detection. A torn tail parses as nothing and reads as "not ended".
+   */
+  static readLastEvent(file: string): SessionEvent | undefined {
+    return boundedLineEvent(file, 'last');
+  }
+}
+
+const BOUNDED_READ_BYTES = 16 * 1024;
+
+function boundedLineEvent(file: string, which: 'first' | 'last'): SessionEvent | undefined {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const len = Math.min(size, BOUNDED_READ_BYTES);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, which === 'first' ? 0 : size - len);
+      const text = buf.toString('utf8');
+      let line: string | undefined;
+      if (which === 'first') {
+        const nl = text.indexOf('\n');
+        if (nl === -1) return undefined; // no committed (newline-terminated) line in the window
+        line = text.slice(0, nl);
+      } else {
+        // The last COMPLETE line: everything after the final newline is a torn tail — ignore it.
+        const complete = text.slice(0, text.lastIndexOf('\n') + 1);
+        line = complete.split('\n').filter((l) => l.trim().length > 0).pop();
+      }
+      if (line === undefined || line.trim().length === 0) return undefined;
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed !== 'object' || parsed === null || typeof (parsed as { type?: unknown }).type !== 'string') return undefined;
+      return parsed as SessionEvent;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
 }

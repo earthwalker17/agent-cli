@@ -429,6 +429,21 @@ export type EventBody =
       scope: 'session' | 'all';
       trailer: boolean;
     }
+  | {
+      /**
+       * Which project-memory documents this session loaded at assembly, with identity facts
+       * (V0.6). Provenance for exactly what durable context reached the system prompt; memory
+       * failures degrade to a status here instead of blocking the session.
+       */
+      type: 'memory.loaded';
+      files: {
+        name: string;
+        sha256: string | null;
+        bytes: number;
+        truncated: boolean;
+        status: 'ok' | 'missing' | 'oversize' | 'unreadable';
+      }[];
+    }
   | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
 
 export type SessionEvent = { v: number; seq: number; ts: string } & EventBody;

@@ -87,7 +87,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     streams.chromeOut.write(`error: ${(err as Error).message}\n`);
     return 1;
   }
-  const { session, sandboxFacts, gitFacts } = assembled;
+  const { session, sandboxFacts, gitFacts, memory } = assembled;
 
   renderer.banner({
     sessionId: session.id,
@@ -98,6 +98,10 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     ...(ctx.provider instanceof AnthropicProvider ? { network: ctx.provider.transport } : {}),
     sandbox: { summary: sandboxFacts.summary, enforced: sandboxFacts.enforced },
     ...(gitFacts.isRepo || gitFacts.probeFailed ? { git: { summary: gitFacts.detail } } : {}),
+    memory: {
+      summary: memory.bannerLine,
+      ...(memory.crashNote !== null ? { crashNote: memory.crashNote } : {}),
+    },
     dangerous: values['dangerously-allow-all'] === true,
   });
 

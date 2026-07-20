@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { resolveLayout, resolveStateRoot, type ProjectLayout } from '../store/layout.js';
@@ -21,6 +22,7 @@ import { AnthropicProvider } from '../provider/anthropic.js';
 import { sanitizeLine } from '../shared/text.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
 import { assembleSession } from './assemble.js';
+import { memoryDir, parseFrontmatter, readDocCapped } from '../memory/store.js';
 
 const USAGE = `Agent CLI — a bounded local agent harness (V0.4).
 
@@ -42,6 +44,7 @@ Usage:
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
+  agent memory                   Show the project-memory documents (paths, status, provenance)
   agent trust [--revoke|--list]  Manage recorded workspace trust (consent, not a sandbox)
 
 Options:
@@ -67,7 +70,7 @@ asks; approved commands run UNSANDBOXED with full privilege and are not undoable
 sandbox is available, auto-run is disabled and every command asks (fail closed). Workspace trust is
 recorded consent, not isolation. See README "Security model & honest limitations".`;
 
-const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'sessions', 'map', 'trust']);
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'sessions', 'map', 'memory', 'trust']);
 
 interface Args {
   values: CliValues;
@@ -144,7 +147,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
-  const { session, sandboxFacts, gitFacts } = await assembleSession({
+  const { session, sandboxFacts, gitFacts, memory } = await assembleSession({
     trust,
     config,
     ctx,
@@ -164,6 +167,8 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   }
   process.stderr.write(`sandbox: ${sandboxFacts.summary}\n`);
   if (gitFacts.isRepo || gitFacts.probeFailed) process.stderr.write(`git: ${gitFacts.detail}\n`);
+  process.stderr.write(`memory: ${memory.bannerLine}\n`);
+  if (memory.crashNote !== null) process.stderr.write(`note: ${memory.crashNote}\n`);
 
   const controller = new AbortController();
   const offSigint = installSigintAbort(controller);
@@ -411,6 +416,47 @@ async function askOnTty(q: string): Promise<string | null> {
   }
 }
 
+/**
+ * Read-only view of the three project-memory documents: where they live, whether they loaded,
+ * and their provenance. Ungated (like report/sessions): reads only harness state + AGENT.md
+ * presence, creates nothing, sends nothing to a model.
+ */
+function cmdMemory(values: CliValues): number {
+  const ws = workspaceRoot(values);
+  const layout = resolveLayout(ws);
+  const dir = memoryDir(layout.projectDir);
+  const agentFile = path.join(ws, 'AGENT.md');
+  const out = process.stdout;
+
+  out.write(`memory home: ${dir}\n\n`);
+  const agent = readDocCapped(agentFile, 'AGENT.md', 1024 * 1024);
+  out.write(`AGENT.md (user-owned project constitution, loaded into every session)\n`);
+  out.write(`  ${agentFile}\n  ${agent.status === 'missing' ? 'absent — create it to give every session durable instructions' : describeDoc(agent)}\n\n`);
+
+  for (const name of ['JOURNAL.md', 'CODEBASE.md'] as const) {
+    const doc = readDocCapped(path.join(dir, name), name, 1024 * 1024);
+    const kind = name === 'JOURNAL.md' ? 'rolling session memory' : 'architecture summary';
+    out.write(`${name} (harness-managed ${kind}; edits are welcome and preserved)\n`);
+    out.write(`  ${path.join(dir, name)}\n`);
+    if (doc.status === 'missing') {
+      out.write('  absent — written automatically after the first productive session\n\n');
+      continue;
+    }
+    const { fields } = parseFrontmatter(doc.text);
+    const provenance =
+      fields !== null
+        ? ` · updated ${fields['updated'] ?? '?'} by session ${fields['last-session'] ?? fields['session'] ?? '?'}`
+        : '';
+    out.write(`  ${describeDoc(doc)}${provenance}\n\n`);
+  }
+  return 0;
+}
+
+function describeDoc(doc: { status: string; bytes: number }): string {
+  const size = doc.bytes >= 1024 ? `${(doc.bytes / 1024).toFixed(1)} KiB` : `${doc.bytes} B`;
+  return doc.status === 'unreadable' ? 'UNREADABLE (will be skipped at session start)' : `present (${size})`;
+}
+
 function cmdSessions(values: CliValues): number {
   const ws = workspaceRoot(values);
   const layout = resolveLayout(ws);
@@ -496,6 +542,7 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === 'checkpoint') return await cmdCheckpoint(values, positionals[1], positionals[2]);
     if (cmd === 'sessions') return cmdSessions(values);
     if (cmd === 'map') return cmdMap(values);
+    if (cmd === 'memory') return cmdMemory(values);
     if (cmd === 'undo') return await cmdUndo(values);
     if (cmd === 'trust') {
       return await cmdTrust({ ...(values.revoke !== undefined ? { revoke: values.revoke } : {}), ...(values.list !== undefined ? { list: values.list } : {}) }, resolveStateRoot(), workspaceRoot(values));

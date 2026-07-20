@@ -3,7 +3,8 @@ import { selectSandbox, type SandboxBackend, type EnforcementFacts } from '../sa
 import { detectGitFacts } from '../git/facts.js';
 import type { GitFacts } from '../git/types.js';
 import { buildWorkspaceMapAuto, type WorkspaceMap } from '../workspace/map.js';
-import { buildSystemPrompt } from '../workspace/system-prompt.js';
+import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
+import { loadMemory, type LoadedMemory } from '../memory/load.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
@@ -42,6 +43,7 @@ export interface Assembled {
   sandboxFacts: EnforcementFacts;
   gitFacts: GitFacts;
   map: WorkspaceMap;
+  memory: LoadedMemory;
 }
 
 export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
@@ -53,7 +55,14 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const sandboxFacts = await sandbox.ensureAvailable();
   const gitFacts = deps.gitFacts ?? (await detectGitFacts(ctx.ws));
   const map = await buildWorkspaceMapAuto(ctx.ws, {}, gitFacts);
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts);
+
+  // Project memory: loaded post-trust (the gate is a structural parameter of this function),
+  // capped, and degrading — a broken memory doc must never block a session.
+  const memory = loadMemory(deps.layout, ctx.ws, {
+    currentMapSha256: map.sha256,
+    ...(deps.resumeId !== undefined ? { resumeId: deps.resumeId } : {}),
+  });
+  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory));
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -84,6 +93,27 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   recordSandboxStatus(session, sandboxFacts);
   recordGitContext(session, gitFacts);
   recordWorkspaceMap(session, map);
+  session.log.append({
+    type: 'memory.loaded',
+    files: [memory.agent, memory.journal, memory.codebase].map((d) => ({
+      name: d.name,
+      sha256: d.sha256,
+      bytes: d.bytes,
+      truncated: d.truncated,
+      status: d.status,
+    })),
+  });
 
-  return { session, sandboxFacts, gitFacts, map };
+  return { session, sandboxFacts, gitFacts, map, memory };
+}
+
+/** Map the loaded docs onto the system-prompt injection shape (only usable docs are injected). */
+function promptMemory(memory: LoadedMemory): SystemPromptMemory {
+  const usable = (status: string): boolean => status === 'ok' || status === 'oversize';
+  return {
+    ...(usable(memory.agent.status) ? { agentText: memory.agent.text, agentTruncated: memory.agent.truncated } : {}),
+    ...(usable(memory.journal.status) ? { journalText: memory.journal.text, journalTruncated: memory.journal.truncated } : {}),
+    ...(usable(memory.codebase.status) ? { codebaseText: memory.codebase.text, codebaseStale: memory.codebase.stale } : {}),
+    ...(memory.crashNote !== null ? { crashNote: memory.crashNote } : {}),
+  };
 }

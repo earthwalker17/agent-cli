@@ -36,6 +36,8 @@ export interface BannerInfo {
   network?: string;
   sandbox?: { summary: string; enforced: boolean };
   git?: { summary: string };
+  /** Project-memory summary + optional crash note (yellow — it deserves the user's eye). */
+  memory?: { summary: string; crashNote?: string };
   dangerous: boolean;
 }
 
@@ -272,6 +274,10 @@ export function createRenderer(opts: {
         chromeLine(info.sandbox.enforced ? style.dim(line) : style.yellow(line));
       }
       if (info.git) chromeLine(style.dim(`  git: ${sanitizeLine(info.git.summary)}`));
+      if (info.memory) {
+        chromeLine(style.dim(`  memory: ${sanitizeLine(info.memory.summary)}`));
+        if (info.memory.crashNote !== undefined) chromeLine(style.yellow(`  ${g.warn} ${sanitizeLine(info.memory.crashNote)}`));
+      }
       if (info.dangerous) chromeLine(style.red(`  ${g.warn} approvals BYPASSED (--dangerously-allow-all)`));
       chromeLine(style.dim(`  /help for commands · Ctrl+C interrupts a running turn · /quit to leave`));
     },

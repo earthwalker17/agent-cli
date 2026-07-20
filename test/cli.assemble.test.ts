@@ -66,6 +66,7 @@ describe('assembleSession', () => {
       'sandbox.status',
       'git.context',
       'workspace.mapped',
+      'memory.loaded',
     ]);
     endSession(session, 'completed');
   });
@@ -88,7 +89,7 @@ describe('assembleSession', () => {
     );
     // session.started predates the observer (it is appended inside startSession); everything after
     // the assignment must be observed.
-    expect(seen).toEqual(['trust.verified', 'config.loaded', 'sandbox.status', 'git.context', 'workspace.mapped']);
+    expect(seen).toEqual(['trust.verified', 'config.loaded', 'sandbox.status', 'git.context', 'workspace.mapped', 'memory.loaded']);
     endSession(session, 'completed');
   });
 
@@ -108,6 +109,7 @@ describe('assembleSession', () => {
       'sandbox.status',
       'git.context',
       'workspace.mapped',
+      'memory.loaded',
     ]);
     endSession(resumed.session, 'completed');
   });
