@@ -5,6 +5,7 @@ import type { GitFacts } from '../git/types.js';
 import { buildWorkspaceMapAuto, type WorkspaceMap } from '../workspace/map.js';
 import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
 import { loadMemory, type LoadedMemory } from '../memory/load.js';
+import { createDelegateTool } from '../tools/delegate.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
@@ -36,6 +37,8 @@ export interface AssembleDeps {
   sandbox?: SandboxBackend;
   /** Injectable for deterministic tests; defaults to a real detectGitFacts probe. */
   gitFacts?: GitFacts;
+  /** Render-only chrome for delegated-task progress lines (the caller sanitizes/styles). */
+  onTaskProgress?: (line: string) => void;
 }
 
 export interface Assembled {
@@ -103,6 +106,33 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       status: d.status,
     })),
   });
+
+  // The delegate tool is a PER-SESSION instance appended to a fresh array (never TOOLS.push):
+  // parents get it; child sessions have a fixed read-only registry without it, so delegation
+  // depth is 1 by construction. The child inherits the PROBED sandbox instance (no re-probe),
+  // the narrowing rules, the map, and the user constitution.
+  session.tools = [
+    ...session.tools,
+    createDelegateTool(
+      {
+        layout,
+        workspaceRoot: ctx.ws,
+        model: ctx.model,
+        maxTokens: ctx.maxTokens,
+        provider: ctx.provider,
+        rules: deps.config.rules,
+        sandbox,
+        sandboxFacts,
+        gitFacts,
+        map,
+        ...(memory.agent.status === 'ok' || memory.agent.status === 'oversize'
+          ? { agentMd: { text: memory.agent.text, truncated: memory.agent.truncated } }
+          : {}),
+        ...(deps.onTaskProgress !== undefined ? { onProgress: deps.onTaskProgress } : {}),
+      },
+      session.id,
+    ),
+  ];
 
   return { session, sandboxFacts, gitFacts, map, memory };
 }

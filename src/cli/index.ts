@@ -10,7 +10,7 @@ import { loadConfig } from '../config/config.js';
 import { runRepl } from '../repl/repl.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
-import { endSession, runTurn, type Session } from '../runtime/session.js';
+import { endReasonForTurn, endSession, runTurn, type Session } from '../runtime/session.js';
 import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
@@ -23,6 +23,7 @@ import { sanitizeLine } from '../shared/text.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
 import { assembleSession } from './assemble.js';
 import { memoryDir, parseFrontmatter, readDocCapped } from '../memory/store.js';
+import { runMemoryUpdate } from '../memory/update.js';
 
 const USAGE = `Agent CLI — a bounded local agent harness (V0.4).
 
@@ -157,6 +158,9 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     onText: (t: string): void => {
       process.stdout.write(t);
     },
+    onTaskProgress: (line: string): void => {
+      process.stderr.write(`[task] ${sanitizeLine(line)}\n`);
+    },
   });
 
   if (values['dangerously-allow-all']) {
@@ -174,7 +178,16 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const offSigint = installSigintAbort(controller);
   try {
     const result = await runTurn(session, task, { signal: controller.signal });
-    endSession(session, result.stopped && result.steps >= ctx.maxSteps ? 'max-steps' : result.stopped ? 'user-quit' : 'completed');
+    const reason = endReasonForTurn(result, ctx.maxSteps);
+    if (reason !== 'aborted') {
+      await runMemoryUpdate(session, {
+        layout,
+        enabled: config.memoryUpdates !== false,
+        endedReason: reason,
+        announce: (l) => process.stderr.write(`${l}\n`),
+      });
+    }
+    endSession(session, reason);
     process.stdout.write('\n');
     printVerdict(layout, session.id);
     return result.denials > 0 || result.stopped ? 2 : 0;
@@ -479,7 +492,11 @@ function cmdSessions(values: CliValues): number {
     const status = ended?.type === 'session.ended' ? ended.reason : 'CRASHED/UNKNOWN';
     const first = task?.type === 'user.message' ? task.text.split('\n')[0]!.slice(0, 60) : '(no task)';
     const model = started?.type === 'session.started' ? started.model : '?';
-    process.stdout.write(`${id}  [${status}]  ${model}  ${first}\n`);
+    const lineage =
+      started?.type === 'session.started' && started.lineage !== undefined
+        ? `  [task:${started.lineage.role} of ${started.lineage.parentSessionId}]`
+        : '';
+    process.stdout.write(`${id}  [${status}]  ${model}  ${sanitizeLine(first)}${lineage}\n`);
   }
   return 0;
 }

@@ -35,11 +35,13 @@ export const HELP = [
   '  /checkpoint [label | list | restore <n>]',
   '                  capture the workspace to a hidden git ref (recovery point; no history',
   '                  touched); restore <n> returns to a checkpoint as one undoable batch',
+  '  /tasks          list delegated subagent tasks (status, child session, usage)',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
   'keys: Ctrl+C interrupts the running turn; at the idle prompt press it twice to quit.',
   'note: shell commands always ask; their effects are never undoable.',
+  'note: cancelling a running delegated task = Ctrl+C (it aborts the whole turn, task included).',
 ].join('\n');
 
 export type SlashOutcome = 'continue' | 'quit';
@@ -102,6 +104,26 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           `  state: ${sanitizeLine(s.stateDir)}`,
         ].join('\n'),
       );
+      return 'continue';
+    }
+
+    case 'tasks': {
+      const events = ctx.session.log.events;
+      const started = events.filter((e) => e.type === 'task.started');
+      if (started.length === 0) {
+        ctx.renderer.chromeLine('no delegated tasks in this session');
+        return 'continue';
+      }
+      const lines = started.map((s, i) => {
+        if (s.type !== 'task.started') return '';
+        const ended = events.find((e) => e.type === 'task.ended' && e.callId === s.callId);
+        const state =
+          ended !== undefined && ended.type === 'task.ended'
+            ? `${ended.status} · ${ended.steps} step(s) · ${ended.usage.inputTokens} in / ${ended.usage.outputTokens} out tok`
+            : 'RUNNING or CRASHED (no task.ended recorded)';
+        return `${i + 1}. ${s.role} ${sanitizeLine(s.childSessionId)} — ${state} — inspect: agent report ${sanitizeLine(s.childSessionId)}`;
+      });
+      ctx.renderer.chromeLine(lines.join('\n'));
       return 'continue';
     }
 

@@ -459,3 +459,50 @@ describe('one-shot SIGINT wiring', () => {
     }
   });
 });
+
+describe('REPL: end-of-session memory wiring', () => {
+  it('a productive session announces the update and writes the journal on /quit', async () => {
+    const narrative = JSON.stringify({
+      objective: 'write f',
+      outcome: 'f written.',
+      decisions: [],
+      openIssues: [],
+      nextSteps: [],
+      codebaseUpdate: null,
+    });
+    const r = await drive(
+      [
+        { say: 'writing', calls: [{ name: 'write_file', input: { path: 'f.txt', content: 'x' } }] },
+        { say: 'done' },
+        { say: narrative },
+      ],
+      ['make f\n', '/quit\n'],
+    );
+    expect(r.code).toBe(0);
+    expect(r.chromeOut).toContain('updating project memory');
+    expect(r.chromeOut).toContain('journal updated');
+    expect(r.events.find((e) => e.type === 'memory.narrative')).toMatchObject({ status: 'ok' });
+
+    const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: state } });
+    const journal = fs.readFileSync(path.join(layout.projectDir, 'memory', 'JOURNAL.md'), 'utf8');
+    expect(journal).toContain('f written.');
+    // The memory.* events land BEFORE session.ended (the update runs pre-endSession).
+    const types = r.events.map((e) => e.type);
+    expect(types.indexOf('memory.updated')).toBeLessThan(types.indexOf('session.ended'));
+  });
+
+  it('an unproductive chat session skips the update quietly', async () => {
+    const r = await drive([{ say: 'hi' }], ['hello\n', '/quit\n']);
+    expect(r.code).toBe(0);
+    expect(r.events.find((e) => e.type === 'memory.narrative')).toMatchObject({ status: 'skipped' });
+    const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: state } });
+    expect(fs.existsSync(path.join(layout.projectDir, 'memory', 'JOURNAL.md'))).toBe(false);
+  });
+});
+
+describe('REPL: /tasks', () => {
+  it('reports no tasks when none were delegated', async () => {
+    const r = await drive([{ say: 'hi' }], ['hello\n', '/tasks\n', '/quit\n']);
+    expect(r.chromeOut).toContain('no delegated tasks in this session');
+  });
+});

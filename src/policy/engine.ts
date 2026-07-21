@@ -123,6 +123,37 @@ export function decide<I>(
     ...(ctx.rules && ctx.rules.protectedPaths.length > 0 ? { extraProtected: ctx.rules.protectedPaths } : {}),
   };
 
+  // 0. Delegation → explicit fail-closed branch, FIRST (before the command branch, so a tool
+  //    declaring both contracts can never reach the auto-run path disguised as a provably-safe
+  //    command; before the fall-throughs, so a command-less mutation-less delegating tool can
+  //    never auto-classify as plain observe — the S6 trap, handled deliberately). Only the
+  //    read-only explorer role exists; every other role denies.
+  const delegation = tool.delegates?.(input);
+  if (delegation !== undefined) {
+    if (tool.command !== undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'task.conflicting-contract',
+        'a tool may declare delegation or a shell command, never both',
+      );
+    }
+    if (delegation.role === 'explorer') {
+      return decision(
+        'observe',
+        'allow',
+        'task.readonly-role',
+        'delegated read-only exploration: the child session gets read-only tools, auto-denied approvals, and a fixed harness budget',
+      );
+    }
+    return decision(
+      'sensitive',
+      'deny',
+      'task.unknown-role',
+      `unknown subagent role '${delegation.role}'; only read-only roles exist`,
+    );
+  }
+
   // 1. Shell command → AUTOMATIC REVIEW (the single default flow; no separate "mode").
   //    - circuit-breaker → deny (absolute; never overridden by anything downstream).
   //    - a command the deterministic analyzer PROVES safe MAY auto-run, but ONLY inside an active

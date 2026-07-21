@@ -37,6 +37,9 @@ const UserConfigSchema = z
   .object({
     model: z.string().min(1).optional(),
     maxSteps: z.number().int().positive().max(200).optional(),
+    /** End-of-session project-memory updates (default on). USER layer only — a workspace file
+     *  must not toggle harness memory writes (workspace config stays narrowing-only). */
+    memoryUpdates: z.boolean().optional(),
     ...narrowing,
   })
   .strict();
@@ -47,6 +50,8 @@ export interface ResolvedConfig {
   /** User-level preferences; CLI flags still win (applied by the caller). */
   model?: string;
   maxSteps?: number;
+  /** End-of-session project-memory updates (absent = on). User layer only. */
+  memoryUpdates?: boolean;
   /** Union of all layers' narrowing knobs. */
   rules: PolicyRules;
   /** Provenance for the config.loaded event. */
@@ -104,6 +109,7 @@ export function loadConfig(stateRoot: string, workspaceRoot: string): ResolvedCo
   return {
     ...(user?.data.model !== undefined ? { model: user.data.model } : {}),
     ...(user?.data.maxSteps !== undefined ? { maxSteps: user.data.maxSteps } : {}),
+    ...(user?.data.memoryUpdates !== undefined ? { memoryUpdates: user.data.memoryUpdates } : {}),
     rules,
     sources,
   };

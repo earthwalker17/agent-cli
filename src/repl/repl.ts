@@ -7,6 +7,8 @@ import { loadConfig } from '../config/config.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from '../cli/context.js';
 import { checkTrust } from '../cli/trust-check.js';
 import { assembleSession, type Assembled } from '../cli/assemble.js';
+import { runMemoryUpdate } from '../memory/update.js';
+import { sanitizeLine } from '../shared/text.js';
 import { createReplIO, type ReplIO } from './io.js';
 import { createRenderer, type Renderer } from './render.js';
 import { detectStyle } from './format.js';
@@ -79,6 +81,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       onText: (t: string) => renderer.onText(t),
       onCommandOutput: (_callId: string, chunk: string, stream: 'stdout' | 'stderr') => renderer.onCommandOutput(chunk, stream),
       onLogEvent: (e) => renderer.onEvent(e),
+      onTaskProgress: (line: string) => renderer.chromeLine(`  [task] ${sanitizeLine(line)}`),
       ...(opts.sandbox !== undefined ? { sandbox: opts.sandbox } : {}),
       ...(opts.gitFacts !== undefined ? { gitFacts: opts.gitFacts } : {}),
     });
@@ -156,6 +159,12 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     return 1;
   }
 
+  await runMemoryUpdate(session, {
+    layout,
+    enabled: config.memoryUpdates !== false,
+    endedReason: 'user-quit',
+    announce: (l) => renderer.chromeLine(style.dim(l)),
+  });
   endSessionSafely(session, 'user-quit');
   renderer.chromeLine(style.dim(`session ${session.id} ended — report: agent report ${session.id}`));
   io.close();

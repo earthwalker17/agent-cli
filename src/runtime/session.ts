@@ -12,6 +12,7 @@ import type {
   SessionEvent,
   SessionMode,
   StopReason,
+  TaskEvidence,
   Tool,
   ToolContext,
   ToolResult,
@@ -99,13 +100,22 @@ export interface StartOptions {
   clock?: Clock;
   idGen?: IdGen;
   saltHex: string;
+  /** Present only for subagent child sessions: recorded on session.started for lineage. */
+  lineage?: { parentSessionId: string; role: string };
 }
 
 /** Open a fresh session: create the log, acquire the lock, and record `session.started`. */
 export function startSession(opts: StartOptions): Session {
   const clock = opts.clock ?? systemClock;
   const idGen = opts.idGen ?? systemIdGen(clock);
-  const id = idGen.sessionId();
+  // Fresh must mean fresh: a same-second id collision (routine once child sessions exist —
+  // several can start inside one parent second) must never append into an EXISTING log, which
+  // would merge two sessions' evidence and steal the same-pid lock. Regenerate, then refuse.
+  let id = idGen.sessionId();
+  for (let attempt = 0; fs.existsSync(opts.layout.sessionFile(id)); attempt++) {
+    if (attempt >= 4) throw new Error(`could not allocate a fresh session id (last tried: ${id})`);
+    id = idGen.sessionId();
+  }
   const log = EventLog.open({ file: opts.layout.sessionFile(id), lockFile: opts.layout.lockFile(id), clock });
   const session = buildSession(id, opts, log, clock);
   log.append({
@@ -116,6 +126,7 @@ export function startSession(opts: StartOptions): Session {
     mode: opts.mode,
     providerName: opts.provider.name,
     argv: opts.argv ?? [],
+    ...(opts.lineage !== undefined ? { lineage: opts.lineage } : {}),
   });
   return session;
 }
@@ -204,11 +215,13 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   const mutatedBy = new Map<string, Extract<SessionEvent, { type: 'file.mutated' }>[]>();
   const snapBy = new Set<string>();
   const commandStartedBy = new Set<string>();
+  const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>>();
   for (const e of events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
     else if (e.type === 'file.mutated') (mutatedBy.get(e.callId) ?? mutatedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
     else if (e.type === 'command.started') commandStartedBy.add(e.callId);
+    else if (e.type === 'task.started') taskStartedBy.set(e.callId, e);
   }
 
   const orphanedCallIds: string[] = [];
@@ -231,6 +244,16 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
       return toolResultBlock(id, 'interrupted after snapshot but before writing; disk state unverified', true);
     }
     orphanedCallIds.push(id);
+    const task = taskStartedBy.get(id);
+    if (task !== undefined) {
+      // The delegated task was running at the crash. The child's OWN evidence log survives —
+      // point at it instead of guessing what the child did.
+      return toolResultBlock(
+        id,
+        `interrupted: a delegated task (child session ${task.childSessionId}) was running when the session crashed; its own evidence log survives — inspect: agent report ${task.childSessionId}`,
+        true,
+      );
+    }
     if (commandStartedBy.has(id)) {
       // The command had SPAWNED (command.started recorded) — its side effects are unknown and
       // the process may even have kept running past the crash.
@@ -287,8 +310,20 @@ export function recordWorkspaceMap(
   });
 }
 
+/**
+ * Map a turn outcome onto the session-end reason. 'aborted' is distinct from 'user-quit' on
+ * purpose: an aborted session must never trigger post-session work (e.g. the memory narrative
+ * call) — the user just asked everything to stop.
+ */
+export function endReasonForTurn(result: TurnResult, maxSteps: number): 'completed' | 'user-quit' | 'max-steps' | 'aborted' {
+  if (result.aborted) return 'aborted';
+  if (result.stopped && result.steps >= maxSteps) return 'max-steps';
+  if (result.stopped) return 'user-quit';
+  return 'completed';
+}
+
 /** Record `session.ended` and release the lock. Safe to call once per session. */
-export function endSession(session: Session, reason: 'completed' | 'user-quit' | 'error' | 'max-steps', error?: string): void {
+export function endSession(session: Session, reason: 'completed' | 'user-quit' | 'error' | 'max-steps' | 'aborted' | 'budget', error?: string): void {
   session.log.append(error !== undefined ? { type: 'session.ended', reason, error } : { type: 'session.ended', reason });
   session.log.close();
 }
@@ -545,6 +580,24 @@ function callSandbox(session: Session, boundary: 'sandbox' | 'unsandboxed' | und
   };
 }
 
+/** Persist a tool-reported task lifecycle fact under the runtime-bound callId (mirrors commands). */
+function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): void {
+  if (e.kind === 'started') {
+    session.log.append({ type: 'task.started', callId, role: e.role, childSessionId: e.childSessionId, budget: e.budget });
+    return;
+  }
+  session.log.append({
+    type: 'task.ended',
+    callId,
+    childSessionId: e.childSessionId,
+    status: e.status,
+    steps: e.steps,
+    usage: e.usage,
+    resultSha256: e.resultSha256,
+    durationMs: e.durationMs,
+  });
+}
+
 /** Persist a tool-reported command lifecycle fact under the runtime-bound callId. */
 function recordCommandEvidence(session: Session, callId: string, e: CommandEvidence): void {
   if (e.kind === 'started') {
@@ -669,6 +722,7 @@ async function runExecution<I>(
     ...(signal ? { signal } : {}),
     ...(sandbox ? { sandbox } : {}),
     reportCommand: (e) => recordCommandEvidence(session, callId, e),
+    reportTask: (e) => recordTaskEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),

@@ -86,6 +86,17 @@ export interface ReportJson {
   gitCheckpoints: { ref: string; oid: string; label: string | null; filesChanged: number }[];
   /** User-commanded checkpoint restores (each an undoable batch; V0.5 logs). */
   gitRestores: { ref: string; oid: string; restored: number; refused: { path: string; reason: string }[] }[];
+  /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
+   *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
+  tasksDelegated: {
+    callId: string;
+    role: string;
+    childSessionId: string;
+    status: string | null;
+    steps?: number;
+    usage?: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number };
+    resultSha256?: string;
+  }[];
   integrity: { truncatedTail: boolean; corruptAt?: { line: number; kind: string } };
 }
 
@@ -266,6 +277,23 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     .filter((e): e is Extract<SessionEvent, { type: 'user.message' }> => e.type === 'user.message')
     .map((e) => e.text);
 
+  // Delegated subagent tasks (V0.6): task.started/task.ended pairs joined by callId. An orphan
+  // task.started (no ended) means the session died while the task ran — rendered honestly.
+  const taskEndedByCall = new Map<string, Extract<SessionEvent, { type: 'task.ended' }>>();
+  for (const e of events) if (e.type === 'task.ended') taskEndedByCall.set(e.callId, e);
+  const tasksDelegated = events
+    .filter((e): e is Extract<SessionEvent, { type: 'task.started' }> => e.type === 'task.started')
+    .map((e) => {
+      const end = taskEndedByCall.get(e.callId);
+      return {
+        callId: e.callId,
+        role: e.role,
+        childSessionId: e.childSessionId,
+        status: end !== undefined ? end.status : null,
+        ...(end !== undefined ? { steps: end.steps, usage: end.usage, resultSha256: end.resultSha256 } : {}),
+      };
+    });
+
   const json: ReportJson = {
     session: {
       id: started?.type === 'session.started' ? started.sessionId : 'unknown',
@@ -310,6 +338,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     gitCommits,
     gitCheckpoints,
     gitRestores,
+    tasksDelegated,
     integrity: {
       truncatedTail: input.truncatedTail ?? false,
       ...(input.corruptAt ? { corruptAt: input.corruptAt } : {}),
@@ -438,6 +467,18 @@ function renderMarkdown(r: ReportJson): string {
     L.push('');
   }
 
+  if (r.tasksDelegated.length > 0) {
+    L.push(`## Delegated tasks (subagents)`);
+    for (const t of r.tasksDelegated) {
+      const state =
+        t.status !== null
+          ? `${t.status} — ${t.steps} step(s), ${t.usage?.inputTokens ?? 0} in / ${t.usage?.outputTokens ?? 0} out tokens`
+          : `STARTED but never completed — the session ended while it ran`;
+      L.push(`- ${t.role} → child session ${t.childSessionId}: ${state} (evidence: agent report ${t.childSessionId})`);
+    }
+    L.push('');
+  }
+
   L.push(`---`);
   L.push(`Assistant narrative is not evidence; the sections above are compiled only from recorded tool events.`);
   const sbx = r.session.sandbox;
@@ -455,6 +496,11 @@ function renderMarkdown(r: ReportJson): string {
   }
   if (r.commands.some((c) => c.termination === 'timeout' || c.termination === 'aborted')) {
     L.push(`Killed commands were force-terminated best-effort (process tree kill); a detached descendant may have survived, and a killed command has no exit code and never counts as a passing check.`);
+  }
+  if (r.tasksDelegated.length > 0) {
+    L.push(
+      `Delegated-task usage is recorded in each child session's own log and is NOT included in this session's token totals. Subagent reports quoted to the model are narration, not verified evidence — each child's own evidence log is the record of what it actually did.`,
+    );
   }
   return L.join('\n');
 }

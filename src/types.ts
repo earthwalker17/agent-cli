@@ -53,6 +53,34 @@ export type CommandEvidence =
       drainTimedOut?: boolean;
     };
 
+/** How a delegated subagent task ended (V0.6). */
+export type TaskStatus = 'completed' | 'error' | 'budget-steps' | 'budget-tokens' | 'timeout' | 'aborted';
+
+/** The harness-fixed budget a delegated task runs under (never model-controlled). */
+export interface TaskBudget {
+  maxSteps: number;
+  timeoutMs: number;
+  maxOutputTokens: number;
+}
+
+/**
+ * Structured facts about a delegated task's lifecycle, reported by the delegating tool through
+ * `ToolContext.reportTask`. Like CommandEvidence, the runtime binds the callId when persisting —
+ * the runtime-bound callId + the unique childSessionId are the unforgeable parent↔child join.
+ */
+export type TaskEvidence =
+  | { kind: 'started'; role: string; childSessionId: string; budget: TaskBudget }
+  | {
+      kind: 'ended';
+      childSessionId: string;
+      status: TaskStatus;
+      steps: number;
+      usage: Usage;
+      /** sha256 of the child's full (untruncated) final report text. */
+      resultSha256: string;
+      durationMs: number;
+    };
+
 export interface ToolContext {
   workspaceRoot: string;
   stateDir: string;
@@ -64,6 +92,8 @@ export interface ToolContext {
   onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void;
   /** Evidence channel for command lifecycle facts (spawn/termination); persisted by the runtime. */
   reportCommand?: (e: CommandEvidence) => void;
+  /** Evidence channel for delegated-task lifecycle facts; persisted by the runtime under this call's id. */
+  reportTask?: (e: TaskEvidence) => void;
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -120,6 +150,13 @@ export interface Tool<I = unknown> {
   readsPaths?(input: I): string[];
   /** For a shell tool: the raw command string, so the policy gate labels and always-asks it. */
   command?(input: I): string;
+  /**
+   * Declares that this tool delegates work to a bounded child session (V0.6). A policy FACT:
+   * decide() gates it in an explicit fail-closed branch BEFORE every other classification (a
+   * command-less, mutation-less tool would otherwise auto-allow as observe — the S6 trap), and
+   * a tool may never declare both `delegates` and `command`.
+   */
+  delegates?(input: I): { role: string };
   /** Optional hook to strip secret content from the result before it is persisted to the log. */
   redactForLog?(result: ToolResult, saltHex: string): ToolResult;
   execute(input: I, ctx: ToolContext): Promise<ToolResult>;
@@ -241,6 +278,8 @@ export type EventBody =
       mode: SessionMode;
       providerName: string;
       argv: string[];
+      /** Present only on subagent child sessions (V0.6): who spawned this session, and as what. */
+      lineage?: { parentSessionId: string; role: string };
     }
   | {
       type: 'session.resumed';
@@ -444,7 +483,57 @@ export type EventBody =
         status: 'ok' | 'missing' | 'oversize' | 'unreadable';
       }[];
     }
-  | { type: 'session.ended'; reason: 'completed' | 'user-quit' | 'error' | 'max-steps'; error?: string };
+  | {
+      /**
+       * A delegated subagent task began executing (V0.6). callId is bound by the runtime (the
+       * delegate tool cannot forge another call's evidence); childSessionId names the child's
+       * own event log — the complete parent↔child lineage join.
+       */
+      type: 'task.started';
+      callId: string;
+      role: string;
+      childSessionId: string;
+      budget: TaskBudget;
+    }
+  | {
+      /** A delegated subagent task finished (V0.6). Usage is the CHILD's spend, recorded once
+       *  here for the parent's view — it is NOT included in this session's own usage totals. */
+      type: 'task.ended';
+      callId: string;
+      childSessionId: string;
+      status: TaskStatus;
+      steps: number;
+      usage: Usage;
+      resultSha256: string;
+      durationMs: number;
+    }
+  | {
+      /**
+       * The end-of-session narrative provider call (V0.6). This call bypasses runTurn (its
+       * instruction must never replay into a resumed conversation), so its usage is recorded
+       * HERE — evidence that the call happened, what it cost, and whether it succeeded.
+       */
+      type: 'memory.narrative';
+      status: 'ok' | 'failed' | 'skipped';
+      durationMs: number;
+      usage?: Usage;
+      detail?: string;
+    }
+  | {
+      /** A project-memory document write outcome at session end (V0.6). Failures are honest, never silent. */
+      type: 'memory.updated';
+      doc: 'journal' | 'codebase';
+      status: 'written' | 'skipped' | 'failed';
+      sha256?: string;
+      bytes?: number;
+      detail?: string;
+    }
+  | {
+      type: 'session.ended';
+      /** 'aborted' (Ctrl+C) and 'budget' (subagent caps) are additive V0.6 values. */
+      reason: 'completed' | 'user-quit' | 'error' | 'max-steps' | 'aborted' | 'budget';
+      error?: string;
+    };
 
 export type SessionEvent = { v: number; seq: number; ts: string } & EventBody;
 export type EventType = EventBody['type'];

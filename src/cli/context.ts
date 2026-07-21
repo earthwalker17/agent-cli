@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { EventLog } from '../store/event-log.js';
 import { MockProvider, parseScript } from '../provider/mock.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { autoDenyApprover, dangerousApprover, createInteractiveApprover } from '../runtime/approvals.js';
@@ -103,6 +104,11 @@ export function buildRunContext(values: CliValues, opts: RunContextOptions = {})
   return { ws, mode, provider, approver, model, maxSteps, maxTokens };
 }
 
+/**
+ * The newest MAIN session. Subagent child logs live in the same directory and, being created
+ * mid-parent-session, always sort newest — without the lineage skip, every "latest session"
+ * default (`--continue`, undo, diff, commit, report) would silently target the newest CHILD.
+ */
 export function latestSessionId(layout: ProjectLayout): string | undefined {
   try {
     return fs
@@ -110,7 +116,11 @@ export function latestSessionId(layout: ProjectLayout): string | undefined {
       .filter((f) => f.endsWith('.jsonl'))
       .map((f) => f.slice(0, -'.jsonl'.length))
       .sort()
-      .pop();
+      .reverse()
+      .find((id) => {
+        const first = EventLog.readFirstEvent(layout.sessionFile(id));
+        return !(first !== undefined && first.type === 'session.started' && first.lineage !== undefined);
+      });
   } catch {
     return undefined;
   }
