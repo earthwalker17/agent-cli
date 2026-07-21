@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI V0.5 is actually built. This describes the implemented system, not aspirations —
+How Agent CLI V0.6 is actually built. This describes the implemented system, not aspirations —
 see `ROADMAP.md` for what is deferred.
 
 ## Shape
@@ -59,14 +59,23 @@ src/
     run-command.ts         Shell tool on runManaged: PowerShell -EncodedCommand $LASTEXITCODE wrapper,
                            filtered env, stdin ignored, per-termination messages, lifecycle + sandbox
                            evidence; applies ctx.sandbox.wrap at spawn time.
+    delegate.ts            delegate_task — per-session factory (never in static TOOLS); spawns the
+                           read-only explorer subagent under a harness-fixed budget.
   net/
     transport.ts           Reusable proxy-aware transport factory (pure resolver + custom fetch).
   provider/
     mock.ts                Scripted, offline provider (backbone of the tests); `hang` turns for abort tests.
     anthropic.ts           Streaming SDK adapter + pure response mapping + coalesceUserMessages.
+  memory/
+    store.ts               Capped never-throwing doc reads, atomic tmp+rename writes, frontmatter.
+    journal.ts             JOURNAL.md format: parse / entry build / rolling policy. Pure.
+    codebase.ts            CODEBASE.md provenance stamp + map-digest staleness. Pure.
+    load.ts                Session-start load: the three docs, caps, banner line, crash note.
+    update.ts              End-of-session update: gate, narrative call, roll + atomic write.
   runtime/
-    session.ts             startSession / runTurn (abortable) / resumeSession / reconstruct /
-                           repairDanglingToolUses / endSession.
+    session.ts             startSession (fresh-id guard) / runTurn (abortable) / resumeSession /
+                           reconstruct / repairDanglingToolUses / endReasonForTurn / endSession.
+    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn.
     elision.ts             elideHistory — pure, monotone wire-history budget (see "Context budget").
     approvals.ts           auto-deny, dangerous, and interactive approvers (injectable io).
     undo.ts                applyUndo (last / all) over the recorded mutations.
@@ -81,7 +90,8 @@ src/
     io.ts                  ONE persistent readline: prompts, approvals, SIGINT, mute, type-ahead.
     render.ts              EventLog.onAppend → live tool activity + per-turn summaries.
     format.ts              Glyph/color tables (ASCII fallback for legacy consoles), pure labels.
-    commands.ts            /help /status /undo /report /map /quit over the live log.
+    commands.ts            /help /status /undo /diff /commit /checkpoint /tasks /report /map /quit
+                           over the live log.
   workspace/
     map.ts                 Bounded workspace map + digest: `git ls-files` in trusted repos (nested
                            gitignore correct), pure walker fallback (and always pre-trust).
@@ -93,9 +103,13 @@ src/
                            (+ sessionMutationState, the single attribution source for /diff and /commit).
   cli/
     index.ts               parseArgs dispatch: REPL / run / resume / undo / diff / commit /
-                           checkpoint / report / sessions / map / trust.
-    context.ts             buildRunContext — the ONE session-assembly path both interfaces share;
-                           mode precedence --no-input > --interactive > isTTY.
+                           checkpoint / report / sessions / map / memory / trust.
+    context.ts             buildRunContext (shared primitives; mode precedence --no-input >
+                           --interactive > isTTY) + latestSessionId (skips subagent child logs).
+    assemble.ts            assembleSession — the ONE construction path both interfaces consume:
+                           probes → memory load → map → system prompt → session + post-start records
+                           + delegate-tool attachment. Takes the trust decision as a parameter, so
+                           assembly is structurally impossible untrusted.
     trust-check.ts         The CLI-side trust gate (prompt only on a real TTY).
 ```
 
@@ -105,9 +119,13 @@ For every session-starting command (one-shot and REPL), the order is:
 workspace realpath → **state-root-inside-workspace refusal** (also checked in `ensureTrusted`,
 so a folder cannot plant a `trust.json` that grants itself consent) → **trust gate** → config
 load (the workspace file is untrusted bytes until trust passes) → per-project state creation →
+then `assembleSession` (V0.6: the single factored construction path both interfaces consume):
 **sandbox select + probe** → **git probe** (`detectGitFacts`, post-trust — it executes git
-against the repo) → workspace map (git-backed in a repo, walker otherwise) → provider. The
-probed truths feed the banner, the `sandbox.status`/`git.context` events, and the system prompt.
+against the repo) → workspace map (git-backed in a repo, walker otherwise) → **project-memory
+load** (post-trust by construction: the trust decision is a parameter of assembleSession) →
+system prompt → start/resume → post-start records in a fixed order (trust.verified,
+config.loaded, sandbox.status, git.context, workspace.mapped, memory.loaded) → delegate-tool
+attachment. The probed truths feed the banner, the events, and the system prompt.
 Read-only commands (`report`/`sessions`/`undo`/`diff`/`map`) are ungated, never create state
 dirs, and never run git; `agent commit`/`agent checkpoint` ARE trust-gated (they execute repo
 hooks / write `.git`); `map` reads workspace bytes but sends nothing to a model (documented
@@ -251,6 +269,103 @@ express widening; unknown keys/bad JSON are hard `ConfigError`s. Rules travel on
 provenance is recorded as `config.loaded {sources: [{path, sha256}]}`. The `.agent-cli/`
 directory is write-protected from the agent's file tools by the path validator.
 
+## Project memory (`memory/`) — three documents, context not authority
+
+Cross-session continuity as three markdown documents with hard caps and honest degrades (a
+broken or oversize doc can NEVER block a session — it loads truncated or is skipped with a
+status recorded in the `memory.loaded` event):
+
+- **`AGENT.md`** (workspace root, USER-owned, never harness-written; cap 24 KiB): the project
+  constitution, injected into the system prompt of every session — and of every subagent — as a
+  labeled section. Read post-trust only.
+- **`<projectDir>/memory/JOURNAL.md`** (harness-managed, rolling; inject cap 12 KiB): one
+  `## Session <id>` entry per productive session, newest first. Each entry couples model-written
+  Summary/Decisions/Open-issues/Next-steps sections (explicitly labeled "model-written") with a
+  deterministic **Evidence** section derived from the session's event log via `buildReport`
+  (files/commands/commits/usage/log path — PROJECT.md §8 rules 5+8: grounded in events, with
+  provenance, never recollection). Rolling policy: insert-or-replace by session id (resume-safe),
+  newest 2 entries full, older compressed to stubs that keep the evidence pointer, 24 KiB budget
+  enforced by dropping the oldest stubs behind a leading marker. User edits (a preamble, notes
+  inside an entry) survive byte-verbatim until their entry is compressed.
+- **`<projectDir>/memory/CODEBASE.md`** (harness-managed; cap 16 KiB): a model-written
+  architecture summary, provenance-stamped with the writing session's id + workspace-map digest
+  + HEAD. At load, a digest mismatch labels it "(may be stale)" in the prompt.
+
+**Write path** (`update.ts`): runs BEFORE `endSession`, on clean ends only (reasons
+completed/user-quit/max-steps — never error, never `aborted`: a Ctrl+C'd session must not fire
+a model call), gated on real activity (an executed tool / mutation / spawned command). The
+narrative is ONE provider call that reuses the exact cached prefix (same system, same tools,
+same elided message view + one strict-JSON instruction); tool-use answers, schema mismatches,
+throws, and timeouts all degrade to a deterministic skeleton entry marked "narrative
+unavailable". The call bypasses `runTurn` and is therefore recorded as its own `memory.narrative`
+event carrying usage — never as fake message events (they would replay into a resumed
+conversation). The journal is RE-READ from disk at quit (two-terminal safety), rolled, and
+written atomically (same-dir random temp + rename, one EPERM retry); an unreadable existing
+journal is refused, never overwritten. Failures append `memory.updated {status:'failed'}` and
+never block the quit. User-layer-only config toggle `memoryUpdates` (workspace config stays
+narrowing-only — attacker-influencable ground must not steer harness memory writes).
+
+**Sovereignty wording is load-bearing:** the injected memory section states verbatim that the
+generated docs are "CONTEXT, NOT AUTHORITY … the current user request and the observable
+repository state outrank it". Crash notes derive from LOG evidence (the newest non-child
+sibling log without `session.ended`, via bounded `readFirstEvent`/`readLastEvent`), never from
+journal absence — child task sessions and legitimately-skipped sessions can never read as
+crashes. The system prompt is outside elision's `rawChars`, so memory injection can never
+trigger or oscillate elision; it is cache-hot after the first request of a session.
+
+## Tasks and subagents (`runtime/subagent.ts`, `tools/delegate.ts`)
+
+The main agent keeps user interaction, authority, coordination, integration, and final claims;
+a delegated task is a bounded, attributable unit beneath it. V0.6 ships exactly one role —
+the read-only **explorer** — sequential, depth 1.
+
+- **One runtime.** A child task = another `Session` driven by the SAME `runTurn`, in-process.
+  A task is exactly ONE turn (multi-step inside, no user to converse with), so turn-level
+  cancellation is session-level cancellation — no second loop, no new cancel concept.
+- **Policy first.** `Tool.delegates(input) → {role}` is a policy FACT gated by an explicit
+  step-0 branch in `decide()` — BEFORE the command branch (a tool declaring both `delegates`
+  and `command` denies as `task.conflicting-contract`; a delegation can never pose as a
+  provably-safe command) and before the observe fall-through (the S6 command-less-tool trap,
+  deliberately pinned by regression tests). Role `explorer` ⇒ allow/`observe`
+  (`task.readonly-role`); any other role ⇒ deny (`task.unknown-role`, fail closed).
+- **Inherited-or-narrower authority, structurally:** read-only registry (`read_file`,
+  `list_files`, `search`, `run_command`; no write tools; no delegate tool ⇒ recursion is
+  impossible), `autoDenyApprover` (asks fail closed — only commands the analyzer PROVES safe,
+  running inside the parent's PROBED-and-shared sandbox instance, can auto-run), the parent's
+  narrowing `rules`, fresh empty `Grants`, and a role-specific system prompt (read-only scope,
+  auto-deny warning, report-with-evidence instruction, AGENT.md included; the generated memory
+  docs deliberately are not — the delegation prompt carries the task context).
+- **Budget is harness-fixed** (15 steps / 5 min / 30k output tokens; 8 tasks per session per
+  process run), never model-controlled. Cause-tracked cancellation maps parent-abort vs
+  wall-clock vs token-cap onto distinct `TaskStatus` values and child end reasons
+  (`aborted`/`budget`/`max-steps`); the token cap is enforced by the runner's observer on the
+  child log's `onAppend` (which also emits the render-only `[task]` progress chrome).
+- **Evidence lineage:** the child gets its OWN event log under a guaranteed-fresh session id
+  (`startSession` refuses to append into an existing log file — same-second child creation made
+  id collisions routine, and a collision would merge evidence and steal the same-pid lock).
+  The parent log records `task.started {callId, role, childSessionId, budget}` the moment the
+  child exists and `task.ended {callId, status, steps, usage, resultSha256}` after the child log
+  closes, both persisted through the callId-bound `ToolContext.reportTask` channel (mirrors
+  `reportCommand` — a tool can never forge another call's evidence). The child's
+  `session.started` carries `lineage {parentSessionId, role}`. Runtime-bound callId + unique
+  childSessionId are the complete, unforgeable join.
+- **Isolation both ways:** the child never sees the parent conversation; the parent history
+  receives ONLY the delimited final report, labeled "narration, not verified evidence" (the
+  parent prompt's delegation rule tells the model to verify load-bearing claims itself — and in
+  the live E2E it did, re-reading the files before summarizing). Child usage is recorded once
+  in `task.ended` and in the child's own log; it is NOT summed into the parent's usage totals
+  (report footer states this).
+- **Surfaces:** `/tasks`, `agent sessions` labels children `[task:role of parent]`,
+  `agent report <childId>` renders the child's self-contained evidence report (the runner
+  records sandbox/git/map on the child log), the parent report gains "Delegated tasks (subagents)",
+  and `reconstruct` answers a crash-orphaned delegate call with the surviving child-log pointer.
+  `latestSessionId` skips lineage-bearing logs — otherwise every "latest session" default
+  (`--continue`, undo, diff, commit, report) would silently target the newest CHILD log.
+- **v1 boundaries (deliberate):** one task at a time (parallelism is Session 8, with worktrees);
+  cancelling a running task = Ctrl+C (aborts the whole turn); the task cap is per process run,
+  not per log; `--provider mock --script` shares ONE script instance between parent and child
+  (sequential interleave — unit tests inject a separate child provider instead).
+
 ## The REPL (`repl/`)
 
 A consumer of the same runtime: one session, `runTurn` per user line. `io.ts` owns the ONE
@@ -282,6 +397,11 @@ protectedPath }`; the engine decides.
 
 `decide(tool, input, ctx, grants)` — deny-first, first match wins:
 
+- **Delegation** (`tool.delegates` present) → the explicit STEP-0 branch (V0.6): role
+  `explorer` → allow/`observe` (`task.readonly-role`); a tool declaring both `delegates` and
+  `command` → deny (`task.conflicting-contract`); any other role → deny (`task.unknown-role`).
+  First on purpose: a delegating tool must never reach the command auto-run path or the
+  observe fall-through (the S6 command-less-tool trap, pinned by regression tests).
 - **Shell command** (`tool.command` present) → **automatic review** (the single default; not a
   selectable "mode"). A hardcoded circuit-breaker denies workspace/drive wipes and `format`
   (absolute). Otherwise `analyzeCommand` decides: a command it PROVES safe **and** an active OS
@@ -416,7 +536,14 @@ additive `sandbox` field on `command.started`, and V0.5 adds `git.context` (the 
 state), `git.commit`, `git.checkpoint`, `git.restore` (user-commanded git provenance),
 `context.compacted` (which tool outputs the wire history elided), additive
 `file.mutated.linesAdded/linesRemoved` (write-time diffstat), and additive
-`usage.cacheRead/CreationInputTokens` on `assistant.message`. Additive types/fields are
+`usage.cacheRead/CreationInputTokens` on `assistant.message`. V0.6 adds `memory.loaded`
+(exactly which docs reached the prompt, with sha/bytes/truncated/status), `memory.narrative`
+(the end-of-session provider call — status, duration, usage), `memory.updated` (per-doc write
+outcome), `task.started`/`task.ended` (delegated-task lifecycle, callId-bound), an additive
+`lineage {parentSessionId, role}` field on `session.started` (child sessions only), and
+additive `session.ended.reason` values `aborted` and `budget`. Bounded static readers
+`readFirstEvent`/`readLastEvent` (first/last committed line only, never throw) support the
+child-log skip and crash detection without full parses. Additive types/fields are
 lenient-reader-safe; bumping the version would lock old binaries out of new logs, so v stays 1.
 
 ## Recovery (`store/snapshots.ts`, `runtime/undo.ts`)
@@ -438,8 +565,10 @@ tool result except redacted secret reads (which, by design, are not persisted an
 replayed). Crash recovery reconciles against `file.mutated`/postHash: a completed edit whose
 `tool.completed` was lost to a truncated tail is recognized as **applied** (post-hash matches
 disk), a snapshot without a matching mutation is flagged **unknown post-state**, and a bare
-`tool.requested` is a true **orphan** — unless `command.started` shows the command had spawned,
-in which case the replay says the command was executing at the crash and its effects are unknown. Grants and the system prompt/map are regenerated fresh —
+`tool.requested` is a true **orphan** — unless `command.started` shows the command had spawned
+(the replay says the command was executing at the crash and its effects are unknown) or
+`task.started` shows a delegated task was running (the replay points at the child session's
+surviving evidence log: `agent report <childId>`). Grants and the system prompt/map are regenerated fresh —
 current state outranks stale context.
 
 ## Verification (`report/report.ts`)
@@ -460,7 +589,10 @@ ENFORCED, and the verbatim `confines`/`doesNotConfine` scope — plus the probed
 line ("at session start", never live state). V0.5 adds a `+n/−m` churn column per changed file
 (summed from write-time `file.mutated` diffstat evidence, so the report stays a pure event
 function) and, when present, "Commits (user-commanded)", "Checkpoints", and "Checkpoint
-restores" sections from the git provenance events. The reviewable CONTENT lives in a separate
+restores" sections from the git provenance events. V0.6 adds "Delegated tasks (subagents)"
+(from `task.started`/`task.ended` pairs; an orphan renders "STARTED but never completed") plus
+footer lines stating that child usage is NOT in the parent totals and that subagent reports
+are narration with the child's own log as the record. The reviewable CONTENT lives in a separate
 surface: `report/diff.ts` builds the attributable session diff (first pre-image blob → current
 disk bytes per session-mutated path, undo folded in, external edits flagged DRIFTED), rendered
 by `/diff` and `agent diff` with per-line sanitization. A log without

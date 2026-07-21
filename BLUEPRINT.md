@@ -13,51 +13,49 @@ The central near-term decision stands:
 > Deepen the execution kernel and its enforced safety boundaries before expanding horizontally
 > into document, PDF, image, or video workflow packs.
 
-## 2. Current Starting Point (post-Session 6, V0.5)
+## 2. Current Starting Point (post-Session 7, V0.6)
 
-The single-agent execution kernel is substantially complete: one shared `runTurn`; a practical
-REPL; central policy choke point; recorded consent + narrowing-only config; append-only evidence
-with crash repair and deterministic reports; the managed exec substrate (real cancellation,
-typed termination, env hygiene, lifecycle evidence); the enforced Windows Low-IL sandbox with
-automatic positive-proof command review (fail-closed); and — new in V0.5 — the **GitOps layer**
-(hardened harness-only git substrate; probed session git context; attributable session diff with
-write-time diffstat evidence; deliberate session-scoped commits; hidden-ref checkpoints with
-snapshot-first undoable restore), **prompt caching** (two-breakpoint, live-proven ~6 uncached
-input tokens per short session), **deterministic wire-history elision** (monotone raw-size
-boundary), a **git-backed workspace map** (nested gitignore correct), and editing precision
-(replace_all, line paging).
+The kernel is now an explicit **main-agent control layer** over the single shared runtime: one
+`runTurn`; central policy choke point (now with a fail-closed delegation branch); recorded
+consent + narrowing-only config; append-only evidence with crash repair and deterministic
+reports; the managed exec substrate; the enforced Windows Low-IL sandbox with positive-proof
+command review; the GitOps layer; prompt caching + deterministic elision; and — new in V0.6 —
+the **three-document project memory** (user-owned `AGENT.md` every session; harness-generated
+rolling `JOURNAL.md` + provenance-stamped `CODEBASE.md`, written by a cache-hot end-of-session
+narrative call with deterministic fallback, loaded at start as labeled context-not-authority)
+and the **first subagent task primitives** (read-only `explorer` role: one child session over
+the same runTurn, read-only registry, auto-deny approvals, shared probed sandbox, harness-fixed
+budget with cause-tracked cancellation, callId+childSessionId evidence lineage, own inspectable
+log; live-proven, with the parent model observed verifying the child's narration unprompted).
 
 The remaining structural gaps, in rough order of load-bearing-ness:
 
-- **no task/subagent primitives** — bounded parallel work, isolated context, permission
-  narrowing, and evidence lineage do not exist yet (Session 7);
+- **tasks are sequential, read-only, depth 1** — no parallelism, no worktree isolation, no
+  mutating roles, no per-task cancellation, no task resume (Session 8);
 - the enforced boundary is **write + lifecycle only, and Windows only** — reads and network are
   not confined; approved commands remain full-privilege by design;
 - approved `run_command` file effects are **not attributable** (session-scope commits and /diff
   under-claim them; stated in every surface);
-- per-sandboxed-command latency (~1.2 s Add-Type host) — hotter now that read-only git auto-runs
-  are a common path;
+- per-sandboxed-command latency (~1.2 s Add-Type host; probe ~4–11 s on this machine);
 - no background/long-running process sessions; no PTY;
-- context work covers tool outputs only (assistant/user text is not compacted) and the repo map
-  is a file list, not ranked retrieval.
+- context work covers tool outputs only; the repo map is a file list, not ranked retrieval;
+  journal retrieval is a newest-first inject window, not topic files.
 
 ## 3. Indicative Session Sequence
 
-### Session 7 (next) — Task and Subagent Runtime Primitives
+### Session 8 (next) — Coordinated Parallelism on the Task Primitives
 
-Unchanged in intent: small bounded subagents with explicit inputs/outputs, isolated context,
-scoped tools, inherited-or-narrowed permissions, independent lifecycle/cancellation/budget, and
-attributable evidence lineage. The prerequisites landed across S4–S6: per-call signal plumbing
-(S4), the Windows boundary a subagent runs inside (S5, honest caveats), and — from S6 —
-repo-scoped GitClient/checkpoint namespaces (a worktree is just another instance), attributable
-evidence, and wire-history budgeting for parallel contexts. Read-only roles first. A subagent
-result is evidence, not accepted truth.
-
-### Session 8+ — Coordinated Agent Teams
-
-Unchanged: smallest composable coordination kernel (decomposition, bounded parallelism, isolated
-workspaces, reviewable integration, global verification, shared budgets and cancellation
-propagation) — only after task isolation and lineage are proven.
+Build outward from the proven single-task contract, in dependency order: (1) worktree-isolated
+children — GitClient/CheckpointContext are already instance-scoped; the open design decisions
+are trust inheritance for worktree paths (trust is keyed by realpath) and the sessionId suffix
+on checkpoint temp-index names; (2) bounded PARALLEL read-only tasks (per-child logs and the
+shared content-addressed snapshot store are already concurrency-safe; the delegate surface,
+progress chrome, and /tasks need multi-task shapes; watch the two process-global hazards:
+SIGINT handlers and process.exit stay parent-only); (3) the first MUTATING role behind
+approval-forwarding to the parent (the approver-wrapper seam is designed; decide grant
+routing), with worktree isolation + reviewable integration (the attributable diff/commit
+machinery is the merge-review substrate). A subagent result remains evidence, not accepted
+truth. Full teams (decomposition, inter-agent messaging) stay after this.
 
 ### First Non-Coding Workflow Pack — After the Foundation
 
@@ -94,14 +92,15 @@ Google Workspace CLI: typed operations over shell composition for future externa
 
 ## 6. Readiness Gates
 
-**Before broad multi-agent work** — still needed: task permission inheritance/narrowing;
-collision-free concurrent workspaces (worktrees — the S6 GitClient is instance-scoped for this);
-parent/child evidence lineage. Now satisfied by V0.3: process cancellation and reaping
-semantics. Now partially satisfied by V0.4: an enforced boundary EXISTS on Windows (Low-IL +
-Job Object) — but Windows-only, writes/lifecycle only. Now partially satisfied by V0.5:
-context/budget bounds exist for the wire history (deterministic elision + caching), and
-reviewable integration has its primitives (attributable session diff, session-scoped commits,
-checkpoint recovery) — per-subagent budget enforcement and merge review remain open.
+**Before broad multi-agent work** — now satisfied by V0.6: task permission
+inheritance/narrowing (read-only registry + auto-deny + rules floor, structurally), parent/child
+evidence lineage (callId + childSessionId join, lineage-stamped child logs), and per-subagent
+budget enforcement (steps/tokens/wall-clock, cause-tracked). Still needed: collision-free
+concurrent workspaces (worktrees — the S6 GitClient is instance-scoped for this; trust
+inheritance for worktree paths is the open decision), parallel-task UX shapes, and merge review
+for mutating children (the attributable diff/commit machinery is the substrate). Satisfied
+earlier: process cancellation/reaping (V0.3); an enforced boundary on Windows (V0.4 —
+writes/lifecycle only); wire-history budgeting + reviewable-integration primitives (V0.5).
 
 **Before the first workflow pack** — still needed: capability/dependency declarations; artifact
 identity and metadata in evidence; structured validator results; targeted-revision flow.
@@ -109,6 +108,17 @@ Now satisfied by V0.3: managed subprocess execution with clear cleanup and evide
 
 ## 7. Recently Completed (outcome notes)
 
+- **Session 7 (2026-07-20/21) — V0.6 main-agent control layer: COMPLETE.** Three-document
+  project memory (AGENT.md constitution every session; harness-generated JOURNAL.md/CODEBASE.md
+  at the state root — grounded evidence sections, provenance stamps, rolling caps, verbatim
+  context-not-authority framing; cache-hot narrative call with deterministic fallback, recorded
+  as its own event) + read-only subagent task primitives (explorer role: one child session over
+  the same runTurn, fail-closed step-0 policy branch, harness-fixed budgets with cause-tracked
+  cancellation, callId+childSessionId lineage, /tasks + report + sessions surfaces,
+  latestSessionId child-skip). 450+1 tests (+47); live two-session E2E proved delegation with
+  unprompted parent verification of child narration, AGENT.md behavioral steering, and
+  cross-session journal recall. Full detail: `ROADMAP.md` Session 7; contracts:
+  `ARCHITECTURE.md` "Project memory" and "Tasks and subagents".
 - **Session 6.5 (2026-07-19) — V0.5 capability demo + production-style validation: COMPLETE.**
   One continuous ~68-min recorded run (real ConPTY → xterm.js → Playwright, byte-truthful,
   supervisor-driven): Agent CLI built LedgerLite (20 files, 51 tests, esbuild build) from a
@@ -134,19 +144,5 @@ Now satisfied by V0.3: managed subprocess execution with clear cleanup and evide
   repo map; model-generated compaction and commit messages; attribution of command file
   effects; cached sandbox host. Full detail: `ROADMAP.md` Session 6; contracts:
   `ARCHITECTURE.md` "GitOps" and "Context budget".
-- **Session 5 (2026-07-18) — Enforced isolation + automatic command review: COMPLETE (scoped).**
-  A real, OS-enforced Windows boundary (`windows-lowil`: Low integrity + Job Object) proven by
-  direct machine probe and 8 real-OS tests — writes to the workspace/profile/system/state DENIED,
-  detached grandchild reaped on kill; established by a fail-closed runtime probe and reported
-  truthfully everywhere (never assumed, no cross-platform parity). Automatic command review
-  (deterministic positive-proof `analyzeCommand`) replaced "every command asks": a provably-safe
-  command auto-runs *inside* the sandbox, everything else asks, and with no enforcement auto-run is
-  disabled — backed by policy + enforcement, never the model's opinion (66-assertion adversarial
-  corpus). Honest scope: writes + lifecycle only; reads/network NOT confined. Full detail:
-  `ROADMAP.md` Session 5; contracts: `ARCHITECTURE.md` "Sandbox and enforced isolation".
-- **Session 4 (2026-07-17) — Execution kernel hardening: COMPLETE.** Managed exec substrate;
-  real mid-command cancellation (REPL + one-shot, proven with a genuine delivered console
-  CTRL_C against the live API); typed termination with no-exit-code-when-killed enforced through
-  report/resume/renderer; verified best-effort tree kill + bounded drain (grandchild pipe-hang
-  regression-tested); default-on child-env hygiene with narrowing-only config; command lifecycle
-  evidence events. Full detail: `ROADMAP.md` Session 4; design contracts: `ARCHITECTURE.md`.
+- Sessions 1–5: compressed to `ROADMAP.md` "Earlier Milestones" (V0.1 loop → proxy → recorded
+  demo → V0.3 exec hardening → V0.4 enforced isolation + automatic review).

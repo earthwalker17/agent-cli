@@ -5,240 +5,193 @@ compressed under **Earlier Milestones** (per the rolling-docs policy in `CLAUDE.
 
 ---
 
-## Session 6.5 (2026-07-19) — V0.5 capability demo + production-style validation
+## Session 7 (2026-07-20/21) — V0.6: main-agent control layer — project memory + subagent tasks
 
 ### Objective
 
-Not a product increment (Session-3 pattern): one truthful, continuous, recorded demonstration of
-how complete the V0.5 single-agent kernel is — a realistic project built by Agent CLI under live
-human supervision, exercising trust, sandbox, automatic review, approvals, editing, testing,
-building, diff/commit/checkpoint/restore/undo, caching, and the evidence report — plus a
-foundation review that fixes anything unreliable before the run.
+Evolve the single-agent loop into an explicit main-agent control layer (the main agent keeps
+user interaction, authority, coordination, integration, and final claims) by adding two
+subsystems beneath it: a built-in three-document project memory (user-owned `AGENT.md` loaded
+every session; harness-generated rolling `JOURNAL.md` + architecture `CODEBASE.md`,
+auto-updated after productive sessions, auto-loaded at start, context-not-authority) and the
+first dependable task/subagent primitives (one read-only `explorer` role with explicit
+contract: isolated context, inherited-or-narrower authority, fixed budget, cancellation,
+attributable parent↔child evidence lineage) — without a second execution loop, a policy side
+door, or broad multi-agent scope (teams/parallelism stay Session 8).
 
-### Foundation review → 2 product-repo fixes (both committed with regression coverage)
+### Planning provenance
 
-- **Sandbox probe flakiness (`763032f`)**: during loaded full-suite runs the enforcement probe
-  intermittently reported "not established", silently degrading a genuinely-enforceable session
-  to fail-closed ask-everything. Direct measurement: ~4–11 s normally, **~18 s under 6-way
-  concurrent spawn load**, vs a 30 s timeout. Fix: 60 s timeout + one bounded retry behind an
-  injectable `ProbeRunner` seam; 5 regression tests pin that a retry can recover a transient
-  false NEGATIVE but every path to `enforced: true` still requires the positive self-test marker.
-- **Low-IL test resolved the MSYS whoami (`21a8c40`)**: under Git Bash, `Git\usr\bin` precedes
-  System32, and MSYS binaries crash at Low IL; the test now uses the absolute System32 path as
-  the product probe (bootstrap.ts) always did.
-- Gate after fixes: `npm run typecheck` + `npm run build` clean; **403 passed, 1 skipped (32
-  files)**. (One additional test file failed exactly once in the first loaded run and never
-  reproduced across three later full runs — unidentified, noted honestly.)
+3-Explore-agent recon (session lifecycle/context pipeline; evidence/event/state model;
+policy/exec/concurrency audit — verdict: the kernel is per-session value objects, structurally
+ready) + external research (Claude Code subagents/auto-memory, Codex AGENTS.md/memories) + a
+Plan-agent adversarial critique that caught real flaws before code, hand-verified: the
+`latestSessionId` hijack (child logs sort newest ⇒ `--continue`/undo/diff/commit/report would
+silently target the newest CHILD log), the delegates-branch placement requirement (step 0 +
+conflicting-contract deny), a live product bug (a Ctrl+C'd one-shot recorded `user-quit`, which
+under the new memory trigger would have fired a provider call right after the user aborted),
+the same-second session-id collision (routine once children exist; would merge logs and steal
+the same-pid lock), the narrative call's cache-prefix contract, journal re-read-at-quit
+(two-terminal safety), and crash detection from log tails rather than journal absence.
 
-### Demo environment (rebuilt from scratch; lives OUTSIDE this repo)
+### What was implemented (commits `525d5f1`, `8e4fbbd`, `e8a2edc`, `49027b3`, + docs)
 
-`C:\Users\A\Desktop\agent-cli-demo-20260719\harness\`: a real ConPTY (`@lydell/node-pty` →
-`powershell.exe`) mirrored byte-for-byte into an xterm.js page recorded continuously by
-Playwright (single page = single unedited video), with an HTTP control API (type/keys/wait/
-navigate/click/stop) driven by the supervisor. Truthfulness contract: every displayed byte comes
-from the PTY (raw stream independently saved as a transcript); the page accepts NO local
-keyboard input; the PTY env is normalized (MSYS paths stripped; `TERM_PROGRAM=xterm-web-bridge`
-identifies the bridge, enabling Unicode chrome). Harness lessons: Playwright context.close hung
-on a long recording until page.close-first ordering; undici's ~300 s fetch cap requires chunked
-long-polls; MSYS argv path-mangling requires stdin-passed text + `MSYS2_ARG_CONV_EXCL`.
-
-### The recorded run (session `20260719-054206-9ecc`, live claude-opus-4-8 via proxy)
-
-The supervisor seeded `C:\Users\A\Desktop\ledgerlite` (git repo, one commit: `BRIEF.md` product
-brief granting explicit user-owned git delivery authority) and gave natural-language tasks only.
-On camera, continuously (~68 min): trust consent (`t`) → banner (sandbox ENFORCED, `git: branch
-main @ c7be96a, clean`) → `/map` → **the agent built LedgerLite** (personal finance tracker:
-dashboard, SVG donut + trend charts, CSV import with dedup, localStorage, dark amber UI) — 20
-files, 51 unit tests, esbuild production build, in one 37-step turn with 13 approvals granted
-live; it recovered from PowerShell 5.1 rejecting `&&`, self-caught an HTML/JS id inconsistency,
-and verified its own dist output. Then: `/status` → `/diff` → `/commit` (preview staged ONLY
-session-attributed paths; `package-lock.json` honestly excluded as an unattributable install
-side effect, swept by an explicit `/commit --all`) → `/checkpoint v1-complete` → amber restyle
-turn (targeted `edit_file`s incl. contrast fixes) → deny-adapt beat (2 denials of chained/
-flagged git; the model's fallback summary explicitly labeled itself "not a live diff read") →
-plain `git status` **auto-ran `[sandboxed: windows-lowil]` with no approval** → `/checkpoint
-restore 1` (previewed, snapshot-first, confirmed) → `/undo` (restore reverted; amber back,
-verified out-of-band on disk) → the next turn KNEW about the undo via the harness note and
-re-read before acting → final green verification (51/51, build, dist amber confirmed) →
-`/commit` → `/report` (full evidence chain + honesty footer) → `/quit` → supervisor `npm start`
-→ the recorded page navigated to the app: add-transaction updated balance/charts live, search
-filter isolated the new row. Session totals: **124 uncached input tokens** / 42.1k out,
-cache 2.07M read / 225k written; three commits each carrying `Session:` +
-`Co-authored-by: Agent CLI`.
-
-### Evidence artifacts
-
-`C:\Users\A\Desktop\ledgerlite\validation\`: the continuous MP4, the raw PTY transcript, the
-deterministic `session-report.md` (every file CHECKED with the exact verifying command; the one
-failed pipeline kept as exit 1; per-command boundary markers), and `VALIDATION.md` mapping every
-claim to its evidence — deliberately left uncommitted in the target repo (the deliverable is the
-four clean commits; validation is meta-evidence).
-
-### Decisions
-
-- Validation sessions live outside the product repo; the target repo stays a clean deliverable.
-- The bridge truthfully identifies itself via `TERM_PROGRAM` rather than impersonating Windows
-  Terminal (`WT_SESSION`).
-- The demo task states git authority in the brief ("I handle git myself") so the
-  no-git-unless-asked rule is preserved observably: the agent's only git execution was the
-  sandboxed read-only `git status`.
-
-### Open issues / UX findings (not defects)
-
-- The positive-proof auto-run gate rarely fires for the model's NATURAL command style (chained
-  `;`, extra flags like `--no-pager`) — nearly every command asked. A system-prompt hint
-  describing the auto-runnable shape would raise the hit rate without weakening the gate
-  (added to the deferred pool).
-- Probe cost at session start measured ~4–11 s on this machine (S5 recorded ~1–2 s) — the
-  cached-host optimization grows more attractive.
-- `/diff` is whole-session by design; the "changes since last commit" question is git's job —
-  the demo showed the model answering it via sandboxed `git status` after two denials.
-- `powershell.exe` CLIXML stderr noise remains a visible cosmetic wart in live output.
-
-### Recommended next step
-
-Session 7 (task/subagent runtime primitives) unchanged — the kernel demonstrated end-to-end is
-the stable base it needs. Fold in the auto-run system-prompt hint and consider the cached
-sandbox host when touching that area.
-
----
-
-## Session 6 (2026-07-18) — V0.5: Git-native, reviewable, context-efficient
-
-### Objective
-
-BLUEPRINT Session 6: make Agent CLI Git-native, reviewable, and context-efficient without
-replacing the snapshot system, polluting user history, or breaking the no-git-unless-asked rule.
-Planned via a 3-Explore + 1-Plan-agent recon (repo seams, state/evidence, tests/gaps) plus
-targeted external research; the Plan-agent critique caught two critical design flaws before any
-code (a workspace-planted `git.exe` would have executed unsandboxed at startup; the elision
-trigger as first specified oscillated between requests). Key negative reference: **Codex ghost
-commits were removed upstream (Apr 2026)** after untracked-file sweeps, session bloat, and a
-`git restore` data-loss incident — so git here is a review/delivery/recovery layer, never the
-undo mechanism, and nothing auto-commits.
-
-### What was implemented (10 feature commits + 1 fix)
-
-1. **`feat(git)` substrate** — `src/git/{client,facts,porcelain,types}.ts`: every harness git
-   invocation runs through `runManaged` with an ABSOLUTE git path (PATH scanned directly; bare
-   names resolve against child cwd on Windows — a planted `git.exe` must never execute; `.cmd`
-   shims rejected), `-c core.fsmonitor=false` (malicious-repo config RCE), `GIT_OPTIONAL_LOCKS=0`
-   (probes never rewrite the user index), `GIT_TERMINAL_PROMPT=0` + no stdin, scrubbed
-   repo-targeting `GIT_*` inheritance, bounded timeouts. `detectGitFacts` degrades honestly
-   (git absent / not a repo / probe timeout ⇒ explicit nulls). Porcelain-v2 `-z` parser (pure).
-2. **`feat(runtime,ux)` session git context** — both interfaces probe at assembly → additive
-   `git.context` event; REPL banner + `/status` ("at session start"); report header; system
-   prompt states the repo context in-repo and KEEPS the mutation prohibition (non-repo keeps the
-   old rule verbatim). Policy: `git restore`/`checkout --`/`stash drop|clear`/`push --force*`
-   now label destructive; a REGRESSION test documents that a command-less mutation-less tool
-   auto-allows as observe — why GitClient must never be tool-wrapped (registry guard test).
-3. **`feat(provider)` prompt caching** — pure `buildApiParams`: `cache_control` on the system
-   block + a MOVING breakpoint on the final wire block, attached AFTER coalescing; additive
-   `Usage.cacheRead/CreationInputTokens` (SDK null → 0) through events, `/status`, report.
-4. **`feat(runtime)` deterministic elision** — pure per-request `elideHistory`: boundary is a
-   function of the RAW (only-growing) size ⇒ monotone, no oscillation, no stored state,
-   identical re-derivation on resume; oldest tool_result contents → marker (count+sha+log
-   pointer); last 4 steps protected; pairing preserved; `session.messages`/log never mutated;
-   additive `context.compacted` event (+ live render, exhausted warning).
-5. **`feat(workspace)` git-backed map** — `git ls-files --cached --others --exclude-standard -z`
-   in trusted repos (nested .gitignore correct — walker regression-proven wrong; deleted-tracked
-   subtracted; builtin excludes kept; subtree scoping); walker fallback unchanged. Pre-trust
-   `agent map` deliberately stays on the pure walker (running git against an untrusted `.git`
-   is an attack surface the read-only exception must not take on).
-6. **`feat(tools)` editing precision** — `edit_file.replace_all` (+ occurrence-count refusal
-   naming the flag; empty old_string rejected); `read_file.offset/limit` line paging with a
-   labeled window.
-7. **`feat(review)` attributable session diff** — runtime dep #5 `diff` (jsdiff) wrapped once
-   (binary NUL-8KiB + 1 MiB guards); additive `file.mutated.linesAdded/Removed` computed at
-   write time (report stays pure; +n/−m churn column); `buildSessionDiff`: first pre-image blob
-   → current disk per attributed path, undo folded in (net-unchanged), external edits flagged
-   DRIFTED; surfaced as `/diff` + `agent diff` (sanitized untrusted bytes).
-8. **`feat(git)` deliberate commits** — `/commit [-m] [--all] [--no-trailer]` + trust-gated
-   `agent commit [--yes]`. Session scope stages ONLY attributed paths (status∩attribution with
-   `--untracked-files=all` — collapsed new dirs could never match otherwise); blockers where
-   attribution would corrupt (missing identity — never set for the user; pre-staged index in
-   session scope); drift + unattributable-command-effects warnings; ordinary add + `commit -F
-   <state file>` (hooks run; failures honest, staged state stated); Session line +
-   `Co-authored-by: Agent CLI` trailer; unborn-HEAD + nested-workspace proven; `git.commit`
-   event → render/report/harness-note.
-9. **`feat(git)` checkpoints + restore** — `/checkpoint [label|list|restore <n>]` + trust-gated
-   CLI. Create: temp `GIT_INDEX_FILE` plumbing (read-tree HEAD → add -A → write-tree →
-   commit-tree → `refs/agent-cli/checkpoints/<sessionId>/<n>`), user-visible git state proven
-   BYTE-IDENTICAL before/after; unborn = empty-tree base, no parent; explicit plumbing identity
-   env (user identity never required); gitignored files never swept (regression); >200 untracked
-   requires confirmation; "low-pollution, not zero" wording + prune. Restore: affected set =
-   `diff-tree(current-temp-tree, checkpoint)` filtered to the workspace prefix (moved-HEAD
-   outside-subtree files proven untouched), DELETES checkpoint-postdating files, content via
-   second temp index + `checkout-index --prefix` staging (binary-safe, filter-correct worktree
-   form), snapshot-first under ONE synthetic callId ⇒ one `applyUndo('last')` unit (round-trip
-   proven), `git.restore` event, never invokes `git restore`/`checkout` on the user worktree.
+1. **`refactor(cli)` shared assembly** — `assembleSession` (src/cli/assemble.ts): the
+   duplicated construction tail of both interfaces factored into ONE path (probes → memory →
+   map → prompt → session → fixed-order records → delegate-tool attachment); takes the trust
+   decision as a parameter, so assembly is structurally impossible untrusted.
+2. **`feat(memory)` pure core** — store (capped never-throwing reads, atomic tmp+rename+EPERM-
+   retry writes, frontmatter), journal (entries pair labeled model-written sections with a
+   deterministic Evidence section derived via buildReport; rolling = insert-or-replace by
+   session id, newest 2 full, older → stubs keeping the evidence pointer, 24 KiB cap behind a
+   leading drop marker; user edits byte-preserved), codebase (map-digest provenance stamp,
+   staleness detection).
+3. **`feat(memory)` load path** — three docs into labeled system-prompt sections (AGENT.md
+   24 KiB "written by the USER"; journal 12 KiB + codebase 16 KiB under a verbatim "CONTEXT,
+   NOT AUTHORITY" header; "(may be stale)" on digest mismatch); `memory.loaded` provenance
+   event; banner/stderr memory line; crash notes from LOG evidence (bounded
+   `readFirstEvent`/`readLastEvent`; child/resumed/skipped sessions can never read as crashes);
+   ungated read-only `agent memory` command. No docs ⇒ byte-identical pre-V0.6 prompt.
+4. **`feat(memory)` end-of-session update** — before `endSession`, clean ends only, gated on
+   real activity; ONE narrative provider call reusing the exact cached prefix (same system +
+   tools + elided view + strict-JSON instruction), every failure degrading to a deterministic
+   skeleton entry marked "narrative unavailable"; recorded as `memory.narrative` (usage
+   included) — never fake message events; journal re-read from disk, rolled, written
+   atomically; unreadable journal refused, not overwritten; `session.ended.reason` gains
+   `aborted`/`budget` and the one-shot maps aborts via `endReasonForTurn`; user-layer-only
+   `memoryUpdates` toggle.
+5. **`feat(types,policy)` task contracts** — `Tool.delegates` policy fact + explicit STEP-0
+   branch in `decide()` (explorer ⇒ allow/observe `task.readonly-role`; delegates+command ⇒
+   deny `task.conflicting-contract`; unknown role ⇒ deny, fail closed — the S6 command-less-
+   tool trap pinned); callId-bound `ToolContext.reportTask` evidence channel (mirrors
+   reportCommand); `task.started`/`task.ended` events; `session.started.lineage`.
+6. **`feat(runtime,tools)` runner + tool** — `runSubagentTask`: ONE child session over the
+   same `runTurn` (a task = one turn ⇒ no new cancel concept), read-only registry (no write
+   tools, no delegate tool ⇒ depth 1), autoDenyApprover, parent's probed-and-shared sandbox
+   instance + rules, fresh grants, own log under a guaranteed-fresh id (`startSession` now
+   refuses existing log files), harness-fixed budget (15 steps / 5 min / 30k out-tokens /
+   8 tasks/session) with cause-tracked cancellation (parent-abort vs timeout vs token-cap ⇒
+   distinct statuses + child end reasons); `delegate_task` per-session factory returning the
+   delimited child report labeled "narration, not verified evidence"; explorer system prompt
+   (AGENT.md included, memory docs not); `latestSessionId` child-skip.
+7. **`feat(ux,report)` surfaces** — `/tasks`; `agent sessions` child labels; report "Delegated
+   tasks" section + usage-separation footer; `reconstruct` answers a crash-orphaned delegate
+   call with the surviving child-log pointer; `[task]` progress chrome in both interfaces;
+   parent-prompt Delegation rule (reports are narration; the main agent owns final claims).
 
 ### Verification evidence
 
-- **Gate:** `npm run typecheck` + `npm run build` clean per stage; `npm test` **398 passed,
-  1 skipped** across 31 files (was 321+1; **+77**), including 40+ real-temp-repo git tests with
-  host git config isolated (a global `core.autocrlf=true` legitimately canonicalizes LF
-  fixtures — machine-dependent assertions removed).
-- **Scripted REPL E2E** (built binary, piped `--interactive`, mock provider, real temp repo):
-  banner shows `git: branch main @ …`; task writes a file; `/diff` prints the unified diff;
-  `/commit -m …` previews `?? hello.txt [session]`, confirms, commits; `git log` shows the
-  message + `Session:` line + trailer; `/report` renders the git header, `+1/−0` diffstat, and
-  the Commits section; working tree clean after.
-- **CLI round trip** (built binary): `agent diff` → `agent checkpoint pre-change` → external
-  user edit → `agent checkpoint restore 1 --yes` (file back to checkpoint content) →
-  `agent undo` (file back to the user's edit). Recovery layering works end to end.
-- **Live API E2E** (real `claude-opus-4-8` through the system proxy, temp repo): the model saw
-  the git context line, created `greet.js`, adapted when its verification command auto-denied
-  (`--no-input`, exit 2 by design); `agent commit --yes` delivered it; report correct.
-  **Prompt caching live:** the session's tokens line reads `6 in / 292 out (cache: 5481 read /
-  2904 written)` — the whole multi-step conversation re-read from cache, ~6 uncached input
-  tokens total.
+- **Gate:** `npm run typecheck` + `npm run build` clean per commit; `npm test` **450 passed /
+  1 skipped across 40 files** (was 403+1; **+47**), covering: journal roll/caps/user-edit
+  byte-preservation goldens; atomic-write/corrupt-tolerance; injection sections + staleness +
+  crash-note discrimination (incl. torn-tail and lineage fixtures); update-flow happy path /
+  script-exhaustion fallback / gate skips / resume-replace / cache-prefix spy (byte-identical
+  prior conversation + same system/tools) / unreadable-journal refusal; delegation policy
+  branch (wide-schema stubs pin the engine, not the tool schema; existing decide() table
+  unchanged); full subagent E2E with separately scripted parent+child (event order + callId
+  join + resultSha256, lineage, child-cannot-write/escalate, budget matrix
+  steps/tokens/timeout/parent-abort, task cap spawns nothing, TOOLS purity, latestSessionId
+  skip, aborted-parent completeness); report/reconstruct task surfaces.
+- **Live API E2E** (real claude-opus-4-8 via proxy; temp TinyCalc workspace with `AGENT.md`):
+  Session 1 — banner `memory: AGENT.md 180b`; `delegate_task` auto-ran (`task.readonly-role`)
+  with live `[task]` progress lines; the child explored in 1 step (4 in / 962 out tok); the
+  parent model then **re-read the files itself to verify the subagent's claims before
+  summarizing** (the delegation-rule behavior, unprompted) and its summary ended with the exact
+  marker line AGENT.md demanded; `/tasks` rendered the row; `/quit` → "updating project
+  memory…" → JOURNAL.md + CODEBASE.md written with provenance (parent session: 6 uncached
+  input tokens — caching intact). Session 2 — banner
+  `memory: AGENT.md 180b · journal 1.6k (1 session) · codebase 1.3k (fresh)`; asked "what
+  happened last session?" with no file reads: answered correctly from the journal/codebase
+  (session id, the delegation, formatSum details), volunteered the context-not-authority
+  caveat, honored AGENT.md again; being chat-only it correctly SKIPPED the journal update.
+  CLI: `agent sessions` labels the child `[task:explorer of <parent>]`; parent report shows
+  the Delegated-tasks section; `agent report <childId>` is self-contained (sandbox header,
+  usage, task).
 
 ### Decisions (and why)
 
-- **Git is a harness capability, never a model tool.** A command-less, mutation-less tool would
-  auto-allow as `observe` (the engine has no branch for it) — a "git_commit tool" would commit
-  with NO approval. The model keeps run_command (read-only git auto-runs sandboxed; mutations
-  ask); users get deliberate `/commit`, `/diff`, `/checkpoint`.
-- **The /undo consent precedent, made explicit:** user-typed commands ARE the consent, under
-  three recorded contract conditions — preview+confirm on every mutating flow (`--yes` for
-  non-TTY), a provenance event per operation, GitClient structurally unreachable from the model.
-- **Snapshots stay the undo substrate; git layers on top.** Checkpoint restore goes THROUGH
-  SnapshotStore (snapshot-first, one callId) so it is undoable by the existing machinery — git
-  never becomes the undo mechanism (the Codex lesson).
-- **Elision boundary on RAW size** — monotone because raw only grows; recompute-per-request
-  stays deterministic across resume with zero stored state; hysteresis makes each advance the
-  only cache invalidation.
-- **Session-scope commit staging from status∩attribution** — every stage pathspec provably
-  exists in git's view (deleted-tracked appear as D entries; ignored/vanished never appear), so
-  the pathspec-error class is structurally gone.
+- **Memory home = state root** (`<projectDir>/memory/`), names `JOURNAL.md`/`CODEBASE.md`
+  (user-confirmed): zero git pollution, harness write-ownership, still plain user-editable
+  markdown (`agent memory` shows paths); distinct names avoid dogfooding collisions with this
+  repo's hand-written ROADMAP/ARCHITECTURE.
+- **Memory is context, never authority — structurally:** sovereignty wording injected verbatim;
+  evidence sections derived from events (never model recollection); the narrative call recorded
+  as its own event type because faking message events would replay into resumes; crash
+  detection from log evidence so absence-of-memory never accuses a session.
+- **A delegated task is ONE turn** of the same runTurn — no second loop, and turn-level
+  cancellation IS task cancellation; parallelism deliberately deferred until worktrees.
+- **Delegation is a first-class policy fact** with a fail-closed step-0 branch; budgets are
+  harness-fixed, never model-controlled; child narration is labeled and the parent prompt
+  instructs verification (observed working live).
+- **Aborted ≠ user-quit** (`endReasonForTurn`): post-session work must never fire after Ctrl+C.
 
-### Open issues / not verified
+### Open issues / v1 boundaries (deliberate, documented)
 
-- The attribution set structurally UNDER-claims: approved `run_command` file effects are not
-  attributable (by design) — the /commit preview says so and `--all` exists; a future
-  worktree/FS-watch layer could close it.
-- Restore materializes the git-native worktree form: a file stored in non-canonical form (LF on
-  disk under `autocrlf=true`) comes back canonicalized — the same lossy round-trip git itself
-  has (documented in the contract comment).
-- Elision bounds tool outputs only; assistant/user text grows unbounded (loud warning when even
-  full elision exceeds the target). Model-generated compaction remains future work.
-- Auto-run sandboxed `git status/diff` still pays the ~1.2 s Add-Type host start (S5 issue) —
-  the git-native workflow makes the cached-host optimization more valuable.
-- `agent commit`/`checkpoint` need the session log lock — a session running elsewhere blocks
-  them (by design; commit from inside that REPL). Multi-repo workspaces and submodules are out
-  of scope (facts probe reports the containing repo only).
+- One task at a time; cancelling a task = Ctrl+C on the whole turn; task cap is per process
+  run; `--script` mock shares one script between parent and child (tests inject a second
+  provider). Parallel tasks, mutating/approval-forwarding roles, worktree isolation (+ its
+  trust-inheritance decision), task resume, child memory, and deeper child-report scanning are
+  Session 8+ material.
+- Memory docs are lock-less: re-read-at-quit + atomic rename leaves a seconds-wide
+  last-writer-wins window (two simultaneous quits); the log remains the evidence.
+- The journal inject cap slices the newest-first file top; `sessionCount` counts the loaded
+  window only. Assistant/user-text compaction and journal topic files remain future work.
+- Child usage is deliberately excluded from parent totals (stated in report footer); a
+  cross-log cost roll-up view does not exist yet.
 
 ### Recommended next step
 
-BLUEPRINT Session 7: task/subagent runtime primitives. The prerequisites this session added:
-repo-scoped GitClient (a worktree = another instance), per-session checkpoint namespaces,
-attributable evidence lineage, and wire-history budgeting for parallel contexts. Fold in the
-cached sandbox host if command latency starts to matter.
+Session 8 per BLUEPRINT: coordinated parallelism on these primitives — worktree-isolated
+children (GitClient/checkpoint are already instance-scoped; decide trust inheritance for
+worktree paths; add the sessionId suffix to checkpoint temp-index names), bounded parallel
+read-only tasks, then the first mutating role behind approval forwarding. Fold in the
+auto-run system-prompt hint and the cached sandbox host when touching those areas.
 
 ---
 
-## Earlier Milestones (Sessions 1–5 — compressed per the rolling-docs policy)
+## Earlier Milestones (Sessions 1–6.5 — compressed per the rolling-docs policy)
+
+### Session 6.5 (2026-07-19) — V0.5 capability demo + production-style validation
+
+One continuous ~68-min recorded run (real ConPTY → xterm.js → Playwright, byte-truthful,
+supervisor-driven, live claude-opus-4-8): Agent CLI built **LedgerLite** (personal finance
+tracker; 20 files, 51 unit tests, esbuild build) from a natural-language brief with 13 live
+approvals, then demonstrated status/diff/attributed commits (`package-lock.json` honestly
+excluded as unattributable)/checkpoint/restore/undo/report, sandboxed auto-run `git status`,
+deny-adapt (the fallback summary labeled itself "not a live diff read"), harness-note
+coherence after /undo, and **124 uncached input tokens** for the whole session (cache 2.07M
+read). Two product fixes with regression coverage from the pre-run foundation review: sandbox
+probe 60s+retry behind an injectable ProbeRunner (`763032f` — a loaded probe took ~18s vs the
+old 30s timeout, silently degrading to fail-closed) and the Low-IL test's absolute-System32
+whoami (`21a8c40`). Suite 403+1. Evidence: `C:\Users\A\Desktop\ledgerlite\validation\` (MP4,
+raw PTY transcript, deterministic session report, VALIDATION.md). Lasting decisions: validation
+sessions live OUTSIDE the product repo; the bridge identifies itself truthfully
+(`TERM_PROGRAM`); demo briefs state git authority explicitly. Standing findings: the
+positive-proof auto-run gate rarely fires for the model's natural chained/flagged command
+style (system-prompt hint in the deferred pool); probe cost ~4–11s on this machine.
+
+### Session 6 (2026-07-18) — V0.5: Git-native, reviewable, context-efficient
+
+GitOps as a **harness-only capability** — a policy regression test pins why it must never be a
+model tool (a command-less, mutation-less tool auto-allows as observe; a "git_commit tool"
+would commit with NO approval): hardened substrate (absolute-path git resolved by scanning
+PATH — a workspace-planted git.exe must never execute; `core.fsmonitor=false`;
+`GIT_OPTIONAL_LOCKS=0`; GIT_* scrub; no prompts; bounded timeouts), probed `git.context`,
+attributable `/diff` + `agent diff` (first pre-image blob → disk, undo folded, DRIFTED
+flagged), session-scoped `/commit` (stages ONLY status∩attribution; blockers where attribution
+would corrupt; Session line + Co-authored-by trailer), hidden-ref checkpoints
+(`refs/agent-cli/checkpoints/<session>/<n>`, user git state byte-identical, "low-pollution
+not zero") with snapshot-first restore that is ONE applyUndo unit — git is never the undo
+mechanism (the Codex ghost-commit data-loss lesson). Context efficiency: two-breakpoint prompt
+caching (live: ~6 uncached input tokens/session), deterministic monotone elision (boundary a
+function of raw only-growing size ⇒ no oscillation, no stored state, identical on resume;
+tool outputs only), git-backed workspace map (nested gitignore correct; pre-trust keeps the
+pure walker). Editing: replace_all + line paging. **Consent contract made explicit:**
+user-typed commands ARE consent under three conditions — preview+confirm on every mutating
+flow, a provenance event per operation, GitClient structurally unreachable from the model.
+398+1 tests; scripted REPL + CLI round-trip + live-API E2E. Still-open from S6: approved
+run_command file effects structurally under-claimed by attribution; restore materializes the
+git-native worktree form (same lossy round-trip as git itself); `agent commit`/`checkpoint`
+need the session lock (a live session blocks them by design).
 
 ### Session 5 (2026-07-18) — V0.4: enforced isolation + automatic command review
 
@@ -365,18 +318,23 @@ ranked repo map with selective retrieval (S6 shipped the git-backed file LIST on
 tools; MCP and workflow packs; SQLite index over the JSONL; conversation rewind; session
 pruning/sanitized export; prompt-history persistence + line-editing niceties; background/
 long-running process sessions; PTY support; output spill-to-file for huge command output.
-**Git follow-ups (post-S6):** patch/multi-edit editing (replace_all + paging shipped; a
-diff/hunk apply format did not); model-generated commit messages; attribution of approved
-run_command file effects (structurally under-claimed today); isolated worktrees (S7 dependency);
-push/PR flows; submodule + multi-repo workspaces. **Context follow-ups (post-S6):** model-
-generated compaction of assistant/user text (deterministic tool-output elision shipped; loud
-warning when even full elision exceeds the target). **Sandbox follow-ups (post-S5):**
-network-egress control and a read/confidentiality boundary (the two enforced gaps that most
-matter); a cached/compiled sandbox host to cut per-command Add-Type latency (~1.2 s — more
-visible now that read-only git auto-runs are a hot path, and S6.5 measured the startup probe at
-~4–11 s on this machine); macOS/Linux enforcement backends; containment of service-reparented
-work (schtasks/sc/wmic/BITS) that escapes the Job Object. **Command-review follow-up (S6.5
-finding):** a system-prompt hint describing the auto-runnable command shape (single unchained
-read-only command, no extra global flags) — the model's natural chained/flagged style meant
-nearly every command asked during the demo; the hint raises the auto-run hit rate without
-weakening the positive-proof gate.
+**Task/subagent follow-ups (post-S7):** parallel/multiple concurrent tasks; worktree-isolated
+children (+ the trust-inheritance decision for worktree paths; sessionId suffix on checkpoint
+temp-index names for concurrent mutating children); mutating/verifier roles behind
+approval-forwarding to the parent (approver-wrapper seam designed); per-task cancellation
+separate from the turn; task resume/continue (SendMessage-style); deeper scanning of child
+reports for instruction-shaped content (v1 ships delimiters + provenance labels); cross-log
+cost roll-up view. **Memory follow-ups (post-S7):** journal topic files / retrieval beyond the
+newest-first inject window; a memory relocation/config knob; model-generated compaction of
+assistant/user text (deterministic tool-output elision shipped; loud warning when even full
+elision exceeds the target). **Git follow-ups (post-S6):** patch/multi-edit editing; model-
+generated commit messages; attribution of approved run_command file effects (structurally
+under-claimed today); push/PR flows; submodule + multi-repo workspaces. **Sandbox follow-ups
+(post-S5):** network-egress control and a read/confidentiality boundary (the two enforced gaps
+that most matter); a cached/compiled sandbox host to cut per-command Add-Type latency (~1.2 s;
+probe ~4–11 s on this machine); macOS/Linux enforcement backends; containment of
+service-reparented work (schtasks/sc/wmic/BITS) that escapes the Job Object.
+**Command-review follow-up (S6.5 finding):** a system-prompt hint describing the auto-runnable
+command shape (single unchained read-only command, no extra global flags) — the model's natural
+chained/flagged style meant nearly every command asked during the demo; the hint raises the
+auto-run hit rate without weakening the positive-proof gate.
