@@ -73,14 +73,21 @@ function parseAnswer(answer: string): ApprovalOutcome {
 /**
  * Interactive approver. `io.question` is injectable so tests can drive it without a TTY; the
  * default uses readline on stdin/stdout. The prompt fully pauses the loop (strictly sequential).
+ * `signal` (the one-shot's turn-abort controller, V0.7.1): Ctrl+C during a pending default-
+ * readline question resolves it as deny-stop instead of leaving the prompt hanging — the REPL
+ * path (io) has its own interrupt wiring and ignores it.
  */
-export function createInteractiveApprover(io?: { question: (q: string) => Promise<string> }): Approver {
+export function createInteractiveApprover(io?: { question: (q: string) => Promise<string> }, signal?: AbortSignal): Approver {
   return async (req: ApprovalRequest): Promise<ApprovalOutcome> => {
     const prompt = formatApprovalPrompt(req) + '\n  > ';
     if (io) return parseAnswer(await io.question(prompt));
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
-      return parseAnswer(await rl.question(prompt));
+      const answer = await rl.question(prompt, signal !== undefined ? { signal } : {});
+      return parseAnswer(answer);
+    } catch (err) {
+      if (signal?.aborted) return { decision: 'deny-stop', scope: 'once', source: 'user' };
+      throw err;
     } finally {
       rl.close();
     }

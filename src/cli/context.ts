@@ -65,10 +65,15 @@ export function makeProvider(values: CliValues): Provider {
   throw new ConfigError(`unknown provider: ${kind}`);
 }
 
-export function makeApprover(values: CliValues, mode: SessionMode, io?: { question: (q: string) => Promise<string> }): Approver {
+export function makeApprover(
+  values: CliValues,
+  mode: SessionMode,
+  io?: { question: (q: string) => Promise<string> },
+  approvalSignal?: AbortSignal,
+): Approver {
   if (values['dangerously-allow-all']) return dangerousApprover;
   if (mode === 'non-interactive') return autoDenyApprover;
-  return createInteractiveApprover(io);
+  return createInteractiveApprover(io, approvalSignal);
 }
 
 export interface RunContext {
@@ -86,6 +91,8 @@ export interface RunContextOptions {
   config?: { model?: string; maxSteps?: number };
   /** REPL approval routing through its one persistent readline. */
   io?: { question: (q: string) => Promise<string> };
+  /** One-shot turn-abort signal: Ctrl+C resolves a pending approval prompt as deny-stop (V0.7.1). */
+  approvalSignal?: AbortSignal;
 }
 
 /**
@@ -97,7 +104,7 @@ export function buildRunContext(values: CliValues, opts: RunContextOptions = {})
   const ws = workspaceRoot(values);
   const mode = resolveMode(values);
   const provider = makeProvider(values);
-  const approver = makeApprover(values, mode, opts.io);
+  const approver = makeApprover(values, mode, opts.io, opts.approvalSignal);
   const model = values.model ?? opts.config?.model ?? DEFAULT_MODEL;
   const maxSteps = values['max-turns'] ? Number(values['max-turns']) : (opts.config?.maxSteps ?? 20);
   const maxTokens = provider.name === 'anthropic' ? 64_000 : 16_000;

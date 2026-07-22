@@ -132,6 +132,16 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             : 'RUNNING or CRASHED (no task.ended recorded)';
         return `${i + 1}. ${s.role} ${sanitizeLine(s.childSessionId)} — ${state} — inspect: agent report ${sanitizeLine(s.childSessionId)}`;
       });
+      // Children's summed usage (V0.7.1): /status stays parent-only; this is the labeled sum.
+      let childIn = 0;
+      let childOut = 0;
+      for (const e of events) {
+        if (e.type === 'task.ended') {
+          childIn += e.usage.inputTokens;
+          childOut += e.usage.outputTokens;
+        }
+      }
+      lines.push(`children total: ${childIn} in / ${childOut} out tok (not part of /status session totals)`);
       ctx.renderer.chromeLine(lines.join('\n'));
       return 'continue';
     }

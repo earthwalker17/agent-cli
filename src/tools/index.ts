@@ -27,7 +27,8 @@ function fail(error: string): ToolResult {
   return { ok: false, output: '', error, truncated: false, durationMs: 0 };
 }
 
-/** Directory names never descended into by list/search (the gitignore-aware map lands in Phase 9). */
+/** Directory names never descended into by list/search (the workspace MAP is gitignore-aware —
+ *  workspace/map.ts — but these tools keep a fixed skip-list: cheap, predictable, no repo probe). */
 const WALK_EXCLUDES = new Set(['node_modules', '.git', '.agent-cli', 'dist', 'coverage']);
 
 const MAX_READ_BYTES = 20 * 1024 * 1024;
@@ -266,9 +267,4 @@ export function toToolSchema(tool: Tool): ToolSchema {
 
 export function findTool(name: string): Tool | undefined {
   return TOOLS.find((t) => t.name === name);
-}
-
-/** Stable content hash of a tool's contract — useful for evidence/debugging. */
-export function toolFingerprint(tool: Tool): string {
-  return sha256(JSON.stringify(toToolSchema(tool)));
 }

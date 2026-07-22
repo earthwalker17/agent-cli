@@ -549,6 +549,13 @@ function renderMarkdown(r: ReportJson): string {
           : `STARTED but never completed — the session ended while it ran`;
       L.push(`- ${t.role} → child session ${t.childSessionId}: ${state} (evidence: agent report ${t.childSessionId})`);
     }
+    // Cost roll-up (V0.7.1): one COMBINED line so the total spend is visible in one place.
+    // The session usage totals elsewhere in this report stay PARENT-ONLY (stated in the footer);
+    // this line is labeled as the sum, not a replacement.
+    const childIn = r.tasksDelegated.reduce((s, t) => s + (t.usage?.inputTokens ?? 0), 0);
+    const childOut = r.tasksDelegated.reduce((s, t) => s + (t.usage?.outputTokens ?? 0), 0);
+    const u = r.session.usage;
+    L.push(`- combined tokens (parent + children): ${u.inputTokens + childIn} in / ${u.outputTokens + childOut} out — session totals elsewhere remain parent-only`);
     L.push('');
   }
 

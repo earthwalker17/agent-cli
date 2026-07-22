@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import type { CommandTermination } from '../types.js';
 import { killTree } from './kill.js';
 
@@ -206,7 +207,15 @@ export function runManaged(spec: ExecSpec): Promise<ExecOutcome> {
 
     child.once('spawn', () => {
       spawned = true;
-      if (child.pid !== undefined) spec.onSpawn?.(child.pid);
+      if (child.pid !== undefined) {
+        try {
+          spec.onSpawn?.(child.pid);
+        } catch {
+          // An observer (evidence append) that throws inside the 'spawn' listener would be an
+          // unhandled exception crashing the process mid-command; the command itself still
+          // completes and its outcome is recorded through the normal completion path.
+        }
+      }
     });
 
     child.on('error', (err) => {
@@ -219,15 +228,21 @@ export function runManaged(spec: ExecSpec): Promise<ExecOutcome> {
       }
     });
 
+    // Live-preview decode is STATEFUL per stream: a multi-byte rune split across chunks must not
+    // render as replacement chars (the captured result decodes once from raw buffers regardless).
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
     child.stdout?.on('data', (d: Buffer) => {
       stdoutCap.push(d);
       combinedCap.push(d);
-      spec.onOutput?.(d.toString('utf8'), 'stdout');
+      const text = stdoutDecoder.write(d);
+      if (text.length > 0) spec.onOutput?.(text, 'stdout');
     });
     child.stderr?.on('data', (d: Buffer) => {
       stderrCap.push(d);
       combinedCap.push(d);
-      spec.onOutput?.(d.toString('utf8'), 'stderr');
+      const text = stderrDecoder.write(d);
+      if (text.length > 0) spec.onOutput?.(text, 'stderr');
     });
 
     child.on('exit', (code) => {

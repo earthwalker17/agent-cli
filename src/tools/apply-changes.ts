@@ -33,20 +33,22 @@ type ApplyInputT = z.infer<typeof ApplyInput>;
 export interface CapturedTaskChanges {
   baseOid: string;
   files: TaskChangeFile[];
+  /** Changed files DROPPED at capture by the file-count cap: never stored, never appliable. */
+  omittedCount: number;
 }
 
 /** In-session registry of captured executor changes; rebuilt from task.changes events on resume. */
 export interface TaskChangesRegistry {
-  register(childSessionId: string, baseOid: string, files: TaskChangeFile[]): void;
+  register(childSessionId: string, baseOid: string, files: TaskChangeFile[], omittedCount?: number): void;
   get(childSessionId: string): CapturedTaskChanges | undefined;
 }
 
 export function createTaskChangesRegistry(): TaskChangesRegistry {
   const byChild = new Map<string, CapturedTaskChanges>();
   return {
-    register(childSessionId, baseOid, files) {
+    register(childSessionId, baseOid, files, omittedCount) {
       if (childSessionId.length === 0) return;
-      byChild.set(childSessionId, { baseOid, files });
+      byChild.set(childSessionId, { baseOid, files, omittedCount: omittedCount ?? 0 });
     },
     get(childSessionId) {
       return byChild.get(childSessionId);
@@ -166,6 +168,11 @@ export function createApplyChangesTool(registry: TaskChangesRegistry, snapshots:
       ctx.reportTask?.({ kind: 'applied', childSessionId: input.child_session_id, applied, refused });
       const lines = [
         `applied ${applied.length} of ${files.length + unknown.length} selected change(s) from task ${input.child_session_id} (base ${rec.baseOid.slice(0, 12)})`,
+        // The capture-time cap must stay visible at APPLY time: a reader of only this output
+        // would otherwise take "applied N of N" as the task's complete change set.
+        ...(rec.omittedCount > 0
+          ? [`  NOTE: ${rec.omittedCount} changed file(s) were OMITTED at capture (over the file-count cap) and are NOT part of this apply`]
+          : []),
         ...applied.map((p) => `  applied  ${p}`),
         ...refused.map((r) => `  REFUSED  ${r.relPath}: ${r.reason}`),
         ...(applied.length > 0 ? ['this apply is one undoable unit (/undo reverts it); run a check before claiming success'] : []),

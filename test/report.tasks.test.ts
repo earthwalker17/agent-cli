@@ -58,6 +58,8 @@ describe('report: delegated tasks', () => {
     expect(md).toContain('## Delegated tasks (subagents)');
     expect(md).toContain('agent report c-9');
     expect(md).toContain("NOT included in this session's token totals");
+    // The labeled COMBINED roll-up (V0.7.1): parent 100/20 + child 7777/8888.
+    expect(md).toContain('combined tokens (parent + children): 7877 in / 8908 out');
   });
 
   it('renders an orphaned task.started honestly and omits the section when no tasks exist', () => {

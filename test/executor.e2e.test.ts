@@ -328,13 +328,15 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     expect(byPath.get('doomed.txt')).toMatchObject({ kind: 'delete', blobSha256: null });
     expect(byPath.get('a.txt')).toMatchObject({ kind: 'modify' });
 
-    // Apply both: the delete lands, the modify lands, one refusal-free integration.
+    // Apply both: the delete lands, the modify lands, one refusal-free integration. The
+    // registry carries a simulated capture-cap omission — apply must re-state it (V0.7.1).
     const registry = createTaskChangesRegistry();
-    registry.register('c-del', head, cap.files);
+    registry.register('c-del', head, cap.files, 3);
     const tool = createApplyChangesTool(registry, snapshots);
     const ctx = { workspaceRoot: repo, stateDir: layout.projectDir };
     const result = await tool.execute({ child_session_id: 'c-del' } as never, ctx);
     expect(result.ok).toBe(true);
+    expect(result.output).toContain('3 changed file(s) were OMITTED at capture (over the file-count cap) and are NOT part of this apply');
     expect(fs.existsSync(path.join(repo, 'doomed.txt'))).toBe(false);
     expect(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('task version\n');
     expect((await git(repo, 'worktree', 'remove', '--force', wt)).ok).toBe(true);

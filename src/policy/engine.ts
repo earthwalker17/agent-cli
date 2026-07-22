@@ -9,10 +9,14 @@ import { analyzeCommand } from './command-review.js';
 /**
  * The single policy choke point. `decide()` classifies every tool call and returns
  * allow / ask / deny. It is pure over (tool, input, ctx, grants) — no I/O beyond the shared
- * path validator. Tools declare facts (mutates / readsPaths / command); policy alone decides.
+ * path validator. Tools declare facts (mutates / readsPaths / command / delegates / planDoc);
+ * policy alone decides.
  *
- * V0.1 posture (honest): this is the APPROVAL control only. There is NO OS sandbox — an approved
- * shell command runs with full user privilege and is neither snapshotted nor undoable.
+ * Approval and sandbox are SEPARATE axes (V0.4+): this engine is the approval control, and it
+ * additionally READS `ctx.sandbox.enforced` to gate command auto-run — a provably-safe command
+ * auto-runs only INSIDE an OS-enforced boundary; with no enforcement every command asks (fail
+ * closed). An approved command still runs with full user privilege and is neither snapshotted
+ * nor undoable — approval is consent, never containment.
  */
 
 // Classes that may be carried by a session grant. Never `destructive` (no-undo) or `reversible`.

@@ -47,6 +47,33 @@ describe('runManaged basics', () => {
     expect(r.exitCode).toBe(3);
   });
 
+  it('a throwing onSpawn observer never crashes the run (guarded evidence channel)', async () => {
+    const r = await runManaged(
+      spec(`console.log('survived')`, {
+        onSpawn: () => {
+          throw new Error('observer boom');
+        },
+      }),
+    );
+    expect(r.termination).toBe('exited');
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/survived/);
+  });
+
+  it('live-preview decode is stateful: a rune split across chunks arrives intact', async () => {
+    const chunks: string[] = [];
+    // 'é' = 0xC3 0xA9: write the bytes in two flushes 80ms apart — two data events, split mid-rune.
+    const script =
+      `const b = Buffer.from([0xc3, 0xa9]);` +
+      `process.stdout.write(b.subarray(0, 1));` +
+      `setTimeout(() => process.stdout.write(b.subarray(1)), 80);`;
+    const r = await runManaged(spec(script, { onOutput: (c) => chunks.push(c) }));
+    expect(r.termination).toBe('exited');
+    expect(chunks.join('')).toContain('é');
+    for (const c of chunks) expect(c).not.toContain('�'); // no replacement chars in the preview
+    expect(r.stdout).toContain('é'); // the captured result was already decode-once correct
+  });
+
   it('captures stdout and stderr separately and interleaved', async () => {
     const r = await runManaged(spec(`console.log('to-out'); console.error('to-err');`));
     expect(r.termination).toBe('exited');

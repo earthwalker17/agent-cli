@@ -90,7 +90,7 @@ export interface ExecutorDeps {
    */
   noteBaseRef: (ref: string) => void;
   /** Feed the in-session apply registry the moment changes are captured. */
-  registerChanges: (childSessionId: string, baseOid: string, files: TaskChangeFile[]) => void;
+  registerChanges: (childSessionId: string, baseOid: string, files: TaskChangeFile[], omittedCount?: number) => void;
   clockIso: () => string;
 }
 
@@ -358,7 +358,7 @@ async function runExecutorTask(
         files: cap.files,
         ...(cap.omittedCount > 0 ? { omittedCount: cap.omittedCount } : {}),
       });
-      ex.registerChanges(result.childSessionId, baseOid, cap.files);
+      ex.registerChanges(result.childSessionId, baseOid, cap.files, cap.omittedCount);
       capturedPaths = cap.files.map((f) => f.relPath);
       const oversize = cap.files.filter((f) => f.oversize === true).length;
       notes.push(

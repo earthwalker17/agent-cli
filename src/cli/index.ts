@@ -147,7 +147,10 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     return 3;
   }
   const config = loadConfig(resolveStateRoot(), ws);
-  const ctx = buildRunContext(values, { config });
+  // The abort controller exists BEFORE the approver so Ctrl+C can resolve a pending one-shot
+  // approval prompt as deny-stop instead of leaving the readline question hanging (V0.7.1).
+  const controller = new AbortController();
+  const ctx = buildRunContext(values, { config, approvalSignal: controller.signal });
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
@@ -177,7 +180,6 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   process.stderr.write(`memory: ${memory.bannerLine}\n`);
   if (memory.crashNote !== null) process.stderr.write(`note: ${memory.crashNote}\n`);
 
-  const controller = new AbortController();
   const offSigint = installSigintAbort(controller);
   try {
     const result = await runTurn(session, task, { signal: controller.signal });

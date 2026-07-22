@@ -9,10 +9,9 @@ import { createTransport, type Transport } from '../net/transport.js';
  * Networking (proxy detection, direct vs proxied) is delegated to the shared transport factory —
  * this class contains no proxy logic, so future providers can reuse the same infrastructure.
  *
- * V0.1 deliberately does NOT enable extended/adaptive thinking: on Opus 4.8, omitting the
- * `thinking` param runs without thinking, which avoids the thinking-block round-trip that a
- * tool-use loop would otherwise have to preserve. Adaptive thinking (with block preservation) is
- * a documented V0.2 enhancement.
+ * Extended/adaptive thinking stays deliberately OFF (still true at V0.7): omitting the
+ * `thinking` param avoids the thinking-block round-trip that a tool-use loop would otherwise
+ * have to preserve. Enabling it (with block preservation) remains in the deferred pool.
  */
 export class AnthropicProvider implements Provider {
   readonly name = 'anthropic';

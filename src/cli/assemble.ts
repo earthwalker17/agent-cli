@@ -149,7 +149,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // crash between capture and apply never strands integrable work.
   const changesRegistry = createTaskChangesRegistry();
   for (const e of session.log.events) {
-    if (e.type === 'task.changes') changesRegistry.register(e.childSessionId, e.baseOid, e.files);
+    if (e.type === 'task.changes') changesRegistry.register(e.childSessionId, e.baseOid, e.files, e.omittedCount);
   }
   // Task-base checkpoint refs created for executor groups this session; pruned at session end.
   const taskBaseRefs: string[] = [];
@@ -178,7 +178,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
               diverged: approvedSha !== null && currentSha !== null && approvedSha !== currentSha,
             };
           },
-          registerChanges: (childSessionId, baseOid, files) => changesRegistry.register(childSessionId, baseOid, files),
+          registerChanges: (childSessionId, baseOid, files, omittedCount) => changesRegistry.register(childSessionId, baseOid, files, omittedCount),
           noteBaseRef: (ref) => taskBaseRefs.push(ref),
           clockIso: () => session.clock.iso(),
         }
