@@ -10,7 +10,7 @@ import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
 import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
-import { readPlan } from '../plan/store.js';
+import { planApprovalSha, readPlan } from '../plan/store.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
@@ -155,11 +155,19 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
           worktreesRoot: worktreesRoot(layout.projectDir),
           registryFile: registryFile(layout.projectDir),
           snapshots: session.snapshots,
-          // Read fresh per group: the plan file's current bytes are truth, and the sha-bound
-          // approval story lives in the events — here only the STATUS gates executor spawns.
-          planStatus: () => {
+          // Read fresh per use: the plan file's current bytes are truth; the sha-bound approval
+          // story lives in the events. STATUS gates executor spawns (draft/unknown refuse);
+          // sha divergence is DISPLAYED at the spawn ask — the consent moment (V0.7.1).
+          planContext: () => {
             const p = readPlan(layout, session.id);
-            return p.exists ? p.status : 'none';
+            const currentSha = p.exists ? p.sha256 : null;
+            const approvedSha = planApprovalSha(session.log.events);
+            return {
+              status: p.exists ? p.status : 'none',
+              currentSha,
+              approvedSha,
+              diverged: approvedSha !== null && currentSha !== null && approvedSha !== currentSha,
+            };
           },
           registerChanges: (childSessionId, baseOid, files) => changesRegistry.register(childSessionId, baseOid, files),
           clockIso: () => session.clock.iso(),

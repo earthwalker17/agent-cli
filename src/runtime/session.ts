@@ -680,13 +680,23 @@ function recordCommandEvidence(session: Session, callId: string, e: CommandEvide
 
 function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecision, callId: string): ApprovalRequest {
   const { summary, detail } = describeCall(tool, input);
+  // Display-only tool context (V0.7.1, e.g. plan state at an executor spawn) folds into detail
+  // so it inherits the prompt renderer's sanitize + line cap. The decision is already made —
+  // this changes what the human SEES, never what was decided — and a throw must not block the ask.
+  let contextLines: string[] = [];
+  try {
+    contextLines = tool.approvalContext?.(input) ?? [];
+  } catch {
+    contextLines = [];
+  }
+  const fullDetail = contextLines.length > 0 ? [detail, ...contextLines].filter((s) => s !== '').join('\n') : detail;
   const base: ApprovalRequest = {
     callId,
     tool: tool.name,
     classification: decision.classification,
     ...(tool.command !== undefined ? { kind: 'command' as const } : {}),
     summary,
-    detail,
+    detail: fullDetail,
     reason: decision.reason,
   };
   return decision.noUndo ? { ...base, noUndoWarning: true } : base;

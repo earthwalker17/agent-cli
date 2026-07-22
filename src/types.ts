@@ -231,6 +231,13 @@ export interface Tool<I = unknown> {
    * observe (the S6 trap again). Never combinable with `command` or `delegates`.
    */
   planDoc?(input: I): { action: 'update' };
+  /**
+   * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
+   * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the
+   * prompt renderer's sanitization and line cap; NEVER consulted by policy (the decision is
+   * already made when this runs), and a throw yields no lines rather than blocking the ask.
+   */
+  approvalContext?(input: I): string[];
   /** Optional hook to strip secret content from the result before it is persisted to the log. */
   redactForLog?(result: ToolResult, saltHex: string): ToolResult;
   execute(input: I, ctx: ToolContext): Promise<ToolResult>;

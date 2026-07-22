@@ -8,7 +8,7 @@ import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from 
 import { checkTrust } from '../cli/trust-check.js';
 import { assembleSession, type Assembled } from '../cli/assemble.js';
 import { runMemoryUpdate } from '../memory/update.js';
-import { readPlan, PLAN_INJECT_CAP_CHARS } from '../plan/store.js';
+import { planApprovalSha, readPlan, PLAN_INJECT_CAP_CHARS } from '../plan/store.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { createReplIO, type ReplIO } from './io.js';
@@ -212,12 +212,10 @@ function buildPlanNote(
   const plan = readPlan(layout, session.id);
   if (!plan.exists || plan.sha256 === null || plan.status === 'superseded') return null;
 
-  let approvedSha: string | null = null;
+  const approvedSha = planApprovalSha(session.log.events);
   const knownShas = new Set<string>(lastInjectedSha !== null ? [lastInjectedSha] : []);
   for (const e of session.log.events) {
-    if (e.type === 'plan.approved') approvedSha = e.sha256;
-    else if (e.type === 'plan.discarded') approvedSha = null;
-    else if (e.type === 'plan.updated') knownShas.add(e.sha256);
+    if (e.type === 'plan.updated') knownShas.add(e.sha256);
   }
   const divergence =
     approvedSha !== null && approvedSha !== plan.sha256

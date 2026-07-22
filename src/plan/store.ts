@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { parseFrontmatter, writeDocAtomic } from '../memory/store.js';
 import { sha256 } from '../shared/hash.js';
+import type { SessionEvent } from '../types.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Clock } from '../shared/clock.js';
@@ -42,6 +43,21 @@ export interface PlanDoc {
   truncated: boolean;
   /** Lenient `## Task N` heading extraction for compact summaries; display-only, never authority. */
   tasks: { title: string; status: string | null }[];
+}
+
+/**
+ * The sha the user last approved, from the session's events: `plan.approved` binds the exact
+ * bytes; `plan.discarded` clears the binding. Null = no live recorded approval. Shared by the
+ * per-turn injection note and the executor-spawn approval prompt (V0.7.1) so both surfaces
+ * derive divergence from ONE rule.
+ */
+export function planApprovalSha(events: readonly SessionEvent[]): string | null {
+  let approvedSha: string | null = null;
+  for (const e of events) {
+    if (e.type === 'plan.approved') approvedSha = e.sha256;
+    else if (e.type === 'plan.discarded') approvedSha = null;
+  }
+  return approvedSha;
 }
 
 export function readPlan(layout: ProjectLayout, planId: string): PlanDoc {

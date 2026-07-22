@@ -59,6 +59,17 @@ const DelegateInput = z
   .strict();
 type DelegateInputT = z.infer<typeof DelegateInput>;
 
+/** Plan gate + consent-display state, read fresh from the file and events (bytes are truth). */
+export interface PlanGateContext {
+  status: 'none' | 'draft' | 'approved' | 'superseded' | 'unknown';
+  /** sha256 of the plan file's CURRENT bytes; null when absent/unreadable. */
+  currentSha: string | null;
+  /** The sha the user last approved (from plan.approved/plan.discarded events); null = none. */
+  approvedSha: string | null;
+  /** status says approved but the file's bytes are no longer the approved bytes. */
+  diverged: boolean;
+}
+
 /** Everything executor orchestration needs from assembly; absent ⇒ executors honestly unavailable. */
 export interface ExecutorDeps {
   gitPath: string;
@@ -69,8 +80,8 @@ export interface ExecutorDeps {
   worktreesRoot: string;
   registryFile: string;
   snapshots: SnapshotStore;
-  /** Current plan gate state, read fresh per group (the plan file's bytes are truth). */
-  planStatus: () => 'none' | 'draft' | 'approved' | 'superseded' | 'unknown';
+  /** Current plan gate state, read fresh per use (gate at execute; display at the ask). */
+  planContext: () => PlanGateContext;
   /** Feed the in-session apply registry the moment changes are captured. */
   registerChanges: (childSessionId: string, baseOid: string, files: TaskChangeFile[]) => void;
   clockIso: () => string;
@@ -101,6 +112,25 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
     // decides FIRST (and a delegates+command combination is denied outright).
     mutates: () => null,
     delegates: (i) => ({ roles: i.tasks.map((t) => t.role) }),
+    // Display-only plan state for the executor-spawn ask (V0.7.1): the human approving a spawn
+    // must SEE whether the plan they approved is still the plan on disk. Read fresh at ask time;
+    // the gate below re-reads at execute time (fresher — the safe direction). Never policy.
+    approvalContext: (i) => {
+      if (!i.tasks.some((t) => t.role === 'executor') || executor === undefined) return [];
+      const p = executor.planContext();
+      const short = (sha: string | null): string => (sha !== null ? sha.slice(0, 12) : '(unknown)');
+      if (p.status === 'none') return ['plan: none — no plan document exists for this session'];
+      if (p.status === 'approved') {
+        if (p.approvedSha === null) {
+          return ['plan: file says APPROVED but no /plan approve is recorded this session (status possibly hand-edited) — review /plan show'];
+        }
+        return p.diverged
+          ? [`plan: APPROVED but DIVERGED after approval (approved ${short(p.approvedSha)}, current ${short(p.currentSha)}) — review /plan show before allowing`]
+          : [`plan: APPROVED (sha ${short(p.currentSha)}, matches the user-approved bytes)`];
+      }
+      if (p.status === 'superseded') return ['plan: SUPERSEDED (discarded) — executors would run without an active plan'];
+      return [`plan: ${p.status.toUpperCase()} — executor tasks will refuse until /plan approve`];
+    },
     async execute(input, ctx): Promise<ToolResult> {
       const refuse = (error: string): ToolResult => ({ ok: false, output: '', error, durationMs: 0, truncated: false });
       // Group-atomic caps: a group either fully fits the remaining budget or is refused whole —
@@ -125,10 +155,10 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
         }
         const support = worktreeSupport(executor.gitVersion);
         if (!support.ok) return refuse(`executor tasks unavailable: ${support.reason}`);
-        const plan = executor.planStatus();
-        if (plan === 'draft' || plan === 'unknown') {
+        const plan = executor.planContext();
+        if (plan.status === 'draft' || plan.status === 'unknown') {
           return refuse(
-            `a plan document exists but is not approved (status: ${plan}) — executor tasks are blocked until the user runs /plan approve (or /plan discard)`,
+            `a plan document exists but is not approved (status: ${plan.status}) — executor tasks are blocked until the user runs /plan approve (or /plan discard)`,
           );
         }
         // ONE base checkpoint per group, created sequentially before any fan-out: every member

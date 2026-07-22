@@ -6,7 +6,7 @@ import { findGitOnPath, runGit } from '../src/git/client.js';
 import { worktreeSupport } from '../src/git/worktree.js';
 import { createApprovalForwarder } from '../src/runtime/approval-forwarder.js';
 import { loadRegistry, registerWorktree, registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
-import { createDelegateTool, type ExecutorDeps } from '../src/tools/delegate.js';
+import { createDelegateTool, type ExecutorDeps, type PlanGateContext } from '../src/tools/delegate.js';
 import { createApplyChangesTool, createTaskChangesRegistry, type TaskChangesRegistry } from '../src/tools/apply-changes.js';
 import { startSession, endSession, runTurn, type Session } from '../src/runtime/session.js';
 import { applyUndo } from '../src/runtime/undo.js';
@@ -161,7 +161,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     parentScript: ScriptTurn[];
     childScripts: ScriptTurn[][];
     forwardOutcomes?: ApprovalOutcome[];
-    planStatus?: () => 'none' | 'draft' | 'approved' | 'superseded' | 'unknown';
+    planContext?: () => PlanGateContext;
   }): Harness {
     const registry = createTaskChangesRegistry();
     const forwarded: ApprovalRequest[] = [];
@@ -174,7 +174,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       worktreesRoot: path.join(tmp, 'wt-home'),
       registryFile: registryFile(layout.projectDir),
       snapshots: undefined as never, // set after the parent exists (shares its store)
-      planStatus: opts.planStatus ?? (() => 'none'),
+      planContext: opts.planContext ?? (() => ({ status: 'none', currentSha: null, approvedSha: null, diverged: false })),
       registerChanges: (id, baseOid, files) => registry.register(id, baseOid, files),
       clockIso: () => new Date(0).toISOString(),
     };
@@ -411,15 +411,89 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     const h = makeHarness({
       parentScript: [{ say: 'delegating', calls: [EXEC_CALL()] }, { say: 'blocked' }],
       childScripts: [[{ say: 'must never run' }]],
-      planStatus: () => 'draft',
+      planContext: () => ({ status: 'draft', currentSha: 'a'.repeat(64), approvedSha: null, diverged: false }),
     });
-    h.parent.approver = async () => ({ decision: 'allow', scope: 'once', source: 'user' });
+    const prompts: ApprovalRequest[] = [];
+    h.parent.approver = async (req) => {
+      prompts.push(req);
+      return { decision: 'allow', scope: 'once', source: 'user' };
+    };
     const before = fs.readdirSync(layout.sessionsDir).filter((f) => f.endsWith('.jsonl')).length;
     await runTurn(h.parent, 'go');
     expect(h.parent.log.events.some((e) => e.type === 'task.started')).toBe(false);
     expect(fs.readdirSync(layout.sessionsDir).filter((f) => f.endsWith('.jsonl')).length).toBe(before);
     // The refusal reaches the MODEL as the tool_result error content.
     expect(JSON.stringify(h.parent.messages)).toContain('not approved');
+    // The spawn ASK already told the human the plan was a draft (V0.7.1 consent surface).
+    expect(prompts[0]!.detail).toContain('plan: DRAFT — executor tasks will refuse');
+    endSession(h.parent, 'completed');
+  });
+
+  it('the executor spawn ask displays plan-approval state: matching, diverged, none, hand-edited', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+    const shaA = 'a'.repeat(64);
+    const shaB = 'b'.repeat(64);
+
+    const cases: { plan: PlanGateContext; expectLine: string }[] = [
+      {
+        plan: { status: 'approved', currentSha: shaA, approvedSha: shaA, diverged: false },
+        expectLine: `plan: APPROVED (sha ${shaA.slice(0, 12)}, matches the user-approved bytes)`,
+      },
+      {
+        plan: { status: 'approved', currentSha: shaB, approvedSha: shaA, diverged: true },
+        expectLine: `plan: APPROVED but DIVERGED after approval (approved ${shaA.slice(0, 12)}, current ${shaB.slice(0, 12)})`,
+      },
+      {
+        plan: { status: 'none', currentSha: null, approvedSha: null, diverged: false },
+        expectLine: 'plan: none — no plan document exists for this session',
+      },
+      {
+        plan: { status: 'approved', currentSha: shaA, approvedSha: null, diverged: false },
+        expectLine: 'no /plan approve is recorded this session',
+      },
+    ];
+    for (const c of cases) {
+      const h = makeHarness({
+        parentScript: [{ say: 'delegating', calls: [EXEC_CALL()] }, { say: 'done' }],
+        childScripts: [[{ say: 'child done' }]],
+        planContext: () => c.plan,
+      });
+      const prompts: ApprovalRequest[] = [];
+      h.parent.approver = async (req) => {
+        prompts.push(req);
+        return { decision: 'deny-stop', scope: 'once', source: 'user' }; // display test only; spawn nothing
+      };
+      await runTurn(h.parent, 'go');
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]!.detail).toContain(c.expectLine);
+      expect(prompts[0]!.detail).toContain('[executor]'); // the role/task lines are still there
+      endSession(h.parent, 'completed');
+    }
+  });
+
+  it('a throwing approvalContext never blocks the ask (display-only seam)', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+
+    const h = makeHarness({
+      parentScript: [{ say: 'delegating', calls: [EXEC_CALL()] }, { say: 'done' }],
+      childScripts: [[{ say: 'child done' }]],
+      planContext: () => {
+        throw new Error('boom');
+      },
+    });
+    const prompts: ApprovalRequest[] = [];
+    h.parent.approver = async (req) => {
+      prompts.push(req);
+      return { decision: 'deny-stop', scope: 'once', source: 'user' };
+    };
+    await runTurn(h.parent, 'go');
+    expect(prompts).toHaveLength(1); // the ask still happened
+    expect(prompts[0]!.detail).toContain('[executor]'); // base detail intact, no plan line
+    expect(prompts[0]!.detail).not.toContain('plan:');
     endSession(h.parent, 'completed');
   });
 
