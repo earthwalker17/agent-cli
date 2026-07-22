@@ -251,14 +251,23 @@ async function runExecutorTask(
 
   const dir = newWorktreeDir(ex.worktreesRoot, spec.parentSessionId);
   try {
-    registerWorktree(ex.registryFile, { dir, repoRoot: ex.repoRoot, childSessionId: '', createdAt: ex.clockIso() });
+    // Owner-stamped (V0.7.1): the sweep skips entries whose pid is alive, so a concurrent
+    // session's startup can never remove this worktree while we are using it.
+    await registerWorktree(ex.registryFile, {
+      dir,
+      repoRoot: ex.repoRoot,
+      childSessionId: '',
+      createdAt: ex.clockIso(),
+      ownerSessionId: spec.parentSessionId,
+      pid: process.pid,
+    });
   } catch (err) {
     return failResult(`executor setup failed: cannot record the worktree registry entry (${(err as Error).message})`);
   }
   const add = await addWorktree(ex.gitPath, ex.repoRoot, dir, baseOid);
   if (!add.ok) {
     try {
-      unregisterWorktree(ex.registryFile, dir);
+      await unregisterWorktree(ex.registryFile, dir);
     } catch {
       /* registry cleanup is best-effort; the sweep is path-guarded anyway */
     }
@@ -322,7 +331,7 @@ async function runExecutorTask(
     const rem = await removeWorktree(ex.gitPath, ex.repoRoot, dir);
     if (rem.ok) {
       try {
-        unregisterWorktree(ex.registryFile, dir);
+        await unregisterWorktree(ex.registryFile, dir);
       } catch {
         /* stale entry is harmless: the sweep skips missing dirs */
       }

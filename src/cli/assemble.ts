@@ -71,10 +71,16 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   if (gitFacts.isRepo && gitFacts.gitPath !== null) {
     try {
       const swept = await sweepOrphanedWorktrees(layout.projectDir, gitFacts.gitPath);
-      if (swept.removed.length > 0 || swept.failed.length > 0) {
-        worktreeSweep =
-          `removed ${swept.removed.length} orphaned task worktree(s) from a previous run` +
-          (swept.failed.length > 0 ? `; ${swept.failed.length} could not be removed (retried next session)` : '');
+      if (swept.lockUnavailable === true) {
+        worktreeSweep = 'sweep skipped (registry busy); orphans are retried next session';
+      } else if (swept.removed.length > 0 || swept.failed.length > 0 || swept.skippedLive.length > 0) {
+        worktreeSweep = [
+          swept.removed.length > 0 ? `removed ${swept.removed.length} orphaned task worktree(s) from a previous run` : '',
+          swept.failed.length > 0 ? `${swept.failed.length} could not be removed (retried next session)` : '',
+          swept.skippedLive.length > 0 ? `${swept.skippedLive.length} left in place (owned by a live session)` : '',
+        ]
+          .filter((s) => s !== '')
+          .join('; ');
       }
     } catch {
       /* the sweep must never block a session; leftovers are retried next time */

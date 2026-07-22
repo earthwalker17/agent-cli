@@ -19,7 +19,8 @@ interface ParseResult {
   committedBytes: number;
 }
 
-function isPidAlive(pid: number): boolean {
+/** Pid liveness probe (kill(pid,0); EPERM ⇒ alive). Shared with the worktree-registry sweep. */
+export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

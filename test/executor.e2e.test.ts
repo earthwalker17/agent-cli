@@ -434,18 +434,53 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     fs.mkdirSync(root, { recursive: true });
     expect((await git(repo, 'worktree', 'add', '--detach', orphan, head)).ok).toBe(true);
     const reg = registryFile(layout.projectDir);
-    registerWorktree(reg, { dir: orphan, repoRoot: repo, childSessionId: 'c1', createdAt: 't' });
+    // Legacy entry shape (no owner/pid): always sweepable, exactly as before V0.7.1.
+    await registerWorktree(reg, { dir: orphan, repoRoot: repo, childSessionId: 'c1', createdAt: 't' });
     // A hostile/corrupt entry pointing OUTSIDE our root must be dropped, never touched.
     const outside = path.join(tmp, 'precious');
     fs.mkdirSync(outside);
     fs.writeFileSync(path.join(outside, 'keep.txt'), 'do not delete');
-    registerWorktree(reg, { dir: outside, repoRoot: repo, childSessionId: 'c2', createdAt: 't' });
+    await registerWorktree(reg, { dir: outside, repoRoot: repo, childSessionId: 'c2', createdAt: 't' });
 
     const swept = await sweepOrphanedWorktrees(layout.projectDir, REAL_GIT!);
     expect(swept.removed).toEqual([orphan]);
     expect(fs.existsSync(orphan)).toBe(false);
     expect(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8')).toBe('do not delete'); // untouched
     expect(loadRegistry(reg)).toEqual([]); // both entries gone from the registry
+  });
+
+  it('sweep never removes a live sibling session\'s worktree — dead-pid and age-hatch rules', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+    const head = (await git(repo, 'rev-parse', 'HEAD')).stdout.trim();
+
+    const root = worktreesRoot(layout.projectDir);
+    fs.mkdirSync(root, { recursive: true });
+    const mk = async (name: string): Promise<string> => {
+      const dir = path.join(root, name);
+      expect((await git(repo, 'worktree', 'add', '--detach', dir, head)).ok).toBe(true);
+      return dir;
+    };
+    const liveDir = await mk('live-1');
+    const deadDir = await mk('dead-1');
+    const agedDir = await mk('aged-1');
+    const reg = registryFile(layout.projectDir);
+    const nowIso = new Date().toISOString();
+    const oldIso = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(); // 3h > the 2h hatch
+    await registerWorktree(reg, { dir: liveDir, repoRoot: repo, childSessionId: 'c1', createdAt: nowIso, ownerSessionId: 'sA', pid: 1111 });
+    await registerWorktree(reg, { dir: deadDir, repoRoot: repo, childSessionId: 'c2', createdAt: nowIso, ownerSessionId: 'sB', pid: 2222 });
+    await registerWorktree(reg, { dir: agedDir, repoRoot: repo, childSessionId: 'c3', createdAt: oldIso, ownerSessionId: 'sC', pid: 3333 });
+
+    // 1111 and 3333 are "alive"; 2222 is dead. The aged entry sweeps despite its live pid.
+    const swept = await sweepOrphanedWorktrees(layout.projectDir, REAL_GIT!, { isAlive: (pid) => pid !== 2222 });
+    expect(swept.skippedLive).toEqual([liveDir]);
+    expect(swept.removed.sort()).toEqual([agedDir, deadDir].sort());
+    expect(fs.existsSync(liveDir)).toBe(true); // the live sibling's worktree is untouched
+    expect(fs.existsSync(deadDir)).toBe(false);
+    expect(fs.existsSync(agedDir)).toBe(false);
+    // The live entry SURVIVES in the registry for its owner's own cleanup.
+    expect(loadRegistry(reg).map((e) => e.dir)).toEqual([liveDir]);
   });
 
   it('executors are honestly unavailable without a repo bundle', async () => {
