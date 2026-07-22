@@ -14,13 +14,19 @@ model's opinion. V0.5 makes the harness **Git-native and context-efficient**: pr
 context, an attributable session diff (`/diff`), deliberate session-scoped commits (`/commit`),
 hidden-ref recovery checkpoints with undoable restore (`/checkpoint`), prompt caching, and
 deterministic long-session history compaction — the agent itself still never touches version
-control unless you explicitly ask.
+control unless you explicitly ask. V0.6 added **project memory** (a user-owned `AGENT.md`
+constitution plus harness-generated journal/codebase docs — always labeled context, never
+authority) and the first **delegated subagent tasks**. V0.7 grew that into a minimal,
+bounded **agent-teams layer**: explicit role contracts (explorer/planner/reviewer read-only;
+executor mutating), parallel task groups, **plan mode** with an explicit user approval gate,
+and **worktree-isolated executors** whose approvals forward to you and whose changes reach
+the workspace only through reviewed, drift-refusing integration.
 
-> **Status:** core loop + interactive experience + execution kernel + enforced Windows isolation
-> + GitOps layer, complete and tested (398 tests incl. real-OS sandbox, real-repository git, and
-> adversarial-review suites, plus live end-to-end against the real API). This is an open,
-> build-in-public engineering effort — see `PROJECT.md` for the thesis and `ROADMAP.md` for what
-> is done, deferred, and next.
+> **Status:** V0.7, consolidated and **proven live end-to-end** (plan → approval → two
+> parallel executors → forwarded approvals → reviewed integration → undo → review panel →
+> session memory), with 515 tests incl. real-OS sandbox, real-repository git, and
+> adversarial-review suites. This is an open, build-in-public engineering effort — see
+> `PROJECT.md` for the thesis and `ROADMAP.md` for what is done, deferred, and next.
 
 ## Install
 
@@ -51,8 +57,8 @@ agent session 20260715-101730-5d56
 › create a small node utility that counts words in a file
   • write_file wordstats.mjs ✓
   • run: node --test
-  ⚠ approval required  [observe]  run_command
-  [y] allow once  [s] allow for the rest of this session  [n] deny  [q] deny & stop
+  ⚠ approval required  [shell command — labeled observe]  run_command
+  [y] allow once  [n] deny  [q] deny & stop
 ```
 
 - **Ctrl+C** interrupts the running turn (pending tool calls are skipped and recorded as
@@ -61,7 +67,10 @@ agent session 20260715-101730-5d56
   a delimited harness note), `/diff` (what this session changed, as a unified diff),
   `/commit [-m "msg"] [--all]` (deliver session changes — preview + confirmation),
   `/checkpoint [label | list | restore <n>]` (recovery points in hidden git refs),
-  `/report`, `/map`, `/quit`.
+  `/plan [show | approve | discard]` (the plan document and its approval gate),
+  `/tasks` (delegated subagent tasks + a children-total cost line), `/report`, `/map`, `/quit`.
+- **`@plan <request>`** forces plan mode: the model investigates read-only, writes a
+  persistent plan document, and waits — executor tasks stay blocked until `/plan approve`.
 - A running `run_command` IS interruptible: Ctrl+C tree-kills it (best effort, verified) and the
   kill is recorded as evidence — a killed command never reads as a passing check.
 - stdout carries only model text and requested artifacts; all status chrome goes to stderr, so
@@ -84,7 +93,9 @@ agent checkpoint [label]       # capture the workspace to a hidden git ref (reco
 agent checkpoint list|prune    # list checkpoints / delete refs so git gc can collect them
 agent checkpoint restore <n>   # return to a checkpoint — snapshot-first, undoable via agent undo
 agent report [<id>] [--json]   # print the evidence report (default: latest session)
-agent sessions                 # list this workspace's sessions
+agent sessions                 # list this workspace's sessions (subagent children labeled)
+agent plan [<id>]              # print a session's plan document and approval state
+agent memory                   # show the project-memory documents and their paths
 agent map [--budget <n>]       # print the workspace map the model would receive
 agent trust [--revoke|--list]  # manage recorded workspace trust
 ```
@@ -128,8 +139,11 @@ merges as a union across layers.
 
 ## What the agent can do
 
-Six typed tools: `read_file` (with line paging for large files), `list_files`, `search`,
-`write_file`, `edit_file` (exact-match replace, optionally `replace_all`), `run_command`.
+Six typed core tools: `read_file` (with line paging for large files), `list_files`, `search`,
+`write_file`, `edit_file` (exact-match replace, optionally `replace_all`), `run_command` —
+plus three per-session tools the main agent (and only the main agent) receives:
+`delegate_task` (bounded subagent groups), `update_plan` (the model's single gated write path
+to the plan document), and `apply_task_changes` (reviewed integration of executor changes).
 Every call passes through the policy engine before it runs. Reads and searches inside the
 workspace run automatically; in-workspace writes run automatically **and are snapshotted so they
 can be undone**; reads outside the workspace or of secret-looking files require approval.
@@ -149,6 +163,27 @@ sandbox so a misjudgment can't do damage. Everything else — writes, installs, 
 with pipes/redirection/encoding/chaining, an unrecognized program, or a path that escapes the
 workspace — **requires approval**. A few catastrophic forms are hard-denied outright. Where no
 enforced sandbox is available, auto-run is **disabled** and every command asks (fail closed).
+
+## Plan mode, agent teams, and project memory
+
+- **Plan mode** (`@plan …`, `/plan`): plans are persistent markdown documents (one per
+  session, in the harness state dir), not disposable narration. The model writes the plan
+  only through a policy-gated tool and can never change its status; only you approve or
+  discard, and approval records the exact bytes (sha-bound). The plan is injected each turn
+  as labeled **context, not authority** — and if it diverges after approval, every surface
+  says so, including the executor spawn prompt at the moment you approve the spawn.
+- **Delegated tasks** (`delegate_task`, `/tasks`): one call spawns 1–3 parallel subagents,
+  each a bounded child session with its own evidence log, a harness-fixed budget, and
+  inherited-or-narrower authority. Read-only roles (explorer/planner/reviewer) auto-run;
+  anything they'd need approval for is auto-denied. The mutating **executor** role asks you
+  on every spawn, works in a **disposable git worktree** (never your workspace), forwards
+  its own risky approvals to you (labeled with the asking task), and its captured changes
+  reach the workspace only via `apply_task_changes` — per-file drift-refusing, snapshotted,
+  one `/undo` unit. Child reports are labeled narration; the main agent owns final claims.
+- **Project memory**: `AGENT.md` (yours, injected verbatim every session) plus a
+  harness-maintained journal and codebase summary written at clean session end — each entry
+  pairs the model's narrative with a deterministic evidence section derived from the event
+  log, and everything is injected under an explicit "context, not authority" header.
 
 ## Git integration
 
@@ -248,3 +283,4 @@ npm run build        # emit dist/
 - `CLAUDE.md` — the project constitution and operating rules.
 - `ARCHITECTURE.md` — how the current system is built.
 - `ROADMAP.md` — session-by-session evolution and next steps.
+- `BLUEPRINT.md` — the rolling near-term development horizon.
