@@ -151,7 +151,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
-  const { session, sandboxFacts, gitFacts, memory } = await assembleSession({
+  const { session, sandboxFacts, gitFacts, memory, pruneTaskBaseRefs } = await assembleSession({
     trust,
     config,
     ctx,
@@ -183,6 +183,15 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     const result = await runTurn(session, task, { signal: controller.signal });
     const reason = endReasonForTurn(result, ctx.maxSteps);
     if (reason !== 'aborted') {
+      // Session-end hygiene before endSession (the event must land in the open log).
+      if (pruneTaskBaseRefs !== undefined) {
+        try {
+          const pruneLine = await pruneTaskBaseRefs();
+          if (pruneLine !== null) process.stderr.write(`${pruneLine}\n`);
+        } catch {
+          /* best-effort hygiene */
+        }
+      }
       await runMemoryUpdate(session, {
         layout,
         enabled: config.memoryUpdates !== false,

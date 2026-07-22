@@ -162,6 +162,24 @@ export async function listCheckpoints(cctx: CheckpointContext, sessionId?: strin
   return out.sort((a, b) => (a.sessionId === b.sessionId ? a.n - b.n : a.sessionId.localeCompare(b.sessionId)));
 }
 
+/**
+ * Delete SPECIFIC checkpoint refs by name (V0.7.1: session-end task-base pruning). Best-effort
+ * per ref; the caller owns announcing and recording the outcome.
+ */
+export async function deleteCheckpointRefs(
+  gitPath: string,
+  repoRoot: string,
+  refs: readonly string[],
+): Promise<{ deleted: string[]; failed: string[] }> {
+  const deleted: string[] = [];
+  const failed: string[] = [];
+  for (const ref of refs) {
+    const r = await runGit({ gitPath, argv: ['update-ref', '-d', ref], cwd: repoRoot });
+    (r.ok ? deleted : failed).push(ref);
+  }
+  return { deleted, failed };
+}
+
 /** Delete checkpoint refs (all sessions when sessionId is undefined) so gc can reclaim them. */
 export async function pruneCheckpoints(cctx: CheckpointContext, sessionId?: string): Promise<{ deleted: string[]; failed: string[] }> {
   const refs = await listCheckpoints(cctx, sessionId);

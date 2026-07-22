@@ -7,6 +7,7 @@ import { worktreeSupport } from '../src/git/worktree.js';
 import { createApprovalForwarder } from '../src/runtime/approval-forwarder.js';
 import { loadRegistry, registerWorktree, registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
 import { createDelegateTool, type ExecutorDeps, type PlanGateContext } from '../src/tools/delegate.js';
+import { pruneTaskBaseCheckpointRefs } from '../src/cli/assemble.js';
 import { createApplyChangesTool, createTaskChangesRegistry, type TaskChangesRegistry } from '../src/tools/apply-changes.js';
 import { startSession, endSession, runTurn, type Session } from '../src/runtime/session.js';
 import { applyUndo } from '../src/runtime/undo.js';
@@ -154,6 +155,8 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     registry: TaskChangesRegistry;
     executorDeps: ExecutorDeps;
     forwarded: ApprovalRequest[];
+    /** Task-base checkpoint refs the delegate tool reported (what assembly prunes at quit). */
+    baseRefs: string[];
   }
 
   /** Parent session + delegate tool wired like assembly, with per-child scripted providers. */
@@ -165,6 +168,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
   }): Harness {
     const registry = createTaskChangesRegistry();
     const forwarded: ApprovalRequest[] = [];
+    const baseRefs: string[] = [];
     let forwardIdx = 0;
     const executorDeps: ExecutorDeps = {
       gitPath: REAL_GIT!,
@@ -176,6 +180,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       snapshots: undefined as never, // set after the parent exists (shares its store)
       planContext: opts.planContext ?? (() => ({ status: 'none', currentSha: null, approvedSha: null, diverged: false })),
       registerChanges: (id, baseOid, files) => registry.register(id, baseOid, files),
+      noteBaseRef: (ref) => baseRefs.push(ref),
       clockIso: () => new Date(0).toISOString(),
     };
     const parent = startSession({
@@ -210,7 +215,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       createDelegateTool(deps, parent.id, executorDeps) as Tool,
       createApplyChangesTool(registry, parent.snapshots) as Tool,
     ];
-    return { parent, registry, executorDeps, forwarded };
+    return { parent, registry, executorDeps, forwarded, baseRefs };
   }
 
   const EXEC_CALL = (task = 'apply the change') => ({
@@ -555,6 +560,54 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     expect(fs.existsSync(agedDir)).toBe(false);
     // The live entry SURVIVES in the registry for its owner's own cleanup.
     expect(loadRegistry(reg).map((e) => e.dir)).toEqual([liveDir]);
+  });
+
+  it('task-base refs: tracked at spawn, session-end prune deletes + records, apply still works from blobs', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+
+    const h = makeHarness({
+      parentScript: [
+        { say: 'delegating', calls: [EXEC_CALL('write out.txt')] },
+        { say: 'captured' }, // turn 1 ends AFTER capture, before any apply
+        { say: 'applying', calls: [{ name: 'apply_task_changes', input: { child_session_id: 'child-session-0001' } }] },
+        { say: 'done' },
+      ],
+      childScripts: [
+        [
+          { say: 'writing', calls: [{ name: 'write_file', input: { path: 'out.txt', content: 'made in worktree\n' } }] },
+          { say: 'REPORT: wrote out.txt' },
+        ],
+      ],
+    });
+    h.parent.approver = async () => ({ decision: 'allow', scope: 'once', source: 'user' });
+
+    await runTurn(h.parent, 'go'); // spawn + capture
+    expect(h.baseRefs).toHaveLength(1);
+    expect(h.baseRefs[0]).toMatch(/^refs\/agent-cli\/checkpoints\//);
+    expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout).toContain(h.baseRefs[0]!);
+
+    // What assembly's pruneTaskBaseRefs does at session end: delete + record + summarize.
+    const line = await pruneTaskBaseCheckpointRefs(REAL_GIT!, repo, h.baseRefs, h.parent.log);
+    expect(line).toBe('pruned 1 task-base checkpoint ref(s)');
+    expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout.trim()).toBe('');
+    expect(h.parent.log.events.at(-1)).toMatchObject({
+      type: 'git.checkpoint.pruned',
+      kind: 'task-base',
+      refs: h.baseRefs,
+      failed: [],
+    });
+    // Empty ref list = nothing to do, no event, no line.
+    const evCount = h.parent.log.events.length;
+    expect(await pruneTaskBaseCheckpointRefs(REAL_GIT!, repo, [], h.parent.log)).toBeNull();
+    expect(h.parent.log.events.length).toBe(evCount);
+
+    // Integration AFTER the ref is gone: apply reads captured blobs, never git.
+    await runTurn(h.parent, 'apply it');
+    expect(fs.readFileSync(path.join(repo, 'out.txt'), 'utf8')).toBe('made in worktree\n');
+    expect(h.parent.log.events.find((e) => e.type === 'task.applied')).toMatchObject({ refused: [] });
+    endSession(h.parent, 'completed');
   });
 
   it('executors are honestly unavailable without a repo bundle', async () => {

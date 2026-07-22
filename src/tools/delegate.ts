@@ -82,6 +82,13 @@ export interface ExecutorDeps {
   snapshots: SnapshotStore;
   /** Current plan gate state, read fresh per use (gate at execute; display at the ask). */
   planContext: () => PlanGateContext;
+  /**
+   * Called with each group's base-checkpoint ref so assembly can prune them at session end
+   * (V0.7.1): the ref is a live recovery point only while the session runs — the captured
+   * blobs + task.changes events are the durable record, and silently accumulating one hidden
+   * ref per executor group pollutes the user's repo.
+   */
+  noteBaseRef: (ref: string) => void;
   /** Feed the in-session apply registry the moment changes are captured. */
   registerChanges: (childSessionId: string, baseOid: string, files: TaskChangeFile[]) => void;
   clockIso: () => string;
@@ -172,6 +179,7 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
           return refuse(`cannot capture the task-base checkpoint: ${base.error ?? 'unknown error'}`);
         }
         baseOid = base.oid;
+        if (base.ref !== undefined) executor.noteBaseRef(base.ref);
       }
       tasksStarted += input.tasks.length;
 

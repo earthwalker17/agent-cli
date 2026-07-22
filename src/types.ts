@@ -558,6 +558,18 @@ export type EventBody =
     }
   | {
       /**
+       * This session's task-base checkpoint refs were deleted at session end (V0.7.1). The
+       * base oids stay recorded in task.changes/worktree events and the captured blobs are the
+       * durable integration record — the ref was only a live recovery point while the session
+       * ran. A crash before this event leaks the refs to manual `agent checkpoint prune`.
+       */
+      type: 'git.checkpoint.pruned';
+      kind: 'task-base';
+      refs: string[];
+      failed: string[];
+    }
+  | {
+      /**
        * Which project-memory documents this session loaded at assembly, with identity facts
        * (V0.6). Provenance for exactly what durable context reached the system prompt; memory
        * failures degrade to a status here instead of blocking the session.

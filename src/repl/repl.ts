@@ -186,6 +186,16 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     return 1;
   }
 
+  // Session-end hygiene BEFORE the memory update and endSession: the provenance event must
+  // land in the open log, and a failing prune must never block the quit.
+  if (assembled.pruneTaskBaseRefs !== undefined) {
+    try {
+      const pruneLine = await assembled.pruneTaskBaseRefs();
+      if (pruneLine !== null) renderer.chromeLine(style.dim(`  checkpoints: ${pruneLine}`));
+    } catch {
+      /* best-effort hygiene */
+    }
+  }
   await runMemoryUpdate(session, {
     layout,
     enabled: config.memoryUpdates !== false,

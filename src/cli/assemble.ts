@@ -11,11 +11,12 @@ import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/appl
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
 import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
 import { planApprovalSha, readPlan } from '../plan/store.js';
+import { deleteCheckpointRefs } from '../git/checkpoint.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
 import type { TrustDecision } from '../trust/gate.js';
-import type { SessionEvent } from '../types.js';
+import type { EventBody, SessionEvent } from '../types.js';
 import type { RunContext } from './context.js';
 
 /**
@@ -54,6 +55,12 @@ export interface Assembled {
   memory: LoadedMemory;
   /** One-line summary when crash-orphaned task worktrees were swept at startup (V0.7). */
   worktreeSweep?: string;
+  /**
+   * Delete this session's task-base checkpoint refs (V0.7.1) — call at clean session end,
+   * BEFORE endSession (the provenance event must land in the open log). Returns a one-line
+   * summary for chrome, or null when there is nothing to prune. Absent without a repo.
+   */
+  pruneTaskBaseRefs?: () => Promise<string | null>;
 }
 
 export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
@@ -144,6 +151,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   for (const e of session.log.events) {
     if (e.type === 'task.changes') changesRegistry.register(e.childSessionId, e.baseOid, e.files);
   }
+  // Task-base checkpoint refs created for executor groups this session; pruned at session end.
+  const taskBaseRefs: string[] = [];
   // Executor orchestration bundle — absent (⇒ honest tool-level refusal) without a probed repo.
   const executorDeps: ExecutorDeps | undefined =
     gitFacts.isRepo && gitFacts.gitPath !== null && gitFacts.repoRoot !== null
@@ -170,9 +179,19 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
             };
           },
           registerChanges: (childSessionId, baseOid, files) => changesRegistry.register(childSessionId, baseOid, files),
+          noteBaseRef: (ref) => taskBaseRefs.push(ref),
           clockIso: () => session.clock.iso(),
         }
       : undefined;
+
+  // Session-end hygiene (V0.7.1): the task-base ref is a live recovery point only while the
+  // session runs — blobs + task.changes events are the durable record. Announced + recorded;
+  // a crash before this leaks the refs to manual `agent checkpoint prune` (documented).
+  const pruneTaskBaseRefs =
+    executorDeps === undefined
+      ? undefined
+      : (): Promise<string | null> =>
+          pruneTaskBaseCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, taskBaseRefs.splice(0), session.log);
 
   // The delegate tool is a PER-SESSION instance appended to a fresh array (never TOOLS.push):
   // parents get it; child sessions have fixed role registries without it, so delegation depth
@@ -207,7 +226,39 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     createApplyChangesTool(changesRegistry, session.snapshots),
   ];
 
-  return { session, sandboxFacts, gitFacts, map, memory, ...(worktreeSweep !== undefined ? { worktreeSweep } : {}) };
+  return {
+    session,
+    sandboxFacts,
+    gitFacts,
+    map,
+    memory,
+    ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
+    ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),
+  };
+}
+
+/**
+ * The session-end task-base prune (V0.7.1), factored for testability: delete the refs, record
+ * the provenance event (a silent ref delete would violate the evidence invariant), return the
+ * chrome summary line. `splice(0)` at the call site guarantees never-double-prune.
+ */
+export async function pruneTaskBaseCheckpointRefs(
+  gitPath: string,
+  repoRoot: string,
+  refs: readonly string[],
+  log: { append(body: EventBody): unknown },
+): Promise<string | null> {
+  if (refs.length === 0) return null;
+  const r = await deleteCheckpointRefs(gitPath, repoRoot, [...new Set(refs)]);
+  try {
+    log.append({ type: 'git.checkpoint.pruned', kind: 'task-base', refs: r.deleted, failed: r.failed });
+  } catch {
+    /* best-effort hygiene: a failing log at quit must not block the end path */
+  }
+  return (
+    `pruned ${r.deleted.length} task-base checkpoint ref(s)` +
+    (r.failed.length > 0 ? `; ${r.failed.length} failed (agent checkpoint prune)` : '')
+  );
 }
 
 /** Map the loaded docs onto the system-prompt injection shape (only usable docs are injected). */
