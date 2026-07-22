@@ -45,14 +45,22 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   }
   lines.push(`  reason: ${req.reason}`);
   if (req.noUndoWarning) lines.push('  ⚠ this action is NOT undoable');
-  // [s] is shown only when a session grant can actually be stored — offering a no-op option
-  // on a non-grantable class would misrepresent what pressing it does.
+  // [s] is shown only when a session grant would actually be STORED: the class must be
+  // grantable AND the request must not be a shell command — grant enforcement refuses
+  // command-bearing tools (a command's class is a best-effort label over untrusted text,
+  // never a fact to key standing permission on). The live V0.7 E2E surfaced the old gap: an
+  // 'external'-labeled forwarded command offered a no-op [s]. Forwarded asks always explain
+  // that [q] stops THAT task only, and a forwarded [s] grant lives and dies with the child.
+  const grantable = isGrantable(req.classification) && req.kind !== 'command';
+  const forwarded = req.taskContext !== undefined;
+  const sPart = grantable
+    ? forwarded
+      ? '   [s] allow for the rest of THIS TASK'
+      : '   [s] allow for the rest of this session'
+    : '';
   lines.push(
-    isGrantable(req.classification)
-      ? '  [y] allow once   [s] allow for the rest of this session   [n] deny   [q] deny & stop'
-      : req.taskContext !== undefined
-        ? '  [y] allow once   [n] deny   [q] deny & stop THIS TASK (the rest of the turn continues)'
-        : '  [y] allow once   [n] deny   [q] deny & stop',
+    `  [y] allow once${sPart}   [n] deny   ` +
+      (forwarded ? '[q] deny & stop THIS TASK (the rest of the turn continues)' : '[q] deny & stop'),
   );
   return lines.join('\n');
 }

@@ -306,6 +306,32 @@ describe('approval prompt display safety', () => {
     });
     expect(filePrompt).toContain('[sensitive]');
   });
+
+  it('options-line matrix: [s] never offered for a command; forwarded asks always explain [q] (live-E2E finding)', async () => {
+    const { formatApprovalPrompt } = await import('../src/runtime/approvals.js');
+    const base = { callId: 'c', summary: 's', detail: '', reason: 'r' } as const;
+    const taskContext = { childSessionId: 'child-1', role: 'executor' };
+
+    // A grantable-CLASS command must NOT offer [s]: Grants refuse command tools, so the old
+    // prompt offered a silent no-op (observed live on an 'external'-labeled forwarded command).
+    const cmdExternal = formatApprovalPrompt({ ...base, tool: 'run_command', classification: 'external', kind: 'command' });
+    expect(cmdExternal).not.toContain('[s]');
+    const cmdForwarded = formatApprovalPrompt({ ...base, tool: 'run_command', classification: 'external', kind: 'command', taskContext });
+    expect(cmdForwarded).not.toContain('[s]');
+    expect(cmdForwarded).toContain('deny & stop THIS TASK');
+
+    // A grantable non-command keeps [s]; forwarded wording says the grant is task-scoped.
+    const fileSensitive = formatApprovalPrompt({ ...base, tool: 'read_file', classification: 'sensitive' });
+    expect(fileSensitive).toContain('[s] allow for the rest of this session');
+    const fileForwarded = formatApprovalPrompt({ ...base, tool: 'read_file', classification: 'sensitive', taskContext });
+    expect(fileForwarded).toContain('[s] allow for the rest of THIS TASK');
+    expect(fileForwarded).toContain('deny & stop THIS TASK');
+
+    // Non-grantable classes never show [s], forwarded or not.
+    const rev = formatApprovalPrompt({ ...base, tool: 'delegate_task', classification: 'reversible' });
+    expect(rev).not.toContain('[s]');
+    expect(rev).toContain('[q] deny & stop');
+  });
 });
 
 describe('REPL: resilience', () => {

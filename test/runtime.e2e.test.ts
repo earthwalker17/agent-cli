@@ -178,6 +178,40 @@ describe('runTurn approvals and grants', () => {
     expect(JSON.stringify(session.messages)).toContain('SECRET=abc123');
   });
 
+  it('a session-scope approval on a COMMAND-bearing tool stores no grant — the second call asks again', async () => {
+    // The live V0.7 E2E surfaced the display half of this ([s] offered on an 'external'-labeled
+    // command); this pins the ENFORCEMENT half: a command's class is a best-effort label over
+    // untrusted model text, so a session grant keyed on it would be standing shell permission
+    // won by a label. applyGrant upgrades any matching ask, so without the fact-based gate a
+    // non-run_command command tool WOULD have auto-run here on the second call.
+    const { z } = await import('zod');
+    const fetchTool = {
+      name: 'fetch_url',
+      description: 'test-only command-bearing tool',
+      schema: z.object({}).strict(),
+      mutates: () => null,
+      command: () => 'curl http://example.com/', // deterministically labeled 'external' (grantable class)
+      execute: async () => ({ ok: true, output: 'fetched', durationMs: 0, truncated: false }),
+    };
+    const { approver, calls } = scriptedApprover([
+      { decision: 'allow', scope: 'session', source: 'user' },
+      { decision: 'allow', scope: 'once', source: 'user' },
+    ]);
+    const session = makeSession(
+      [{ calls: [{ name: 'fetch_url', input: {} }] }, { calls: [{ name: 'fetch_url', input: {} }] }, { say: 'done' }],
+      approver,
+    );
+    session.tools = [...session.tools, fetchTool as never];
+    const result = await runTurn(session, 'fetch twice');
+    endSession(session, 'completed');
+
+    expect(result.finalText).toBe('done');
+    expect(calls.length).toBe(2); // BOTH asked — no grant was stored or honored
+    expect(calls.every((c) => c.tool === 'fetch_url')).toBe(true);
+    expect(calls[0]!.classification).toBe('external'); // the premise: a grantable CLASS
+    expect(session.grants.has('fetch_url', 'external')).toBe(false);
+  });
+
   it('deny & stop halts the turn before the next model call', async () => {
     const { approver } = scriptedApprover([{ decision: 'deny-stop', scope: 'once', source: 'user' }]);
     const session = makeSession(

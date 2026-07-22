@@ -574,7 +574,13 @@ async function executeCall(
       session.log.append({ type: 'tool.completed', callId, ok: false, outputPreview: 'denied by user', durationMs: 0, truncated: false });
       return { toolResult: toolResultBlock(callId, 'denied by user', true), denied: true, stop: outcome.decision === 'deny-stop' };
     }
-    if (outcome.scope === 'session') session.grants.add(tool.name, decision.classification);
+    // A grant is stored only for tools WITHOUT shell authority: a command's classification is
+    // a best-effort label over untrusted model text, never a stable fact to key standing
+    // permission on (Grants.add also refuses 'run_command' by name — defense in depth; this
+    // fact-based gate covers any future command-bearing tool, and the prompt hides [s] to match).
+    if (outcome.scope === 'session' && tool.command === undefined) {
+      session.grants.add(tool.name, decision.classification);
+    }
   }
 
   return await runExecution(session, ctx, tool, input, decision, callId, signal);
