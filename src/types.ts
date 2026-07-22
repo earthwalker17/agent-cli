@@ -92,6 +92,19 @@ export interface TaskBudget {
  * `ToolContext.reportTask`. Like CommandEvidence, the runtime binds the callId when persisting —
  * the runtime-bound callId + the unique childSessionId are the unforgeable parent↔child join.
  */
+/** One file change captured from an executor task's worktree (V0.7). Paths are WORKSPACE-relative. */
+export interface TaskChangeFile {
+  relPath: string;
+  kind: 'create' | 'modify' | 'delete';
+  /** sha256 of the file's BASE bytes (worktree form, filters applied); null for creates. */
+  baseSha256: string | null;
+  /** sha256 of the AFTER bytes, stored as a content-addressed blob; null for deletes and oversize skips. */
+  blobSha256: string | null;
+  bytes: number;
+  /** Content exceeded the per-file cap: recorded, never applied. */
+  oversize?: boolean;
+}
+
 export type TaskEvidence =
   | { kind: 'started'; role: string; childSessionId: string; budget: TaskBudget }
   | {
@@ -103,6 +116,23 @@ export type TaskEvidence =
       /** sha256 of the child's full (untruncated) final report text. */
       resultSha256: string;
       durationMs: number;
+    }
+  | {
+      /** An executor task's captured changes vs its base (V0.7) — the diff OUTLIVES the worktree. */
+      kind: 'changes';
+      childSessionId: string;
+      baseOid: string;
+      files: TaskChangeFile[];
+      omittedCount?: number;
+    }
+  | { kind: 'worktree-created'; childSessionId: string; path: string; baseOid: string }
+  | { kind: 'worktree-removed'; childSessionId: string; ok: boolean; detail?: string }
+  | {
+      /** apply_task_changes outcome (V0.7): which captured changes reached the parent workspace. */
+      kind: 'applied';
+      childSessionId: string;
+      applied: string[];
+      refused: { relPath: string; reason: string }[];
     };
 
 /** Structured plan-document facts reported by the update_plan tool; the runtime binds the callId. */
@@ -251,7 +281,8 @@ export interface ApprovalOutcome {
   decision: 'allow' | 'deny' | 'deny-stop';
   /** 'session' grants apply to future (tool, class) matches; run_command is never granted. */
   scope: 'once' | 'session';
-  source: 'user' | 'non-interactive' | 'dangerous-mode';
+  /** 'task-aborted' = a forwarded ask auto-denied because its task died first (V0.7). */
+  source: 'user' | 'non-interactive' | 'dangerous-mode' | 'task-aborted';
 }
 export type Approver = (req: ApprovalRequest) => Promise<ApprovalOutcome>;
 
@@ -359,7 +390,8 @@ export type EventBody =
       callId: string;
       decision: 'allow' | 'deny' | 'deny-stop';
       scope: 'once' | 'session';
-      source: 'user' | 'non-interactive' | 'dangerous-mode';
+      /** 'task-aborted' (V0.7, additive): a forwarded child ask auto-denied because its task died first. */
+      source: 'user' | 'non-interactive' | 'dangerous-mode' | 'task-aborted';
     }
   | {
       type: 'snapshot.created';
@@ -555,6 +587,44 @@ export type EventBody =
       usage: Usage;
       resultSha256: string;
       durationMs: number;
+    }
+  | {
+      /**
+       * An executor task's captured file changes vs its checkpoint base (V0.7). The after-bytes
+       * live as content-addressed blobs, so this evidence — not the removed worktree — is the
+       * durable record; apply_task_changes replays from exactly this.
+       */
+      type: 'task.changes';
+      callId: string;
+      childSessionId: string;
+      baseOid: string;
+      files: TaskChangeFile[];
+      omittedCount?: number;
+    }
+  | {
+      /** apply_task_changes outcome (V0.7): per-file applied/refused, alongside the ordinary
+       *  snapshot/file.mutated evidence the write path records. */
+      type: 'task.applied';
+      callId: string;
+      childSessionId: string;
+      applied: string[];
+      refused: { relPath: string; reason: string }[];
+    }
+  | {
+      /** A task worktree came into existence (V0.7): ownership evidence for the sweep story. */
+      type: 'worktree.created';
+      callId: string;
+      childSessionId: string;
+      path: string;
+      baseOid: string;
+    }
+  | {
+      /** A task worktree was removed — or could not be (ok:false ⇒ the startup sweep owns it). */
+      type: 'worktree.removed';
+      callId: string;
+      childSessionId: string;
+      ok: boolean;
+      detail?: string;
     }
   | {
       /**

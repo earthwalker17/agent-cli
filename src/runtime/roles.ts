@@ -1,5 +1,6 @@
 import { SUBAGENT_ROLES, type SubagentRoleAccess, type SubagentRoleName, type TaskBudget } from '../types.js';
 import {
+  buildExecutorSystemPrompt,
   buildExplorerSystemPrompt,
   buildPlannerSystemPrompt,
   buildReviewerSystemPrompt,
@@ -77,12 +78,7 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
     toolNames: [...READ_ONLY_TOOLS, 'write_file', 'edit_file'],
     budget: EXECUTOR_BUDGET,
     approvals: 'forward',
-    // Structurally unreachable until Stage C: policy denies mutating roles
-    // (task.mutating-role-unavailable). Throwing here fails LOUDLY if that gate were ever
-    // bypassed — an executor must never run without its worktree scaffold.
-    buildPrompt: () => {
-      throw new Error('executor role requires worktree isolation (not wired yet)');
-    },
+    buildPrompt: (a) => buildExecutorSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd),
   },
 };
 

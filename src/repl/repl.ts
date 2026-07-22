@@ -110,6 +110,10 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     dangerous: values['dangerously-allow-all'] === true,
   });
 
+  if (assembled.worktreeSweep !== undefined) {
+    renderer.chromeLine(style.dim(`  worktrees: ${assembled.worktreeSweep}`));
+  }
+
   const pendingNotes: string[] = [];
   const commandCtx: CommandContext = { session, layout, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => io.question(q) };
   let exitCode = 0;

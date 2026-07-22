@@ -241,6 +241,24 @@ export function createRenderer(opts: {
           );
           break;
         }
+        case 'task.changes': {
+          chromeLine(
+            style.dim(
+              `  ± task ${sanitizeLine(e.childSessionId.slice(-4))} captured ${e.files.length} changed file(s)${(e.omittedCount ?? 0) > 0 ? ` (+${e.omittedCount} omitted)` : ''} — integrate with apply_task_changes`,
+            ),
+          );
+          break;
+        }
+        case 'task.applied': {
+          const mark = e.refused.length === 0 ? style.green(g.ok) : style.yellow(g.warn);
+          chromeLine(`  ${mark} applied ${e.applied.length} change(s) from task ${sanitizeLine(e.childSessionId.slice(-4))}${e.refused.length > 0 ? `; ${e.refused.length} REFUSED` : ''} (undo with /undo)`);
+          for (const r of e.refused) chromeLine(style.yellow(`    refused ${sanitizeLine(r.relPath)}: ${sanitizeLine(r.reason)}`));
+          break;
+        }
+        case 'worktree.removed': {
+          if (!e.ok) chromeLine(style.yellow(`  ${g.warn} task worktree could not be removed (${sanitizeLine(e.detail ?? 'unknown')}); it will be swept next session`));
+          break;
+        }
         case 'context.compacted': {
           const pct = e.rawChars > 0 ? Math.round((100 * e.sentChars) / e.rawChars) : 100;
           chromeLine(

@@ -18,6 +18,11 @@ import { analyzeCommand } from './command-review.js';
 // Classes that may be carried by a session grant. Never `destructive` (no-undo) or `reversible`.
 const GRANTABLE: readonly ActionClass[] = ['sensitive', 'external'];
 
+/** Whether an `ask` of this class can be granted for the session — the prompt hides [s] otherwise. */
+export function isGrantable(cls: ActionClass): boolean {
+  return GRANTABLE.includes(cls);
+}
+
 /** In-memory, session-scoped approval grants. Not persisted; not restored on resume. */
 export class Grants {
   private readonly set = new Set<string>();
@@ -161,13 +166,15 @@ export function decide<I>(
     }
     const mutating = delegation.roles.find((r) => subagentRoleAccess(r) === 'mutating-worktree');
     if (mutating !== undefined) {
-      // Fail-closed placeholder until worktree isolation ships (Session 8 Stage C flips this
-      // branch to ask/'reversible' — pinned by tests so it cannot be enabled by accident).
+      // Mutating roles ask EVERY time (the strictest member governs the whole group).
+      // 'reversible' is honest — the children write only inside disposable worktrees, and their
+      // changes enter the real workspace solely through the snapshot-backed apply tool — and it
+      // is deliberately NOT session-grantable (engine rule): each spawn is a human decision.
       return decision(
-        'sensitive',
-        'deny',
-        'task.mutating-role-unavailable',
-        `role '${mutating}' mutates files and requires worktree isolation, which is not available yet`,
+        'reversible',
+        'ask',
+        'task.mutating-role',
+        `spawns MUTATING subagent(s) in isolated git worktree(s); their approvals forward to you, their changes are captured for review and enter the workspace only through apply_task_changes`,
       );
     }
     return decision(

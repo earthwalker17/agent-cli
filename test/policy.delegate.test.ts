@@ -65,13 +65,16 @@ describe('decide: delegation branch (step 0, fail closed)', () => {
     expect(d).toMatchObject({ decision: 'deny', rule: 'task.empty-group' });
   });
 
-  it('the mutating executor role is DENIED until worktree isolation ships (Stage B pin)', () => {
-    // Stage C flips this to ask/'reversible' deliberately; until then a batch containing an
-    // executor must fail closed even next to read-only companions.
+  it('the mutating executor role ASKS every time — reversible, and the strictest member governs the batch', () => {
     for (const roles of [['executor'], ['explorer', 'executor']]) {
       const d = decide(stubTool(), { roles }, ctx(), new Grants());
-      expect(d, roles.join(',')).toMatchObject({ decision: 'deny', rule: 'task.mutating-role-unavailable' });
+      expect(d, roles.join(',')).toMatchObject({ decision: 'ask', rule: 'task.mutating-role', classification: 'reversible' });
     }
+    // 'reversible' is deliberately NOT session-grantable: a granted executor spawn would let
+    // later groups mutate without a human in the loop. Pin the grant no-op.
+    const grants = new Grants();
+    grants.add('stub_delegate', 'reversible');
+    expect(grants.has('stub_delegate', 'reversible')).toBe(false);
   });
 
   it('a throwing delegates() is a deny, never an escape into the fall-throughs', () => {

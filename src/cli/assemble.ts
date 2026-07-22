@@ -5,8 +5,12 @@ import type { GitFacts } from '../git/types.js';
 import { buildWorkspaceMapAuto, type WorkspaceMap } from '../workspace/map.js';
 import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
 import { loadMemory, type LoadedMemory } from '../memory/load.js';
-import { createDelegateTool } from '../tools/delegate.js';
+import { createDelegateTool, type ExecutorDeps } from '../tools/delegate.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
+import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
+import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
+import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
+import { readPlan } from '../plan/store.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
@@ -48,6 +52,8 @@ export interface Assembled {
   gitFacts: GitFacts;
   map: WorkspaceMap;
   memory: LoadedMemory;
+  /** One-line summary when crash-orphaned task worktrees were swept at startup (V0.7). */
+  worktreeSweep?: string;
 }
 
 export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
@@ -59,6 +65,21 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const sandboxFacts = await sandbox.ensureAvailable();
   const gitFacts = deps.gitFacts ?? (await detectGitFacts(ctx.ws));
   const map = await buildWorkspaceMapAuto(ctx.ws, {}, gitFacts);
+
+  // Sweep crash-orphaned task worktrees (V0.7): registry-driven, path-guarded, honest summary.
+  let worktreeSweep: string | undefined;
+  if (gitFacts.isRepo && gitFacts.gitPath !== null) {
+    try {
+      const swept = await sweepOrphanedWorktrees(layout.projectDir, gitFacts.gitPath);
+      if (swept.removed.length > 0 || swept.failed.length > 0) {
+        worktreeSweep =
+          `removed ${swept.removed.length} orphaned task worktree(s) from a previous run` +
+          (swept.failed.length > 0 ? `; ${swept.failed.length} could not be removed (retried next session)` : '');
+      }
+    } catch {
+      /* the sweep must never block a session; leftovers are retried next time */
+    }
+  }
 
   // Project memory: loaded post-trust (the gate is a structural parameter of this function),
   // capped, and degrading — a broken memory doc must never block a session.
@@ -108,10 +129,41 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     })),
   });
 
+  // Child→parent approval forwarding (V0.7): the queue wraps the SESSION approver — never io
+  // directly — so non-interactive parents fail closed structurally and EOF cascades deny-stop.
+  const forwarder = createApprovalForwarder(ctx.approver, deps.onTaskProgress);
+  // Captured executor changes, keyed by child session; REBUILT FROM EVENTS on resume so a
+  // crash between capture and apply never strands integrable work.
+  const changesRegistry = createTaskChangesRegistry();
+  for (const e of session.log.events) {
+    if (e.type === 'task.changes') changesRegistry.register(e.childSessionId, e.baseOid, e.files);
+  }
+  // Executor orchestration bundle — absent (⇒ honest tool-level refusal) without a probed repo.
+  const executorDeps: ExecutorDeps | undefined =
+    gitFacts.isRepo && gitFacts.gitPath !== null && gitFacts.repoRoot !== null
+      ? {
+          gitPath: gitFacts.gitPath,
+          gitVersion: gitFacts.gitVersion,
+          repoRoot: gitFacts.repoRoot,
+          stateDir: layout.projectDir,
+          worktreesRoot: worktreesRoot(layout.projectDir),
+          registryFile: registryFile(layout.projectDir),
+          snapshots: session.snapshots,
+          // Read fresh per group: the plan file's current bytes are truth, and the sha-bound
+          // approval story lives in the events — here only the STATUS gates executor spawns.
+          planStatus: () => {
+            const p = readPlan(layout, session.id);
+            return p.exists ? p.status : 'none';
+          },
+          registerChanges: (childSessionId, baseOid, files) => changesRegistry.register(childSessionId, baseOid, files),
+          clockIso: () => session.clock.iso(),
+        }
+      : undefined;
+
   // The delegate tool is a PER-SESSION instance appended to a fresh array (never TOOLS.push):
-  // parents get it; child sessions have a fixed read-only registry without it, so delegation
-  // depth is 1 by construction. The child inherits the PROBED sandbox instance (no re-probe),
-  // the narrowing rules, the map, and the user constitution.
+  // parents get it; child sessions have fixed role registries without it, so delegation depth
+  // is 1 by construction. Children inherit the PROBED sandbox instance (no re-probe), the
+  // narrowing rules, and the user constitution.
   session.tools = [
     ...session.tools,
     createDelegateTool(
@@ -126,19 +178,22 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         sandboxFacts,
         gitFacts,
         map,
+        forwardAsk: (req, signal) => forwarder.ask(req, signal),
         ...(memory.agent.status === 'ok' || memory.agent.status === 'oversize'
           ? { agentMd: { text: memory.agent.text, truncated: memory.agent.truncated } }
           : {}),
         ...(deps.onTaskProgress !== undefined ? { onProgress: deps.onTaskProgress } : {}),
       },
       session.id,
+      executorDeps,
     ),
-    // update_plan is likewise parent-only (no role registry contains it): the model's single,
-    // policy-gated write path to the harness-owned plan document (V0.7).
+    // update_plan and apply_task_changes are likewise parent-only (no role registry contains
+    // them): the model's single gated write paths to the plan document and to integration.
     createUpdatePlanTool({ layout, snapshots: session.snapshots, planId: session.id }),
+    createApplyChangesTool(changesRegistry, session.snapshots),
   ];
 
-  return { session, sandboxFacts, gitFacts, map, memory };
+  return { session, sandboxFacts, gitFacts, map, memory, ...(worktreeSweep !== undefined ? { worktreeSweep } : {}) };
 }
 
 /** Map the loaded docs onto the system-prompt injection shape (only usable docs are injected). */

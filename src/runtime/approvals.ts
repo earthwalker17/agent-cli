@@ -1,5 +1,6 @@
 import readline from 'node:readline/promises';
 import { sanitizeLine } from '../shared/text.js';
+import { isGrantable } from '../policy/engine.js';
 import type { ApprovalOutcome, ApprovalRequest, Approver } from '../types.js';
 
 /** Non-interactive mode: every `ask` becomes a recorded denial (fails safe). */
@@ -29,14 +30,30 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   const lines = [
     '',
     `  ⚠ approval required  ${cls}  ${req.tool}`,
-    `  ${sanitizeLine(req.summary)}`,
   ];
+  // Forwarded child asks carry the task identity: the human must know WHICH agent is asking
+  // and that a command would run inside that task's isolated worktree — not the workspace.
+  if (req.taskContext !== undefined) {
+    lines.push(`  from delegated task: ${sanitizeLine(req.taskContext.role)} (child session ${sanitizeLine(req.taskContext.childSessionId)})`);
+    if (req.kind === 'command') {
+      lines.push('  the command would run in the task\'s ISOLATED WORKTREE — but approved commands run UNSANDBOXED with full privilege (reads/network are not confined to the worktree)');
+    }
+  }
+  lines.push(`  ${sanitizeLine(req.summary)}`);
   if (req.detail && req.detail !== req.summary) {
     for (const l of req.detail.split('\n').slice(0, 12)) lines.push(`    ${sanitizeLine(l)}`);
   }
   lines.push(`  reason: ${req.reason}`);
   if (req.noUndoWarning) lines.push('  ⚠ this action is NOT undoable');
-  lines.push('  [y] allow once   [s] allow for the rest of this session   [n] deny   [q] deny & stop');
+  // [s] is shown only when a session grant can actually be stored — offering a no-op option
+  // on a non-grantable class would misrepresent what pressing it does.
+  lines.push(
+    isGrantable(req.classification)
+      ? '  [y] allow once   [s] allow for the rest of this session   [n] deny   [q] deny & stop'
+      : req.taskContext !== undefined
+        ? '  [y] allow once   [n] deny   [q] deny & stop THIS TASK (the rest of the turn continues)'
+        : '  [y] allow once   [n] deny   [q] deny & stop',
+  );
   return lines.join('\n');
 }
 

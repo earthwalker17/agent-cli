@@ -230,12 +230,14 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   // One delegate call may start a PARALLEL GROUP (V0.7) — keep every task.started per callId,
   // or a crash replay would name only the last child and orphan the other survivors' evidence.
   const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>[]>();
+  const taskChangesBy = new Set<string>();
   for (const e of events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
     else if (e.type === 'file.mutated') (mutatedBy.get(e.callId) ?? mutatedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
     else if (e.type === 'command.started') commandStartedBy.add(e.callId);
     else if (e.type === 'task.started') (taskStartedBy.get(e.callId) ?? taskStartedBy.set(e.callId, []).get(e.callId)!).push(e);
+    else if (e.type === 'task.changes') taskChangesBy.add(e.callId);
   }
 
   const orphanedCallIds: string[] = [];
@@ -263,11 +265,14 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
       // The delegated task(s) were running at the crash. Each child's OWN evidence log
       // survives — point at every one of them instead of guessing what the children did.
       const pointers = tasks.map((t) => `child session ${t.childSessionId} (${t.role}) — inspect: agent report ${t.childSessionId}`);
+      const changesNote = taskChangesBy.has(id)
+        ? ' Captured task changes survived the crash and can still be integrated with apply_task_changes.'
+        : '';
       return toolResultBlock(
         id,
-        tasks.length === 1
+        (tasks.length === 1
           ? `interrupted: a delegated task (child session ${tasks[0]!.childSessionId}) was running when the session crashed; its own evidence log survives — inspect: agent report ${tasks[0]!.childSessionId}`
-          : `interrupted: ${tasks.length} delegated tasks were running when the session crashed; each child's own evidence log survives — ${pointers.join('; ')}`,
+          : `interrupted: ${tasks.length} delegated tasks were running when the session crashed; each child's own evidence log survives — ${pointers.join('; ')}`) + changesNote,
         true,
       );
     }
@@ -599,20 +604,48 @@ function callSandbox(session: Session, boundary: 'sandbox' | 'unsandboxed' | und
 
 /** Persist a tool-reported task lifecycle fact under the runtime-bound callId (mirrors commands). */
 function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): void {
-  if (e.kind === 'started') {
-    session.log.append({ type: 'task.started', callId, role: e.role, childSessionId: e.childSessionId, budget: e.budget });
-    return;
+  switch (e.kind) {
+    case 'started':
+      session.log.append({ type: 'task.started', callId, role: e.role, childSessionId: e.childSessionId, budget: e.budget });
+      return;
+    case 'ended':
+      session.log.append({
+        type: 'task.ended',
+        callId,
+        childSessionId: e.childSessionId,
+        status: e.status,
+        steps: e.steps,
+        usage: e.usage,
+        resultSha256: e.resultSha256,
+        durationMs: e.durationMs,
+      });
+      return;
+    case 'changes':
+      session.log.append({
+        type: 'task.changes',
+        callId,
+        childSessionId: e.childSessionId,
+        baseOid: e.baseOid,
+        files: e.files,
+        ...(e.omittedCount !== undefined ? { omittedCount: e.omittedCount } : {}),
+      });
+      return;
+    case 'worktree-created':
+      session.log.append({ type: 'worktree.created', callId, childSessionId: e.childSessionId, path: e.path, baseOid: e.baseOid });
+      return;
+    case 'worktree-removed':
+      session.log.append({
+        type: 'worktree.removed',
+        callId,
+        childSessionId: e.childSessionId,
+        ok: e.ok,
+        ...(e.detail !== undefined ? { detail: e.detail } : {}),
+      });
+      return;
+    case 'applied':
+      session.log.append({ type: 'task.applied', callId, childSessionId: e.childSessionId, applied: e.applied, refused: e.refused });
+      return;
   }
-  session.log.append({
-    type: 'task.ended',
-    callId,
-    childSessionId: e.childSessionId,
-    status: e.status,
-    steps: e.steps,
-    usage: e.usage,
-    resultSha256: e.resultSha256,
-    durationMs: e.durationMs,
-  });
 }
 
 /** Persist a tool-reported plan-document write under the runtime-bound callId (V0.7). */

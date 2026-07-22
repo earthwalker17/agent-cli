@@ -10,7 +10,18 @@ import type { GitFacts } from '../git/types.js';
 import { randomSaltHex, sha256 } from '../shared/hash.js';
 import { systemClock, type Clock } from '../shared/clock.js';
 import type { IdGen } from '../shared/ids.js';
-import type { Approver, PolicyRules, Provider, SubagentRoleName, TaskBudget, TaskEvidence, TaskStatus, Usage } from '../types.js';
+import type {
+  ApprovalOutcome,
+  ApprovalRequest,
+  Approver,
+  PolicyRules,
+  Provider,
+  SubagentRoleName,
+  TaskBudget,
+  TaskEvidence,
+  TaskStatus,
+  Usage,
+} from '../types.js';
 
 /**
  * The subagent task runner: ONE bounded child session driving the SAME runTurn the main agent
@@ -59,11 +70,12 @@ export interface SubagentDeps {
   /** Harness-internal budget narrowing (tests). NEVER derived from model input. */
   budget?: Partial<TaskBudget>;
   /**
-   * The parent-side approver a 'forward'-mode role's asks are routed to (V0.7 Stage C wires the
-   * serialized forwarding queue through this). Absent — and for every auto-deny role — the
-   * child fails closed on autoDenyApprover.
+   * The serialized parent-side approval forwarder for 'forward'-mode roles (the queue wraps the
+   * parent SESSION approver, so non-interactive parents fail closed structurally). Each request
+   * is stamped with the asking task's identity and linked to its abort signal. Absent — and for
+   * every auto-deny role — the child fails closed on autoDenyApprover.
    */
-  approver?: Approver;
+  forwardAsk?: (req: ApprovalRequest, signal: AbortSignal | undefined) => Promise<ApprovalOutcome>;
   /**
    * Per-task provider override for a PARALLEL group (tests: one scripted MockProvider per child
    * — a shared script cursor interleaves nondeterministically under Promise.all). Production
@@ -114,9 +126,29 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     budget,
   });
 
-  // A 'forward' role routes asks to the parent-side approver (fail closed when none was wired);
-  // read-only roles ALWAYS auto-deny regardless of what the caller passed.
-  const approver = contract.approvals === 'forward' ? (deps.approver ?? autoDenyApprover) : autoDenyApprover;
+  // Cause-tracked cancellation machinery is created BEFORE the session so the forwarding
+  // approver can be signal-linked from birth (a forwarded ask must die with its task).
+  const controller = new AbortController();
+  let cause: 'parent-abort' | 'timeout' | 'budget-tokens' | null = null;
+  const cancel = (c: NonNullable<typeof cause>): void => {
+    if (cause === null) {
+      cause = c;
+      controller.abort();
+    }
+  };
+
+  // A 'forward' role routes asks through the serialized parent-side forwarder, each request
+  // stamped with this task's identity (the box fills right after startSession — no tool call
+  // can run before that). No forwarder wired ⇒ fail closed. Read-only roles ALWAYS auto-deny.
+  const taskIdBox = { childSessionId: '' };
+  const approver: Approver =
+    contract.approvals === 'forward' && deps.forwardAsk !== undefined
+      ? (req) =>
+          deps.forwardAsk!(
+            { ...req, taskContext: { childSessionId: taskIdBox.childSessionId, role: spec.role } },
+            controller.signal,
+          )
+      : autoDenyApprover;
   let system: string;
   try {
     system = contract.buildPrompt({
@@ -156,6 +188,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     return fail(`subagent failed to start: ${(err as Error).message}`);
   }
 
+  taskIdBox.childSessionId = child.id;
   // Child evidence completeness: the probed facts still hold (same process, same workspace),
   // so `agent report <childId>` renders the same header sections as any session.
   if (deps.sandboxFacts !== undefined) recordSandboxStatus(child, deps.sandboxFacts);
@@ -163,16 +196,8 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   recordWorkspaceMap(child, deps.map);
   deps.reportTask?.({ kind: 'started', role: spec.role, childSessionId: child.id, budget });
 
-  // Cause-tracked cancellation: one child controller, three inputs. The cause decides the status
+  // Cancellation inputs: parent abort, wall clock, token cap. The cause decides the status
   // (and the child's session.ended reason) — the child itself only ever sees "aborted".
-  const controller = new AbortController();
-  let cause: 'parent-abort' | 'timeout' | 'budget-tokens' | null = null;
-  const cancel = (c: NonNullable<typeof cause>): void => {
-    if (cause === null) {
-      cause = c;
-      controller.abort();
-    }
-  };
   const onParentAbort = (): void => cancel('parent-abort');
   if (parentSignal?.aborted) onParentAbort();
   else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
