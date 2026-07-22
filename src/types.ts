@@ -105,6 +105,15 @@ export type TaskEvidence =
       durationMs: number;
     };
 
+/** Structured plan-document facts reported by the update_plan tool; the runtime binds the callId. */
+export interface PlanEvidence {
+  planId: string;
+  sha256: string;
+  bytes: number;
+  prevSha256: string | null;
+  status: 'draft' | 'approved' | 'superseded' | 'unknown';
+}
+
 export interface ToolContext {
   workspaceRoot: string;
   stateDir: string;
@@ -118,6 +127,8 @@ export interface ToolContext {
   reportCommand?: (e: CommandEvidence) => void;
   /** Evidence channel for delegated-task lifecycle facts; persisted by the runtime under this call's id. */
   reportTask?: (e: TaskEvidence) => void;
+  /** Evidence channel for plan-document writes; persisted by the runtime under this call's id (V0.7). */
+  reportPlan?: (e: PlanEvidence) => void;
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -183,6 +194,13 @@ export interface Tool<I = unknown> {
    * the whole group. A throwing `delegates` is a deny, never an escape.
    */
   delegates?(input: I): { roles: readonly string[] };
+  /**
+   * Declares that this tool writes the harness-owned PLAN DOCUMENT (V0.7) — state-dir bytes the
+   * file tools cannot reach. A policy FACT with its own explicit fail-closed branch: without it
+   * a mutation-less, command-less tool writing persistent harness state would auto-classify as
+   * observe (the S6 trap again). Never combinable with `command` or `delegates`.
+   */
+  planDoc?(input: I): { action: 'update' };
   /** Optional hook to strip secret content from the result before it is persisted to the log. */
   redactForLog?(result: ToolResult, saltHex: string): ToolResult;
   execute(input: I, ctx: ToolContext): Promise<ToolResult>;
@@ -537,6 +555,35 @@ export type EventBody =
       usage: Usage;
       resultSha256: string;
       durationMs: number;
+    }
+  | {
+      /**
+       * The plan document was rewritten (V0.7). Model writes flow through the policy-gated
+       * update_plan tool (callId bound by the runtime); prior bytes are archived as the
+       * `prevSha256` blob, so plan history is fully reviewable.
+       */
+      type: 'plan.updated';
+      callId: string;
+      planId: string;
+      sha256: string;
+      bytes: number;
+      prevSha256: string | null;
+      status: 'draft' | 'approved' | 'superseded' | 'unknown';
+    }
+  | {
+      /**
+       * The USER approved the plan (/plan approve) — the execution consent record (V0.7).
+       * Binds the exact approved bytes: divergence of the file's later sha from this one is
+       * surfaced on every injection and executor-spawn prompt, never hidden.
+       */
+      type: 'plan.approved';
+      planId: string;
+      sha256: string;
+    }
+  | {
+      /** The USER discarded the plan (/plan discard): status → superseded (V0.7). */
+      type: 'plan.discarded';
+      planId: string;
     }
   | {
       /**

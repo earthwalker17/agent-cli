@@ -16,8 +16,11 @@ export interface ProjectLayout {
   projectDir: string;
   sessionsDir: string;
   objectsDir: string;
+  /** Harness-owned plan documents (V0.7): `<projectDir>/plans/<planId>.md`, user-editable. */
+  plansDir: string;
   sessionFile(sessionId: string): string;
   lockFile(sessionId: string): string;
+  planFile(planId: string): string;
 }
 
 function realIfExists(p: string): string {
@@ -67,10 +70,12 @@ export function resolveLayout(
   const projectDir = path.join(stateRoot, 'projects', projectSlug(workspaceReal));
   const sessionsDir = path.join(projectDir, 'sessions');
   const objectsDir = path.join(projectDir, 'objects');
+  const plansDir = path.join(projectDir, 'plans');
 
   if (opts.ensure) {
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.mkdirSync(objectsDir, { recursive: true });
+    // plansDir is created on first plan write (writeDocAtomic mkdirs), not eagerly.
   }
 
   return {
@@ -78,7 +83,9 @@ export function resolveLayout(
     projectDir,
     sessionsDir,
     objectsDir,
+    plansDir,
     sessionFile: (id) => path.join(sessionsDir, `${id}.jsonl`),
     lockFile: (id) => path.join(sessionsDir, `${id}.lock`),
+    planFile: (id) => path.join(plansDir, `${id}.md`),
   };
 }

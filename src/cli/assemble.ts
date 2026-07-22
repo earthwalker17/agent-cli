@@ -6,6 +6,7 @@ import { buildWorkspaceMapAuto, type WorkspaceMap } from '../workspace/map.js';
 import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
 import { loadMemory, type LoadedMemory } from '../memory/load.js';
 import { createDelegateTool } from '../tools/delegate.js';
+import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
@@ -132,6 +133,9 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       },
       session.id,
     ),
+    // update_plan is likewise parent-only (no role registry contains it): the model's single,
+    // policy-gated write path to the harness-owned plan document (V0.7).
+    createUpdatePlanTool({ layout, snapshots: session.snapshots, planId: session.id }),
   ];
 
   return { session, sandboxFacts, gitFacts, map, memory };

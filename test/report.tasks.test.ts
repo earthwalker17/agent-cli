@@ -77,6 +77,48 @@ describe('report: delegated tasks', () => {
   });
 });
 
+describe('report: plan section (V0.7)', () => {
+  it('derives writes, approval, and post-approval divergence purely from events', () => {
+    seq = 0;
+    const events = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'w', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({ type: 'plan.updated', callId: 'call_1', planId: 'p-1', sha256: 'aaa1', bytes: 100, prevSha256: null, status: 'draft' }),
+      evt({ type: 'plan.approved', planId: 'p-1', sha256: 'bbb2' }),
+      evt({ type: 'plan.updated', callId: 'call_2', planId: 'p-1', sha256: 'ccc3', bytes: 120, prevSha256: 'bbb2', status: 'approved' }),
+      evt({ type: 'session.ended', reason: 'user-quit' }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.plan).toEqual({ planId: 'p-1', updates: 2, lastSha256: 'ccc3', approvedSha256: 'bbb2', discarded: false });
+    expect(md).toContain('## Plan');
+    expect(md).toContain('APPROVED by the user');
+    expect(md).toContain('changed AFTER approval');
+  });
+
+  it('a discarded plan renders honestly; no plan events → no section', () => {
+    seq = 0;
+    const events = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'w', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({ type: 'plan.updated', callId: 'call_1', planId: 'p-1', sha256: 'aaa1', bytes: 100, prevSha256: null, status: 'draft' }),
+      evt({ type: 'plan.discarded', planId: 'p-1' }),
+      evt({ type: 'session.ended', reason: 'user-quit' }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.plan).toMatchObject({ discarded: true, approvedSha256: null });
+    expect(md).toContain('DISCARDED by the user');
+    expect(md).toContain('never approved');
+
+    seq = 0;
+    const none = buildReport({
+      events: [
+        evt({ type: 'session.started', sessionId: 'p', workspaceRoot: 'w', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+        evt({ type: 'session.ended', reason: 'completed' }),
+      ],
+    });
+    expect(none.json.plan).toBeNull();
+    expect(none.md).not.toContain('## Plan');
+  });
+});
+
 describe('reconstruct: crash mid-delegate', () => {
   it('answers the dangling tool_use with the child log pointer and counts it orphaned', () => {
     const events = baseEvents(); // task.started but no task.ended / tool.completed and no crash repair

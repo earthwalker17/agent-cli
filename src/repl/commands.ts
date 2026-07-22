@@ -4,8 +4,10 @@ import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
 import { createCheckpoint, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
+import { readPlan, setPlanStatus } from '../plan/store.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
+import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
 
 /**
@@ -15,6 +17,7 @@ import type { Renderer } from './render.js';
 
 export interface CommandContext {
   session: Session;
+  layout: ProjectLayout;
   renderer: Renderer;
   modelOut: NodeJS.WritableStream;
   /** Notes to prepend (clearly delimited) to the next user message so the model learns of
@@ -36,12 +39,16 @@ export const HELP = [
   '                  capture the workspace to a hidden git ref (recovery point; no history',
   '                  touched); restore <n> returns to a checkpoint as one undoable batch',
   '  /tasks          list delegated subagent tasks (status, child session, usage)',
+  '  /plan [show | approve | discard]',
+  '                  show the plan document for this session; approve it (records consent and',
+  '                  unblocks planned execution) or discard it. You can also edit the file directly.',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
   'keys: Ctrl+C interrupts the running turn; at the idle prompt press it twice to quit.',
   'note: shell commands always ask; their effects are never undoable.',
   'note: cancelling a running delegated task = Ctrl+C (it aborts the whole turn, task included).',
+  'note: @plan <request> routes a request into plan mode (plan first, no execution until approved).',
 ].join('\n');
 
 export type SlashOutcome = 'continue' | 'quit';
@@ -126,6 +133,65 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         return `${i + 1}. ${s.role} ${sanitizeLine(s.childSessionId)} — ${state} — inspect: agent report ${sanitizeLine(s.childSessionId)}`;
       });
       ctx.renderer.chromeLine(lines.join('\n'));
+      return 'continue';
+    }
+
+    case 'plan': {
+      const sub = arg.trim().toLowerCase();
+      const plan = readPlan(ctx.layout, ctx.session.id);
+      if (sub === '' || sub === 'show') {
+        if (!plan.exists) {
+          ctx.renderer.chromeLine('no plan document for this session (ask for one, or use @plan <request>)');
+          return 'continue';
+        }
+        const taskLines = plan.tasks.map((t, i) => `  ${i + 1}. ${sanitizeLine(t.title)}${t.status !== null ? ` — ${sanitizeLine(t.status)}` : ''}`);
+        ctx.renderer.chromeLine(
+          [
+            `plan ${sanitizeLine(plan.planId)} — status: ${plan.status}${plan.truncated ? ' (display truncated)' : ''}`,
+            `  file (editable): ${sanitizeLine(plan.file)}`,
+            `  sha256: ${plan.sha256 ?? 'unreadable'} · ${plan.bytes} bytes`,
+            ...(taskLines.length > 0 ? ['  tasks:', ...taskLines] : []),
+          ].join('\n'),
+        );
+        ctx.modelOut.write(plan.text + (plan.text.endsWith('\n') ? '' : '\n'));
+        return 'continue';
+      }
+      if (sub === 'approve') {
+        if (!plan.exists) {
+          ctx.renderer.chromeLine('no plan document to approve');
+          return 'continue';
+        }
+        if (plan.status === 'approved') {
+          ctx.renderer.chromeLine('plan is already approved');
+          return 'continue';
+        }
+        const w = await setPlanStatus(ctx.layout, ctx.session.id, 'approved', ctx.session.snapshots, ctx.session.clock);
+        if ('error' in w) {
+          ctx.renderer.chromeLine(`cannot approve: ${w.error}`);
+          return 'continue';
+        }
+        // The consent record binds the EXACT approved bytes; later divergence is surfaced, never hidden.
+        ctx.session.log.append({ type: 'plan.approved', planId: ctx.session.id, sha256: w.sha256 });
+        ctx.pendingNotes.push(`the user APPROVED the plan (sha256 ${w.sha256.slice(0, 12)}); planned execution may begin`);
+        ctx.renderer.chromeLine(`plan approved (sha256 ${w.sha256.slice(0, 12)}…) — recorded as consent evidence`);
+        return 'continue';
+      }
+      if (sub === 'discard') {
+        if (!plan.exists) {
+          ctx.renderer.chromeLine('no plan document to discard');
+          return 'continue';
+        }
+        const w = await setPlanStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
+        if ('error' in w) {
+          ctx.renderer.chromeLine(`cannot discard: ${w.error}`);
+          return 'continue';
+        }
+        ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id });
+        ctx.pendingNotes.push('the user DISCARDED the plan; do not follow it — ask for direction if the next step is unclear');
+        ctx.renderer.chromeLine('plan discarded (status: superseded; the file remains on disk for reference)');
+        return 'continue';
+      }
+      ctx.renderer.chromeLine('usage: /plan [show | approve | discard]');
       return 'continue';
     }
 

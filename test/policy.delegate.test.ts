@@ -119,6 +119,55 @@ describe('decide: delegation branch (step 0, fail closed)', () => {
   });
 });
 
+describe('decide: planDoc branch (V0.7, fail closed — the S6 trap pinned again)', () => {
+  function planTool(overrides: Partial<Tool<{ content: string }>> = {}): Tool<{ content: string }> {
+    return {
+      name: 'stub_update_plan',
+      description: 'test stub',
+      schema: z.object({ content: z.string() }).passthrough() as unknown as Tool<{ content: string }>['schema'],
+      mutates: () => null, // the trap shape: null mutates + no command would fall through to observe
+      planDoc: () => ({ action: 'update' }),
+      execute: async () => ({ ok: true, output: '', durationMs: 0, truncated: false }),
+      ...overrides,
+    };
+  }
+
+  it('a planDoc tool with null mutates classifies plan.update/reversible — NEVER observe', () => {
+    const d = decide(planTool(), { content: 'x' }, ctx(), new Grants());
+    expect(d).toMatchObject({ decision: 'allow', classification: 'reversible', rule: 'plan.update' });
+    expect(d.requiresSnapshot).toBe(false); // the plan store archives prior bytes itself
+  });
+
+  it('planDoc + command is a contradictory contract → deny', () => {
+    const d = decide(planTool({ command: () => 'git status' }), { content: 'x' }, ctx(), new Grants());
+    expect(d).toMatchObject({ decision: 'deny', rule: 'plan.conflicting-contract' });
+  });
+
+  it('planDoc + delegates is denied by the delegation branch (which fires first)', () => {
+    const d = decide(
+      planTool({ delegates: () => ({ roles: ['explorer'] }) }),
+      { content: 'x' },
+      ctx(),
+      new Grants(),
+    );
+    expect(d).toMatchObject({ decision: 'deny', rule: 'task.conflicting-contract' });
+  });
+
+  it('a throwing planDoc() is a deny, never an escape', () => {
+    const bomb = planTool({
+      planDoc: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(decide(bomb, { content: 'x' }, ctx(), new Grants())).toMatchObject({ decision: 'deny', rule: 'plan.invalid-contract' });
+  });
+
+  it('an unknown plan action is denied', () => {
+    const weird = planTool({ planDoc: () => ({ action: 'delete' as 'update' }) });
+    expect(decide(weird, { content: 'x' }, ctx(), new Grants())).toMatchObject({ decision: 'deny', rule: 'plan.unknown-action' });
+  });
+});
+
 describe('reportTask: runtime-bound task evidence', () => {
   it('persists task.started/task.ended under the RUNTIME callId', async () => {
     const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-evidence-')));

@@ -14,6 +14,7 @@ import { endReasonForTurn, endSession, runTurn, type Session } from '../runtime/
 import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
+import { readPlan } from '../plan/store.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
@@ -43,6 +44,8 @@ Usage:
   agent checkpoint restore <n>   Return the workspace to checkpoint <n> (snapshot-first,
                                  one undoable batch; deletes files the checkpoint predates)
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
+  agent plan [<id>]              Print a session's plan document (default: latest; read-only —
+                                 approve/discard from inside the session with /plan)
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
   agent memory                   Show the project-memory documents (paths, status, provenance)
@@ -71,7 +74,7 @@ asks; approved commands run UNSANDBOXED with full privilege and are not undoable
 sandbox is available, auto-run is disabled and every command asks (fail closed). Workspace trust is
 recorded consent, not isolation. See README "Security model & honest limitations".`;
 
-const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'sessions', 'map', 'memory', 'trust']);
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust']);
 
 interface Args {
   values: CliValues;
@@ -430,6 +433,33 @@ async function askOnTty(q: string): Promise<string | null> {
 }
 
 /**
+ * Read-only view of a session's plan document (V0.7). Ungated (like report/sessions): reads
+ * only harness state, creates nothing, sends nothing to a model. Approval and discard are
+ * in-session acts (/plan approve|discard) — they are consent, and consent needs the session.
+ */
+function cmdPlan(values: CliValues, id?: string): number {
+  const ws = workspaceRoot(values);
+  const layout = resolveLayout(ws);
+  const sessionId = id ?? values.session ?? latestSessionId(layout);
+  if (!sessionId) {
+    process.stderr.write('no sessions found for this workspace\n');
+    return 1;
+  }
+  const plan = readPlan(layout, sessionId);
+  if (!plan.exists) {
+    process.stderr.write(`no plan document for session ${sessionId}\n`);
+    return 1;
+  }
+  process.stderr.write(
+    `plan ${sanitizeLine(plan.planId)} — status: ${plan.status} · sha256 ${plan.sha256 ?? 'unreadable'} · ${plan.bytes} bytes\n` +
+      `file (editable): ${sanitizeLine(plan.file)}\n\n`,
+  );
+  process.stdout.write(plan.text + (plan.text.endsWith('\n') ? '' : '\n'));
+  if (plan.truncated) process.stderr.write('(display truncated; the full plan is in the file)\n');
+  return 0;
+}
+
+/**
  * Read-only view of the three project-memory documents: where they live, whether they loaded,
  * and their provenance. Ungated (like report/sessions): reads only harness state + AGENT.md
  * presence, creates nothing, sends nothing to a model.
@@ -554,6 +584,7 @@ export async function main(argv: string[]): Promise<number> {
   try {
     const cmd = positionals[0];
     if (cmd === 'report') return cmdReport(values, positionals[1]);
+    if (cmd === 'plan') return cmdPlan(values, positionals[1]);
     if (cmd === 'diff') return cmdDiff(values, positionals[1]);
     if (cmd === 'commit') return await cmdCommit(values);
     if (cmd === 'checkpoint') return await cmdCheckpoint(values, positionals[1], positionals[2]);

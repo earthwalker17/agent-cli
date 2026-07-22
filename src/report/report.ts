@@ -97,7 +97,18 @@ export interface ReportJson {
     usage?: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number };
     resultSha256?: string;
   }[];
+  /** Plan-document lifecycle (V0.7): every write plus the user's approval/discard consent records.
+   *  Optional-additive: old readers and hand-built fixtures stay valid; buildReport always sets it. */
+  plan?: ReportPlan | null;
   integrity: { truncatedTail: boolean; corruptAt?: { line: number; kind: string } };
+}
+
+export interface ReportPlan {
+  planId: string;
+  updates: number;
+  lastSha256: string | null;
+  approvedSha256: string | null;
+  discarded: boolean;
 }
 
 export interface ReportInput {
@@ -295,6 +306,32 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       };
     });
 
+  // Plan-document lifecycle (V0.7): pure event derivation, like everything else here.
+  let planId: string | null = null;
+  let planUpdates = 0;
+  let planLastSha: string | null = null;
+  let planApprovedSha: string | null = null;
+  let planDiscarded = false;
+  for (const e of events) {
+    if (e.type === 'plan.updated') {
+      planId = e.planId;
+      planUpdates++;
+      planLastSha = e.sha256;
+    } else if (e.type === 'plan.approved') {
+      planId = e.planId;
+      planLastSha = e.sha256; // approval rewrites the status line, so the approved bytes ARE the latest
+      planApprovedSha = e.sha256;
+      planDiscarded = false;
+    } else if (e.type === 'plan.discarded') {
+      planId = e.planId;
+      planDiscarded = true;
+    }
+  }
+  const planState: ReportPlan | null =
+    planId === null
+      ? null
+      : { planId, updates: planUpdates, lastSha256: planLastSha, approvedSha256: planApprovedSha, discarded: planDiscarded };
+
   const json: ReportJson = {
     session: {
       id: started?.type === 'session.started' ? started.sessionId : 'unknown',
@@ -340,6 +377,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     gitCheckpoints,
     gitRestores,
     tasksDelegated,
+    plan: planState,
     integrity: {
       truncatedTail: input.truncatedTail ?? false,
       ...(input.corruptAt ? { corruptAt: input.corruptAt } : {}),
@@ -465,6 +503,22 @@ function renderMarkdown(r: ReportJson): string {
       L.push(`- undo ${u.target}: restored ${u.restored} file(s)${u.refused.length ? `, refused ${u.refused.length}` : ''}`);
       for (const ref of u.refused) L.push(`    refused ${ref.path}: ${ref.reason}`);
     }
+    L.push('');
+  }
+
+  if (r.plan !== null && r.plan !== undefined) {
+    L.push(`## Plan`);
+    L.push(`- plan ${r.plan.planId}: ${r.plan.updates} write(s) via update_plan; latest sha256 ${short(r.plan.lastSha256)}`);
+    if (r.plan.approvedSha256 !== null) {
+      const divergence =
+        r.plan.lastSha256 !== null && r.plan.lastSha256 !== r.plan.approvedSha256
+          ? ` — the file changed AFTER approval (approved ${short(r.plan.approvedSha256)}, latest ${short(r.plan.lastSha256)})`
+          : '';
+      L.push(`- APPROVED by the user at sha256 ${short(r.plan.approvedSha256)}${divergence}`);
+    } else {
+      L.push(`- never approved by the user${r.plan.discarded ? '' : ' (draft)'}`);
+    }
+    if (r.plan.discarded) L.push(`- DISCARDED by the user (status: superseded)`);
     L.push('');
   }
 

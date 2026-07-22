@@ -389,6 +389,83 @@ describe('REPL: automatic command review', () => {
   });
 });
 
+describe('REPL: plan mode (V0.7)', () => {
+  const PLAN_BODY = '# Plan: demo\n\n## Task 1: do the thing\nStatus: pending\nDependsOn: none\nVerify: npm test\n';
+
+  it('update_plan → /plan approve → the next turn carries the approved plan as labeled context', async () => {
+    const r = await drive(
+      [
+        { say: 'planning', calls: [{ name: 'update_plan', input: { content: PLAN_BODY } }] },
+        { say: 'plan written — awaiting approval' },
+        { say: 'executing per plan' },
+      ],
+      ['plan this work\n', '/plan\n', '/plan approve\n', 'go ahead\n', '/quit\n'],
+    );
+    expect(r.code).toBe(0);
+
+    // Evidence chain: the gated write (callId-bound) and the user's approval (sha-bound).
+    const updated = r.events.find((e) => e.type === 'plan.updated');
+    expect(updated).toBeDefined();
+    expect(updated && 'callId' in updated && typeof updated.callId === 'string' && updated.callId.length > 0).toBe(true);
+    const approved = r.events.find((e) => e.type === 'plan.approved');
+    expect(approved).toBeDefined();
+    // Approval rewrites the status line, so the approved sha differs from the draft write's.
+    expect(approved && updated && approved.type === 'plan.approved' && updated.type === 'plan.updated' && approved.sha256 !== updated.sha256).toBe(true);
+
+    // /plan showed the doc: status chrome + full text on stdout (model-text stream).
+    expect(r.chromeOut).toContain('status: draft');
+    expect(r.modelOut).toContain('## Task 1: do the thing');
+    expect(r.chromeOut).toContain('plan approved');
+
+    // The post-approval turn carried the standing note: full content (new sha), sovereignty wording.
+    const goMsg = r.events.filter((e) => e.type === 'user.message').find((e) => e.type === 'user.message' && e.text.includes('go ahead'));
+    expect(goMsg).toBeDefined();
+    const text = goMsg!.type === 'user.message' ? goMsg!.text : '';
+    expect(text).toContain('status: APPROVED');
+    expect(text).toContain('CONTEXT, NOT AUTHORITY');
+    expect(text).toContain('--- plan begin ---');
+    expect(text).toContain('the user APPROVED the plan');
+  });
+
+  it('@plan routes into plan mode with the explicit no-execution-before-approval note', async () => {
+    const r = await drive([{ say: 'ack planning request' }], ['@plan refactor the widget\n', '/quit\n']);
+    const msg = r.events.find((e) => e.type === 'user.message');
+    const text = msg?.type === 'user.message' ? msg.text : '';
+    expect(text).toContain('PLAN MODE');
+    expect(text).toContain('do NOT begin implementation');
+    expect(text).toContain('refactor the widget');
+    expect(text).not.toContain('@plan'); // the sigil is routing, not message content
+  });
+
+  it('a post-approval rewrite surfaces divergence, and /plan discard stops injection', async () => {
+    const r = await drive(
+      [
+        { say: 'planning', calls: [{ name: 'update_plan', input: { content: PLAN_BODY } }] },
+        { say: 'written' },
+        { say: 'tweaking', calls: [{ name: 'update_plan', input: { content: PLAN_BODY + '\n## Task 2: extra\nStatus: pending\n' } }] },
+        { say: 'tweaked' },
+        { say: 'observing divergence' },
+        { say: 'after discard' },
+      ],
+      ['plan it\n', '/plan approve\n', 'tweak the plan\n', 'another turn\n', '/plan discard\n', 'now what\n', '/quit\n'],
+    );
+    // After the post-approval rewrite, the injected note must surface the divergence between
+    // the approved sha and the file's current sha (content itself collapses to a pointer —
+    // the model wrote it, so it is a known sha).
+    const divergentMsg = r.events.filter((e) => e.type === 'user.message').find((e) => e.type === 'user.message' && e.text.includes('another turn'));
+    const divText = divergentMsg?.type === 'user.message' ? divergentMsg.text : '';
+    expect(divText).toContain('the file changed after approval');
+    expect(divText).toContain('status: APPROVED');
+
+    // Discard: consent recorded, injection stops, the model is told.
+    expect(r.events.some((e) => e.type === 'plan.discarded')).toBe(true);
+    const lastMsg = r.events.filter((e) => e.type === 'user.message').find((e) => e.type === 'user.message' && e.text.includes('now what'));
+    const text = lastMsg?.type === 'user.message' ? lastMsg.text : '';
+    expect(text).not.toContain('Active plan');
+    expect(text).toContain('the user DISCARDED the plan');
+  });
+});
+
 describe('renderer: live command output unit behavior', () => {
   let seq = 0;
   function ev(body: Record<string, unknown>): SessionEvent {

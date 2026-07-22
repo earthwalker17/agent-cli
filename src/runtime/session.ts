@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   CommandEvidence,
   ContentBlock,
+  PlanEvidence,
   PolicyDecision,
   PolicyRules,
   Provider,
@@ -614,6 +615,19 @@ function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): 
   });
 }
 
+/** Persist a tool-reported plan-document write under the runtime-bound callId (V0.7). */
+function recordPlanEvidence(session: Session, callId: string, e: PlanEvidence): void {
+  session.log.append({
+    type: 'plan.updated',
+    callId,
+    planId: e.planId,
+    sha256: e.sha256,
+    bytes: e.bytes,
+    prevSha256: e.prevSha256,
+    status: e.status,
+  });
+}
+
 /** Persist a tool-reported command lifecycle fact under the runtime-bound callId. */
 function recordCommandEvidence(session: Session, callId: string, e: CommandEvidence): void {
   if (e.kind === 'started') {
@@ -750,6 +764,7 @@ async function runExecution<I>(
     ...(sandbox ? { sandbox } : {}),
     reportCommand: (e) => recordCommandEvidence(session, callId, e),
     reportTask: (e) => recordTaskEvidence(session, callId, e),
+    reportPlan: (e) => recordPlanEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),

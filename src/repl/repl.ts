@@ -8,7 +8,9 @@ import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from 
 import { checkTrust } from '../cli/trust-check.js';
 import { assembleSession, type Assembled } from '../cli/assemble.js';
 import { runMemoryUpdate } from '../memory/update.js';
+import { readPlan, PLAN_INJECT_CAP_CHARS } from '../plan/store.js';
 import { sanitizeLine } from '../shared/text.js';
+import type { ProjectLayout } from '../store/layout.js';
 import { createReplIO, type ReplIO } from './io.js';
 import { createRenderer, type Renderer } from './render.js';
 import { detectStyle } from './format.js';
@@ -109,9 +111,12 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   });
 
   const pendingNotes: string[] = [];
-  const commandCtx: CommandContext = { session, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => io.question(q) };
+  const commandCtx: CommandContext = { session, layout, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => io.question(q) };
   let exitCode = 0;
   let consecutiveInterrupts = 0;
+  // Plan injection dedupe: content already shown to the model (by injection or its own
+  // update_plan writes) collapses to a one-line pointer instead of re-feeding the full text.
+  let lastInjectedPlanSha: string | null = null;
 
   try {
     for (;;) {
@@ -125,15 +130,33 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         continue;
       }
       consecutiveInterrupts = 0;
-      const line = read.text.trim();
+      let line = read.text.trim();
       if (line.length === 0) continue;
       if (line.startsWith('/')) {
         if ((await dispatchSlash(line, commandCtx)) === 'quit') break;
         continue;
       }
 
-      const userText =
-        pendingNotes.length > 0 ? `[[harness note: ${pendingNotes.join(' | ')}]]\n\n${line}` : line;
+      // @plan — explicit plan-mode invocation: the request routes into planning, and the
+      // harness note makes the no-execution-before-approval contract explicit to the model.
+      if (/^@plan\b/i.test(line)) {
+        const rest = line.replace(/^@plan\b/i, '').trim();
+        if (rest.length === 0) {
+          renderer.chromeLine('usage: @plan <request> — investigate and produce a plan without executing');
+          continue;
+        }
+        line = rest;
+        pendingNotes.push(
+          'the user explicitly invoked PLAN MODE for this request: investigate as needed (read-only; delegate explorer tasks where useful), write or update the plan with update_plan, and present it — do NOT begin implementation or any mutating work until the user approves the plan (/plan approve)',
+        );
+      }
+
+      // Standing plan note: while a plan document exists (and is not discarded), every turn
+      // carries its status — and its full content whenever the file's bytes changed.
+      const planNote = buildPlanNote(layout, session, lastInjectedPlanSha);
+      if (planNote !== null) lastInjectedPlanSha = planNote.sha;
+      const notes = [...(planNote !== null ? [planNote.note] : []), ...pendingNotes];
+      const userText = notes.length > 0 ? `[[harness note: ${notes.join(' | ')}]]\n\n${line}` : line;
       pendingNotes.length = 0;
 
       const controller = new AbortController();
@@ -169,6 +192,45 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   renderer.chromeLine(style.dim(`session ${session.id} ended — report: agent report ${session.id}`));
   io.close();
   return exitCode;
+}
+
+/**
+ * Build the per-turn standing plan note (V0.7). Reads the plan file FRESH every turn — the
+ * file's current bytes are truth (the user may have edited it between turns). Full content is
+ * injected only when the sha is NEW to the model (not last-injected, not written by the model
+ * itself via update_plan); otherwise a one-line pointer. The sovereignty wording is load-bearing.
+ */
+function buildPlanNote(
+  layout: ProjectLayout,
+  session: Session,
+  lastInjectedSha: string | null,
+): { note: string; sha: string } | null {
+  const plan = readPlan(layout, session.id);
+  if (!plan.exists || plan.sha256 === null || plan.status === 'superseded') return null;
+
+  let approvedSha: string | null = null;
+  const knownShas = new Set<string>(lastInjectedSha !== null ? [lastInjectedSha] : []);
+  for (const e of session.log.events) {
+    if (e.type === 'plan.approved') approvedSha = e.sha256;
+    else if (e.type === 'plan.discarded') approvedSha = null;
+    else if (e.type === 'plan.updated') knownShas.add(e.sha256);
+  }
+  const divergence =
+    approvedSha !== null && approvedSha !== plan.sha256
+      ? ` NOTE: the file changed after approval (approved sha ${approvedSha.slice(0, 12)}, current ${plan.sha256.slice(0, 12)}).`
+      : '';
+  const header =
+    `Active plan for this session — status: ${plan.status.toUpperCase()}.${divergence} ` +
+    `The plan is CONTEXT, NOT AUTHORITY: the user's current request and the observable repository state outrank it. ` +
+    `The file's current bytes are the truth (the user may edit it directly): ${plan.file}`;
+  if (knownShas.has(plan.sha256)) {
+    return { note: `${header} (content unchanged since last shown)`, sha: plan.sha256 };
+  }
+  const body =
+    plan.text.length > PLAN_INJECT_CAP_CHARS
+      ? `${plan.text.slice(0, PLAN_INJECT_CAP_CHARS)}\n[… truncated for injection; the full plan is on disk]`
+      : plan.text;
+  return { note: `${header}\nCurrent plan content:\n--- plan begin ---\n${body}\n--- plan end ---`, sha: plan.sha256 };
 }
 
 /** endSession appends to the log; if THAT is what is failing, still release and stay honest. */

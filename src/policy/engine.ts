@@ -138,12 +138,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'task.invalid-contract', `delegates() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined) {
+    if (tool.command !== undefined || tool.planDoc !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'task.conflicting-contract',
-        'a tool may declare delegation or a shell command, never both',
+        'a tool may declare delegation, a shell command, or a plan-document write — never a combination',
       );
     }
     if (delegation.roles.length === 0) {
@@ -175,6 +175,37 @@ export function decide<I>(
       'allow',
       'task.readonly-role',
       'delegated read-only work: each child session gets read-only tools, auto-denied approvals, and a fixed harness budget',
+    );
+  }
+
+  // 0b. Plan-document write → explicit fail-closed branch (V0.7). Same trap-avoidance as
+  //     delegation: update_plan mutates persistent harness state (the plan file in the state
+  //     dir, which declared-mutation validation would DENY as protected), so without its own
+  //     branch it would fall through to observe/auto-allow. Reversible honestly: prior bytes
+  //     are blob-archived by the store, and the write cannot touch workspace files.
+  if (tool.planDoc !== undefined) {
+    let planDoc: { action: 'update' };
+    try {
+      planDoc = tool.planDoc(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'plan.invalid-contract', `planDoc() threw: ${(e as Error).message}`);
+    }
+    if (tool.command !== undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'plan.conflicting-contract',
+        'a tool may declare a plan-document write or a shell command, never both',
+      );
+    }
+    if (planDoc.action !== 'update') {
+      return decision('sensitive', 'deny', 'plan.unknown-action', `unknown plan action '${String(planDoc.action)}'`);
+    }
+    return decision(
+      'reversible',
+      'allow',
+      'plan.update',
+      'writes the harness-owned plan document at the state root (prior bytes archived; user edits outrank; status only changes by user command) — never workspace files',
     );
   }
 
