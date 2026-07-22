@@ -5,6 +5,164 @@ compressed under **Earlier Milestones** (per the rolling-docs policy in `CLAUDE.
 
 ---
 
+## Session 8 (2026-07-22) — V0.7: coordinated parallelism + the minimal agent-teams layer
+
+### Objective
+
+Build outward from the proven V0.6 single-task primitives into a minimal, bounded agent-teams
+system — real plan mode (planner role + persistent user-editable plan document + explicit user
+approval gate), parallel task groups, a mutating executor role isolated in git worktrees with
+approval forwarding and reviewed integration, and a reviewer role for bounded adversarial
+review — with roles as explicit contracts, no second runtime, no policy side door, and no
+unbounded swarm.
+
+### Planning provenance
+
+3 Explore-agent recon passes (runtime/task/policy; git/trust/state layout; REPL/report/tests)
++ targeted external research (worktree-per-agent as the industry isolation primitive; plan mode
+as enforced read-only + persistent plan file + approval gate) + a Plan-agent adversarial
+critique, every load-bearing claim hand-verified. The critique caught one CRITICAL design flaw
+before code — the draft placed worktrees under the state dir, where `validatePath` denies every
+child write (`.agent-cli` segment + stateDir protection ⇒ tmpdir home + path-guarded registry
+sweep instead) — plus: the same-pid lock RECLAIM would let a colliding child silently merge a
+live sibling's evidence (fixed structurally, not by the TOCTOU guard); a sessionId suffix
+cannot fix same-session concurrent checkpoint temp indexes (per-op randomness + one base per
+group); deny-stop mapped to task status 'error' (would misrecord the new per-task user-stop);
+`reconstruct` kept only the LAST task.started per callId (a crash mid-group would orphan
+siblings' evidence); forwarded approvals could deadlock a dead child (signal-linked queue
+entries); group approval prompts were unanswerable (delegates-aware describeCall +
+taskContext); shared MockProvider cursors are nondeterministic under Promise.all (per-task
+provider seam); pendingNotes clear after one turn (standing plan injection).
+
+### What was implemented (commits `d0abbb1`, `15a1f93`, `58f06ed`, `2cfe2ca`, + docs; stage order A→B→D→C→E)
+
+1. **Stage A `feat(store,git,ids)` concurrency foundations** — 32-bit session-id suffixes;
+   `EventLog.open(expectFresh)`: atomic exclusive log creation BEFORE any lock interaction
+   (collision ⇒ `FreshLogCollisionError` + regenerate — refusal is structural; the old
+   existsSync check was TOCTOU and the same-pid reclaim made collisions silent); atomic
+   snapshot-blob writes (temp+rename; losing the rename race to identical content is success)
+   + additive `putBlob`; checkpoint/restore/commit temp names gain per-operation randomness
+   (pid alone collides once ONE process runs concurrent sessions).
+2. **Stage B `feat(policy,runtime,tools)` role contracts + parallel groups** — `SUBAGENT_ROLES`
+   policy-fact table in types.ts (explorer/planner/reviewer read-only; executor
+   mutating-worktree) + `runtime/roles.ts` RoleContract rows (registry, prompt builder, budget,
+   approval mode; load-time consistency check); step-0 rewritten for batches (try/catch around
+   the fact, empty/unknown/conflicting deny, strictest member governs); `delegate_task` takes
+   `tasks[1..3]` run via `Promise.all` INSIDE the tool — `runTurn` byte-identical, one call =
+   one group = one evidence unit; caps: 12 tasks/session group-atomic + 150k cumulative child
+   output tokens; planner/reviewer prompt builders over the shared read-only scaffold;
+   consumers batch-corrected (childSessionId joins, reconstruct keeps all task.started per
+   callId, task chrome + turn-summary counts, delegates-aware approval descriptions).
+3. **Stage D `feat(plan,policy,repl,cli)` plan mode** — plan documents at
+   `<projectDir>/plans/<sessionId>.md`: lenient never-throwing reads, atomic writes,
+   blob-archived priors, harness-owned frontmatter (model writes NEVER change status; smuggled
+   frontmatter stripped); `update_plan` behind the new fail-closed `planDoc` policy branch
+   (the S6 observe-trap pinned a third time); `plan.updated` via the callId-bound `reportPlan`
+   channel; `/plan show|approve|discard` with approval binding the exact sha (consent
+   evidence; later divergence surfaced, never hidden); `@plan` forced routing; standing
+   per-turn injection (full content only when the sha is new to the model, pointer otherwise,
+   sovereignty wording verbatim); executor gate on unapproved plans; `agent plan` CLI; report
+   "## Plan" section; system-prompt Planning rule.
+4. **Stage C `feat(git,runtime,tools)` executor role** — policy flip to ask/`reversible`
+   (`task.mutating-role`, deliberately non-grantable — every spawn is a human decision); ONE
+   base checkpoint per group (dirty parent state included) → detached worktree per task under
+   `<os-tmp>/agent-cli-worktrees/<slug>/` (placement dictated by validatePath) → child scoped
+   to the worktree with fresh git facts/map → bounded binary-safe capture (porcelain
+   enumerate, read-tree+checkout-index base staging, content-addressed blobs, 200 files/5 MiB
+   caps, overlap warnings) recorded as `task.changes` → worktree ALWAYS removed (EBUSY retries
+   + rm fallback + prune; failures are `worktree.removed ok:false` evidence; crash orphans
+   swept at assembly from a path-guarded registry). Approval forwarding: serialized queue
+   wrapping the SESSION approver (non-interactive fail-closes structurally, EOF cascades
+   deny-stop), taskContext-labeled prompts, signal-linked entries ('task-aborted' auto-deny,
+   loud stale-answer discard), forwarded deny-stop ends THAT task only (`user-stopped`).
+   Integration: `apply_task_changes` declares apply-eligible paths via `mutates()` (never
+   null) so the existing snapshot/file.mutated/undo/attribution machinery does the writing;
+   per-file drift-refuse; registry rebuilt from events on resume. Trust decision: worktrees of
+   a trusted workspace are trusted BY DERIVATION, never written to trust.json.
+5. **Stage E `feat/docs`** — review-stage prompt rule (ONE bounded panel of 2–3 reviewer
+   lenses, parent hand-verifies findings — the CLAUDE.md cost discipline encoded in the
+   product prompt); report "Task changes and integration" section + executor honesty footer;
+   render-only stall chrome ("no activity for Ns"); USAGE bump; ARCHITECTURE/ROADMAP/BLUEPRINT
+   updates.
+
+### Verification evidence
+
+- **Gate:** `npm run typecheck` + `npm run build` clean per commit; suite grew 450→**498
+  passed / 1 skipped across 42 files (+48)**: expectFresh refusal leaves a live sibling's lock
+  byte-identical and its log writable; startSession regenerate/exhaustion; atomic blobs;
+  concurrent same-pid checkpoints (distinct refs, correct trees, clean state dir); policy
+  pinning-table extensions (batch unknown/empty/throwing/conflicting; executor ask/reversible
+  + reversible-grant no-op; planDoc trap pins); 3-child parallel e2e (per-child providers, one
+  callId, three lineage-stamped logs, ordered labeled reports, context passthrough); abort
+  mid-group ends every child `aborted` with a complete parent log; group-atomic cap refusal
+  spawns nothing; plan store roundtrip/status-preservation/frontmatter-smuggle/leniency/
+  user-edits-win; REPL plan e2e (update_plan → /plan approve → labeled injection → divergence
+  → discard stops injection; @plan routing); forwarder units (FIFO, abort-while-queued never
+  displays, loud late-answer discard, throwing base fails closed); real-git executor e2e
+  (dirty base reached the child, isolation proven from both logs, capture shapes incl.
+  delete, cleanup + empty registry, apply through the snapshot path with one-unit undo, drift
+  refusal declares nothing and touches nothing, forwarded deny-stop → `user-stopped` with the
+  parent turn surviving, draft-plan block, path-guarded sweep leaves foreign dirs untouched,
+  honest no-repo refusal); report plan/integration sections.
+- No live-API E2E this session (mock-driven e2e coverage is dense; a live plan→approve→
+  executor→apply→review run is the recommended first act of Session 9).
+
+### Decisions (and why)
+
+- **Parallelism lives in the delegate tool, not runTurn** — one call = one parallel group = one
+  attributable evidence unit = one approval for a mutating group; the kernel loop stays
+  byte-identical (the strongest form of the one-runtime invariant); the schema max (3) IS the
+  concurrency cap.
+- **Roles are two-layer contracts:** the policy fact table (types.ts, data-only — decide()
+  fails closed on anything outside it) and the runtime contract table (roles.ts). Adding a
+  role is a deliberate two-table act, pinned by a load-time consistency check.
+- **Stage order A→B→D→C** (BLUEPRINT said worktrees before parallel groups): D-before-C lands
+  the plan-approval gate BEFORE the capability it gates and makes the coherent fallback
+  increment (plan mode + parallel read-only teams) if C overran.
+- **Worktrees live in the OS temp dir** — dictated by verified policy behavior, not taste:
+  under the state root every executor write would deny (`.agent-cli` segment rule); under the
+  project dir likewise (stateDir protection). The registry+sweep owns the crash story and can
+  never touch a path it did not create.
+- **The diff outlives the worktree:** capture-to-blobs + `task.changes` events make the
+  worktree disposable (removed in finally, every time) and integration replayable across
+  crashes/resume — no long-lived checkout to leak, reconcile, or trust.
+- **Integration rides the existing write path** — apply declares real paths via `mutates()`,
+  so snapshot/undo//diff//commit attribution came for free and the S6 observe-trap stayed
+  closed. Per-file drift-refuse mirrors the snapshot-restore philosophy.
+- **Plan approval binds bytes, not vibes:** `plan.approved {sha256}` is the consent record;
+  the file's current bytes stay truth; divergence is surfaced at every injection and executor
+  spawn rather than silently blocking (the per-spawn ask is the enforcement point).
+- **Executor spawns are never grantable** (`reversible` excluded from GRANTABLE, pinned): a
+  session grant would let later groups mutate with no human in the loop.
+
+### Open issues / boundaries (deliberate, documented)
+
+- Per-task cancellation = forwarded deny-stop + harness causes (timeout/tokens/parent-abort);
+  a mid-turn task-management UI (list/cancel while running) remains deferred. Ctrl+C still
+  aborts the whole turn.
+- A stale forwarded prompt left displayed after its task dies consumes the user's next typed
+  line as its answer; the discard is LOUD (chrome line) but the line is still consumed —
+  bounded, documented, fixable only with a deeper io redesign.
+- Executor worktrees lack gitignored files (no node_modules): builds/tests may need installs
+  (forwarded approval) or the executor honestly reports UNVERIFIED. Sandbox scratch TEMP is
+  still shared across concurrent sandboxed auto-run commands (read-only commands; collision
+  risk accepted). Task-base checkpoints accumulate as hidden refs until `checkpoint prune`.
+- The reviewer stage is prompt-shaped (role contract + review rule), not structurally forced;
+  the parent may skip review — the report's CHECKED/diff surfaces stay the backstop.
+- `--provider mock --script` still shares one script between parent and children (tests use
+  the per-task provider seam); no cross-log cost roll-up view yet; task resume, inter-agent
+  messaging, and deeper child-report instruction-scanning remain out (delimiters + provenance
+  labels stand).
+
+### Recommended next step
+
+Live-API E2E of the full V0.7 loop (@plan → approve → parallel executors with a forwarded
+approval → apply → review panel → /undo), then per BLUEPRINT: the first non-coding workflow
+pack (documents/PDF) on the now-complete kernel, or the deferred-pool UX debts (per-task
+cancel UI, cross-log cost roll-up) if live usage surfaces friction first.
+
+---
+
 ## Session 7 (2026-07-20/21) — V0.6: main-agent control layer — project memory + subagent tasks
 
 ### Objective
@@ -318,13 +476,14 @@ ranked repo map with selective retrieval (S6 shipped the git-backed file LIST on
 tools; MCP and workflow packs; SQLite index over the JSONL; conversation rewind; session
 pruning/sanitized export; prompt-history persistence + line-editing niceties; background/
 long-running process sessions; PTY support; output spill-to-file for huge command output.
-**Task/subagent follow-ups (post-S7):** parallel/multiple concurrent tasks; worktree-isolated
-children (+ the trust-inheritance decision for worktree paths; sessionId suffix on checkpoint
-temp-index names for concurrent mutating children); mutating/verifier roles behind
-approval-forwarding to the parent (approver-wrapper seam designed); per-task cancellation
-separate from the turn; task resume/continue (SendMessage-style); deeper scanning of child
-reports for instruction-shaped content (v1 ships delimiters + provenance labels); cross-log
-cost roll-up view. **Memory follow-ups (post-S7):** journal topic files / retrieval beyond the
+**Task/subagent follow-ups (post-S8; S8 shipped parallel groups, worktree-isolated executors
+with approval forwarding + reviewed integration, and the planner/reviewer roles):** a mid-turn
+per-task management UI (list/cancel while running — today: forwarded deny-stop + harness
+causes); task resume/continue (SendMessage-style); deeper scanning of child reports for
+instruction-shaped content (v1 ships delimiters + provenance labels); cross-log cost roll-up
+view; the stale-displayed-forwarded-prompt line-consumption wart (needs an io redesign);
+per-child sandbox scratch TEMP isolation; pruning/GC policy for accumulated task-base
+checkpoint refs; a structural (not prompt-shaped) review gate. **Memory follow-ups (post-S7):** journal topic files / retrieval beyond the
 newest-first inject window; a memory relocation/config knob; model-generated compaction of
 assistant/user text (deterministic tool-output elision shipped; loud warning when even full
 elision exceeds the target). **Git follow-ups (post-S6):** patch/multi-edit editing; model-

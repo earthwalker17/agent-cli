@@ -77,6 +77,46 @@ describe('report: delegated tasks', () => {
   });
 });
 
+describe('report: task changes and integration (V0.7)', () => {
+  it('renders captures, applies, refusals, and the never-applied case with honesty footer', () => {
+    seq = 0;
+    const events = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'w', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({
+        type: 'task.changes',
+        callId: 'call_1',
+        childSessionId: 'c-1',
+        baseOid: 'abcdef0123456789',
+        files: [
+          { relPath: 'a.txt', kind: 'modify', baseSha256: 'b1', blobSha256: 'a1', bytes: 10 },
+          { relPath: 'big.bin', kind: 'create', baseSha256: null, blobSha256: null, bytes: 999, oversize: true },
+        ],
+        omittedCount: 3,
+      }),
+      evt({
+        type: 'task.changes',
+        callId: 'call_2',
+        childSessionId: 'c-2',
+        baseOid: 'abcdef0123456789',
+        files: [{ relPath: 'x.txt', kind: 'create', baseSha256: null, blobSha256: 'x1', bytes: 5 }],
+      }),
+      evt({ type: 'task.applied', callId: 'call_3', childSessionId: 'c-1', applied: ['a.txt'], refused: [{ relPath: 'big.bin', reason: 'oversize' }] }),
+      evt({ type: 'session.ended', reason: 'user-quit' }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.taskChanges).toEqual([
+      { childSessionId: 'c-1', baseOid: 'abcdef0123456789', files: 2, oversize: 1, omitted: 3 },
+      { childSessionId: 'c-2', baseOid: 'abcdef0123456789', files: 1, oversize: 0, omitted: 0 },
+    ]);
+    expect(json.taskApplies).toEqual([{ childSessionId: 'c-1', applied: 1, refused: [{ relPath: 'big.bin', reason: 'oversize' }] }]);
+    expect(md).toContain('## Task changes and integration');
+    expect(md).toContain('captured from c-1: 2 file change(s)');
+    expect(md).toContain('1 REFUSED');
+    expect(md).toContain('NOT applied: the 1 captured change(s) from c-2');
+    expect(md).toContain('WITHOUT gitignored files');
+  });
+});
+
 describe('report: plan section (V0.7)', () => {
   it('derives writes, approval, and post-approval divergence purely from events', () => {
     seq = 0;

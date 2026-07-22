@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI V0.6 is actually built. This describes the implemented system, not aspirations —
+How Agent CLI V0.7 is actually built. This describes the implemented system, not aspirations —
 see `ROADMAP.md` for what is deferred.
 
 ## Shape
@@ -48,6 +48,8 @@ src/
     porcelain.ts           Pure `status --porcelain=v2 -z` parser (NUL records, rename pairs).
     commit.ts              prepareCommit/performCommit/runCommitFlow — the deliberate-commit flow.
     checkpoint.ts          create/list/prune + planRestore/runRestoreFlow — hidden-ref checkpoints.
+    worktree.ts            V0.7: detached task worktrees — version gate, add, honest EBUSY-retrying
+                           removal (rm fallback + prune; failure is sweep evidence, never silent).
   sandbox/
     types.ts               SandboxBackend + EnforcementFacts contracts (re-exports ExecSandbox).
     bootstrap.ts           The versioned PowerShell + inline-C# (Add-Type P/Invoke) Low-IL host script.
@@ -59,8 +61,13 @@ src/
     run-command.ts         Shell tool on runManaged: PowerShell -EncodedCommand $LASTEXITCODE wrapper,
                            filtered env, stdin ignored, per-termination messages, lifecycle + sandbox
                            evidence; applies ctx.sandbox.wrap at spawn time.
-    delegate.ts            delegate_task — per-session factory (never in static TOOLS); spawns the
-                           read-only explorer subagent under a harness-fixed budget.
+    delegate.ts            delegate_task — per-session factory (never in static TOOLS); V0.7: 1–3
+                           tasks per call run as a PARALLEL GROUP; orchestrates executor worktrees
+                           (base checkpoint → worktree → capture → removal) and all group caps.
+    update-plan.ts         update_plan — the model's ONLY write path to the plan document (V0.7);
+                           gated by the explicit planDoc policy branch; status is never model-writable.
+    apply-changes.ts       apply_task_changes + the captured-changes registry (V0.7): declared
+                           mutations from capture evidence, per-file drift-refuse integration.
   net/
     transport.ts           Reusable proxy-aware transport factory (pure resolver + custom fetch).
   provider/
@@ -72,12 +79,27 @@ src/
     codebase.ts            CODEBASE.md provenance stamp + map-digest staleness. Pure.
     load.ts                Session-start load: the three docs, caps, banner line, crash note.
     update.ts              End-of-session update: gate, narrative call, roll + atomic write.
+  plan/
+    store.ts               V0.7 plan documents: lenient reads (never throw), atomic writes with
+                           blob-archived priors, harness-owned frontmatter (status is user-only).
   runtime/
-    session.ts             startSession (fresh-id guard) / runTurn (abortable) / resumeSession /
-                           reconstruct / repairDanglingToolUses / endReasonForTurn / endSession.
-    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn.
+    session.ts             startSession (structurally-fresh id via exclusive log create) / runTurn
+                           (abortable) / resumeSession / reconstruct / repairDanglingToolUses /
+                           endReasonForTurn / endSession.
+    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn,
+                           role-parameterized from ROLE_CONTRACTS (V0.7).
+    roles.ts               V0.7: the runtime role contracts (tool registry, prompt builder, budget,
+                           approval mode per role) over the policy fact table in types.ts.
+    worktrees.ts           V0.7: worktree home under the OS temp dir, crash registry, path-guarded
+                           startup sweep (never touches a dir it did not create).
+    task-changes.ts        V0.7: bounded executor change capture — porcelain enumerate vs the base,
+                           binary-safe base bytes via read-tree + checkout-index staging, blobs.
+    approval-forwarder.ts  V0.7: serialized child→parent approval queue wrapping the SESSION
+                           approver; signal-linked entries; loud discard of stale answers.
     elision.ts             elideHistory — pure, monotone wire-history budget (see "Context budget").
-    approvals.ts           auto-deny, dangerous, and interactive approvers (injectable io).
+    approvals.ts           auto-deny, dangerous, and interactive approvers (injectable io);
+                           formatApprovalPrompt hides [s] for non-grantable classes and renders
+                           forwarded-task headers (V0.7).
     undo.ts                applyUndo (last / all) over the recorded mutations.
   trust/
     store.ts               trust.json + trust.log at the state root; hard error on corruption.
@@ -121,11 +143,14 @@ so a folder cannot plant a `trust.json` that grants itself consent) → **trust 
 load (the workspace file is untrusted bytes until trust passes) → per-project state creation →
 then `assembleSession` (V0.6: the single factored construction path both interfaces consume):
 **sandbox select + probe** → **git probe** (`detectGitFacts`, post-trust — it executes git
-against the repo) → workspace map (git-backed in a repo, walker otherwise) → **project-memory
+against the repo) → **orphaned-worktree sweep** (V0.7: registry-driven, path-guarded, never
+blocks a session) → workspace map (git-backed in a repo, walker otherwise) → **project-memory
 load** (post-trust by construction: the trust decision is a parameter of assembleSession) →
 system prompt → start/resume → post-start records in a fixed order (trust.verified,
-config.loaded, sandbox.status, git.context, workspace.mapped, memory.loaded) → delegate-tool
-attachment. The probed truths feed the banner, the events, and the system prompt.
+config.loaded, sandbox.status, git.context, workspace.mapped, memory.loaded) → per-session
+tool attachment (delegate_task with the executor bundle + forwarding queue, update_plan,
+apply_task_changes with the changes registry rebuilt from events on resume). The probed
+truths feed the banner, the events, and the system prompt.
 Read-only commands (`report`/`sessions`/`undo`/`diff`/`map`) are ungated, never create state
 dirs, and never run git; `agent commit`/`agent checkpoint` ARE trust-gated (they execute repo
 hooks / write `.git`); `map` reads workspace bytes but sends nothing to a model (documented
@@ -313,58 +338,146 @@ journal absence — child task sessions and legitimately-skipped sessions can ne
 crashes. The system prompt is outside elision's `rawChars`, so memory injection can never
 trigger or oscillate elision; it is cache-hot after the first request of a session.
 
-## Tasks and subagents (`runtime/subagent.ts`, `tools/delegate.ts`)
+## Tasks, roles, and parallel groups (`runtime/subagent.ts`, `runtime/roles.ts`, `tools/delegate.ts`)
 
 The main agent keeps user interaction, authority, coordination, integration, and final claims;
-a delegated task is a bounded, attributable unit beneath it. V0.6 ships exactly one role —
-the read-only **explorer** — sequential, depth 1.
+a delegated task is a bounded, attributable unit beneath it. V0.7 makes roles EXPLICIT
+CONTRACTS (not prompt aliases) and lets one delegate call run a bounded parallel group.
 
-- **One runtime.** A child task = another `Session` driven by the SAME `runTurn`, in-process.
-  A task is exactly ONE turn (multi-step inside, no user to converse with), so turn-level
-  cancellation is session-level cancellation — no second loop, no new cancel concept.
-- **Policy first.** `Tool.delegates(input) → {role}` is a policy FACT gated by an explicit
-  step-0 branch in `decide()` — BEFORE the command branch (a tool declaring both `delegates`
-  and `command` denies as `task.conflicting-contract`; a delegation can never pose as a
-  provably-safe command) and before the observe fall-through (the S6 command-less-tool trap,
-  deliberately pinned by regression tests). Role `explorer` ⇒ allow/`observe`
-  (`task.readonly-role`); any other role ⇒ deny (`task.unknown-role`, fail closed).
-- **Inherited-or-narrower authority, structurally:** read-only registry (`read_file`,
-  `list_files`, `search`, `run_command`; no write tools; no delegate tool ⇒ recursion is
-  impossible), `autoDenyApprover` (asks fail closed — only commands the analyzer PROVES safe,
-  running inside the parent's PROBED-and-shared sandbox instance, can auto-run), the parent's
-  narrowing `rules`, fresh empty `Grants`, and a role-specific system prompt (read-only scope,
-  auto-deny warning, report-with-evidence instruction, AGENT.md included; the generated memory
-  docs deliberately are not — the delegation prompt carries the task context).
-- **Budget is harness-fixed** (15 steps / 5 min / 30k output tokens; 8 tasks per session per
-  process run), never model-controlled. Cause-tracked cancellation maps parent-abort vs
-  wall-clock vs token-cap onto distinct `TaskStatus` values and child end reasons
-  (`aborted`/`budget`/`max-steps`); the token cap is enforced by the runner's observer on the
-  child log's `onAppend` (which also emits the render-only `[task]` progress chrome).
-- **Evidence lineage:** the child gets its OWN event log under a guaranteed-fresh session id
-  (`startSession` refuses to append into an existing log file — same-second child creation made
-  id collisions routine, and a collision would merge evidence and steal the same-pid lock).
-  The parent log records `task.started {callId, role, childSessionId, budget}` the moment the
-  child exists and `task.ended {callId, status, steps, usage, resultSha256}` after the child log
-  closes, both persisted through the callId-bound `ToolContext.reportTask` channel (mirrors
-  `reportCommand` — a tool can never forge another call's evidence). The child's
-  `session.started` carries `lineage {parentSessionId, role}`. Runtime-bound callId + unique
-  childSessionId are the complete, unforgeable join.
-- **Isolation both ways:** the child never sees the parent conversation; the parent history
-  receives ONLY the delimited final report, labeled "narration, not verified evidence" (the
-  parent prompt's delegation rule tells the model to verify load-bearing claims itself — and in
-  the live E2E it did, re-reading the files before summarizing). Child usage is recorded once
-  in `task.ended` and in the child's own log; it is NOT summed into the parent's usage totals
-  (report footer states this).
-- **Surfaces:** `/tasks`, `agent sessions` labels children `[task:role of parent]`,
-  `agent report <childId>` renders the child's self-contained evidence report (the runner
-  records sandbox/git/map on the child log), the parent report gains "Delegated tasks (subagents)",
-  and `reconstruct` answers a crash-orphaned delegate call with the surviving child-log pointer.
-  `latestSessionId` skips lineage-bearing logs — otherwise every "latest session" default
-  (`--continue`, undo, diff, commit, report) would silently target the newest CHILD log.
-- **v1 boundaries (deliberate):** one task at a time (parallelism is Session 8, with worktrees);
-  cancelling a running task = Ctrl+C (aborts the whole turn); the task cap is per process run,
-  not per log; `--provider mock --script` shares ONE script instance between parent and child
-  (sequential interleave — unit tests inject a separate child provider instead).
+- **Roles, split by layer.** `types.ts` `SUBAGENT_ROLES` is the POLICY fact table — explorer /
+  planner / reviewer are `read-only`, executor is `mutating-worktree`; `decide()` consults only
+  this and fails closed on anything else. `runtime/roles.ts` `ROLE_CONTRACTS` is the RUNTIME
+  contract per role: tool registry (a subset of TOOLS; never the delegate/update_plan/apply
+  tools ⇒ depth 1 and no self-integration, structurally), role prompt builder, harness-fixed
+  budget (read-only roles 15 steps / 5 min / 30k out; executor 30 / 12 min / 50k — approval
+  wait counts against its wall clock), and approval mode (`auto-deny` | `forward`). A load-time
+  check pins the two tables consistent.
+- **One runtime, parallelism in the TOOL.** A child task = another `Session` driven by the SAME
+  `runTurn`, in-process; a task is exactly ONE turn. `delegate_task` takes `tasks: [1..3]`; the
+  tasks of one call run concurrently via `Promise.all` (the schema max IS the concurrency cap)
+  — `runTurn`'s sequential tool loop is untouched. One call = one parallel group = one evidence
+  unit = ONE approval for a group containing a mutating role (the strictest member governs).
+- **Policy step-0 (fail closed, batched):** `Tool.delegates(input) → {roles}` is evaluated
+  FIRST, inside try/catch (a throwing fact denies as `task.invalid-contract`, never escapes
+  into the fall-throughs); `delegates`+`command`/`planDoc` → deny; empty group → deny; any
+  unknown role → the WHOLE group denies; any mutating role → `ask` (class `reversible`, rule
+  `task.mutating-role` — deliberately NOT session-grantable, so every executor spawn is a human
+  decision); all read-only → allow/`observe` (`task.readonly-role`).
+- **Inherited-or-narrower authority, structurally:** role registry ⊆ TOOLS, the parent's
+  narrowing `rules`, the parent's PROBED-and-shared sandbox instance, fresh empty `Grants` per
+  child, AGENT.md injected (generated memory docs deliberately not). Read-only roles get
+  `autoDenyApprover`; the executor's asks FORWARD to the parent's approver (below).
+- **Caps (harness-fixed, never model-controlled):** per-role budgets; group ≤ 3; 12 tasks per
+  session, group-atomic (a group that does not fully fit is refused whole, spawning nothing);
+  a cumulative 150k child-output-token lid per session; no automatic retries. Cause-tracked
+  cancellation maps parent-abort / wall-clock / token-cap / forwarded deny-stop onto distinct
+  `TaskStatus` values (`aborted`/`timeout`/`budget-tokens`/`user-stopped`) and child end
+  reasons; a silent child gets a render-only "no activity" chrome line (the wall clock is the
+  enforcement). Progress lines carry `role·childId` identity because group members interleave
+  on one chrome stream.
+- **Approval forwarding (`runtime/approval-forwarder.ts`):** a serialized FIFO queue wrapping
+  the parent SESSION approver — never io directly — so non-interactive parents fail closed
+  structurally, REPL EOF cascades deny-stop, and `--dangerously-allow-all` keeps its meaning.
+  Every forwarded request carries `taskContext {childSessionId, role}` (rendered as a labeled
+  header; for commands the prompt states the worktree cwd AND that approval runs it
+  unsandboxed); entries are signal-linked — a task that dies while its ask is QUEUED resolves
+  deny (`approval.resolved.source: 'task-aborted'`) without ever displaying; a task that dies
+  while its ask is DISPLAYED unblocks immediately and the eventual stale answer is discarded
+  with an honest chrome line. Answering `q` (deny-stop) ends THAT child only
+  (`user-stopped`); Ctrl+C still aborts the whole turn. `s` grants land in the asking child's
+  own Grants and die with it.
+- **Evidence lineage:** unchanged joins, now batch-correct — one callId spans a group, so
+  `/tasks`, the report, and `reconstruct` join `task.started`↔`task.ended` by
+  `childSessionId`; `reconstruct` keeps EVERY `task.started` per callId and a crash replay
+  points at ALL surviving child logs (plus captured changes, when a `task.changes` exists).
+  Session ids are structurally fresh: `EventLog.open(expectFresh)` creates the log file with
+  an atomic exclusive open BEFORE any lock interaction — a collision throws
+  (`FreshLogCollisionError`, regenerated) instead of reclaiming a live sibling's same-pid lock
+  and merging evidence; id entropy is 32 bits/second.
+- **Surfaces:** `/tasks`; task lifecycle chrome (`task.started`/`task.ended` lines, task count
+  in the turn summary); `agent sessions` child labels; `agent report <childId>`; the parent
+  report's "Delegated tasks" + "Task changes and integration" sections; `latestSessionId`
+  still skips lineage-bearing logs.
+- **Boundaries (deliberate):** depth 1; no inter-child messaging (siblings are blind to each
+  other; the parent integrates); no task resume; per-task cancellation exists as forwarded
+  deny-stop + harness causes only (a full mid-turn task-management UI is deferred);
+  `--provider mock --script` still shares one script (tests use the per-task provider seam).
+
+## Executor isolation and integration (`git/worktree.ts`, `runtime/worktrees.ts`, `runtime/task-changes.ts`, `tools/apply-changes.ts`)
+
+The mutating role never touches the user's workspace. The chain is: base → worktree → capture
+→ review → apply, every link evidenced.
+
+- **Base = one hidden-ref checkpoint per GROUP**, created sequentially before fan-out (the
+  existing checkpoint machinery, so the parent's CURRENT working tree — dirty state included —
+  is the base; unborn repos work). Every group member starts from the same attributable oid.
+- **Worktree per task:** `git worktree add --detach` at the base oid, under
+  `<os-tmp>/agent-cli-worktrees/<projectSlug>/` — placement DICTATED by `validatePath` (the
+  state dir and any `.agent-cli` segment are write-denied, and the workspace must not contain
+  derived checkouts), ephemeral by design. A version gate refuses git < 2.20 / unparseable
+  (fail closed); non-repo workspaces refuse honestly; an unapproved draft plan blocks executor
+  groups at the tool. The child session is scoped to the worktree (validatePath then confines
+  its writes there), with FRESH `detectGitFacts` + map probed against the worktree; the parent
+  layout is retained, so child logs stay joined to the project. TRUST: children never pass the
+  CLI trust gate (it lives at the interface, not `startSession`) — a harness-created worktree
+  of a trusted workspace is trusted BY DERIVATION and never written to `trust.json`. HONESTY:
+  the worktree materializes WITHOUT gitignored files (no node_modules/.env — stated in the
+  executor prompt: unverified means unverified), and `git worktree list` shows it while a task
+  runs (low-pollution, not zero — like hidden refs).
+- **Capture (`task-changes.ts`):** at task end — for ANY status; partial work is evidence —
+  `git status --porcelain=v2 -z` in the worktree (detached HEAD IS the base, so status
+  enumerates exactly changed-vs-base, untracked included), workspace-prefix filtered (subdir
+  workspaces), base bytes materialized BINARY-SAFELY via read-tree + `checkout-index --prefix`
+  staging (worktree form under the repo's filters — never string-stdout `git show`), after +
+  base bytes stored as content-addressed blobs, bounded (200 files / 5 MiB per file; every
+  omission counted, oversize entries recorded but never integrable). Recorded as callId-bound
+  `task.changes {childSessionId, baseOid, files[], omittedCount}` — the diff OUTLIVES the
+  worktree. Overlapping write-sets between group members are warned at capture time.
+- **Cleanup is deterministic:** the worktree is ALWAYS removed in `finally` (EBUSY retries →
+  rm fallback → `git worktree prune`); failure is honest `worktree.removed {ok:false}`
+  evidence. A registry under `projectDir` records every worktree at creation; the
+  assembly-time sweep removes crash orphans and is PATH-GUARDED — entries outside this
+  project's worktree home are dropped from the registry but never touched on disk.
+- **Integration (`apply_task_changes`, parent-only):** `mutates()` declares the concrete
+  apply-ELIGIBLE workspace paths from the captured evidence (never null — the S6 observe-trap;
+  conflicted files are not declared, so they are never snapshotted and never pollute
+  attribution), and the EXISTING snapshot-first / `file.mutated` / undo / diff+commit
+  attribution machinery does all the writing. Per-file drift-refuse rule: the workspace file
+  must still hold the task's base bytes (or already hold the target, or be absent for a
+  create); anything else refuses THAT file. Partial applies are reported per-file
+  (`task.applied`), one undoable unit. The registry is rebuilt from `task.changes` events on
+  resume, so a crash between capture and apply strands nothing.
+
+## Plan mode (`plan/store.ts`, `tools/update-plan.ts`, REPL `/plan`, `@plan`)
+
+Plans are explicit temporary local state — one markdown document per session at
+`<projectDir>/plans/<sessionId>.md` — never disposable narration, and never authority.
+
+- **The file's current bytes are truth.** The user may edit it with any editor at any time;
+  the harness re-reads it before every use. Reads never throw (a malformed plan degrades to
+  status `unknown`, content intact); writes are atomic; prior bytes are blob-archived
+  (`prevSha256`) so plan history stays reviewable.
+- **The model writes it ONLY through `update_plan`**, gated by the first-class `Tool.planDoc`
+  policy fact with its own fail-closed engine branch (`plan.update`, allow/`reversible`;
+  planDoc+command/delegates deny; a throwing fact denies) — without it, a mutation-less
+  command-less tool writing harness state would auto-classify observe (the S6 trap, pinned
+  again). The harness owns the frontmatter: model writes can NEVER change `status` (a
+  body-smuggled frontmatter block is stripped); only `/plan approve|discard` do.
+- **Approval is consent evidence:** `/plan approve` records `plan.approved {planId, sha256}` —
+  binding the EXACT approved bytes. Later divergence (model progress updates keep status
+  `approved`; user edits too) is SURFACED on every injection and in the report, never hidden;
+  the enforcement point stays the per-spawn executor `ask`, which displays plan status. While
+  a draft/unknown plan exists, the delegate tool refuses executor groups. `/plan discard`
+  records `plan.discarded` and stops injection.
+- **Injection is a standing per-turn harness note** (never the cached system prompt): full
+  plan content only when its sha is NEW to the model (not last-injected, not one the model
+  itself wrote — `plan.updated` events carry the shas), a one-line pointer otherwise; capped
+  at 12 KiB; labeled with the verbatim context-not-authority sovereignty wording. `@plan
+  <request>` forces plan mode via an explicit harness note (investigate → update_plan →
+  present → wait for approval).
+- **Surfaces:** `/plan [show|approve|discard]`; read-only `agent plan [<id>]`; the report's
+  "## Plan" section (writes, approval sha, post-approval divergence, discard) derived purely
+  from events; `plan.updated` flows through the callId-bound `ToolContext.reportPlan` channel.
 
 ## The REPL (`repl/`)
 
@@ -397,11 +510,18 @@ protectedPath }`; the engine decides.
 
 `decide(tool, input, ctx, grants)` — deny-first, first match wins:
 
-- **Delegation** (`tool.delegates` present) → the explicit STEP-0 branch (V0.6): role
-  `explorer` → allow/`observe` (`task.readonly-role`); a tool declaring both `delegates` and
-  `command` → deny (`task.conflicting-contract`); any other role → deny (`task.unknown-role`).
-  First on purpose: a delegating tool must never reach the command auto-run path or the
-  observe fall-through (the S6 command-less-tool trap, pinned by regression tests).
+- **Delegation** (`tool.delegates` present) → the explicit STEP-0 branch (V0.6; batched V0.7):
+  the fact names EVERY role in the group and is called inside try/catch (throw → deny
+  `task.invalid-contract`); `delegates`+`command`/`planDoc` → deny (`task.conflicting-contract`);
+  empty group → deny; any role outside `SUBAGENT_ROLES` → the whole group denies
+  (`task.unknown-role`); any `mutating-worktree` role → `ask`/`reversible`
+  (`task.mutating-role`, deliberately non-grantable); all read-only → allow/`observe`
+  (`task.readonly-role`). First on purpose: a delegating tool must never reach the command
+  auto-run path or the observe fall-through (the S6 command-less-tool trap, pinned).
+- **Plan-document write** (`tool.planDoc` present) → the explicit V0.7 branch right after:
+  allow/`reversible` (`plan.update` — the store archives prior bytes; the write cannot touch
+  workspace files); planDoc+command → deny; a throwing fact → deny. Same trap-avoidance
+  rationale, same pinning tests.
 - **Shell command** (`tool.command` present) → **automatic review** (the single default; not a
   selectable "mode"). A hardcoded circuit-breaker denies workspace/drive wipes and `format`
   (absolute). Otherwise `analyzeCommand` decides: a command it PROVES safe **and** an active OS
@@ -428,8 +548,10 @@ reviewer, so safety is *proven*, not pattern-matched — and the reviewer is a p
 the boundary (the sandbox is).
 
 `Grants` are in-memory, session-scoped, keyed `(tool, class)`, and store only grantable classes
-(`sensitive`/`external`) — never `run_command`, never `destructive`. They are not persisted or
-restored on resume.
+(`sensitive`/`external`) — never `run_command`, never `destructive`, never `reversible` (an
+executor spawn must ask every time). They are not persisted or restored on resume. The approval
+prompt hides `[s]` when the class is not grantable (offering a no-op option would misrepresent
+what pressing it does).
 
 ## Sandbox and enforced isolation (`sandbox/`)
 
@@ -541,7 +663,12 @@ state), `git.commit`, `git.checkpoint`, `git.restore` (user-commanded git proven
 (the end-of-session provider call — status, duration, usage), `memory.updated` (per-doc write
 outcome), `task.started`/`task.ended` (delegated-task lifecycle, callId-bound), an additive
 `lineage {parentSessionId, role}` field on `session.started` (child sessions only), and
-additive `session.ended.reason` values `aborted` and `budget`. Bounded static readers
+additive `session.ended.reason` values `aborted` and `budget`. V0.7 adds `task.changes`
+(captured executor diffs — the durable record that outlives the worktree), `task.applied`
+(per-file integration outcomes), `worktree.created`/`worktree.removed` (lifecycle honesty,
+`ok:false` = sweep evidence), `plan.updated`/`plan.approved`/`plan.discarded` (plan lifecycle;
+approval binds the sha), the additive `TaskStatus` value `user-stopped`, and the additive
+`approval.resolved.source` value `task-aborted`. Bounded static readers
 `readFirstEvent`/`readLastEvent` (first/last committed line only, never throw) support the
 child-log skip and crash detection without full parses. Additive types/fields are
 lenient-reader-safe; bumping the version would lock old binaries out of new logs, so v stays 1.
@@ -567,9 +694,10 @@ replayed). Crash recovery reconciles against `file.mutated`/postHash: a complete
 disk), a snapshot without a matching mutation is flagged **unknown post-state**, and a bare
 `tool.requested` is a true **orphan** — unless `command.started` shows the command had spawned
 (the replay says the command was executing at the crash and its effects are unknown) or
-`task.started` shows a delegated task was running (the replay points at the child session's
-surviving evidence log: `agent report <childId>`). Grants and the system prompt/map are regenerated fresh —
-current state outranks stale context.
+`task.started` shows delegated tasks were running (the replay points at EVERY surviving child
+evidence log — one delegate call can start a parallel group — and, when a `task.changes`
+exists, notes that the captured changes can still be integrated via apply_task_changes).
+Grants and the system prompt/map are regenerated fresh — current state outranks stale context.
 
 ## Verification (`report/report.ts`)
 
@@ -590,9 +718,13 @@ line ("at session start", never live state). V0.5 adds a `+n/−m` churn column 
 (summed from write-time `file.mutated` diffstat evidence, so the report stays a pure event
 function) and, when present, "Commits (user-commanded)", "Checkpoints", and "Checkpoint
 restores" sections from the git provenance events. V0.6 adds "Delegated tasks (subagents)"
-(from `task.started`/`task.ended` pairs; an orphan renders "STARTED but never completed") plus
-footer lines stating that child usage is NOT in the parent totals and that subagent reports
-are narration with the child's own log as the record. The reviewable CONTENT lives in a separate
+(from `task.started`/`task.ended` pairs, joined by childSessionId since V0.7 groups share a
+callId; an orphan renders "STARTED but never completed") plus footer lines stating that child
+usage is NOT in the parent totals and that subagent reports are narration with the child's own
+log as the record. V0.7 adds "## Plan" (writes, the approval sha, post-approval divergence,
+discard), "## Task changes and integration" (captures, applies, per-file refusals, and the
+honest "NOT applied" case), and an executor honesty footer (worktree visibility, the
+gitignored-files gap, forwarded approvals running unsandboxed when approved). The reviewable CONTENT lives in a separate
 surface: `report/diff.ts` builds the attributable session diff (first pre-image blob → current
 disk bytes per session-mutated path, undo folded in, external edits flagged DRIFTED), rendered
 by `/diff` and `agent diff` with per-line sanitization. A log without

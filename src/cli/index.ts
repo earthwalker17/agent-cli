@@ -26,7 +26,7 @@ import { assembleSession } from './assemble.js';
 import { memoryDir, parseFrontmatter, readDocCapped } from '../memory/store.js';
 import { runMemoryUpdate } from '../memory/update.js';
 
-const USAGE = `Agent CLI — a bounded local agent harness (V0.4).
+const USAGE = `Agent CLI — a bounded local agent harness (V0.7).
 
 Usage:
   agent                          Start an interactive session (REPL) in the current directory

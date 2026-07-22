@@ -202,10 +202,20 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   if (parentSignal?.aborted) onParentAbort();
   else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
   const timer = setTimeout(() => cancel('timeout'), budget.timeoutMs);
+  // Stall VISIBILITY (render-only): a silent child is probably mid-provider-call or waiting on
+  // a forwarded approval — both legitimate — so this only narrates; the wall clock enforces.
+  let lastActivity = clock.now();
+  const stallTimer = setInterval(() => {
+    const idleMs = clock.now() - lastActivity;
+    if (idleMs >= 60_000) {
+      deps.onProgress?.(`${spec.role}·${child.id.slice(-4)} no activity for ${Math.round(idleMs / 1000)}s (hard timeout at ${Math.round(budget.timeoutMs / 1000)}s)`);
+    }
+  }, 30_000);
 
   let outputTokens = 0;
   child.log.onAppend = (e): void => {
     try {
+      lastActivity = clock.now();
       if (e.type === 'assistant.message') {
         outputTokens += e.usage.outputTokens;
         if (outputTokens > budget.maxOutputTokens) cancel('budget-tokens');
@@ -228,6 +238,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     error = err as Error;
   } finally {
     clearTimeout(timer);
+    clearInterval(stallTimer);
     parentSignal?.removeEventListener('abort', onParentAbort);
     child.log.onAppend = undefined;
   }

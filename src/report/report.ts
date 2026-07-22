@@ -100,6 +100,9 @@ export interface ReportJson {
   /** Plan-document lifecycle (V0.7): every write plus the user's approval/discard consent records.
    *  Optional-additive: old readers and hand-built fixtures stay valid; buildReport always sets it. */
   plan?: ReportPlan | null;
+  /** Executor change capture + integration outcomes (V0.7, optional-additive). */
+  taskChanges?: { childSessionId: string; baseOid: string; files: number; oversize: number; omitted: number }[];
+  taskApplies?: { childSessionId: string; applied: number; refused: { relPath: string; reason: string }[] }[];
   integrity: { truncatedTail: boolean; corruptAt?: { line: number; kind: string } };
 }
 
@@ -332,6 +335,19 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       ? null
       : { planId, updates: planUpdates, lastSha256: planLastSha, approvedSha256: planApprovedSha, discarded: planDiscarded };
 
+  const taskChanges = events
+    .filter((e): e is Extract<SessionEvent, { type: 'task.changes' }> => e.type === 'task.changes')
+    .map((e) => ({
+      childSessionId: e.childSessionId,
+      baseOid: e.baseOid,
+      files: e.files.length,
+      oversize: e.files.filter((f) => f.oversize === true).length,
+      omitted: e.omittedCount ?? 0,
+    }));
+  const taskApplies = events
+    .filter((e): e is Extract<SessionEvent, { type: 'task.applied' }> => e.type === 'task.applied')
+    .map((e) => ({ childSessionId: e.childSessionId, applied: e.applied.length, refused: e.refused }));
+
   const json: ReportJson = {
     session: {
       id: started?.type === 'session.started' ? started.sessionId : 'unknown',
@@ -378,6 +394,8 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     gitRestores,
     tasksDelegated,
     plan: planState,
+    taskChanges,
+    taskApplies,
     integrity: {
       truncatedTail: input.truncatedTail ?? false,
       ...(input.corruptAt ? { corruptAt: input.corruptAt } : {}),
@@ -534,6 +552,27 @@ function renderMarkdown(r: ReportJson): string {
     L.push('');
   }
 
+  if ((r.taskChanges?.length ?? 0) > 0 || (r.taskApplies?.length ?? 0) > 0) {
+    L.push(`## Task changes and integration (executor worktrees)`);
+    for (const c of r.taskChanges ?? []) {
+      L.push(
+        `- captured from ${c.childSessionId}: ${c.files} file change(s) vs base ${c.baseOid.slice(0, 12)}` +
+          `${c.oversize > 0 ? `, ${c.oversize} oversize (recorded, not integrable)` : ''}${c.omitted > 0 ? `, ${c.omitted} omitted over the cap` : ''}`,
+      );
+    }
+    const appliedByChild = new Set((r.taskApplies ?? []).map((a) => a.childSessionId));
+    for (const a of r.taskApplies ?? []) {
+      L.push(`- applied into the workspace from ${a.childSessionId}: ${a.applied} change(s)${a.refused.length > 0 ? `; ${a.refused.length} REFUSED` : ''}`);
+      for (const ref of a.refused) L.push(`    refused ${ref.relPath}: ${ref.reason}`);
+    }
+    for (const c of r.taskChanges ?? []) {
+      if (!appliedByChild.has(c.childSessionId) && c.files > 0) {
+        L.push(`- NOT applied: the ${c.files} captured change(s) from ${c.childSessionId} never entered the workspace this session`);
+      }
+    }
+    L.push('');
+  }
+
   L.push(`---`);
   L.push(`Assistant narrative is not evidence; the sections above are compiled only from recorded tool events.`);
   const sbx = r.session.sandbox;
@@ -555,6 +594,11 @@ function renderMarkdown(r: ReportJson): string {
   if (r.tasksDelegated.length > 0) {
     L.push(
       `Delegated-task usage is recorded in each child session's own log and is NOT included in this session's token totals. Subagent reports quoted to the model are narration, not verified evidence — each child's own evidence log is the record of what it actually did.`,
+    );
+  }
+  if ((r.taskChanges?.length ?? 0) > 0) {
+    L.push(
+      `Executor tasks ran in disposable git worktrees (visible to \`git worktree list\` while running; removed at task end, crash leftovers swept at the next session start). A worktree materializes WITHOUT gitignored files (no node_modules/.env), so an executor's verification claims cover only what actually ran there. Approvals forwarded from a task were answered by the user; an APPROVED forwarded command ran UNSANDBOXED with full privilege, and time spent waiting on an approval counted against the task's wall clock.`,
     );
   }
   return L.join('\n');

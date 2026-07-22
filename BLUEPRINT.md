@@ -13,55 +13,50 @@ The central near-term decision stands:
 > Deepen the execution kernel and its enforced safety boundaries before expanding horizontally
 > into document, PDF, image, or video workflow packs.
 
-## 2. Current Starting Point (post-Session 7, V0.6)
+## 2. Current Starting Point (post-Session 8, V0.7)
 
-The kernel is now an explicit **main-agent control layer** over the single shared runtime: one
-`runTurn`; central policy choke point (now with a fail-closed delegation branch); recorded
-consent + narrowing-only config; append-only evidence with crash repair and deterministic
-reports; the managed exec substrate; the enforced Windows Low-IL sandbox with positive-proof
-command review; the GitOps layer; prompt caching + deterministic elision; and — new in V0.6 —
-the **three-document project memory** (user-owned `AGENT.md` every session; harness-generated
-rolling `JOURNAL.md` + provenance-stamped `CODEBASE.md`, written by a cache-hot end-of-session
-narrative call with deterministic fallback, loaded at start as labeled context-not-authority)
-and the **first subagent task primitives** (read-only `explorer` role: one child session over
-the same runTurn, read-only registry, auto-deny approvals, shared probed sandbox, harness-fixed
-budget with cause-tracked cancellation, callId+childSessionId evidence lineage, own inspectable
-log; live-proven, with the parent model observed verifying the child's narration unprompted).
+The kernel is now a **coordinated main-agent control layer**: one `runTurn`; a central policy
+choke point with fail-closed delegation (batched, role-table-driven) and plan-document
+branches; recorded consent + narrowing-only config; append-only evidence with crash repair and
+deterministic reports; the managed exec substrate; the enforced Windows Low-IL sandbox with
+positive-proof command review; GitOps; prompt caching + deterministic elision; the
+three-document project memory; and — new in V0.7 — the **minimal agent-teams layer**: explicit
+two-table role contracts (explorer/planner/reviewer read-only, executor mutating-worktree);
+parallel task groups (1–3 per delegate call, group-atomic caps, cumulative child-token lid);
+**plan mode** (persistent user-editable plan documents, sha-bound user approval as consent
+evidence, standing context-not-authority injection, an executor gate on unapproved plans);
+**worktree-isolated executors** (one base checkpoint per group, disposable tmp-dir worktrees
+with a path-guarded crash sweep, bounded binary-safe change capture that outlives the
+worktree, drift-refusing snapshot-backed integration, approval forwarding through a
+signal-linked serialized queue with per-task deny-stop); and a prompt-encoded bounded review
+stage.
 
 The remaining structural gaps, in rough order of load-bearing-ness:
 
-- **tasks are sequential, read-only, depth 1** — no parallelism, no worktree isolation, no
-  mutating roles, no per-task cancellation, no task resume (Session 8);
+- **the V0.7 loop is unproven live** — every e2e is mock-driven; no recorded live run of
+  plan → approve → parallel executors → forwarded approval → apply → review exists yet;
 - the enforced boundary is **write + lifecycle only, and Windows only** — reads and network are
   not confined; approved commands remain full-privilege by design;
 - approved `run_command` file effects are **not attributable** (session-scope commits and /diff
   under-claim them; stated in every surface);
+- task management UX debts: no mid-turn task list/cancel, no task resume, no cross-log cost
+  roll-up; the stale-forwarded-prompt line-consumption wart;
 - per-sandboxed-command latency (~1.2 s Add-Type host; probe ~4–11 s on this machine);
 - no background/long-running process sessions; no PTY;
-- context work covers tool outputs only; the repo map is a file list, not ranked retrieval;
-  journal retrieval is a newest-first inject window, not topic files.
+- context work covers tool outputs only; the repo map is a file list, not ranked retrieval.
 
 ## 3. Indicative Session Sequence
 
-### Session 8 (next) — Coordinated Parallelism on the Task Primitives
+### Session 9 (next) — Live Validation, then the First Workflow Pack
 
-Build outward from the proven single-task contract, in dependency order: (1) worktree-isolated
-children — GitClient/CheckpointContext are already instance-scoped; the open design decisions
-are trust inheritance for worktree paths (trust is keyed by realpath) and the sessionId suffix
-on checkpoint temp-index names; (2) bounded PARALLEL read-only tasks (per-child logs and the
-shared content-addressed snapshot store are already concurrency-safe; the delegate surface,
-progress chrome, and /tasks need multi-task shapes; watch the two process-global hazards:
-SIGINT handlers and process.exit stay parent-only); (3) the first MUTATING role behind
-approval-forwarding to the parent (the approver-wrapper seam is designed; decide grant
-routing), with worktree isolation + reviewable integration (the attributable diff/commit
-machinery is the merge-review substrate). A subagent result remains evidence, not accepted
-truth. Full teams (decomposition, inter-agent messaging) stay after this.
-
-### First Non-Coding Workflow Pack — After the Foundation
-
-Unchanged: documents/PDF first, consuming stable kernel capabilities (the exec substrate now
-provides managed renderer-process execution); structured intermediate representations;
-domain verification beyond exit codes; no renderer logic inside `runTurn`, policy, or the REPL.
+First act: a LIVE-API E2E of the full V0.7 loop (@plan → explore → approve → parallel
+executors with a forwarded approval → apply → review panel → /undo), recorded per the S6.5
+validation discipline — the teams layer is dense with mock-proven behavior that deserves one
+real-model proof before anything is built on top. Then begin the **documents/PDF workflow
+pack** on the now-complete kernel: structured intermediate representations; renderer processes
+through the managed exec substrate; domain verification beyond exit codes; no renderer logic
+inside `runTurn`, policy, or the REPL. If live usage surfaces teams-layer friction first,
+prefer paying the UX debts (mid-turn task management, cost roll-up) before the pack.
 
 ## 4. Patterns to Borrow (standing references)
 
@@ -92,15 +87,13 @@ Google Workspace CLI: typed operations over shell composition for future externa
 
 ## 6. Readiness Gates
 
-**Before broad multi-agent work** — now satisfied by V0.6: task permission
-inheritance/narrowing (read-only registry + auto-deny + rules floor, structurally), parent/child
-evidence lineage (callId + childSessionId join, lineage-stamped child logs), and per-subagent
-budget enforcement (steps/tokens/wall-clock, cause-tracked). Still needed: collision-free
-concurrent workspaces (worktrees — the S6 GitClient is instance-scoped for this; trust
-inheritance for worktree paths is the open decision), parallel-task UX shapes, and merge review
-for mutating children (the attributable diff/commit machinery is the substrate). Satisfied
-earlier: process cancellation/reaping (V0.3); an enforced boundary on Windows (V0.4 —
-writes/lifecycle only); wire-history budgeting + reviewable-integration primitives (V0.5).
+**Before broad multi-agent work** — satisfied through V0.7: permission inheritance/narrowing,
+evidence lineage, and budget enforcement (V0.6); collision-free concurrent workspaces
+(structurally-fresh ids + disposable worktrees), parallel-task UX shapes (group chrome,
+childSessionId joins), and merge review for mutating children (capture → drift-refusing apply
+over the attributable diff/commit substrate) — all V0.7. Still deliberately absent before any
+"full teams" step: inter-agent messaging, task resume, a structural review gate, and one live
+recorded proof of the whole loop.
 
 **Before the first workflow pack** — still needed: capability/dependency declarations; artifact
 identity and metadata in evidence; structured validator results; targeted-revision flow.
@@ -108,6 +101,19 @@ Now satisfied by V0.3: managed subprocess execution with clear cleanup and evide
 
 ## 7. Recently Completed (outcome notes)
 
+- **Session 8 (2026-07-22) — V0.7 coordinated parallelism + minimal agent teams: COMPLETE.**
+  Explicit two-table role contracts (explorer/planner/reviewer/executor) over a batched
+  fail-closed policy branch; parallel task groups inside the delegate tool (runTurn untouched);
+  plan mode (persistent sha-approved plan documents behind the new planDoc policy branch,
+  standing context-not-authority injection, @plan + /plan, executor gate); worktree-isolated
+  executors (group base checkpoint → disposable tmp worktrees with path-guarded sweep →
+  bounded binary-safe capture → drift-refusing snapshot-backed apply) with approval forwarding
+  (serialized signal-linked queue over the session approver, per-task deny-stop =
+  'user-stopped'); concurrency foundations (structural fresh-log refusal, 32-bit ids, atomic
+  blobs, randomized git temp names); bounded review-stage prompt rule. 498 passed / 1 skipped
+  (+48); mock-driven e2e only — the live proof is Session 9's first act. Full detail:
+  `ROADMAP.md` Session 8; contracts: `ARCHITECTURE.md` "Tasks, roles, and parallel groups",
+  "Executor isolation and integration", and "Plan mode".
 - **Session 7 (2026-07-20/21) — V0.6 main-agent control layer: COMPLETE.** Three-document
   project memory (AGENT.md constitution every session; harness-generated JOURNAL.md/CODEBASE.md
   at the state root — grounded evidence sections, provenance stamps, rolling caps, verbatim
