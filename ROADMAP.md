@@ -5,6 +5,149 @@ compressed under **Earlier Milestones** (per the rolling-docs policy in `CLAUDE.
 
 ---
 
+## Session 9 (2026-07-22/23) — pre-expansion consolidation, hardening, and the live V0.7 proof
+
+### Objective
+
+Prepare the kernel for the workflow-pack phase: audit the repository against the recorded
+open issues, fix the verified session-sized gaps that matter before expansion, produce the
+missing LIVE-API proof of the complete V0.7 loop, and reconcile the docs — without starting
+the pack or any speculative abstraction.
+
+### Audit provenance
+
+3 bounded Explore lenses (recorded-issue verification against code; adversarial
+concurrency/recovery/policy audit; hygiene + docs-drift + live-run recon) + 1 Plan-agent
+adversarial critique of the fix design, every load-bearing claim hand-verified (CLAUDE.md
+review discipline — 4 agents total). The audit CONFIRMED two real V0.7 defects (below),
+verified most of the teams layer SOUND (forwarder signal-links, expectFresh, capture
+correctness, apply idempotency, role tables, budgets), and found two recorded items already
+CLOSED (the S6.5 auto-run command-shape hint ships at system-prompt.ts:30; the executor
+gitignored-files gap is disclosed in the executor prompt + report footer). The critique
+caught three design flaws before code: a naive registry lock would break the in-process
+serialization that Promise.all fan-out relies on (and a same-pid stale-reclaim would let
+group members steal each other's lock); base-ref deletion after capture would remove a
+user-visible recovery point (moved to session end); approvalContext needed a render
+contract (folded into `detail` to inherit sanitize + cap).
+
+### What was implemented (commits `4e630ef`, `0255f8b`, `a8df0a8`, `7ba0fb8`, `0e8d376`, + docs)
+
+1. **`fix(worktrees)` concurrent-session worktree safety [audit HIGH]** — the startup sweep
+   removed ANY registered existing dir with no ownership/liveness check (two parent sessions
+   in one project are supported; session B's sweep would destroy session A's LIVE executor
+   worktree), and registry mutations were unlocked cross-process RMW (lost entries = never-
+   swept orphans). Now: entries are owner-stamped (`ownerSessionId` + `pid`); every mutation
+   runs under an in-process async mutex PLUS a token-based `O_EXCL` lock file (a live
+   same-pid holder is NEVER reclaimed — group members share the pid; staleness = dead pid or
+   over-age only; stale break = delete-then-retry-create, one winner); the lock is held only
+   at registry read/write edges — never across git removals — and the sweep's save is a
+   MERGE (re-read, drop only what it disposed of). The sweep skips live-pid entries, with a
+   2h age hatch (executor wall clock is 12 min, so no live task's worktree is hours old —
+   frees pid-recycled orphans). Legacy entries stay sweepable; the path guard is unchanged.
+2. **`fix(plan,runtime,tools)` plan consent at the executor spawn ask [audit MED-HIGH]** —
+   ARCHITECTURE documented the per-spawn ask as the enforcement point "which displays plan
+   status", but `describeCall` showed only roles+tasks: a model can rewrite an approved plan
+   (status is preserved by design) and the human approving the spawn could not see it. Now:
+   `planApprovalSha(events)` is the ONE approval-state derivation (shared with injection);
+   `ExecutorDeps.planContext()` returns {status, currentSha, approvedSha, diverged}; a new
+   display-only `Tool.approvalContext?(input)` seam folds lines into the request's `detail`
+   (inheriting sanitizeLine + the 12-line cap; a throw never blocks the ask; POLICY
+   UNTOUCHED); the delegate tool renders APPROVED+matching / APPROVED-but-DIVERGED (both
+   shas) / none / DRAFT / SUPERSEDED / approved-but-no-recorded-approval. The gate still
+   blocks only draft/unknown (S8's decision: surface divergence, don't block).
+3. **`fix(git,tools,cli)` task-base checkpoint ref hygiene [audit LOW-MED]** — one hidden
+   ref per executor group accumulated forever. Now pruned at SESSION END (not after capture:
+   the ref is a legitimate whole-workspace recovery point until quit; integration never
+   needs it — apply reads blobs, asserted by test), announced in chrome and recorded as the
+   additive `git.checkpoint.pruned` provenance event; `splice(0)` makes double-pruning
+   impossible; a crash leaks refs to manual `agent checkpoint prune` (unchanged).
+4. **`fix(exec,repl,cli,tools,report)` robustness batch [audit LOW]** — guarded
+   `spec.onSpawn` (an evidence-append throw inside the 'spawn' listener was an unhandled
+   crash); stateful StringDecoder live-preview decode (split runes rendered ��); one-shot
+   approval prompts take the turn-abort signal (Ctrl+C → deny-stop instead of a hung
+   readline); capture-cap `omittedCount` now travels into the changes registry (and its
+   event-rebuild) and is re-stated at apply; cost roll-up — the report's Delegated-tasks
+   section and `/tasks` print a labeled parent+children combined token line (session totals
+   stay parent-only); dead `toolFingerprint` removed; three stale docblocks fixed.
+5. **`fix(runtime,policy)` command grants — the live-E2E finding** — see below.
+
+### The live-API E2E (the session centerpiece)
+
+One scripted expect-style run (driver + pattern table + lockstep rule preserved in
+`C:\Users\A\Desktop\agent-cli-s9-live\VALIDATION.md`; artifacts: transcript, decisions log,
+all 5 session reports, plan document) against real claude-opus-4-8 in a fresh git workspace:
+`@plan` → `update_plan` → `/plan approve` (sha-bound) → ONE delegate call → TWO parallel
+worktree executors (group wall 17.7s) each running a real `node` assert-suite in its
+worktree → both verifications FORWARDED (task-identity header + worktree/unsandboxed
+honesty text) → capture (same base oid) → `apply_task_changes` ×2 through the snapshot
+path → `/undo` → honest recovery → a 16-assertion parent-written check, real exit 0 → a
+2-lens reviewer panel whose `run_command` attempts were all AUTO-DENIED (read-only contract
+held live) with the parent re-running the load-bearing probe ITSELF → `/report` + `/diff`
+→ `/quit` → task-base ref pruned live (`refs/agent-cli/` EMPTY after quit) → memory
+narrative + journal + codebase written. 42 uncached input tokens (caching intact under the
+teams layer); every child lineage-labeled; AGENT.md steering held (5/5 marker lines);
+the Session 9 consent fix observed live (`plan: APPROVED (sha e91fc968…, matches the
+user-approved bytes)` inside the spawn ask). Sovereignty behavior observed unprompted: told
+(wrongly) that applied files were gone, the model checked the workspace, reported them
+present, and proceeded from observable state.
+
+**Live finding → fix `0e8d376`:** a forwarded command labeled `external` displayed
+`[s] allow for the rest of this session` — a silent no-op (grants refuse command tools),
+plus a latent enforcement hole: `applyGrant` upgrades any matching ask, so a session grant
+on any FUTURE non-`run_command` command tool would have become standing shell permission
+keyed on a text label. Both sides now key on the command FACT: the runtime stores a grant
+only when `tool.command` is undefined (name check kept as defense in depth) and the prompt
+hides [s] for command asks; forwarded asks always carry the THIS-TASK deny-stop wording and
+a forwarded [s] reads "for the rest of THIS TASK". Pinned by the full options-line matrix +
+an e2e proving a custom `external`-labeled command tool re-asks after a session-scope allow.
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite 498→**515 passed / 1 skipped
+across 44 files (+17)**: lock protocol (same-pid never stolen, dead-pid/over-age/corrupt
+breaks, fan-out atomicity, merge-on-save under concurrent registration), live/dead/aged
+sweep discrimination against real git worktrees, all four consent-display cases on the
+captured ApprovalRequest, throwing-approvalContext containment, session-end ref prune with
+provenance + apply-after-prune, onSpawn-throw containment, split-rune preview decode,
+omittedCount at apply, combined roll-up rendering, the options-line matrix, and the
+command-grant e2e pin. Plus the recorded live run above (driver exit 0, 11/11 steps,
+8 approvals all answered post-display).
+
+### Decisions (and why)
+
+- **The registry lock never copies the event-log's same-pid reclaim** — group members share
+  one pid, so "same pid ⇒ stale" is exactly wrong there; staleness is dead-pid or over-age,
+  and the age rule also frees a lock whose dead holder's pid was recycled onto US.
+- **Sweep liveness errs toward keeping** (a recycled pid delays a sweep, never destroys
+  live work), bounded by the age hatch grounded in the harness-fixed executor budget.
+- **Base refs die at session end, not capture** — they are user-visible recovery points
+  until quit; and their deletion is EVIDENCE (`git.checkpoint.pruned`), never silent.
+- **Display mirrors enforcement for grants**: what the prompt offers must be exactly what
+  the runtime would store; both now derive from the command FACT, not the tool name or the
+  label.
+- **The live driver never pre-supplies approval answers** — every prompt is answered after
+  display (queue semantics on pipes exist for drivers, but consent evidence should show the
+  prompt preceding the answer).
+
+### Open issues / boundaries (deliberate, documented)
+
+- The apply-as-one-undo-unit path is still mock-proven only: in the live run the model had
+  already written the check script (per AGENT.md), so `/undo` correctly reverted that write
+  instead of the apply (last-mutation semantics working as designed).
+- Command labels stay noisy (the literal word "format" in a filename labeled a command
+  `destructive`; `-e` labels node ESM one-liners `external`) — labels only inform the human
+  and never grant; recorded as a known cosmetic with the CLIXML stderr noise.
+- The stale-forwarded-prompt wart stands as documented: the discard is LOUD but the typed
+  line is still consumed (io redesign, deferred pool).
+
+### Recommended next step
+
+Session 10 per BLUEPRINT: begin the documents/PDF workflow pack on the now live-proven
+kernel — structured intermediate representation, renderer processes through `runManaged`,
+domain verification beyond exit codes, no renderer logic inside runTurn/policy/REPL.
+
+---
+
 ## Session 8 (2026-07-22) — V0.7: coordinated parallelism + the minimal agent-teams layer
 
 ### Objective
@@ -163,150 +306,32 @@ cancel UI, cross-log cost roll-up) if live usage surfaces friction first.
 
 ---
 
-## Session 7 (2026-07-20/21) — V0.6: main-agent control layer — project memory + subagent tasks
+## Earlier Milestones (Sessions 1–7 — compressed per the rolling-docs policy)
 
-### Objective
+### Session 7 (2026-07-20/21) — V0.6: main-agent control layer — memory + subagent tasks
 
-Evolve the single-agent loop into an explicit main-agent control layer (the main agent keeps
-user interaction, authority, coordination, integration, and final claims) by adding two
-subsystems beneath it: a built-in three-document project memory (user-owned `AGENT.md` loaded
-every session; harness-generated rolling `JOURNAL.md` + architecture `CODEBASE.md`,
-auto-updated after productive sessions, auto-loaded at start, context-not-authority) and the
-first dependable task/subagent primitives (one read-only `explorer` role with explicit
-contract: isolated context, inherited-or-narrower authority, fixed budget, cancellation,
-attributable parent↔child evidence lineage) — without a second execution loop, a policy side
-door, or broad multi-agent scope (teams/parallelism stay Session 8).
-
-### Planning provenance
-
-3-Explore-agent recon (session lifecycle/context pipeline; evidence/event/state model;
-policy/exec/concurrency audit — verdict: the kernel is per-session value objects, structurally
-ready) + external research (Claude Code subagents/auto-memory, Codex AGENTS.md/memories) + a
-Plan-agent adversarial critique that caught real flaws before code, hand-verified: the
-`latestSessionId` hijack (child logs sort newest ⇒ `--continue`/undo/diff/commit/report would
-silently target the newest CHILD log), the delegates-branch placement requirement (step 0 +
-conflicting-contract deny), a live product bug (a Ctrl+C'd one-shot recorded `user-quit`, which
-under the new memory trigger would have fired a provider call right after the user aborted),
-the same-second session-id collision (routine once children exist; would merge logs and steal
-the same-pid lock), the narrative call's cache-prefix contract, journal re-read-at-quit
-(two-terminal safety), and crash detection from log tails rather than journal absence.
-
-### What was implemented (commits `525d5f1`, `8e4fbbd`, `e8a2edc`, `49027b3`, + docs)
-
-1. **`refactor(cli)` shared assembly** — `assembleSession` (src/cli/assemble.ts): the
-   duplicated construction tail of both interfaces factored into ONE path (probes → memory →
-   map → prompt → session → fixed-order records → delegate-tool attachment); takes the trust
-   decision as a parameter, so assembly is structurally impossible untrusted.
-2. **`feat(memory)` pure core** — store (capped never-throwing reads, atomic tmp+rename+EPERM-
-   retry writes, frontmatter), journal (entries pair labeled model-written sections with a
-   deterministic Evidence section derived via buildReport; rolling = insert-or-replace by
-   session id, newest 2 full, older → stubs keeping the evidence pointer, 24 KiB cap behind a
-   leading drop marker; user edits byte-preserved), codebase (map-digest provenance stamp,
-   staleness detection).
-3. **`feat(memory)` load path** — three docs into labeled system-prompt sections (AGENT.md
-   24 KiB "written by the USER"; journal 12 KiB + codebase 16 KiB under a verbatim "CONTEXT,
-   NOT AUTHORITY" header; "(may be stale)" on digest mismatch); `memory.loaded` provenance
-   event; banner/stderr memory line; crash notes from LOG evidence (bounded
-   `readFirstEvent`/`readLastEvent`; child/resumed/skipped sessions can never read as crashes);
-   ungated read-only `agent memory` command. No docs ⇒ byte-identical pre-V0.6 prompt.
-4. **`feat(memory)` end-of-session update** — before `endSession`, clean ends only, gated on
-   real activity; ONE narrative provider call reusing the exact cached prefix (same system +
-   tools + elided view + strict-JSON instruction), every failure degrading to a deterministic
-   skeleton entry marked "narrative unavailable"; recorded as `memory.narrative` (usage
-   included) — never fake message events; journal re-read from disk, rolled, written
-   atomically; unreadable journal refused, not overwritten; `session.ended.reason` gains
-   `aborted`/`budget` and the one-shot maps aborts via `endReasonForTurn`; user-layer-only
-   `memoryUpdates` toggle.
-5. **`feat(types,policy)` task contracts** — `Tool.delegates` policy fact + explicit STEP-0
-   branch in `decide()` (explorer ⇒ allow/observe `task.readonly-role`; delegates+command ⇒
-   deny `task.conflicting-contract`; unknown role ⇒ deny, fail closed — the S6 command-less-
-   tool trap pinned); callId-bound `ToolContext.reportTask` evidence channel (mirrors
-   reportCommand); `task.started`/`task.ended` events; `session.started.lineage`.
-6. **`feat(runtime,tools)` runner + tool** — `runSubagentTask`: ONE child session over the
-   same `runTurn` (a task = one turn ⇒ no new cancel concept), read-only registry (no write
-   tools, no delegate tool ⇒ depth 1), autoDenyApprover, parent's probed-and-shared sandbox
-   instance + rules, fresh grants, own log under a guaranteed-fresh id (`startSession` now
-   refuses existing log files), harness-fixed budget (15 steps / 5 min / 30k out-tokens /
-   8 tasks/session) with cause-tracked cancellation (parent-abort vs timeout vs token-cap ⇒
-   distinct statuses + child end reasons); `delegate_task` per-session factory returning the
-   delimited child report labeled "narration, not verified evidence"; explorer system prompt
-   (AGENT.md included, memory docs not); `latestSessionId` child-skip.
-7. **`feat(ux,report)` surfaces** — `/tasks`; `agent sessions` child labels; report "Delegated
-   tasks" section + usage-separation footer; `reconstruct` answers a crash-orphaned delegate
-   call with the surviving child-log pointer; `[task]` progress chrome in both interfaces;
-   parent-prompt Delegation rule (reports are narration; the main agent owns final claims).
-
-### Verification evidence
-
-- **Gate:** `npm run typecheck` + `npm run build` clean per commit; `npm test` **450 passed /
-  1 skipped across 40 files** (was 403+1; **+47**), covering: journal roll/caps/user-edit
-  byte-preservation goldens; atomic-write/corrupt-tolerance; injection sections + staleness +
-  crash-note discrimination (incl. torn-tail and lineage fixtures); update-flow happy path /
-  script-exhaustion fallback / gate skips / resume-replace / cache-prefix spy (byte-identical
-  prior conversation + same system/tools) / unreadable-journal refusal; delegation policy
-  branch (wide-schema stubs pin the engine, not the tool schema; existing decide() table
-  unchanged); full subagent E2E with separately scripted parent+child (event order + callId
-  join + resultSha256, lineage, child-cannot-write/escalate, budget matrix
-  steps/tokens/timeout/parent-abort, task cap spawns nothing, TOOLS purity, latestSessionId
-  skip, aborted-parent completeness); report/reconstruct task surfaces.
-- **Live API E2E** (real claude-opus-4-8 via proxy; temp TinyCalc workspace with `AGENT.md`):
-  Session 1 — banner `memory: AGENT.md 180b`; `delegate_task` auto-ran (`task.readonly-role`)
-  with live `[task]` progress lines; the child explored in 1 step (4 in / 962 out tok); the
-  parent model then **re-read the files itself to verify the subagent's claims before
-  summarizing** (the delegation-rule behavior, unprompted) and its summary ended with the exact
-  marker line AGENT.md demanded; `/tasks` rendered the row; `/quit` → "updating project
-  memory…" → JOURNAL.md + CODEBASE.md written with provenance (parent session: 6 uncached
-  input tokens — caching intact). Session 2 — banner
-  `memory: AGENT.md 180b · journal 1.6k (1 session) · codebase 1.3k (fresh)`; asked "what
-  happened last session?" with no file reads: answered correctly from the journal/codebase
-  (session id, the delegation, formatSum details), volunteered the context-not-authority
-  caveat, honored AGENT.md again; being chat-only it correctly SKIPPED the journal update.
-  CLI: `agent sessions` labels the child `[task:explorer of <parent>]`; parent report shows
-  the Delegated-tasks section; `agent report <childId>` is self-contained (sandbox header,
-  usage, task).
-
-### Decisions (and why)
-
-- **Memory home = state root** (`<projectDir>/memory/`), names `JOURNAL.md`/`CODEBASE.md`
-  (user-confirmed): zero git pollution, harness write-ownership, still plain user-editable
-  markdown (`agent memory` shows paths); distinct names avoid dogfooding collisions with this
-  repo's hand-written ROADMAP/ARCHITECTURE.
-- **Memory is context, never authority — structurally:** sovereignty wording injected verbatim;
-  evidence sections derived from events (never model recollection); the narrative call recorded
-  as its own event type because faking message events would replay into resumes; crash
-  detection from log evidence so absence-of-memory never accuses a session.
-- **A delegated task is ONE turn** of the same runTurn — no second loop, and turn-level
-  cancellation IS task cancellation; parallelism deliberately deferred until worktrees.
-- **Delegation is a first-class policy fact** with a fail-closed step-0 branch; budgets are
-  harness-fixed, never model-controlled; child narration is labeled and the parent prompt
-  instructs verification (observed working live).
-- **Aborted ≠ user-quit** (`endReasonForTurn`): post-session work must never fire after Ctrl+C.
-
-### Open issues / v1 boundaries (deliberate, documented)
-
-- One task at a time; cancelling a task = Ctrl+C on the whole turn; task cap is per process
-  run; `--script` mock shares one script between parent and child (tests inject a second
-  provider). Parallel tasks, mutating/approval-forwarding roles, worktree isolation (+ its
-  trust-inheritance decision), task resume, child memory, and deeper child-report scanning are
-  Session 8+ material.
-- Memory docs are lock-less: re-read-at-quit + atomic rename leaves a seconds-wide
-  last-writer-wins window (two simultaneous quits); the log remains the evidence.
-- The journal inject cap slices the newest-first file top; `sessionCount` counts the loaded
-  window only. Assistant/user-text compaction and journal topic files remain future work.
-- Child usage is deliberately excluded from parent totals (stated in report footer); a
-  cross-log cost roll-up view does not exist yet.
-
-### Recommended next step
-
-Session 8 per BLUEPRINT: coordinated parallelism on these primitives — worktree-isolated
-children (GitClient/checkpoint are already instance-scoped; decide trust inheritance for
-worktree paths; add the sessionId suffix to checkpoint temp-index names), bounded parallel
-read-only tasks, then the first mutating role behind approval forwarding. Fold in the
-auto-run system-prompt hint and the cached sandbox host when touching those areas.
-
----
-
-## Earlier Milestones (Sessions 1–6.5 — compressed per the rolling-docs policy)
+The three-document project memory (user-owned `AGENT.md` injected every session; harness-
+generated rolling `JOURNAL.md` + `CODEBASE.md` at the state root — model-written sections
+always paired with a deterministic event-derived Evidence section, provenance stamps,
+rolling caps, the verbatim "CONTEXT, NOT AUTHORITY" framing; ONE cache-prefix-reusing
+narrative call at clean session end, every failure degrading to a deterministic skeleton,
+recorded as `memory.narrative` — never fake message events, which would replay into
+resumes) + the first task/subagent primitives (read-only `explorer`: ONE child session over
+the SAME `runTurn` — a task = one turn, so turn cancellation IS task cancellation; the
+fail-closed step-0 `delegates` policy branch; harness-fixed budgets with cause-tracked
+cancellation; callId+childSessionId evidence lineage; autoDeny approver;
+`latestSessionId` child-skip so `--continue`/undo/diff can never silently target a child
+log) + `assembleSession` (the ONE construction path both interfaces consume; trust is a
+parameter, so assembly is structurally impossible untrusted). 450+1 tests (+47). Live
+two-session E2E: delegation with unprompted parent re-verification of child narration,
+AGENT.md steering, cross-session journal recall with the context-not-authority caveat
+volunteered, 6 uncached input tokens. Lasting decisions: memory is context-not-authority
+STRUCTURALLY (evidence from events, crash notes from log tails — absence of memory never
+accuses a session); `aborted ≠ user-quit` (`endReasonForTurn` — post-session work must
+never fire after Ctrl+C); delegation budgets are harness-fixed, never model-controlled.
+Still-relevant: memory docs are lock-less (a seconds-wide last-writer-wins window at
+simultaneous quits, documented; the log stays the evidence); the journal inject cap slices
+the newest-first top.
 
 ### Session 6.5 (2026-07-19) — V0.5 capability demo + production-style validation
 
@@ -471,29 +496,34 @@ sandbox" limitation is closed on Windows in S5 — writes only; reads/network re
 
 ## Deferred pool (accumulated, still open)
 
-Adaptive thinking with block preservation; per-action / `--to` / `--steps` undo; tree-sitter
+Adaptive thinking with block preservation (`pause_turn` is mapped but the loop would end the
+turn — latent until thinking ships); per-action / `--to` / `--steps` undo; tree-sitter
 ranked repo map with selective retrieval (S6 shipped the git-backed file LIST only); network/web
 tools; MCP and workflow packs; SQLite index over the JSONL; conversation rewind; session
 pruning/sanitized export; prompt-history persistence + line-editing niceties; background/
-long-running process sessions; PTY support; output spill-to-file for huge command output.
-**Task/subagent follow-ups (post-S8; S8 shipped parallel groups, worktree-isolated executors
-with approval forwarding + reviewed integration, and the planner/reviewer roles):** a mid-turn
-per-task management UI (list/cancel while running — today: forwarded deny-stop + harness
-causes); task resume/continue (SendMessage-style); deeper scanning of child reports for
-instruction-shaped content (v1 ships delimiters + provenance labels); cross-log cost roll-up
-view; the stale-displayed-forwarded-prompt line-consumption wart (needs an io redesign);
-per-child sandbox scratch TEMP isolation; pruning/GC policy for accumulated task-base
-checkpoint refs; a structural (not prompt-shaped) review gate. **Memory follow-ups (post-S7):** journal topic files / retrieval beyond the
-newest-first inject window; a memory relocation/config knob; model-generated compaction of
-assistant/user text (deterministic tool-output elision shipped; loud warning when even full
-elision exceeds the target). **Git follow-ups (post-S6):** patch/multi-edit editing; model-
-generated commit messages; attribution of approved run_command file effects (structurally
-under-claimed today); push/PR flows; submodule + multi-repo workspaces. **Sandbox follow-ups
-(post-S5):** network-egress control and a read/confidentiality boundary (the two enforced gaps
-that most matter); a cached/compiled sandbox host to cut per-command Add-Type latency (~1.2 s;
-probe ~4–11 s on this machine); macOS/Linux enforcement backends; containment of
+long-running process sessions; PTY support; output spill-to-file for huge command output;
+`--max-turns` flag vs internal `maxSteps` naming alignment; plan-file pruning (one doc per
+session accumulates in the state dir).
+**Task/subagent follow-ups (post-S8/S9):** a mid-turn per-task management UI (list/cancel
+while running — today: forwarded deny-stop + harness causes); task resume/continue
+(SendMessage-style); deeper scanning of child reports for instruction-shaped content (v1
+ships delimiters + provenance labels); the stale-displayed-forwarded-prompt line-consumption
+wart (the discard is LOUD since S8, but the typed line is still consumed — needs an io
+redesign); per-child sandbox scratch TEMP isolation; a per-child `--script` seam for the
+mock provider (tests use the providerForTask seam; production children share one script);
+a structural (not prompt-shaped) review gate. **Memory follow-ups (post-S7):** journal
+topic files / retrieval beyond the newest-first inject window; a memory relocation/config
+knob; a cross-process memory-doc lock (today: a seconds-wide last-writer-wins window at
+simultaneous quits); model-generated compaction of assistant/user text (deterministic
+tool-output elision shipped; loud warning when even full elision exceeds the target).
+**Git follow-ups (post-S6):** patch/multi-edit editing; model-generated commit messages;
+attribution of approved run_command file effects (structurally under-claimed today);
+push/PR flows; submodule + multi-repo workspaces. **Sandbox follow-ups (post-S5):**
+network-egress control and a read/confidentiality boundary (the two enforced gaps that most
+matter); a cached/compiled sandbox host to cut per-command Add-Type latency (~1.2 s; probe
+~4–11 s on this machine); macOS/Linux enforcement backends; containment of
 service-reparented work (schtasks/sc/wmic/BITS) that escapes the Job Object.
-**Command-review follow-up (S6.5 finding):** a system-prompt hint describing the auto-runnable
-command shape (single unchained read-only command, no extra global flags) — the model's natural
-chained/flagged style meant nearly every command asked during the demo; the hint raises the
-auto-run hit rate without weakening the positive-proof gate.
+**Cosmetics (recorded, informational-only):** command-label noise — word-boundary matches
+can mislabel (the literal "format" in `format.js` → destructive; `-e` ESM one-liners →
+external); labels never grant and never gate, they only inform the human. PowerShell CLIXML
+progress-stream noise on some chained commands' stderr.

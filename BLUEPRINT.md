@@ -13,50 +13,54 @@ The central near-term decision stands:
 > Deepen the execution kernel and its enforced safety boundaries before expanding horizontally
 > into document, PDF, image, or video workflow packs.
 
-## 2. Current Starting Point (post-Session 8, V0.7)
+## 2. Current Starting Point (post-Session 9, V0.7 consolidated + live-proven)
 
-The kernel is now a **coordinated main-agent control layer**: one `runTurn`; a central policy
-choke point with fail-closed delegation (batched, role-table-driven) and plan-document
-branches; recorded consent + narrowing-only config; append-only evidence with crash repair and
-deterministic reports; the managed exec substrate; the enforced Windows Low-IL sandbox with
-positive-proof command review; GitOps; prompt caching + deterministic elision; the
-three-document project memory; and — new in V0.7 — the **minimal agent-teams layer**: explicit
-two-table role contracts (explorer/planner/reviewer read-only, executor mutating-worktree);
-parallel task groups (1–3 per delegate call, group-atomic caps, cumulative child-token lid);
-**plan mode** (persistent user-editable plan documents, sha-bound user approval as consent
-evidence, standing context-not-authority injection, an executor gate on unapproved plans);
-**worktree-isolated executors** (one base checkpoint per group, disposable tmp-dir worktrees
-with a path-guarded crash sweep, bounded binary-safe change capture that outlives the
-worktree, drift-refusing snapshot-backed integration, approval forwarding through a
-signal-linked serialized queue with per-task deny-stop); and a prompt-encoded bounded review
-stage.
+The kernel is a **coordinated main-agent control layer, proven live end-to-end**: one
+`runTurn`; a central policy choke point with fail-closed delegation (batched,
+role-table-driven) and plan-document branches; recorded consent + narrowing-only config;
+append-only evidence with crash repair and deterministic reports; the managed exec substrate;
+the enforced Windows Low-IL sandbox with positive-proof command review; GitOps; prompt
+caching + deterministic elision; the three-document project memory; and the **minimal
+agent-teams layer** (V0.7, hardened in Session 9): explicit two-table role contracts;
+parallel task groups; plan mode with sha-bound approval AND the plan state displayed at the
+executor spawn ask; worktree-isolated executors safe under CONCURRENT sessions
+(owner-stamped, lock-protected registry; live-owner-skipping sweep), with approval
+forwarding, bounded capture, drift-refusing integration, and session-end base-ref hygiene;
+grants that can never store shell authority; a labeled cost roll-up; and a prompt-encoded
+bounded review stage. The whole loop (plan → approve → 2 parallel executors → forwarded
+approvals → apply → review panel → undo → memory) has ONE recorded live-API proof
+(Session 9; artifacts outside the repo).
 
 The remaining structural gaps, in rough order of load-bearing-ness:
 
-- **the V0.7 loop is unproven live** — every e2e is mock-driven; no recorded live run of
-  plan → approve → parallel executors → forwarded approval → apply → review exists yet;
 - the enforced boundary is **write + lifecycle only, and Windows only** — reads and network are
   not confined; approved commands remain full-privilege by design;
 - approved `run_command` file effects are **not attributable** (session-scope commits and /diff
   under-claim them; stated in every surface);
-- task management UX debts: no mid-turn task list/cancel, no task resume, no cross-log cost
-  roll-up; the stale-forwarded-prompt line-consumption wart;
+- task management UX debts: no mid-turn task list/cancel, no task resume; the
+  stale-forwarded-prompt line-consumption wart;
 - per-sandboxed-command latency (~1.2 s Add-Type host; probe ~4–11 s on this machine);
 - no background/long-running process sessions; no PTY;
-- context work covers tool outputs only; the repo map is a file list, not ranked retrieval.
+- context work covers tool outputs only; the repo map is a file list, not ranked retrieval;
+- no workflow packs yet — the entire artifact-quality thesis (PROJECT.md §9) is untested.
 
 ## 3. Indicative Session Sequence
 
-### Session 9 (next) — Live Validation, then the First Workflow Pack
+### Session 10 (next) — the First Workflow Pack (documents/PDF)
 
-First act: a LIVE-API E2E of the full V0.7 loop (@plan → explore → approve → parallel
-executors with a forwarded approval → apply → review panel → /undo), recorded per the S6.5
-validation discipline — the teams layer is dense with mock-proven behavior that deserves one
-real-model proof before anything is built on top. Then begin the **documents/PDF workflow
-pack** on the now-complete kernel: structured intermediate representations; renderer processes
-through the managed exec substrate; domain verification beyond exit codes; no renderer logic
-inside `runTurn`, policy, or the REPL. If live usage surfaces teams-layer friction first,
-prefer paying the UX debts (mid-turn task management, cost roll-up) before the pack.
+Begin the **documents/PDF workflow pack** on the live-proven kernel — the first test of the
+"small kernel, broad workflows" thesis. Shape (per PROJECT.md §9): request → document model
+(structured intermediate representation) → deterministic render (DOCX/PDF via renderer
+processes through `runManaged` — typed termination, kill/drain, sandbox wrap for free) →
+domain verification beyond exit codes (pagination/heading/table checks, artifact metadata in
+evidence) → targeted revision. Constraints: NO renderer logic inside `runTurn`, policy, or
+the REPL; pack capabilities plug in at the assembly-time tool-attachment seam (like
+delegate/update_plan/apply); artifact identity + validator results become evidence events;
+dependency checks are honest refusals, not silent degradation. Readiness-gate items to
+resolve IN the session: capability/dependency declarations, artifact identity in evidence,
+structured validator results, the targeted-revision flow. If pack work surfaces teams-layer
+friction, pay only session-sized UX debts (mid-turn task management stays deferred unless it
+blocks).
 
 ## 4. Patterns to Borrow (standing references)
 
@@ -87,20 +91,37 @@ Google Workspace CLI: typed operations over shell composition for future externa
 
 ## 6. Readiness Gates
 
-**Before broad multi-agent work** — satisfied through V0.7: permission inheritance/narrowing,
-evidence lineage, and budget enforcement (V0.6); collision-free concurrent workspaces
-(structurally-fresh ids + disposable worktrees), parallel-task UX shapes (group chrome,
-childSessionId joins), and merge review for mutating children (capture → drift-refusing apply
-over the attributable diff/commit substrate) — all V0.7. Still deliberately absent before any
-"full teams" step: inter-agent messaging, task resume, a structural review gate, and one live
-recorded proof of the whole loop.
+**Before broad multi-agent work** — satisfied through V0.7 + Session 9: permission
+inheritance/narrowing, evidence lineage, budget enforcement (V0.6); collision-free concurrent
+workspaces — including CONCURRENT PARENT SESSIONS (S9: owner-stamped locked registry,
+live-owner-skipping sweep); parallel-task UX shapes; merge review for mutating children; the
+consent surface displaying plan state at the spawn ask (S9); and the live recorded proof of
+the whole loop (S9). Still deliberately absent before any "full teams" step: inter-agent
+messaging, task resume, a structural review gate.
 
-**Before the first workflow pack** — still needed: capability/dependency declarations; artifact
-identity and metadata in evidence; structured validator results; targeted-revision flow.
-Now satisfied by V0.3: managed subprocess execution with clear cleanup and evidence.
+**Before the first workflow pack** — still needed (now Session 10's in-scope items):
+capability/dependency declarations; artifact identity and metadata in evidence; structured
+validator results; targeted-revision flow. Satisfied already: managed subprocess execution
+with cleanup and evidence (V0.3); the assembly-time tool-attachment seam (V0.6/V0.7).
 
 ## 7. Recently Completed (outcome notes)
 
+- **Session 9 (2026-07-22/23) — pre-expansion consolidation + the live V0.7 proof: COMPLETE.**
+  Bounded audit (3 Explore lenses + 1 Plan critique, hand-verified) → five fix commits:
+  concurrent-session worktree safety (owner-stamped locked registry, live-owner-skipping
+  sweep — closed a real destroy-live-work race); plan-approval state displayed at the
+  executor spawn ask (the documented consent surface, now implemented); session-end
+  task-base ref pruning with `git.checkpoint.pruned` provenance; a robustness batch
+  (guarded onSpawn, stateful preview decode, one-shot Ctrl+C approval abort, omittedCount
+  at apply, labeled cost roll-up, stale docblocks); and the live-E2E finding — grants and
+  the [s] affordance now both key on the command FACT (a session grant can never become
+  standing shell permission won by a label). Suite 498→515+1 (+17). The FULL V0.7 loop ran
+  live (claude-opus-4-8: @plan → approve → 2 parallel worktree executors → forwarded asks →
+  apply ×2 → /undo → 16-assertion check exit 0 → 2-lens review with parent re-verification →
+  ref prune → memory write; 42 uncached input tokens; read-only contract held under attempt).
+  Two recorded items found already closed (auto-run hint; gitignored disclosure). Evidence:
+  `C:\Users\A\Desktop\agent-cli-s9-live\` (VALIDATION.md, transcript, decisions log, all 5
+  reports, plan doc). Full detail: `ROADMAP.md` Session 9.
 - **Session 8 (2026-07-22) — V0.7 coordinated parallelism + minimal agent teams: COMPLETE.**
   Explicit two-table role contracts (explorer/planner/reviewer/executor) over a batched
   fail-closed policy branch; parallel task groups inside the delegate tool (runTurn untouched);

@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
-How Agent CLI V0.7 is actually built. This describes the implemented system, not aspirations —
-see `ROADMAP.md` for what is deferred.
+How Agent CLI V0.7 (post-Session-9 consolidation) is actually built. This describes the
+implemented system, not aspirations — see `ROADMAP.md` for what is deferred.
 
 ## Shape
 
@@ -91,15 +91,18 @@ src/
     roles.ts               V0.7: the runtime role contracts (tool registry, prompt builder, budget,
                            approval mode per role) over the policy fact table in types.ts.
     worktrees.ts           V0.7: worktree home under the OS temp dir, crash registry, path-guarded
-                           startup sweep (never touches a dir it did not create).
+                           startup sweep (never touches a dir it did not create). V0.7.1: entries
+                           owner-stamped (session+pid); mutations under an in-process mutex + a
+                           token O_EXCL lock file; the sweep skips live owners (2h age hatch).
     task-changes.ts        V0.7: bounded executor change capture — porcelain enumerate vs the base,
                            binary-safe base bytes via read-tree + checkout-index staging, blobs.
     approval-forwarder.ts  V0.7: serialized child→parent approval queue wrapping the SESSION
                            approver; signal-linked entries; loud discard of stale answers.
     elision.ts             elideHistory — pure, monotone wire-history budget (see "Context budget").
     approvals.ts           auto-deny, dangerous, and interactive approvers (injectable io);
-                           formatApprovalPrompt hides [s] for non-grantable classes and renders
-                           forwarded-task headers (V0.7).
+                           formatApprovalPrompt hides [s] for non-grantable classes AND for all
+                           command asks (grants never store shell authority — V0.7.1), and
+                           renders forwarded-task headers + THIS-TASK deny-stop wording (V0.7).
     undo.ts                applyUndo (last / all) over the recorded mutations.
   trust/
     store.ts               trust.json + trust.log at the state root; hard error on corruption.
@@ -112,8 +115,8 @@ src/
     io.ts                  ONE persistent readline: prompts, approvals, SIGINT, mute, type-ahead.
     render.ts              EventLog.onAppend → live tool activity + per-turn summaries.
     format.ts              Glyph/color tables (ASCII fallback for legacy consoles), pure labels.
-    commands.ts            /help /status /undo /diff /commit /checkpoint /tasks /report /map /quit
-                           over the live log.
+    commands.ts            /help /status /undo /diff /commit /checkpoint /plan /tasks /report
+                           /map /quit over the live log.
   workspace/
     map.ts                 Bounded workspace map + digest: `git ls-files` in trusted repos (nested
                            gitignore correct), pure walker fallback (and always pre-trust).
@@ -144,7 +147,10 @@ load (the workspace file is untrusted bytes until trust passes) → per-project 
 then `assembleSession` (V0.6: the single factored construction path both interfaces consume):
 **sandbox select + probe** → **git probe** (`detectGitFacts`, post-trust — it executes git
 against the repo) → **orphaned-worktree sweep** (V0.7: registry-driven, path-guarded, never
-blocks a session) → workspace map (git-backed in a repo, walker otherwise) → **project-memory
+blocks a session; V0.7.1: skips entries whose owning pid is alive — a concurrent sibling
+session's live worktrees are never touched — with a 2h age hatch for recycled pids, and all
+registry access goes through the cross-process lock, skipping the sweep if contended) →
+workspace map (git-backed in a repo, walker otherwise) → **project-memory
 load** (post-trust by construction: the trust decision is a parameter of assembleSession) →
 system prompt → start/resume → post-start records in a fixed order (trust.verified,
 config.loaded, sandbox.status, git.context, workspace.mapped, memory.loaded) → per-session
@@ -251,7 +257,10 @@ The load-bearing types (`src/types.ts`):
 
 - `Tool<I>` declares `schema` (one zod source), `mutates(input, ctx)` (write paths, or `null` =
   undeclarable side effects), optional `readsPaths` and `command`, and `execute`. Policy reads
-  these facts; tools contain no policy logic.
+  these facts; tools contain no policy logic. Optional `approvalContext(input)` (V0.7.1) is
+  DISPLAY-ONLY: extra lines folded into the approval request's `detail` (inheriting the
+  prompt renderer's sanitize + line cap) inside try/catch — never consulted by policy, and a
+  throw never blocks the ask.
 - `ToolContext` optionally carries `signal` (turn cancellation — a long-running tool must observe
   it), `onOutput` (render-only live chunks), `reportCommand` (structured `CommandEvidence`; the
   runtime binds the callId), and `sandbox` (`ExecSandbox`). All optional: plain read tools ignore them.
@@ -411,6 +420,12 @@ The mutating role never touches the user's workspace. The chain is: base → wor
 - **Base = one hidden-ref checkpoint per GROUP**, created sequentially before fan-out (the
   existing checkpoint machinery, so the parent's CURRENT working tree — dirty state included —
   is the base; unborn repos work). Every group member starts from the same attributable oid.
+  The base REF lives only as long as the session (V0.7.1): it stays listed/restorable as a
+  whole-workspace recovery point until quit, then the clean end paths delete this session's
+  task-base refs (best-effort `update-ref -d`), announce it in chrome, and record the
+  additive `git.checkpoint.pruned` provenance event — integration never needs the ref (apply
+  reads captured blobs), the baseOid stays in `task.changes`, and a crash leaks the refs to
+  manual `agent checkpoint prune`.
 - **Worktree per task:** `git worktree add --detach` at the base oid, under
   `<os-tmp>/agent-cli-worktrees/<projectSlug>/` — placement DICTATED by `validatePath` (the
   state dir and any `.agent-cli` segment are write-denied, and the workspace must not contain
@@ -438,6 +453,20 @@ The mutating role never touches the user's workspace. The chain is: base → wor
   evidence. A registry under `projectDir` records every worktree at creation; the
   assembly-time sweep removes crash orphans and is PATH-GUARDED — entries outside this
   project's worktree home are dropped from the registry but never touched on disk.
+- **The registry is concurrency-safe (V0.7.1):** two parent sessions in one project are
+  supported, so entries are OWNER-STAMPED (`ownerSessionId` + `pid`) and the sweep skips any
+  entry whose pid is alive (conservative direction — a recycled pid delays a sweep, never
+  destroys live work), with a 2h age hatch grounded in the harness-fixed executor budget
+  (no live task's worktree can be hours old). Every registry mutation runs under an
+  in-process async mutex (register/unregister execute inside the group's Promise.all
+  fan-out) PLUS a token-based `O_EXCL` lock file for cross-process callers: a live same-pid
+  holder is NEVER reclaimed (group members share the pid — the event-log's same-pid rule
+  must not be copied here); staleness is dead-pid or over-age only; a stale break is
+  delete-then-retry-create so exactly one contender wins. The lock is held only at registry
+  read/write edges — never across git removals — and the sweep's final save is a MERGE
+  (re-read, drop only what it disposed of), so a sibling's concurrent registration always
+  survives. Lock contention: register fails the executor setup honestly; the sweep skips
+  that startup. Legacy entries (no pid) remain sweepable exactly as before.
 - **Integration (`apply_task_changes`, parent-only):** `mutates()` declares the concrete
   apply-ELIGIBLE workspace paths from the captured evidence (never null — the S6 observe-trap;
   conflicted files are not declared, so they are never snapshotted and never pollute
@@ -466,9 +495,14 @@ Plans are explicit temporary local state — one markdown document per session a
 - **Approval is consent evidence:** `/plan approve` records `plan.approved {planId, sha256}` —
   binding the EXACT approved bytes. Later divergence (model progress updates keep status
   `approved`; user edits too) is SURFACED on every injection and in the report, never hidden;
-  the enforcement point stays the per-spawn executor `ask`, which displays plan status. While
-  a draft/unknown plan exists, the delegate tool refuses executor groups. `/plan discard`
-  records `plan.discarded` and stops injection.
+  the enforcement point stays the per-spawn executor `ask`, which since V0.7.1 genuinely
+  DISPLAYS the plan-approval state at the consent moment: the delegate tool's
+  `approvalContext` renders "APPROVED (sha …, matches the user-approved bytes)" /
+  "APPROVED but DIVERGED after approval (approved …, current …)" / none / DRAFT /
+  SUPERSEDED / approved-with-no-recorded-approval (hand-edited frontmatter), derived from
+  `planApprovalSha(events)` — the ONE approval-state derivation shared with the injection
+  note. While a draft/unknown plan exists, the delegate tool refuses executor groups.
+  `/plan discard` records `plan.discarded` and stops injection.
 - **Injection is a standing per-turn harness note** (never the cached system prompt): full
   plan content only when its sha is NEW to the model (not last-injected, not one the model
   itself wrote — `plan.updated` events carry the shas), a one-line pointer otherwise; capped
@@ -490,8 +524,9 @@ live view of the persisted evidence (tool lines, approval outcomes, `(pid N)` on
 kill lines for killed commands, per-turn files/commands/steps/token summaries). Two — and only
 two — render-only incremental channels exist alongside the event view: `onText` (model deltas)
 and the V0.3 live command-output preview (`Session.onCommandOutput` → sanitized dim lines,
-100ms cadence, 8 KiB/command display cap); for both, the persisted truth remains the recorded
-events. Stream split: **stdout = model text + requested artifacts
+100ms cadence, 8 KiB/command display cap, stateful per-stream UTF-8 decode so a rune split
+across pipe chunks never renders as replacement chars); for both, the persisted truth remains
+the recorded events. Stream split: **stdout = model text + requested artifacts
 only; stderr = all chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs and
 echoes accepted input lines for readable transcripts). Slash commands operate on the session's
 own live log (`/undo` → `applyUndo` + `undo.applied` on the same open log; the model learns of
@@ -548,10 +583,14 @@ reviewer, so safety is *proven*, not pattern-matched — and the reviewer is a p
 the boundary (the sandbox is).
 
 `Grants` are in-memory, session-scoped, keyed `(tool, class)`, and store only grantable classes
-(`sensitive`/`external`) — never `run_command`, never `destructive`, never `reversible` (an
-executor spawn must ask every time). They are not persisted or restored on resume. The approval
-prompt hides `[s]` when the class is not grantable (offering a no-op option would misrepresent
-what pressing it does).
+(`sensitive`/`external`) — never `destructive`, never `reversible` (an executor spawn must ask
+every time), and NEVER any command-bearing tool (V0.7.1): a command's classification is a
+best-effort label over untrusted model text, so a session grant keyed on it would be standing
+shell permission won by a label — the runtime stores a grant only when `tool.command` is
+undefined (the `run_command` name check in `Grants.add` stays as defense in depth), and the
+prompt hides `[s]` for command asks to match. Grants are not persisted or restored on resume.
+The approval prompt hides `[s]` whenever no grant would actually be stored (offering a no-op
+option would misrepresent what pressing it does — observed live in the S9 E2E and fixed).
 
 ## Sandbox and enforced isolation (`sandbox/`)
 
@@ -668,7 +707,11 @@ additive `session.ended.reason` values `aborted` and `budget`. V0.7 adds `task.c
 (per-file integration outcomes), `worktree.created`/`worktree.removed` (lifecycle honesty,
 `ok:false` = sweep evidence), `plan.updated`/`plan.approved`/`plan.discarded` (plan lifecycle;
 approval binds the sha), the additive `TaskStatus` value `user-stopped`, and the additive
-`approval.resolved.source` value `task-aborted`. Bounded static readers
+`approval.resolved.source` value `task-aborted`. Session 9 (V0.7.1) adds
+`git.checkpoint.pruned {kind:'task-base', refs, failed}` — the session-end deletion of this
+session's task-base checkpoint refs (a silent ref delete would violate the evidence
+invariant) — and an additive `omittedCount` passthrough into the rebuilt changes registry.
+Bounded static readers
 `readFirstEvent`/`readLastEvent` (first/last committed line only, never throw) support the
 child-log skip and crash detection without full parses. Additive types/fields are
 lenient-reader-safe; bumping the version would lock old binaries out of new logs, so v stays 1.
@@ -721,7 +764,9 @@ restores" sections from the git provenance events. V0.6 adds "Delegated tasks (s
 (from `task.started`/`task.ended` pairs, joined by childSessionId since V0.7 groups share a
 callId; an orphan renders "STARTED but never completed") plus footer lines stating that child
 usage is NOT in the parent totals and that subagent reports are narration with the child's own
-log as the record. V0.7 adds "## Plan" (writes, the approval sha, post-approval divergence,
+log as the record; V0.7.1 adds one labeled "combined tokens (parent + children)" roll-up line
+to the section (and a matching children-total line in `/tasks`) — the session totals
+everywhere else remain parent-only, so the stated invariant is kept, not contradicted. V0.7 adds "## Plan" (writes, the approval sha, post-approval divergence,
 discard), "## Task changes and integration" (captures, applies, per-file refusals, and the
 honest "NOT applied" case), and an executor honesty footer (worktree visibility, the
 gitignored-files gap, forwarded approvals running unsandboxed when approved). The reviewable CONTENT lives in a separate
