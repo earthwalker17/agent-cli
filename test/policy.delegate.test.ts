@@ -15,19 +15,20 @@ import type { TaskEvidence, Tool, ToolContext } from '../src/types.js';
 
 /**
  * The delegation policy branch. Stub tools use WIDE schemas on purpose: the real delegate tool's
- * z.literal('explorer') would reject bad roles before the policy gate ever saw them — these tests
- * pin the ENGINE's fail-closed behavior independent of any tool's schema.
+ * z.enum of roles would reject bad roles before the policy gate ever saw them — these tests
+ * pin the ENGINE's fail-closed behavior independent of any tool's schema. V0.7: the fact names
+ * every role in a parallel GROUP; the strictest member governs and any unknown denies the batch.
  */
 
-const WIDE = z.object({ role: z.string() }).passthrough();
+const WIDE = z.object({ roles: z.array(z.string()) }).passthrough();
 
-function stubTool(overrides: Partial<Tool<{ role: string }>> = {}): Tool<{ role: string }> {
+function stubTool(overrides: Partial<Tool<{ roles: string[] }>> = {}): Tool<{ roles: string[] }> {
   return {
     name: 'stub_delegate',
     description: 'test stub',
-    schema: WIDE as unknown as Tool<{ role: string }>['schema'],
+    schema: WIDE as unknown as Tool<{ roles: string[] }>['schema'],
     mutates: () => null,
-    delegates: (i) => ({ role: i.role }),
+    delegates: (i) => ({ roles: i.roles }),
     execute: async () => ({ ok: true, output: '', durationMs: 0, truncated: false }),
     ...overrides,
   };
@@ -39,22 +40,53 @@ function ctx(): ToolContext {
 }
 
 describe('decide: delegation branch (step 0, fail closed)', () => {
-  it('explorer role → allow as observe under the explicit rule', () => {
-    const d = decide(stubTool(), { role: 'explorer' }, ctx(), new Grants());
-    expect(d).toMatchObject({ decision: 'allow', classification: 'observe', rule: 'task.readonly-role' });
-    expect(d.requiresSnapshot).toBe(false);
+  it('every read-only role → allow as observe under the explicit rule (alone and batched)', () => {
+    for (const roles of [['explorer'], ['planner'], ['reviewer'], ['explorer', 'planner', 'reviewer']]) {
+      const d = decide(stubTool(), { roles }, ctx(), new Grants());
+      expect(d, roles.join(',')).toMatchObject({ decision: 'allow', classification: 'observe', rule: 'task.readonly-role' });
+      expect(d.requiresSnapshot).toBe(false);
+    }
   });
 
-  it('any other role → deny (future roles must be added deliberately, never default open)', () => {
+  it('any unknown role → deny (future roles must be added deliberately, never default open)', () => {
     for (const role of ['verifier', 'builder', 'EXPLORER', 'explorer ', '']) {
-      const d = decide(stubTool(), { role }, ctx(), new Grants());
+      const d = decide(stubTool(), { roles: [role] }, ctx(), new Grants());
       expect(d, `role ${JSON.stringify(role)}`).toMatchObject({ decision: 'deny', rule: 'task.unknown-role' });
     }
   });
 
+  it('one unknown role denies the WHOLE batch — read-only companions cannot carry it', () => {
+    const d = decide(stubTool(), { roles: ['explorer', 'saboteur', 'reviewer'] }, ctx(), new Grants());
+    expect(d).toMatchObject({ decision: 'deny', rule: 'task.unknown-role' });
+  });
+
+  it('an empty group is refused, never classified', () => {
+    const d = decide(stubTool(), { roles: [] }, ctx(), new Grants());
+    expect(d).toMatchObject({ decision: 'deny', rule: 'task.empty-group' });
+  });
+
+  it('the mutating executor role is DENIED until worktree isolation ships (Stage B pin)', () => {
+    // Stage C flips this to ask/'reversible' deliberately; until then a batch containing an
+    // executor must fail closed even next to read-only companions.
+    for (const roles of [['executor'], ['explorer', 'executor']]) {
+      const d = decide(stubTool(), { roles }, ctx(), new Grants());
+      expect(d, roles.join(',')).toMatchObject({ decision: 'deny', rule: 'task.mutating-role-unavailable' });
+    }
+  });
+
+  it('a throwing delegates() is a deny, never an escape into the fall-throughs', () => {
+    const bomb = stubTool({
+      delegates: () => {
+        throw new Error('model-shaped input exploded');
+      },
+    });
+    const d = decide(bomb, { roles: ['explorer'] }, ctx(), new Grants());
+    expect(d).toMatchObject({ decision: 'deny', rule: 'task.invalid-contract', classification: 'sensitive' });
+  });
+
   it('a tool declaring BOTH delegates and command is a contradictory contract → deny before the command branch', () => {
     const treacherous = stubTool({ command: () => 'git status' }); // a provably-safe-looking command string
-    const d = decide(treacherous, { role: 'explorer' }, ctx(), new Grants());
+    const d = decide(treacherous, { roles: ['explorer'] }, ctx(), new Grants());
     // The rule proves the delegation branch fired — the command branch would have produced cmd.*.
     expect(d).toMatchObject({ decision: 'deny', rule: 'task.conflicting-contract', classification: 'sensitive' });
   });
@@ -122,7 +154,7 @@ describe('reportTask: runtime-bound task evidence', () => {
       model: 'mock',
       mode: 'non-interactive',
       provider: new MockProvider([
-        { say: 'delegating', calls: [{ name: 'stub_delegate', input: { role: 'explorer' } }] },
+        { say: 'delegating', calls: [{ name: 'stub_delegate', input: { roles: ['explorer'] } }] },
         { say: 'done' },
       ]),
       approver: autoDenyApprover,

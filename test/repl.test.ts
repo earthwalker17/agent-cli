@@ -432,6 +432,23 @@ describe('renderer: live command output unit behavior', () => {
     expect(text()).toContain('force-killed (best effort)');
     expect(text()).toContain('no exit code');
   });
+
+  it('task lifecycle renders identity-carrying chrome and counts into the turn summary (V0.7)', () => {
+    const { r, text } = makeRenderer();
+    r.beginTurn();
+    r.onEvent(ev({ type: 'task.started', callId: 'c1', role: 'explorer', childSessionId: 'child-ab12', budget: { maxSteps: 15, timeoutMs: 1, maxOutputTokens: 1 } }));
+    r.onEvent(ev({ type: 'task.started', callId: 'c1', role: 'reviewer', childSessionId: 'child-cd34', budget: { maxSteps: 15, timeoutMs: 1, maxOutputTokens: 1 } }));
+    r.onEvent(ev({ type: 'task.ended', callId: 'c1', childSessionId: 'child-ab12', status: 'completed', steps: 2, usage: { inputTokens: 1, outputTokens: 500 }, resultSha256: 'x', durationMs: 5 }));
+    r.onEvent(ev({ type: 'task.ended', callId: 'c1', childSessionId: 'child-cd34', status: 'timeout', steps: 1, usage: { inputTokens: 1, outputTokens: 100 }, resultSha256: 'y', durationMs: 5 }));
+    r.endTurn({ finalText: '', stopReason: 'end_turn', denials: 0, steps: 1, stopped: false, aborted: false }, 20);
+    const out = text();
+    expect(out).toContain('task explorer·ab12 started');
+    expect(out).toContain('task reviewer·cd34 started');
+    expect(out).toContain('task ab12 completed');
+    expect(out).toContain('task cd34 timeout');
+    expect(out).toContain('agent report child-ab12');
+    expect(out).toContain('2 task(s)');
+  });
 });
 
 describe('one-shot SIGINT wiring', () => {

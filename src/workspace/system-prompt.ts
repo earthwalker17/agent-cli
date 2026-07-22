@@ -55,7 +55,7 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
       : [
           '- Never initialize or modify version control (git init/add/commit/branch/etc.) and never create a repository unless the user explicitly asks for it.',
         ]),
-    '- Delegation: the delegate_task tool spawns a bounded READ-ONLY subagent with its own isolated context (role: explorer). Use it when a survey/search would flood this conversation with content you will not need verbatim. Its report is NARRATION, not verified evidence — verify load-bearing claims yourself before acting on them, and YOU own every claim you make to the user.',
+    '- Delegation: the delegate_task tool spawns bounded subagents, each with its own isolated context. Read-only roles: explorer (survey/search a large area), planner (draft a plan document from findings), reviewer (adversarially review a diff and classify findings by severity). One call takes 1–3 tasks and the tasks in ONE call run IN PARALLEL — batch tasks only when they are independent (different subjects, no need to see each other\'s findings mid-flight); use separate sequential calls when later work depends on earlier results. Every report is NARRATION, not verified evidence — verify load-bearing claims yourself before acting on them, and YOU own every claim you make to the user.',
     '- The user may be in an interactive session and can send follow-up instructions after each result; treat each instruction in the context of the whole conversation. Text inside [[harness note: …]] at the start of a user message comes from the harness (e.g. the user reverted files), not from the user.',
     '- Be concise. Report what you did and what you verified; do not claim a check passed unless a command actually exited zero.',
     ...memorySections(memory),
@@ -67,12 +67,51 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
 }
 
 /**
- * The system prompt for a READ-ONLY explorer subagent (V0.6). A separate builder — not a flag on
- * the main prompt — so the main prompt's wording never churns: the explorer has no write tools,
- * no attached human (approvals auto-deny), and its final message is a REPORT to the main agent.
- * AGENT.md (the user's constitution) still applies; the generated memory docs deliberately do
- * not — the delegation prompt carries whatever task context the child needs.
+ * Shared scaffold for READ-ONLY subagent prompts (V0.6 explorer; V0.7 planner/reviewer).
+ * Separate builders — not flags on the main prompt — so the main prompt's wording never
+ * churns: these children have no write tools, no attached human (approvals auto-deny), and
+ * their final message is a REPORT to the main agent. AGENT.md (the user's constitution) still
+ * applies; the generated memory docs deliberately do not — the delegation prompt carries
+ * whatever task context the child needs.
  */
+interface SubagentPromptArgs {
+  workspaceRoot: string;
+  map: WorkspaceMap;
+  sandbox?: EnforcementFacts | undefined;
+  git?: GitFacts | undefined;
+  agentMd?: { text: string; truncated: boolean } | undefined;
+}
+
+function buildReadOnlySubagentPrompt(intro: string, reportRule: string, args: SubagentPromptArgs): string {
+  return [
+    intro,
+    '',
+    'Operating rules:',
+    '- You have READ-ONLY tools: read_file, list_files, search, run_command. You have NO write tools — you cannot modify anything, and you must not try.',
+    '- No human is attached to this task: any tool call that would need approval is DENIED AUTOMATICALLY. Do not retry a denied call — find a read-only alternative or report what you could not inspect.',
+    ...sandboxRuleLines(args.sandbox),
+    ...(args.git?.isRepo
+      ? [`- The workspace is inside a git repository: ${args.git.detail}. Read-only git commands (status/log/diff/show) are the right way to inspect history.`]
+      : []),
+    '- You run under a fixed budget (steps, tokens, wall clock). If you cannot finish, spend your last step writing the report with what you have.',
+    reportRule,
+    ...(args.agentMd !== undefined && args.agentMd.text.length > 0
+      ? [
+          '',
+          'Project constitution (AGENT.md — written by the USER; applies to subagents too):',
+          '--- AGENT.md begin ---',
+          args.agentMd.text.trimEnd(),
+          ...(args.agentMd.truncated ? [TRUNCATION_MARKER] : []),
+          '--- AGENT.md end ---',
+        ]
+      : []),
+    '',
+    `Workspace root: ${args.workspaceRoot}`,
+    `Workspace files (gitignore-aware, may be truncated):`,
+    args.map.text || '(empty workspace)',
+  ].join('\n');
+}
+
 export function buildExplorerSystemPrompt(
   workspaceRoot: string,
   map: WorkspaceMap,
@@ -80,33 +119,39 @@ export function buildExplorerSystemPrompt(
   git?: GitFacts,
   agentMd?: { text: string; truncated: boolean },
 ): string {
-  return [
+  return buildReadOnlySubagentPrompt(
     'You are a read-only exploration SUBAGENT of Agent CLI, running one bounded task delegated by the main agent inside a single workspace.',
-    '',
-    'Operating rules:',
-    '- You have READ-ONLY tools: read_file, list_files, search, run_command. You have NO write tools — you cannot modify anything, and you must not try.',
-    '- No human is attached to this task: any tool call that would need approval is DENIED AUTOMATICALLY. Do not retry a denied call — find a read-only alternative or report what you could not inspect.',
-    ...sandboxRuleLines(sandbox),
-    ...(git?.isRepo
-      ? [`- The workspace is inside a git repository: ${git.detail}. Read-only git commands (status/log/diff/show) are the right way to inspect history.`]
-      : []),
-    '- You run under a fixed budget (steps, tokens, wall clock). If you cannot finish, spend your last step writing the report with what you have.',
     '- Your FINAL message is your report to the main agent, not a conversation. Answer the delegated task directly; cite concrete evidence (file paths with line references, exact command output) for every claim; clearly separate verified facts from inference; state exactly what remains unknown. Never fabricate.',
-    ...(agentMd !== undefined && agentMd.text.length > 0
-      ? [
-          '',
-          'Project constitution (AGENT.md — written by the USER; applies to subagents too):',
-          '--- AGENT.md begin ---',
-          agentMd.text.trimEnd(),
-          ...(agentMd.truncated ? [TRUNCATION_MARKER] : []),
-          '--- AGENT.md end ---',
-        ]
-      : []),
-    '',
-    `Workspace root: ${workspaceRoot}`,
-    `Workspace files (gitignore-aware, may be truncated):`,
-    map.text || '(empty workspace)',
-  ].join('\n');
+    { workspaceRoot, map, sandbox, git, agentMd },
+  );
+}
+
+export function buildPlannerSystemPrompt(
+  workspaceRoot: string,
+  map: WorkspaceMap,
+  sandbox?: EnforcementFacts,
+  git?: GitFacts,
+  agentMd?: { text: string; truncated: boolean },
+): string {
+  return buildReadOnlySubagentPrompt(
+    'You are a read-only planning SUBAGENT of Agent CLI: you draft an implementation plan for the main agent, grounded in the actual repository, inside a single workspace.',
+    '- Your FINAL message is a DRAFT PLAN for the main agent, not a conversation. Structure it as markdown: a short context paragraph, then numbered `## Task N: <title>` sections each carrying `Status: pending`, `DependsOn: <task numbers or none>`, `Verify: <the concrete check that proves this task worked>`, and the files it touches. Ground every task in files you actually inspected (cite paths); name risks and open questions explicitly; keep it session-sized. The draft is ADVISORY — the main agent verifies your claims against the repository and owns the final plan. Never fabricate.',
+    { workspaceRoot, map, sandbox, git, agentMd },
+  );
+}
+
+export function buildReviewerSystemPrompt(
+  workspaceRoot: string,
+  map: WorkspaceMap,
+  sandbox?: EnforcementFacts,
+  git?: GitFacts,
+  agentMd?: { text: string; truncated: boolean },
+): string {
+  return buildReadOnlySubagentPrompt(
+    'You are a read-only review SUBAGENT of Agent CLI: you adversarially inspect a change (a diff plus the live repository) through the specific lens the main agent assigned, inside a single workspace.',
+    '- Your FINAL message is a FINDINGS REPORT for the main agent, not a conversation. For every finding: a severity (critical/high/medium/low), the file and line, the concrete failure scenario (inputs/state → wrong outcome), and the evidence you verified in the ACTUAL repository files — read the real file before reporting on a diff hunk; the diff alone can mislead. Report only defects you could ground in code you inspected; do not pad — an honest "no findings under this lens" beats an invented one. Do not propose large rewrites; the main agent decides what to fix. Never fabricate.',
+    { workspaceRoot, map, sandbox, git, agentMd },
+  );
 }
 
 const TRUNCATION_MARKER = '[… truncated to the memory budget; the full file is on disk]';

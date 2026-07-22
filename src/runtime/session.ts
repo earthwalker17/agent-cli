@@ -226,13 +226,15 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   const mutatedBy = new Map<string, Extract<SessionEvent, { type: 'file.mutated' }>[]>();
   const snapBy = new Set<string>();
   const commandStartedBy = new Set<string>();
-  const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>>();
+  // One delegate call may start a PARALLEL GROUP (V0.7) — keep every task.started per callId,
+  // or a crash replay would name only the last child and orphan the other survivors' evidence.
+  const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>[]>();
   for (const e of events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
     else if (e.type === 'file.mutated') (mutatedBy.get(e.callId) ?? mutatedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
     else if (e.type === 'command.started') commandStartedBy.add(e.callId);
-    else if (e.type === 'task.started') taskStartedBy.set(e.callId, e);
+    else if (e.type === 'task.started') (taskStartedBy.get(e.callId) ?? taskStartedBy.set(e.callId, []).get(e.callId)!).push(e);
   }
 
   const orphanedCallIds: string[] = [];
@@ -255,13 +257,16 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
       return toolResultBlock(id, 'interrupted after snapshot but before writing; disk state unverified', true);
     }
     orphanedCallIds.push(id);
-    const task = taskStartedBy.get(id);
-    if (task !== undefined) {
-      // The delegated task was running at the crash. The child's OWN evidence log survives —
-      // point at it instead of guessing what the child did.
+    const tasks = taskStartedBy.get(id);
+    if (tasks !== undefined && tasks.length > 0) {
+      // The delegated task(s) were running at the crash. Each child's OWN evidence log
+      // survives — point at every one of them instead of guessing what the children did.
+      const pointers = tasks.map((t) => `child session ${t.childSessionId} (${t.role}) — inspect: agent report ${t.childSessionId}`);
       return toolResultBlock(
         id,
-        `interrupted: a delegated task (child session ${task.childSessionId}) was running when the session crashed; its own evidence log survives — inspect: agent report ${task.childSessionId}`,
+        tasks.length === 1
+          ? `interrupted: a delegated task (child session ${tasks[0]!.childSessionId}) was running when the session crashed; its own evidence log survives — inspect: agent report ${tasks[0]!.childSessionId}`
+          : `interrupted: ${tasks.length} delegated tasks were running when the session crashed; each child's own evidence log survives — ${pointers.join('; ')}`,
         true,
       );
     }
@@ -644,6 +649,17 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
   const cmd = tool.command?.(input);
   if (cmd !== undefined) return { summary: `run: ${cmd.slice(0, 120)}`, detail: cmd };
   const i = input as Record<string, unknown>;
+  // Delegation groups: the human must see WHO would be spawned to do WHAT — a bare tool name
+  // is not an answerable approval prompt (the ask path arrives with mutating roles, V0.7).
+  if (tool.delegates !== undefined && Array.isArray(i['tasks'])) {
+    const tasks = i['tasks'] as { role?: unknown; task?: unknown }[];
+    return {
+      summary: `${tool.name}: ${tasks.length} task(s) — ${tasks.map((t) => String(t.role ?? '?')).join(', ')}`,
+      detail: tasks
+        .map((t, n) => `${n + 1}. [${String(t.role ?? '?')}] ${String(t.task ?? '').split('\n')[0]!.slice(0, 160)}`)
+        .join('\n'),
+    };
+  }
   if (typeof i['old_string'] === 'string' && typeof i['new_string'] === 'string') {
     return {
       summary: `${tool.name} ${String(i['path'])}`,

@@ -53,8 +53,32 @@ export type CommandEvidence =
       drainTimedOut?: boolean;
     };
 
-/** How a delegated subagent task ended (V0.6). */
-export type TaskStatus = 'completed' | 'error' | 'budget-steps' | 'budget-tokens' | 'timeout' | 'aborted';
+/**
+ * Subagent role names and their access class — the POLICY fact table (V0.7). Data only: the
+ * runtime builds full role contracts (tool registry, prompt, budget, approval mode) on top of
+ * this in `runtime/roles.ts`. `decide()` consults THIS table and fails closed on any role that
+ * is not in it; 'mutating-worktree' roles additionally require worktree isolation to exist.
+ */
+export type SubagentRoleName = 'explorer' | 'planner' | 'reviewer' | 'executor';
+export type SubagentRoleAccess = 'read-only' | 'mutating-worktree';
+export const SUBAGENT_ROLES: Record<SubagentRoleName, { access: SubagentRoleAccess }> = {
+  explorer: { access: 'read-only' },
+  planner: { access: 'read-only' },
+  reviewer: { access: 'read-only' },
+  executor: { access: 'mutating-worktree' },
+};
+/** Access class for a role name, or undefined when the role is unknown (⇒ deny, fail closed). */
+export function subagentRoleAccess(role: string): SubagentRoleAccess | undefined {
+  return Object.prototype.hasOwnProperty.call(SUBAGENT_ROLES, role)
+    ? SUBAGENT_ROLES[role as SubagentRoleName].access
+    : undefined;
+}
+
+/**
+ * How a delegated subagent task ended (V0.6; 'user-stopped' added in V0.7 — the user answered
+ * a forwarded approval with deny-&-stop, ending THAT child only, not the parent turn).
+ */
+export type TaskStatus = 'completed' | 'error' | 'budget-steps' | 'budget-tokens' | 'timeout' | 'aborted' | 'user-stopped';
 
 /** The harness-fixed budget a delegated task runs under (never model-controlled). */
 export interface TaskBudget {
@@ -151,12 +175,14 @@ export interface Tool<I = unknown> {
   /** For a shell tool: the raw command string, so the policy gate labels and always-asks it. */
   command?(input: I): string;
   /**
-   * Declares that this tool delegates work to a bounded child session (V0.6). A policy FACT:
-   * decide() gates it in an explicit fail-closed branch BEFORE every other classification (a
-   * command-less, mutation-less tool would otherwise auto-allow as observe — the S6 trap), and
-   * a tool may never declare both `delegates` and `command`.
+   * Declares that this tool delegates work to bounded child sessions (V0.6; batched in V0.7 —
+   * one call may spawn a PARALLEL GROUP, so the fact names every role in the group). A policy
+   * FACT: decide() gates it in an explicit fail-closed branch BEFORE every other classification
+   * (a command-less, mutation-less tool would otherwise auto-allow as observe — the S6 trap),
+   * a tool may never declare both `delegates` and `command`, and the strictest member governs
+   * the whole group. A throwing `delegates` is a deny, never an escape.
    */
-  delegates?(input: I): { role: string };
+  delegates?(input: I): { roles: readonly string[] };
   /** Optional hook to strip secret content from the result before it is persisted to the log. */
   redactForLog?(result: ToolResult, saltHex: string): ToolResult;
   execute(input: I, ctx: ToolContext): Promise<ToolResult>;
@@ -197,6 +223,11 @@ export interface ApprovalRequest {
   detail: string;
   reason: string;
   noUndoWarning?: boolean;
+  /**
+   * Present when this request was FORWARDED from a delegated child task (V0.7): the prompt
+   * must attribute it to the task so the human knows which agent is asking and where it runs.
+   */
+  taskContext?: { childSessionId: string; role: string };
 }
 export interface ApprovalOutcome {
   decision: 'allow' | 'deny' | 'deny-stop';

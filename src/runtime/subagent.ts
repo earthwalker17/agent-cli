@@ -1,8 +1,8 @@
 import { autoDenyApprover } from './approvals.js';
 import { startSession, runTurn, endSession, recordSandboxStatus, recordGitContext, recordWorkspaceMap, type Session } from './session.js';
 import type { ElisionOptions } from './elision.js';
+import { ROLE_CONTRACTS } from './roles.js';
 import { TOOLS } from '../tools/index.js';
-import { buildExplorerSystemPrompt } from '../workspace/system-prompt.js';
 import type { WorkspaceMap } from '../workspace/map.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
@@ -10,26 +10,25 @@ import type { GitFacts } from '../git/types.js';
 import { randomSaltHex, sha256 } from '../shared/hash.js';
 import { systemClock, type Clock } from '../shared/clock.js';
 import type { IdGen } from '../shared/ids.js';
-import type { PolicyRules, Provider, TaskBudget, TaskEvidence, TaskStatus, Usage } from '../types.js';
+import type { Approver, PolicyRules, Provider, SubagentRoleName, TaskBudget, TaskEvidence, TaskStatus, Usage } from '../types.js';
 
 /**
  * The subagent task runner: ONE bounded child session driving the SAME runTurn the main agent
  * uses (no second execution loop). A delegated task is exactly one turn — multi-step inside, but
  * with no user to converse with — so turn-level cancellation IS session-level cancellation.
  *
- * Authority is inherited-or-narrower by construction: a read-only tool registry (no write tools,
- * no delegate tool ⇒ depth 1), autoDenyApprover (asks fail closed — only provably-safe commands
- * inside the parent's PROBED sandbox instance can auto-run), the parent's narrowing rules, and a
- * fixed harness budget the model never controls. The child gets its own event log (fresh session
- * id ⇒ own lock), so its evidence is attributable and its work independently inspectable.
+ * Authority is inherited-or-narrower by construction: the role contract's tool registry (a
+ * subset of TOOLS; never the delegate/apply tools ⇒ depth 1), auto-denied approvals for
+ * read-only roles (asks fail closed — only provably-safe commands inside the parent's PROBED
+ * sandbox instance can auto-run; the executor role forwards asks to the parent's approver
+ * instead), the parent's narrowing rules, and a fixed harness budget the model never controls.
+ * The child gets its own event log (fresh session id ⇒ own lock), so its evidence is
+ * attributable and its work independently inspectable.
  */
 
-export const TASK_MAX_STEPS = 15;
-export const TASK_TIMEOUT_MS = 300_000;
-export const TASK_MAX_OUTPUT_TOKENS = 30_000;
-export const TASKS_PER_SESSION = 8;
-
-const CHILD_TOOL_NAMES = new Set(['read_file', 'list_files', 'search', 'run_command']);
+/** Cumulative delegation caps per parent session (enforced by the delegate tool's closure). */
+export const TASKS_PER_SESSION = 12;
+export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 150_000;
 
 export interface SubagentDeps {
   layout: ProjectLayout;
@@ -59,11 +58,25 @@ export interface SubagentDeps {
   reportTask?: (e: TaskEvidence) => void;
   /** Harness-internal budget narrowing (tests). NEVER derived from model input. */
   budget?: Partial<TaskBudget>;
+  /**
+   * The parent-side approver a 'forward'-mode role's asks are routed to (V0.7 Stage C wires the
+   * serialized forwarding queue through this). Absent — and for every auto-deny role — the
+   * child fails closed on autoDenyApprover.
+   */
+  approver?: Approver;
+  /**
+   * Per-task provider override for a PARALLEL group (tests: one scripted MockProvider per child
+   * — a shared script cursor interleaves nondeterministically under Promise.all). Production
+   * leaves this unset: the shared streaming provider is stateless per request.
+   */
+  providerForTask?: (index: number, role: SubagentRoleName) => Provider;
 }
 
 export interface SubagentSpec {
-  role: 'explorer';
+  role: SubagentRoleName;
   task: string;
+  /** Verbatim supporting material from the parent (findings, a scoped diff); joins the delegation prompt. */
+  context?: string;
   expectedOutput?: string;
   parentSessionId: string;
 }
@@ -82,10 +95,11 @@ export interface SubagentResult {
 
 /** Never throws. Exactly one child runTurn; the child log/lock is always released. */
 export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, parentSignal?: AbortSignal): Promise<SubagentResult> {
+  const contract = ROLE_CONTRACTS[spec.role];
   const budget: TaskBudget = {
-    maxSteps: deps.budget?.maxSteps ?? TASK_MAX_STEPS,
-    timeoutMs: deps.budget?.timeoutMs ?? TASK_TIMEOUT_MS,
-    maxOutputTokens: deps.budget?.maxOutputTokens ?? TASK_MAX_OUTPUT_TOKENS,
+    maxSteps: deps.budget?.maxSteps ?? contract.budget.maxSteps,
+    timeoutMs: deps.budget?.timeoutMs ?? contract.budget.timeoutMs,
+    maxOutputTokens: deps.budget?.maxOutputTokens ?? contract.budget.maxOutputTokens,
   };
   const clock = deps.clock ?? systemClock;
   const startedAt = clock.now();
@@ -100,6 +114,21 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     budget,
   });
 
+  // A 'forward' role routes asks to the parent-side approver (fail closed when none was wired);
+  // read-only roles ALWAYS auto-deny regardless of what the caller passed.
+  const approver = contract.approvals === 'forward' ? (deps.approver ?? autoDenyApprover) : autoDenyApprover;
+  let system: string;
+  try {
+    system = contract.buildPrompt({
+      workspaceRoot: deps.workspaceRoot,
+      map: deps.map,
+      sandbox: deps.sandboxFacts,
+      git: deps.gitFacts,
+      agentMd: deps.agentMd,
+    });
+  } catch (err) {
+    return fail(`subagent failed to start: ${(err as Error).message}`);
+  }
   let child: Session;
   try {
     child = startSession({
@@ -108,11 +137,11 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       model: deps.model,
       mode: 'non-interactive',
       provider: deps.provider,
-      approver: autoDenyApprover,
-      system: buildExplorerSystemPrompt(deps.workspaceRoot, deps.map, deps.sandboxFacts, deps.gitFacts, deps.agentMd),
+      approver,
+      system,
       maxSteps: budget.maxSteps,
       maxTokens: deps.maxTokens,
-      tools: TOOLS.filter((t) => CHILD_TOOL_NAMES.has(t.name)),
+      tools: TOOLS.filter((t) => contract.toolNames.includes(t.name)),
       saltHex: randomSaltHex(),
       lineage: { parentSessionId: spec.parentSessionId, role: spec.role },
       ...(deps.rules !== undefined ? { rules: deps.rules } : {}),
@@ -158,7 +187,8 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       } else if (e.type === 'tool.requested') {
         const i = e.input as Record<string, unknown> | null;
         const target = typeof i?.['path'] === 'string' ? i['path'] : typeof i?.['pattern'] === 'string' ? i['pattern'] : typeof i?.['command'] === 'string' ? i['command'] : '';
-        deps.onProgress?.(`${e.tool} ${String(target)}`.trim());
+        // Task identity in every line: parallel group members interleave on one chrome stream.
+        deps.onProgress?.(`${spec.role}·${child.id.slice(-4)} ${e.tool} ${String(target)}`.trim());
       }
     } catch {
       /* progress/budget bookkeeping must never break the child */
@@ -189,10 +219,18 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
         : result!.stopped && result!.steps >= budget.maxSteps
           ? 'budget-steps'
           : result!.stopped
-            ? 'error' // deny-&-stop is unreachable under autoDeny; recorded honestly if it ever happens
+            ? 'user-stopped' // deny-&-stop at a forwarded approval: the user ended THIS child only
             : 'completed';
   const childReason =
-    status === 'completed' ? 'completed' : status === 'budget-steps' ? 'max-steps' : status === 'aborted' ? 'aborted' : status === 'error' ? 'error' : 'budget';
+    status === 'completed'
+      ? 'completed'
+      : status === 'budget-steps'
+        ? 'max-steps'
+        : status === 'aborted' || status === 'user-stopped'
+          ? 'aborted'
+          : status === 'error'
+            ? 'error'
+            : 'budget';
   try {
     endSession(child, childReason, error?.message);
   } catch {
@@ -236,6 +274,15 @@ function delegationPrompt(spec: SubagentSpec): string {
   return [
     `Delegated task from the main agent:`,
     spec.task,
+    ...(spec.context !== undefined && spec.context.length > 0
+      ? [
+          '',
+          'Supporting context from the main agent (verbatim; verify anything load-bearing against the repository):',
+          '--- context begin ---',
+          spec.context,
+          '--- context end ---',
+        ]
+      : []),
     ...(spec.expectedOutput !== undefined ? ['', `Expected report shape: ${spec.expectedOutput}`] : []),
   ].join('\n');
 }

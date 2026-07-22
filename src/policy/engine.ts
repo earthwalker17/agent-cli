@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { subagentRoleAccess } from '../types.js';
 import type { ActionClass, MutationPlan, PolicyDecision, Tool, ToolContext } from '../types.js';
 import { validatePath } from './paths.js';
 import { PathError } from '../shared/errors.js';
@@ -126,10 +127,17 @@ export function decide<I>(
   // 0. Delegation → explicit fail-closed branch, FIRST (before the command branch, so a tool
   //    declaring both contracts can never reach the auto-run path disguised as a provably-safe
   //    command; before the fall-throughs, so a command-less mutation-less delegating tool can
-  //    never auto-classify as plain observe — the S6 trap, handled deliberately). Only the
-  //    read-only explorer role exists; every other role denies.
-  const delegation = tool.delegates?.(input);
-  if (delegation !== undefined) {
+  //    never auto-classify as plain observe — the S6 trap, handled deliberately). V0.7: one
+  //    call may spawn a parallel GROUP, so every role in the batch is checked and the
+  //    STRICTEST member governs; any unknown role denies the whole group. `delegates` runs
+  //    over model-shaped input, so a throw is a deny, never an escape into the fall-throughs.
+  if (tool.delegates !== undefined) {
+    let delegation: { roles: readonly string[] };
+    try {
+      delegation = tool.delegates(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'task.invalid-contract', `delegates() threw: ${(e as Error).message}`);
+    }
     if (tool.command !== undefined) {
       return decision(
         'sensitive',
@@ -138,19 +146,35 @@ export function decide<I>(
         'a tool may declare delegation or a shell command, never both',
       );
     }
-    if (delegation.role === 'explorer') {
+    if (delegation.roles.length === 0) {
+      return decision('sensitive', 'deny', 'task.empty-group', 'a delegation must name at least one role');
+    }
+    for (const role of delegation.roles) {
+      if (subagentRoleAccess(role) === undefined) {
+        return decision(
+          'sensitive',
+          'deny',
+          'task.unknown-role',
+          `unknown subagent role '${role}'; the group is refused (fail closed)`,
+        );
+      }
+    }
+    const mutating = delegation.roles.find((r) => subagentRoleAccess(r) === 'mutating-worktree');
+    if (mutating !== undefined) {
+      // Fail-closed placeholder until worktree isolation ships (Session 8 Stage C flips this
+      // branch to ask/'reversible' — pinned by tests so it cannot be enabled by accident).
       return decision(
-        'observe',
-        'allow',
-        'task.readonly-role',
-        'delegated read-only exploration: the child session gets read-only tools, auto-denied approvals, and a fixed harness budget',
+        'sensitive',
+        'deny',
+        'task.mutating-role-unavailable',
+        `role '${mutating}' mutates files and requires worktree isolation, which is not available yet`,
       );
     }
     return decision(
-      'sensitive',
-      'deny',
-      'task.unknown-role',
-      `unknown subagent role '${delegation.role}'; only read-only roles exist`,
+      'observe',
+      'allow',
+      'task.readonly-role',
+      'delegated read-only work: each child session gets read-only tools, auto-denied approvals, and a fixed harness budget',
     );
   }
 

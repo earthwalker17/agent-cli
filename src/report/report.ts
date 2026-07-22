@@ -277,14 +277,15 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     .filter((e): e is Extract<SessionEvent, { type: 'user.message' }> => e.type === 'user.message')
     .map((e) => e.text);
 
-  // Delegated subagent tasks (V0.6): task.started/task.ended pairs joined by callId. An orphan
-  // task.started (no ended) means the session died while the task ran — rendered honestly.
-  const taskEndedByCall = new Map<string, Extract<SessionEvent, { type: 'task.ended' }>>();
-  for (const e of events) if (e.type === 'task.ended') taskEndedByCall.set(e.callId, e);
+  // Delegated subagent tasks (V0.6): task.started/task.ended pairs joined by childSessionId —
+  // one delegate call can start a parallel GROUP (V0.7), so several pairs share one callId. An
+  // orphan task.started (no ended) means the session died while the task ran — rendered honestly.
+  const taskEndedByChild = new Map<string, Extract<SessionEvent, { type: 'task.ended' }>>();
+  for (const e of events) if (e.type === 'task.ended') taskEndedByChild.set(e.childSessionId, e);
   const tasksDelegated = events
     .filter((e): e is Extract<SessionEvent, { type: 'task.started' }> => e.type === 'task.started')
     .map((e) => {
-      const end = taskEndedByCall.get(e.callId);
+      const end = taskEndedByChild.get(e.childSessionId);
       return {
         callId: e.callId,
         role: e.role,

@@ -48,6 +48,7 @@ interface Counters {
   inTokens: number;
   outTokens: number;
   steps: number;
+  tasks: number;
 }
 
 export function createRenderer(opts: {
@@ -59,7 +60,7 @@ export function createRenderer(opts: {
   const g = style.glyph;
   let textOpen = false; // assistant text column open on modelOut
   let toolOpen = false; // an unterminated tool line open on chromeOut
-  let counters: Counters = { files: new Set(), commands: 0, denials: 0, inTokens: 0, outTokens: 0, steps: 0 };
+  let counters: Counters = { files: new Set(), commands: 0, denials: 0, inTokens: 0, outTokens: 0, steps: 0, tasks: 0 };
 
   // Live command-output preview state (per command; reset on command.started).
   const CMD_FLUSH_MS = 100;
@@ -227,6 +228,19 @@ export function createRenderer(opts: {
           );
           break;
         }
+        case 'task.started': {
+          counters.tasks++;
+          chromeLine(style.dim(`  ${g.bullet} task ${sanitizeLine(e.role)}·${sanitizeLine(e.childSessionId.slice(-4))} started — child session ${sanitizeLine(e.childSessionId)}`));
+          break;
+        }
+        case 'task.ended': {
+          const ok = e.status === 'completed';
+          const mark = ok ? style.green(g.ok) : style.yellow(g.warn);
+          chromeLine(
+            `  ${mark} task ${sanitizeLine(e.childSessionId.slice(-4))} ${e.status} — ${e.steps} step(s), ${fmtTokens(e.usage.outputTokens)} out tok (evidence: agent report ${sanitizeLine(e.childSessionId)})`,
+          );
+          break;
+        }
         case 'context.compacted': {
           const pct = e.rawChars > 0 ? Math.round((100 * e.sentChars) / e.rawChars) : 100;
           chromeLine(
@@ -241,7 +255,7 @@ export function createRenderer(opts: {
     },
 
     beginTurn() {
-      counters = { files: new Set(), commands: 0, denials: 0, inTokens: 0, outTokens: 0, steps: 0 };
+      counters = { files: new Set(), commands: 0, denials: 0, inTokens: 0, outTokens: 0, steps: 0, tasks: 0 };
     },
 
     endTurn(result, maxSteps) {
@@ -252,6 +266,7 @@ export function createRenderer(opts: {
         `${counters.steps} step(s)`,
         `${fmtTokens(counters.inTokens)}/${fmtTokens(counters.outTokens)} tok`,
       ];
+      if (counters.tasks > 0) bits.splice(2, 0, `${counters.tasks} task(s)`);
       if (counters.denials > 0) bits.push(`${counters.denials} denied`);
       let status = '';
       if (result.aborted) status = ` ${g.warn} interrupted`;

@@ -116,7 +116,9 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       }
       const lines = started.map((s, i) => {
         if (s.type !== 'task.started') return '';
-        const ended = events.find((e) => e.type === 'task.ended' && e.callId === s.callId);
+        // Join by childSessionId: one delegate call can start a parallel GROUP (V0.7), so
+        // callId alone is ambiguous across the group's task.ended events.
+        const ended = events.find((e) => e.type === 'task.ended' && e.childSessionId === s.childSessionId);
         const state =
           ended !== undefined && ended.type === 'task.ended'
             ? `${ended.status} · ${ended.steps} step(s) · ${ended.usage.inputTokens} in / ${ended.usage.outputTokens} out tok`
