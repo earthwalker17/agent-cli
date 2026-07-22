@@ -67,6 +67,35 @@ async function userGitState(dir: string): Promise<string> {
   return [head.stdout, status.stdout, index.stdout, branches.stdout].join('|');
 }
 
+describe.skipIf(!hasGit)('createCheckpoint concurrency (Stage A)', () => {
+  it('two concurrent checkpoints on one context succeed with distinct refs and correct trees', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
+    await commitAll(repo, 'base');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'CHANGED\n');
+
+    // Same pid, same stateDir, two concurrent sessions — the old pid-only temp-index names
+    // collided here (interleaved read-tree/add/write-tree over ONE shared index file).
+    // Same-session concurrent checkpoints additionally race the ref counter and stay
+    // unsupported by design: Stage C creates one group base sequentially.
+    const [r1, r2] = await Promise.all([
+      createCheckpoint(cctx(), 's-conc-a', { label: 'one' }),
+      createCheckpoint(cctx(), 's-conc-b', { label: 'two' }),
+    ]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    expect(r1.ref).not.toBe(r2.ref);
+    // Both trees captured the same working state — each index was private to its operation.
+    for (const r of [r1, r2]) {
+      const shown = await git(repo, 'show', `${r.oid}:a.txt`);
+      expect(shown.stdout).toBe('CHANGED\n');
+    }
+    // No temp index/staging residue in the state dir.
+    const residue = fs.readdirSync(stateDir).filter((n) => n.startsWith('checkpoint-index-') || n.startsWith('restore-'));
+    expect(residue).toEqual([]);
+  });
+});
+
 describe.skipIf(!hasGit)('createCheckpoint', () => {
   it('captures dirty + untracked (unignored) state WITHOUT touching index/HEAD/worktree/branches', async () => {
     await initRepo(repo);

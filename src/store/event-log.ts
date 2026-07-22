@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { EVENT_SCHEMA_VERSION, type EventBody, type SessionEvent } from '../types.js';
 import type { Clock } from '../shared/clock.js';
 import { systemClock } from '../shared/clock.js';
-import { CorruptLogError, SchemaVersionError, SessionLockedError } from '../shared/errors.js';
+import { CorruptLogError, FreshLogCollisionError, SchemaVersionError, SessionLockedError } from '../shared/errors.js';
 
 interface LockInfo {
   pid: number;
@@ -103,9 +103,43 @@ export class EventLog {
     clock?: Clock;
     /** Liveness probe for the lock holder; defaults to a real signal-0 check. Injected in tests. */
     isAlive?: (pid: number) => boolean;
+    /**
+     * The caller expects to CREATE this log (startSession). The file is created with an atomic
+     * exclusive open BEFORE the lock is touched; if it already exists the open throws
+     * `FreshLogCollisionError` without acquiring anything — critically, without reclaiming the
+     * colliding session's same-pid lock, which would silently unlock a live sibling session.
+     */
+    expectFresh?: boolean;
   }): EventLog {
     const clock = opts.clock ?? systemClock;
-    const stoleLock = EventLog.acquireLock(opts.lockFile, clock, opts.isAlive ?? isPidAlive);
+    let createdFresh = false;
+    if (opts.expectFresh) {
+      try {
+        fs.writeFileSync(opts.file, '', { flag: 'wx' });
+        createdFresh = true;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+        throw new FreshLogCollisionError(
+          `a session log already exists at this id; refusing to append into another session's evidence`,
+          opts.file,
+        );
+      }
+    }
+    let stoleLock: boolean;
+    try {
+      stoleLock = EventLog.acquireLock(opts.lockFile, clock, opts.isAlive ?? isPidAlive);
+    } catch (e) {
+      // A stale lock from a crashed run can exist for an id whose log was never written; if the
+      // holder is live we must refuse — but not leave behind the empty file we just created.
+      if (createdFresh) {
+        try {
+          fs.rmSync(opts.file, { force: true });
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+      throw e;
+    }
 
     let events: readonly SessionEvent[] = [];
     let repairedTail = false;

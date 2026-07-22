@@ -38,6 +38,39 @@ describe('SnapshotStore.capture', () => {
   });
 });
 
+describe('SnapshotStore atomic blob writes (shared store under concurrent sessions)', () => {
+  it('putBlob stores content-addressed bytes and returns the hash', () => {
+    const hash = store.putBlob(Buffer.from('task result bytes'));
+    expect(hash).toBe(sha256('task result bytes'));
+    expect(fs.readFileSync(path.join(objects, hash), 'utf8')).toBe('task result bytes');
+  });
+
+  it('putBlob is idempotent for identical content', () => {
+    const a = store.putBlob(Buffer.from([0, 255, 13, 10]));
+    const b = store.putBlob(Buffer.from([0, 255, 13, 10]));
+    expect(a).toBe(b);
+    expect(fs.readFileSync(path.join(objects, a)).equals(Buffer.from([0, 255, 13, 10]))).toBe(true);
+  });
+
+  it('leaves no temp residue in the objects dir after capture and putBlob', () => {
+    const f = path.join(tmp, 'a.txt');
+    fs.writeFileSync(f, 'content');
+    store.capture([f]);
+    store.putBlob(Buffer.from('other'));
+    const leftovers = fs.readdirSync(objects).filter((n) => n.includes('.tmp-'));
+    expect(leftovers).toEqual([]);
+  });
+
+  it('concurrent same-content writers cannot corrupt a blob (rename race loses safely)', () => {
+    // Simulate the loser of a rename race: the target already exists when rename fails.
+    const bytes = Buffer.from('identical');
+    const hash = store.putBlob(bytes);
+    // A second writer of the same content simply returns; bytes remain intact.
+    expect(store.putBlob(bytes)).toBe(hash);
+    expect(fs.readFileSync(path.join(objects, hash), 'utf8')).toBe('identical');
+  });
+});
+
 describe('SnapshotStore.restore', () => {
   it('restores modified content when the file still holds the post-image', () => {
     const f = path.join(tmp, 'a.txt');

@@ -32,9 +32,11 @@ describe('ids', () => {
     expect(g.callId()).toBe('t-call-0002');
   });
 
-  it('systemIdGen embeds the clock stamp and a random suffix', () => {
+  it('systemIdGen embeds the clock stamp and a 32-bit random suffix', () => {
     const g = systemIdGen(fixedClock(Date.UTC(2026, 0, 2, 3, 4, 5)));
-    expect(g.sessionId()).toMatch(/^20260102-030405-[0-9a-f]{4}$/);
+    // 8 hex chars (4 random bytes): same-second collisions must be a never-hit backstop once
+    // one process starts several child sessions inside a single second (V0.7 parallel tasks).
+    expect(g.sessionId()).toMatch(/^20260102-030405-[0-9a-f]{8}$/);
     expect(g.callId()).toMatch(/^call_[0-9a-f]{12}$/);
   });
 });

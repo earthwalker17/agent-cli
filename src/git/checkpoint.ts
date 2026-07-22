@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { runGit } from './client.js';
 import { caseFold } from '../shared/pathutil.js';
 import type { SnapshotStore } from '../store/snapshots.js';
@@ -22,6 +23,15 @@ import type { EventBody } from '../types.js';
  */
 
 export const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+/**
+ * Temp-file disambiguator: pid alone is NOT enough once one process runs concurrent sessions
+ * (parallel worktree children checkpoint from the SAME pid), so every temp index/staging name
+ * carries fresh randomness per operation.
+ */
+function tempTag(): string {
+  return `${process.pid}-${randomBytes(4).toString('hex')}`;
+}
 const REF_ROOT = 'refs/agent-cli/checkpoints';
 const UNTRACKED_WARN_THRESHOLD = 200;
 
@@ -89,7 +99,7 @@ export async function createCheckpoint(
     }
   }
 
-  const indexFile = path.join(cctx.stateDir, `checkpoint-index-${process.pid}`);
+  const indexFile = path.join(cctx.stateDir, `checkpoint-index-${tempTag()}`);
   fs.rmSync(indexFile, { force: true });
   const env = { GIT_INDEX_FILE: indexFile }; // absolute — a relative value would resolve against the child cwd
   try {
@@ -204,7 +214,7 @@ export async function planRestore(cctx: CheckpointContext, checkpoint: Checkpoin
     runGit({ gitPath: cctx.gitPath, argv, cwd: cwd ?? cctx.repoRoot, ...(env ? { env } : {}) });
 
   // Current-state tree via the same temp-index construction the checkpoint used.
-  const indexFile = path.join(cctx.stateDir, `restore-index-${process.pid}`);
+  const indexFile = path.join(cctx.stateDir, `restore-index-${tempTag()}`);
   fs.rmSync(indexFile, { force: true });
   const env = { GIT_INDEX_FILE: indexFile };
   let currentTree: string;
@@ -306,8 +316,8 @@ export async function runRestoreFlow(cctx: CheckpointContext, checkpoint: Checkp
   // Materialize checkpoint content into a staging dir via checkout-index (binary-safe, smudge
   // filters applied — bytes never pass through a captured pipe).
   const writes = plan.entries.filter((e) => e.action === 'write');
-  const staging = path.join(cctx.stateDir, `restore-stage-${process.pid}`);
-  const indexFile = path.join(cctx.stateDir, `restore-index2-${process.pid}`);
+  const staging = path.join(cctx.stateDir, `restore-stage-${tempTag()}`);
+  const indexFile = path.join(cctx.stateDir, `restore-index2-${tempTag()}`);
   fs.rmSync(staging, { recursive: true, force: true });
   fs.rmSync(indexFile, { force: true });
   fs.mkdirSync(staging, { recursive: true }); // checkout-index will not create the prefix dir itself

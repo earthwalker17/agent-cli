@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { sha256 } from '../shared/hash.js';
 import { SnapshotError } from '../shared/errors.js';
 
@@ -61,9 +62,40 @@ export class SnapshotStore {
       throw new SnapshotError(`cannot read file for snapshot: ${(e as Error).message}`, p);
     }
     const hash = sha256(bytes);
-    const bp = this.blobPath(hash);
-    if (!fs.existsSync(bp)) fs.writeFileSync(bp, bytes);
+    this.writeBlobAtomic(hash, bytes);
     return { path: p, beforeSha256: hash, bytes: bytes.length };
+  }
+
+  /**
+   * Store arbitrary bytes as a content-addressed blob and return its hash. Used by the
+   * worktree change-capture path (a task's after/base bytes must outlive the worktree).
+   */
+  putBlob(bytes: Buffer): string {
+    const hash = sha256(bytes);
+    this.writeBlobAtomic(hash, bytes);
+    return hash;
+  }
+
+  /**
+   * Atomic same-dir temp + rename (the memory-store pattern): concurrent sessions share this
+   * store, and a plain write could be observed — or left by a crash — half-written. Writers of
+   * the SAME hash write identical bytes, so losing the rename race to another writer is success.
+   */
+  private writeBlobAtomic(hash: string, bytes: Buffer): void {
+    const bp = this.blobPath(hash);
+    if (fs.existsSync(bp)) return;
+    const tmp = `${bp}.tmp-${randomBytes(4).toString('hex')}`;
+    fs.writeFileSync(tmp, bytes);
+    try {
+      fs.renameSync(tmp, bp);
+    } catch (err) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* best-effort temp cleanup */
+      }
+      if (!fs.existsSync(bp)) throw err; // a concurrent identical write winning the rename is fine
+    }
   }
 
   getBlob(hash: string): Buffer {

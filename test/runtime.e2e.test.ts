@@ -54,6 +54,76 @@ function readLog(session: Session): SessionEvent[] {
   return EventLog.readLenient(layout.sessionFile(session.id)).events;
 }
 
+describe('startSession fresh-id allocation (Stage A)', () => {
+  function collidingIdGen(ids: string[]) {
+    let s = 0;
+    let c = 0;
+    return {
+      sessionId: () => ids[Math.min(s++, ids.length - 1)]!,
+      callId: () => `call-${(++c).toString().padStart(4, '0')}`,
+    };
+  }
+
+  it('regenerates on a colliding id and leaves the sibling session untouched', () => {
+    const first = startSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-model',
+      mode: 'non-interactive',
+      provider: new MockProvider([]),
+      approver: autoDenyApprover,
+      saltHex: '0'.repeat(32),
+      idGen: collidingIdGen(['dup-id']),
+    });
+    const second = startSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-model',
+      mode: 'non-interactive',
+      provider: new MockProvider([]),
+      approver: autoDenyApprover,
+      saltHex: '0'.repeat(32),
+      idGen: collidingIdGen(['dup-id', 'fresh-id']),
+    });
+    expect(first.id).toBe('dup-id');
+    expect(second.id).toBe('fresh-id');
+    // Separate logs, separate evidence; the sibling keeps its lock and stays writable.
+    expect(EventLog.readLenient(layout.sessionFile('dup-id')).events.length).toBe(1);
+    expect(EventLog.readLenient(layout.sessionFile('fresh-id')).events.length).toBe(1);
+    first.log.append({ type: 'user.message', text: 'sibling unharmed' });
+    endSession(first, 'completed');
+    endSession(second, 'completed');
+  });
+
+  it('throws after exhausting regeneration attempts instead of merging evidence', () => {
+    const first = startSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-model',
+      mode: 'non-interactive',
+      provider: new MockProvider([]),
+      approver: autoDenyApprover,
+      saltHex: '0'.repeat(32),
+      idGen: collidingIdGen(['stuck-id']),
+    });
+    expect(() =>
+      startSession({
+        workspaceRoot: ws,
+        layout,
+        model: 'mock-model',
+        mode: 'non-interactive',
+        provider: new MockProvider([]),
+        approver: autoDenyApprover,
+        saltHex: '0'.repeat(32),
+        idGen: collidingIdGen(['stuck-id']),
+      }),
+    ).toThrow(/could not allocate a fresh session id/);
+    // The stuck session's evidence is exactly what it wrote — nothing merged in.
+    expect(EventLog.readLenient(layout.sessionFile('stuck-id')).events.length).toBe(1);
+    endSession(first, 'completed');
+  });
+});
+
 describe('runTurn happy path', () => {
   it('reads, edits, and runs a command with one approval', async () => {
     fs.writeFileSync(path.join(ws, 'f.txt'), 'hello world');

@@ -25,7 +25,10 @@ export function formatStamp(ms: number): string {
 
 export function systemIdGen(clock: Clock): IdGen {
   return {
-    sessionId: () => `${formatStamp(clock.now())}-${randomBytes(2).toString('hex')}`,
+    // 4 random bytes (2^32 per same-second window): concurrent same-process child sessions made
+    // same-second id generation routine, so the collision space must be wide enough that the
+    // structural refusal (exclusive log creation) is a never-hit backstop, not a working path.
+    sessionId: () => `${formatStamp(clock.now())}-${randomBytes(4).toString('hex')}`,
     callId: () => `call_${randomBytes(6).toString('hex')}`,
   };
 }

@@ -37,6 +37,20 @@ export class SessionLockedError extends Error {
   }
 }
 
+/**
+ * A log file expected to be fresh already exists (session-id collision). The caller regenerates
+ * the id; appending into an existing log would merge two sessions' evidence.
+ */
+export class FreshLogCollisionError extends Error {
+  override readonly name = 'FreshLogCollisionError';
+  constructor(
+    message: string,
+    readonly file: string,
+  ) {
+    super(message);
+  }
+}
+
 /** A non-final line of the event log is not valid JSON — refuse rather than silently repair. */
 export class CorruptLogError extends Error {
   override readonly name = 'CorruptLogError';

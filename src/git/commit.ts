@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { runGit } from './client.js';
 import { parsePorcelainV2 } from './porcelain.js';
 import { sessionMutationState } from '../report/diff.js';
@@ -262,7 +263,7 @@ export async function performCommit(
   }
 
   const message = [subject.trim(), '', `Session: ${opts.sessionId}`, ...(opts.trailer ? ['', AGENT_TRAILER] : [])].join('\n') + '\n';
-  const msgFile = path.join(cctx.messageDir, `commit-msg-${process.pid}-${Date.now()}.txt`);
+  const msgFile = path.join(cctx.messageDir, `commit-msg-${process.pid}-${randomBytes(4).toString('hex')}.txt`);
   fs.writeFileSync(msgFile, message, 'utf8');
   try {
     const commit = await runGit({ gitPath: cctx.gitPath, argv: ['commit', '-q', '-F', msgFile], cwd: cctx.repoRoot, timeoutMs: 60_000 });

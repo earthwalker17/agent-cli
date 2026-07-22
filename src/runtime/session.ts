@@ -18,6 +18,7 @@ import type {
   ToolResult,
 } from '../types.js';
 import { EventLog } from '../store/event-log.js';
+import { FreshLogCollisionError } from '../shared/errors.js';
 import { SnapshotStore, type CapturedFile } from '../store/snapshots.js';
 import { decide, Grants, escalateOnSnapshotFailure } from '../policy/engine.js';
 import { TOOLS, toToolSchema } from '../tools/index.js';
@@ -110,13 +111,23 @@ export function startSession(opts: StartOptions): Session {
   const idGen = opts.idGen ?? systemIdGen(clock);
   // Fresh must mean fresh: a same-second id collision (routine once child sessions exist —
   // several can start inside one parent second) must never append into an EXISTING log, which
-  // would merge two sessions' evidence and steal the same-pid lock. Regenerate, then refuse.
+  // would merge two sessions' evidence and steal the same-pid lock. The GUARANTEE is the
+  // atomic exclusive create inside EventLog.open (expectFresh) — the existsSync check is only
+  // a cheap fast-path; a cross-process race loses at the exclusive open, never silently.
   let id = idGen.sessionId();
-  for (let attempt = 0; fs.existsSync(opts.layout.sessionFile(id)); attempt++) {
+  let log: EventLog | undefined;
+  for (let attempt = 0; ; attempt++) {
+    if (!fs.existsSync(opts.layout.sessionFile(id))) {
+      try {
+        log = EventLog.open({ file: opts.layout.sessionFile(id), lockFile: opts.layout.lockFile(id), clock, expectFresh: true });
+        break;
+      } catch (err) {
+        if (!(err instanceof FreshLogCollisionError)) throw err;
+      }
+    }
     if (attempt >= 4) throw new Error(`could not allocate a fresh session id (last tried: ${id})`);
     id = idGen.sessionId();
   }
-  const log = EventLog.open({ file: opts.layout.sessionFile(id), lockFile: opts.layout.lockFile(id), clock });
   const session = buildSession(id, opts, log, clock);
   log.append({
     type: 'session.started',

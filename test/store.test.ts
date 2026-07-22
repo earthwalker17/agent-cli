@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveLayout } from '../src/store/layout.js';
 import { EventLog } from '../src/store/event-log.js';
-import { ConfigError, CorruptLogError, SchemaVersionError, SessionLockedError } from '../src/shared/errors.js';
+import { ConfigError, CorruptLogError, FreshLogCollisionError, SchemaVersionError, SessionLockedError } from '../src/shared/errors.js';
 import { fixedClock } from '../src/shared/clock.js';
 import type { EventBody } from '../src/types.js';
 
@@ -176,6 +176,46 @@ describe('EventLog liveness and observation', () => {
     expect(log.events.length).toBe(1);
     log.close();
     expect(EventLog.readLenient(file).events.length).toBe(1);
+  });
+});
+
+describe('EventLog expectFresh (structural collision refusal)', () => {
+  it('creates the log atomically and appends normally when the id is genuinely fresh', () => {
+    const file = path.join(tmp, 'fresh.jsonl');
+    const lock = path.join(tmp, 'fresh.lock');
+    const log = EventLog.open({ file, lockFile: lock, expectFresh: true });
+    expect(fs.existsSync(file)).toBe(true);
+    log.append(started);
+    log.close();
+    expect(EventLog.readLenient(file).events.length).toBe(1);
+  });
+
+  it('refuses an existing log WITHOUT touching the live sibling session lock', () => {
+    const file = path.join(tmp, 'dup.jsonl');
+    const lock = path.join(tmp, 'dup.lock');
+    // A live sibling session in THIS process owns this id: its log and same-pid lock exist.
+    const sibling = EventLog.open({ file, lockFile: lock, expectFresh: true });
+    sibling.append(started);
+    const lockBytes = fs.readFileSync(lock, 'utf8');
+
+    // A colliding expectFresh open must throw BEFORE any lock interaction — the old reclaim
+    // path would have stolen (then released) the sibling's same-pid lock and merged evidence.
+    expect(() => EventLog.open({ file, lockFile: lock, expectFresh: true })).toThrow(FreshLogCollisionError);
+    expect(fs.readFileSync(lock, 'utf8')).toBe(lockBytes); // sibling lock untouched
+    expect(EventLog.readLenient(file).events.length).toBe(1); // sibling evidence unmerged
+    sibling.append({ type: 'user.message', text: 'still mine' }); // sibling still writable
+    sibling.close();
+  });
+
+  it('cleans up the created file when a live foreign process holds a stale-id lock', () => {
+    const file = path.join(tmp, 'ghost.jsonl');
+    const lock = path.join(tmp, 'ghost.lock');
+    // A crashed-elsewhere scenario: lock exists (live foreign pid) but the log was never written.
+    fs.writeFileSync(lock, JSON.stringify({ pid: 424242, startedAt: 't', token: 'x' }));
+    expect(() => EventLog.open({ file, lockFile: lock, expectFresh: true, isAlive: () => true })).toThrow(
+      SessionLockedError,
+    );
+    expect(fs.existsSync(file)).toBe(false); // no empty-file residue
   });
 });
 
