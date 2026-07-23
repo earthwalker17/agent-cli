@@ -2,7 +2,9 @@ import { startSession, resumeSession, recordWorkspaceMap, recordSandboxStatus, r
 import { selectSandbox, type SandboxBackend, type EnforcementFacts } from '../sandbox/index.js';
 import { detectGitFacts } from '../git/facts.js';
 import type { GitFacts } from '../git/types.js';
-import { buildWorkspaceMapAuto, type WorkspaceMap } from '../workspace/map.js';
+import type { WorkspaceMap } from '../workspace/map.js';
+import { buildRankedMap } from '../retrieval/ranked-map.js';
+import type { RetrievalHandle } from '../retrieval/rank.js';
 import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
 import { loadMemory, type LoadedMemory } from '../memory/load.js';
 import { createDelegateTool, type ExecutorDeps } from '../tools/delegate.js';
@@ -53,6 +55,14 @@ export interface Assembled {
   gitFacts: GitFacts;
   map: WorkspaceMap;
   memory: LoadedMemory;
+  /**
+   * Read-only in-memory retrieval view (Session 10): ranked index handle for the retrieve
+   * tool and /map. Null when the session fell back to the flat map (non-repo, git failure).
+   * The index FILE is written only during assembly — never by a tool call.
+   */
+  retrieval: RetrievalHandle | null;
+  /** One-line chrome note about index building (first run, partial state); Session 10. */
+  mapNote?: string;
   /** One-line summary when crash-orphaned task worktrees were swept at startup (V0.7). */
   worktreeSweep?: string;
   /**
@@ -71,7 +81,10 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const sandbox = deps.sandbox ?? selectSandbox({ stateRoot: layout.stateRoot });
   const sandboxFacts = await sandbox.ensureAvailable();
   const gitFacts = deps.gitFacts ?? (await detectGitFacts(ctx.ws));
-  const map = await buildWorkspaceMapAuto(ctx.ws, {}, gitFacts);
+  // Ranked map + retrieval index (Session 10) for git-backed workspaces; ANY failure inside
+  // falls back to the flat file list — the pre-Session-10 behavior is always reachable.
+  const ranked = await buildRankedMap({ root: ctx.ws, git: gitFacts, projectDir: layout.projectDir, rules: deps.config.rules });
+  const map = ranked.map;
 
   // Sweep crash-orphaned task worktrees (V0.7): registry-driven, path-guarded, honest summary.
   let worktreeSweep: string | undefined;
@@ -98,6 +111,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // capped, and degrading — a broken memory doc must never block a session.
   const memory = loadMemory(deps.layout, ctx.ws, {
     currentMapSha256: map.sha256,
+    ...(map.inventorySha256 !== undefined ? { currentInventorySha256: map.inventorySha256 } : {}),
     ...(deps.resumeId !== undefined ? { resumeId: deps.resumeId } : {}),
   });
   const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory));
@@ -232,6 +246,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     gitFacts,
     map,
     memory,
+    retrieval: ranked.handle,
+    ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),
   };

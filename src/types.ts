@@ -374,7 +374,18 @@ export type EventBody =
       orphanedCallIds: string[];
       unknownPostStateCallIds: string[];
     }
-  | { type: 'workspace.mapped'; fileCount: number; truncated: boolean; chars: number; sha256: string }
+  // Session 10 (additive): inventorySha256 digests the sorted file SET independent of the
+  // rendered text (the CODEBASE staleness basis); sha256 stays "exactly the text the model saw".
+  | {
+      type: 'workspace.mapped';
+      fileCount: number;
+      truncated: boolean;
+      chars: number;
+      sha256: string;
+      inventorySha256?: string;
+      indexedFiles?: number;
+      indexState?: 'full' | 'partial';
+    }
   | { type: 'user.message'; text: string }
   | {
       type: 'assistant.message';

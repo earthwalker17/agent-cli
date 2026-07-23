@@ -50,7 +50,7 @@ describe('loadMemory', () => {
     const { ws, layout, dir } = fixture();
     fs.writeFileSync(path.join(ws, 'AGENT.md'), '# Rules\nAlways run tests.\n');
     fs.writeFileSync(path.join(dir, 'JOURNAL.md'), '---\ndoc: journal\n---\n## Session s-1 (2026-07-19) — thing\nbody\n');
-    fs.writeFileSync(path.join(dir, 'CODEBASE.md'), stampCodebase('# Shape', { sessionId: 's-1', updatedAt: 'u', mapSha256: 'OTHER-digest', head: null }));
+    fs.writeFileSync(path.join(dir, 'CODEBASE.md'), stampCodebase('# Shape', { sessionId: 's-1', updatedAt: 'u', mapSha256: 'OTHER-digest', inventorySha256: null, head: null }));
 
     const m = loadMemory(layout, ws, { currentMapSha256: MAP.sha256 });
     expect(m.agent.status).toBe('ok');
@@ -73,6 +73,31 @@ describe('loadMemory', () => {
     // Order: constitution → memory → workspace map footer.
     expect(prompt.indexOf('AGENT.md begin')).toBeLessThan(prompt.indexOf('JOURNAL.md'));
     expect(prompt.indexOf('CODEBASE.md')).toBeLessThan(prompt.indexOf('Workspace root:'));
+  });
+
+  it('inventory-digest stamps: staleness tracks the file SET, immune to map-format changes (Session 10)', () => {
+    const { ws, layout, dir } = fixture();
+    fs.writeFileSync(
+      path.join(dir, 'CODEBASE.md'),
+      stampCodebase('# Shape', { sessionId: 's-1', updatedAt: 'u', mapSha256: 'old-rendered-text-digest', inventorySha256: 'inv-a', head: null }),
+    );
+    // The rendered map text changed (format upgrade) but the file set did not → NOT stale.
+    const same = loadMemory(layout, ws, { currentMapSha256: 'new-rendered-text-digest', currentInventorySha256: 'inv-a' });
+    expect(same.codebase.stale).toBe(false);
+    // The file set changed → stale, regardless of the map text.
+    const changed = loadMemory(layout, ws, { currentMapSha256: 'new-rendered-text-digest', currentInventorySha256: 'inv-b' });
+    expect(changed.codebase.stale).toBe(true);
+  });
+
+  it('legacy stamps (no inventory-digest) keep the exact map-text comparison', () => {
+    const { ws, layout, dir } = fixture();
+    fs.writeFileSync(
+      path.join(dir, 'CODEBASE.md'),
+      stampCodebase('# Shape', { sessionId: 's-1', updatedAt: 'u', mapSha256: MAP.sha256, inventorySha256: null, head: null }),
+    );
+    // Same map text → fresh, even when an inventory digest is now available on the session side.
+    expect(loadMemory(layout, ws, { currentMapSha256: MAP.sha256, currentInventorySha256: 'inv-a' }).codebase.stale).toBe(false);
+    expect(loadMemory(layout, ws, { currentMapSha256: 'different' }).codebase.stale).toBe(true);
   });
 
   it('oversize AGENT.md → truncated with a marker; unreadable doc degrades without throwing', () => {

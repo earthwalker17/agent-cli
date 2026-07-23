@@ -8,6 +8,9 @@ import { resolveLayout } from '../src/store/layout.js';
 import { createNoneSandbox } from '../src/sandbox/none.js';
 import { MockProvider } from '../src/provider/mock.js';
 import { autoDenyApprover } from '../src/runtime/approvals.js';
+import { findGitOnPath, runGit } from '../src/git/client.js';
+import { detectGitFacts } from '../src/git/facts.js';
+import { indexFilePath } from '../src/retrieval/ranked-map.js';
 import type { GitFacts } from '../src/git/types.js';
 import type { SessionEvent } from '../src/types.js';
 
@@ -111,6 +114,53 @@ describe('assembleSession', () => {
       'workspace.mapped',
       'memory.loaded',
     ]);
+    endSession(resumed.session, 'completed');
+  });
+
+  it('non-repo sessions keep the flat map and expose no retrieval handle (fallback path)', async () => {
+    const assembled = await assembleSession(makeDeps());
+    expect(assembled.retrieval).toBeNull();
+    expect(assembled.map.inventorySha256).toBeUndefined();
+    const mapped = assembled.session.log.events.find((e) => e.type === 'workspace.mapped');
+    expect(mapped !== undefined && mapped.type === 'workspace.mapped' && mapped.inventorySha256).toBeUndefined();
+    endSession(assembled.session, 'completed');
+  });
+});
+
+const REAL_GIT = findGitOnPath(process.env, process.platform);
+
+describe.skipIf(REAL_GIT === null)('assembleSession — ranked map (git-backed, Session 10)', () => {
+  it('builds the ranked map + index, records additive event fields, and resume reuses the warm cache', async () => {
+    const deps = makeDeps();
+    const ws = deps.ctx.ws;
+    expect((await runGit({ gitPath: REAL_GIT!, argv: ['init', '-q', '-b', 'main'], cwd: ws })).ok).toBe(true);
+    fs.mkdirSync(path.join(ws, 'src'));
+    fs.writeFileSync(path.join(ws, 'src', 'core.ts'), 'export function coreThing() {}\n');
+    fs.writeFileSync(path.join(ws, 'src', 'user.ts'), `import { coreThing } from './core.js';\n`);
+    const gitFacts = await detectGitFacts(ws, { gitPath: REAL_GIT });
+
+    const assembled = await assembleSession({ ...deps, gitFacts });
+    // Ranked map, not the flat list: tiers present, symbols shown, handle exposed.
+    expect(assembled.map.text).toContain('Repository map — ranked overview');
+    expect(assembled.map.text).toContain('coreThing');
+    expect(assembled.retrieval).not.toBeNull();
+    expect(assembled.map.inventorySha256).toHaveLength(64);
+    expect(assembled.session.system).toContain('Repository map — ranked overview');
+    // The index file was written at ASSEMBLY (harness-owned, pre-turn).
+    expect(fs.existsSync(indexFilePath(deps.layout.projectDir))).toBe(true);
+    // Additive workspace.mapped fields.
+    const mapped = assembled.session.log.events.find((e) => e.type === 'workspace.mapped');
+    if (mapped === undefined || mapped.type !== 'workspace.mapped') throw new Error('missing workspace.mapped');
+    expect(mapped.inventorySha256).toBe(assembled.map.inventorySha256);
+    expect(mapped.indexedFiles).toBe(2);
+    expect(mapped.indexState).toBe('full');
+    endSession(assembled.session, 'completed');
+
+    // Resume: warm cache (no first-run note), same inventory digest.
+    const resumed = await assembleSession({ ...deps, gitFacts, resumeId: assembled.session.id });
+    expect(resumed.retrieval).not.toBeNull();
+    expect(resumed.map.inventorySha256).toBe(assembled.map.inventorySha256);
+    expect(resumed.mapNote).toBeUndefined();
     endSession(resumed.session, 'completed');
   });
 });

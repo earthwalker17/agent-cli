@@ -125,6 +125,8 @@ async function runInner(session: Session, deps: MemoryUpdateDeps): Promise<void>
       sessionId: session.id,
       updatedAt: nowIso,
       mapSha256: mapped !== undefined && mapped.type === 'workspace.mapped' ? mapped.sha256 : '',
+      inventorySha256:
+        mapped !== undefined && mapped.type === 'workspace.mapped' ? (mapped.inventorySha256 ?? null) : null,
       head: gitCtx !== undefined && gitCtx.type === 'git.context' ? gitCtx.head : null,
     });
     const written = await writeDocAtomic(codebaseFile, stamped);

@@ -110,12 +110,15 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     dangerous: values['dangerously-allow-all'] === true,
   });
 
+  if (assembled.mapNote !== undefined) {
+    renderer.chromeLine(style.dim(`  map: ${assembled.mapNote}`));
+  }
   if (assembled.worktreeSweep !== undefined) {
     renderer.chromeLine(style.dim(`  worktrees: ${assembled.worktreeSweep}`));
   }
 
   const pendingNotes: string[] = [];
-  const commandCtx: CommandContext = { session, layout, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => io.question(q) };
+  const commandCtx: CommandContext = { session, layout, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => io.question(q), retrieval: assembled.retrieval };
   let exitCode = 0;
   let consecutiveInterrupts = 0;
   // Plan injection dedupe: content already shown to the model (by injection or its own

@@ -4,6 +4,8 @@ import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
 import { createCheckpoint, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
+import { renderRepoMap } from '../retrieval/render.js';
+import type { RetrievalHandle } from '../retrieval/rank.js';
 import { readPlan, setPlanStatus } from '../plan/store.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
@@ -25,6 +27,8 @@ export interface CommandContext {
   pendingNotes: string[];
   /** Interactive confirmation seam (the REPL's shared readline); null answer = EOF = decline. */
   question?: (q: string) => Promise<string | null>;
+  /** Session 10: the assembled read-only retrieval handle; /map renders it when present. */
+  retrieval?: RetrievalHandle | null;
 }
 
 export const HELP = [
@@ -334,8 +338,15 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'map': {
-      const map = await buildWorkspaceMapAuto(ctx.session.workspaceRoot, {}, ctx.session.gitFacts);
       ctx.renderer.flush();
+      if (ctx.retrieval !== undefined && ctx.retrieval !== null) {
+        // The ranked map the model received at assembly (re-rendered from the same in-memory
+        // handle — no index write, no re-scan). render.ts sanitizes at interpolation.
+        const r = renderRepoMap(ctx.retrieval);
+        ctx.modelOut.write(r.text + `\n\n(${ctx.retrieval.inventory.files.length} files${r.truncated ? ', selective' : ''})\n`);
+        return 'continue';
+      }
+      const map = await buildWorkspaceMapAuto(ctx.session.workspaceRoot, {}, ctx.session.gitFacts);
       ctx.modelOut.write(
         map.text.split('\n').map(sanitizeLine).join('\n') +
           `\n\n(${map.fileCount} files${map.truncated ? ', truncated' : ''})\n`,

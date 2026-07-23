@@ -321,7 +321,15 @@ export function resumeSession(opts: ResumeOptions): Session {
 /** Record the workspace map the model was shown (evidence of exactly what it saw). */
 export function recordWorkspaceMap(
   session: Session,
-  map: { fileCount: number; truncated: boolean; text: string; sha256: string },
+  map: {
+    fileCount: number;
+    truncated: boolean;
+    text: string;
+    sha256: string;
+    inventorySha256?: string;
+    indexedFiles?: number;
+    indexState?: 'full' | 'partial';
+  },
 ): void {
   session.log.append({
     type: 'workspace.mapped',
@@ -329,6 +337,9 @@ export function recordWorkspaceMap(
     truncated: map.truncated,
     chars: map.text.length,
     sha256: map.sha256,
+    ...(map.inventorySha256 !== undefined ? { inventorySha256: map.inventorySha256 } : {}),
+    ...(map.indexedFiles !== undefined ? { indexedFiles: map.indexedFiles } : {}),
+    ...(map.indexState !== undefined ? { indexState: map.indexState } : {}),
   });
 }
 

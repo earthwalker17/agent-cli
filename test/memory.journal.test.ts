@@ -154,10 +154,11 @@ describe('codebase stamping', () => {
       sessionId: 's-1',
       updatedAt: '2026-07-20T10:00:00Z',
       mapSha256: 'digest-a',
+      inventorySha256: null,
       head: 'abc123',
     });
     const { stamp, body } = parseCodebase(stamped);
-    expect(stamp).toEqual({ sessionId: 's-1', updatedAt: '2026-07-20T10:00:00Z', mapSha256: 'digest-a', head: 'abc123' });
+    expect(stamp).toEqual({ sessionId: 's-1', updatedAt: '2026-07-20T10:00:00Z', mapSha256: 'digest-a', inventorySha256: null, head: 'abc123' });
     expect(body).toContain('# Shape');
     expect(body).toContain('NOT');
 
@@ -165,5 +166,24 @@ describe('codebase stamping', () => {
     expect(isStale(stamp, 'digest-b')).toBe(true);
     expect(isStale(null, 'digest-a')).toBe(true);
     expect(isStale(parseCodebase('no frontmatter').stamp, 'x')).toBe(true);
+  });
+
+  it('inventory-digest stamps round-trip and win the staleness comparison (Session 10)', () => {
+    const stamped = stampCodebase('# Shape', {
+      sessionId: 's-2',
+      updatedAt: 'u',
+      mapSha256: 'text-digest',
+      inventorySha256: 'inv-digest',
+      head: null,
+    });
+    expect(stamped).toContain('inventory-digest: inv-digest');
+    const { stamp } = parseCodebase(stamped);
+    expect(stamp?.inventorySha256).toBe('inv-digest');
+    // Inventory compare wins when both sides have one; map text is then irrelevant.
+    expect(isStale(stamp, 'other-text', 'inv-digest')).toBe(false);
+    expect(isStale(stamp, 'text-digest', 'other-inv')).toBe(true);
+    // Without a current inventory digest, the legacy compare still applies.
+    expect(isStale(stamp, 'text-digest')).toBe(false);
+    expect(isStale(stamp, 'other-text')).toBe(true);
   });
 });

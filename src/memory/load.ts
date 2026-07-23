@@ -34,6 +34,8 @@ export interface LoadMemoryOptions {
   resumeId?: string;
   /** The current workspace-map digest, for codebase staleness labeling. */
   currentMapSha256: string;
+  /** Session 10 (additive): the current inventory digest — preferred staleness basis when the stamp has one. */
+  currentInventorySha256?: string;
 }
 
 export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: LoadMemoryOptions): LoadedMemory {
@@ -45,7 +47,10 @@ export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: L
 
   const sessionCount = (journalDoc.text.match(/^## Session /gm) ?? []).length;
   const { stamp } = parseCodebase(codebaseDoc.text);
-  const stale = codebaseDoc.status === 'ok' || codebaseDoc.status === 'oversize' ? isStale(stamp, opts.currentMapSha256) : false;
+  const stale =
+    codebaseDoc.status === 'ok' || codebaseDoc.status === 'oversize'
+      ? isStale(stamp, opts.currentMapSha256, opts.currentInventorySha256)
+      : false;
 
   const journal = { ...journalDoc, sessionCount };
   const codebase = { ...codebaseDoc, stale };
