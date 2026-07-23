@@ -7,7 +7,8 @@ import { buildRankedMap } from '../retrieval/ranked-map.js';
 import type { RetrievalHandle } from '../retrieval/rank.js';
 import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
 import { loadMemory, type LoadedMemory } from '../memory/load.js';
-import { createDelegateTool, delegateCapsFromEvents, type ExecutorDeps, type PlanGateInfo } from '../tools/delegate.js';
+import { createDelegateTool, delegateCapsFromEvents, type DelegateCaps, type ExecutorDeps, type PlanGateInfo } from '../tools/delegate.js';
+import type { ChildStatusUpdate } from '../runtime/subagent.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
@@ -49,6 +50,10 @@ export interface AssembleDeps {
   gitFacts?: GitFacts;
   /** Render-only chrome for delegated-task progress lines (the caller sanitizes/styles). */
   onTaskProgress?: (line: string) => void;
+  /** Render-only STRUCTURED child status updates (Session 11) — feeds the live task table. */
+  onTaskStatus?: (u: ChildStatusUpdate) => void;
+  /** The task-scoped cancellation registry seam (Session 11): remembers per-child handles. */
+  registerTaskCancel?: (childSessionId: string, cancel: () => void) => (() => void) | void;
 }
 
 export interface Assembled {
@@ -73,6 +78,8 @@ export interface Assembled {
    * summary for chrome, or null when there is nothing to prune. Absent without a repo.
    */
   pruneTaskBaseRefs?: () => Promise<string | null>;
+  /** The live delegation counters (Session 11, events-rebuilt) — read-only for the status area. */
+  delegateCaps: DelegateCaps;
 }
 
 export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
@@ -237,6 +244,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
           ? { agentMd: { text: memory.agent.text, truncated: memory.agent.truncated } }
           : {}),
         ...(deps.onTaskProgress !== undefined ? { onProgress: deps.onTaskProgress } : {}),
+        ...(deps.onTaskStatus !== undefined ? { onStatus: deps.onTaskStatus } : {}),
+        ...(deps.registerTaskCancel !== undefined ? { registerCancel: deps.registerTaskCancel } : {}),
       },
       session.id,
       executorDeps,
@@ -255,6 +264,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     map,
     memory,
     retrieval: ranked.handle,
+    delegateCaps,
     ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),

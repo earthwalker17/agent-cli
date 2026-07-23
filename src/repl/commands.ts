@@ -45,7 +45,10 @@ export const HELP = [
   '  /checkpoint [label | list | restore <n>]',
   '                  capture the workspace to a hidden git ref (recovery point; no history',
   '                  touched); restore <n> returns to a checkpoint as one undoable batch',
-  '  /tasks          list delegated subagent tasks (status, child session, usage)',
+  '  /tasks          plan-task DAG states + delegated subagent tasks (also works MID-TURN while',
+  '                  a task group runs, on a TTY)',
+  '  /cancel <ref>   MID-TURN only (TTY): cancel ONE running delegated task by child-id suffix',
+  '                  or plan-task id — the rest of the group and the turn continue',
   '  /plan [show | approve | discard]',
   '                  show the plan document for this session; approve it (records consent and',
   '                  unblocks planned execution) or discard it. You can also edit the file directly.',
@@ -54,7 +57,7 @@ export const HELP = [
   '  /quit           end the session (Ctrl+D on an empty line also works)',
   'keys: Ctrl+C interrupts the running turn; at the idle prompt press it twice to quit.',
   'note: shell commands always ask; their effects are never undoable.',
-  'note: cancelling a running delegated task = Ctrl+C (it aborts the whole turn, task included).',
+  'note: /cancel <task> ends one child; Ctrl+C aborts the whole turn (every task included).',
   'note: @plan <request> routes a request into plan mode (plan first, no execution until approved).',
 ].join('\n');
 
@@ -438,6 +441,10 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       );
       return 'continue';
     }
+
+    case 'cancel':
+      ctx.renderer.chromeLine('nothing to cancel: /cancel works MID-TURN (on a TTY) while a delegated task group is running');
+      return 'continue';
 
     case 'quit':
     case 'exit':

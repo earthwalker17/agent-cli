@@ -82,6 +82,8 @@ export interface SubagentDeps {
   idGen?: IdGen;
   /** Render-only progress lines (chrome). Never evidence; consumers sanitize. */
   onProgress?: (line: string) => void;
+  /** Render-only STRUCTURED status updates (Session 11) — feeds the live task table. */
+  onStatus?: (u: ChildStatusUpdate) => void;
   /**
    * The parent call's runtime-bound evidence channel. The runner reports task.started the moment
    * the child exists (a parent crash mid-task must leave an orphaned task.started) and task.ended
@@ -124,6 +126,24 @@ export interface SubagentDeps {
 export interface SupervisionNote {
   what: 'stall' | 'loop' | 'budget-pressure' | 'cancelled';
   detail?: string;
+}
+
+/**
+ * A structured RENDER-ONLY child status update (Session 11) — the live-surface counterpart of
+ * the onProgress chrome lines. Produced by the runner, consumed by the REPL's task table;
+ * never persisted (the event log stays the truth of record).
+ */
+export interface ChildStatusUpdate {
+  childSessionId: string;
+  role?: string;
+  planTaskId?: string;
+  /** Omitted = no phase change (e.g. a supervision flag riding an existing phase). */
+  phase?: 'running' | 'tool' | 'approval-wait' | 'ended';
+  tool?: string;
+  steps?: number;
+  outTokens?: number;
+  status?: TaskStatus;
+  supervision?: string;
 }
 
 export interface SubagentSpec {
@@ -197,6 +217,13 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   const SUPERVISION_CAP = 6;
   const supervisionNotes: SupervisionNote[] = [];
   const childIdRef = { id: '' };
+  const pushStatus = (u: Omit<ChildStatusUpdate, 'childSessionId'>): void => {
+    try {
+      deps.onStatus?.({ childSessionId: childIdRef.id, ...u });
+    } catch {
+      /* render-only */
+    }
+  };
   const supervise = (what: SupervisionNote['what'], detail?: string): void => {
     if (supervisionNotes.length >= SUPERVISION_CAP) return;
     const note: SupervisionNote = { what, ...(detail !== undefined ? { detail } : {}) };
@@ -207,6 +234,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     } catch {
       /* supervision bookkeeping must never break the child */
     }
+    pushStatus({ supervision: what });
   };
 
   // A 'forward' role routes asks through the serialized parent-side forwarder, each request
@@ -215,11 +243,17 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   const taskIdBox = { childSessionId: '' };
   const approver: Approver =
     contract.approvals === 'forward' && deps.forwardAsk !== undefined
-      ? (req) =>
-          deps.forwardAsk!(
-            { ...req, taskContext: { childSessionId: taskIdBox.childSessionId, role: spec.role } },
-            controller.signal,
-          )
+      ? async (req) => {
+          pushStatus({ phase: 'approval-wait' }); // the live surface shows WHO is waiting on the human
+          try {
+            return await deps.forwardAsk!(
+              { ...req, taskContext: { childSessionId: taskIdBox.childSessionId, role: spec.role } },
+              controller.signal,
+            );
+          } finally {
+            pushStatus({ phase: 'running' });
+          }
+        }
       : autoDenyApprover;
   // Tools first, prompt second: the prompt states exactly the registry this child actually has
   // (retrieve is admitted per-session; the wording must not promise an absent tool).
@@ -278,6 +312,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     budget,
     ...(spec.planTaskId !== undefined ? { planTaskId: spec.planTaskId } : {}),
   });
+  pushStatus({ phase: 'running', role: spec.role, ...(spec.planTaskId !== undefined ? { planTaskId: spec.planTaskId } : {}) });
 
   // Task-scoped cancellation (Session 11): expose ONE narrow handle — cancel THIS child as
   // 'user-cancelled'. Registered only after the child exists; unregistered in finally.
@@ -326,18 +361,22 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   let lastCallSig = '';
   let identicalCalls = 0;
   let outputTokens = 0;
+  let stepsSeen = 0;
   let tokenPressureNoted = false;
   child.log.onAppend = (e): void => {
     try {
       lastActivity = clock.now();
       if (e.type === 'assistant.message') {
+        stepsSeen++;
         outputTokens += e.usage.outputTokens;
+        pushStatus({ phase: 'running', steps: stepsSeen, outTokens: outputTokens });
         if (outputTokens > budget.maxOutputTokens) cancel('budget-tokens');
         else if (!tokenPressureNoted && outputTokens >= budget.maxOutputTokens * 0.8) {
           tokenPressureNoted = true;
           supervise('budget-pressure', `output tokens at ${Math.round((100 * outputTokens) / budget.maxOutputTokens)}% of ${budget.maxOutputTokens}`);
         }
       } else if (e.type === 'tool.requested') {
+        pushStatus({ phase: 'tool', tool: e.tool, steps: stepsSeen, outTokens: outputTokens });
         const sig = sha256(`${e.tool} ${JSON.stringify(e.input)}`);
         identicalCalls = sig === lastCallSig ? identicalCalls + 1 : 1;
         lastCallSig = sig;
@@ -440,6 +479,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     resultSha256: sha256(Buffer.from(finalText, 'utf8')),
     durationMs: out.durationMs,
   });
+  pushStatus({ phase: 'ended', status, steps: out.steps, outTokens: usage.outputTokens });
   return out;
 }
 

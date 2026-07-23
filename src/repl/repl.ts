@@ -16,6 +16,8 @@ import { sanitizeLine } from '../shared/text.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { createReplIO, type ReplIO } from './io.js';
 import { createRenderer, type Renderer } from './render.js';
+import { createStatusArea } from './status.js';
+import { createTaskTable } from './live-tasks.js';
 import { detectStyle } from './format.js';
 import { dispatchSlash, type CommandContext } from './commands.js';
 
@@ -67,9 +69,22 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
 
   const io = createReplIO({ input: streams.input, output: streams.chromeOut, isTTY: streams.isTTY });
   const style = detectStyle({ isTTY: streams.isTTY });
-  const renderer = createRenderer({ modelOut: streams.modelOut, chromeOut: streams.chromeOut, style });
+  // The sticky status area (Session 11): TTY-only; every chrome byte routes through it so it
+  // can erase/redraw around ordinary output. Non-TTY it is a pure pass-through (zero escapes).
+  const statusArea = createStatusArea({ chromeOut: streams.chromeOut, isTTY: streams.isTTY });
+  const taskTable = createTaskTable();
+  const renderer = createRenderer({ modelOut: streams.modelOut, chromeOut: streams.chromeOut, style, chromeSink: statusArea });
 
-  const ctx = buildRunContext(values, { config, io: { question: async (q) => (await io.question(q)) ?? 'q' } });
+  // Approval prompts own the screen: the status area is suspended for the question's lifetime.
+  const question = async (q: string): Promise<string | null> => {
+    statusArea.suspend();
+    try {
+      return await io.question(q);
+    } finally {
+      statusArea.resume();
+    }
+  };
+  const ctx = buildRunContext(values, { config, io: { question: async (q) => (await question(q)) ?? 'q' } });
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
@@ -87,6 +102,11 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       onCommandOutput: (_callId: string, chunk: string, stream: 'stdout' | 'stderr') => renderer.onCommandOutput(chunk, stream),
       onLogEvent: (e) => renderer.onEvent(e),
       onTaskProgress: (line: string) => renderer.chromeLine(`  [task] ${sanitizeLine(line)}`),
+      onTaskStatus: (u) => {
+        taskTable.update(u);
+        statusArea.setLines(taskTable.statusLines(assembled.delegateCaps));
+      },
+      registerTaskCancel: (childSessionId, cancel) => taskTable.registerCancel(childSessionId, cancel),
       ...(opts.sandbox !== undefined ? { sandbox: opts.sandbox } : {}),
       ...(opts.gitFacts !== undefined ? { gitFacts: opts.gitFacts } : {}),
     });
@@ -121,7 +141,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   }
 
   const pendingNotes: string[] = [];
-  const commandCtx: CommandContext = { session, layout, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => io.question(q), retrieval: assembled.retrieval };
+  const commandCtx: CommandContext = { session, layout, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => question(q), retrieval: assembled.retrieval };
   let exitCode = 0;
   let consecutiveInterrupts = 0;
   // Plan injection dedupe: content already shown to the model (by injection or its own
@@ -186,6 +206,40 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       const offInterrupt = io.onInterrupt(() => controller.abort());
       io.mute();
       renderer.beginTurn();
+      // Mid-turn commands (Session 11, TTY only): /tasks shows the live table, /cancel <ref>
+      // cancels ONE child; anything else stays type-ahead. A displayed approval always wins
+      // (io intercepts only when no read is pending).
+      io.setMidTurnHandler((line) => {
+        if (/^\/tasks$/i.test(line)) {
+          const live = taskTable.live();
+          renderer.chromeLine(
+            live.length === 0
+              ? '  [tasks] nothing running right now'
+              : taskTable
+                  .statusLines(assembled.delegateCaps)
+                  .map((l) => `  ${sanitizeLine(l)}`)
+                  .join('\n'),
+          );
+          return true;
+        }
+        const m = /^\/cancel(?:\s+(\S+))?$/i.exec(line);
+        if (m !== null) {
+          if (m[1] === undefined) {
+            renderer.chromeLine('  [tasks] usage: /cancel <child-id-suffix | plan-task-id>');
+            return true;
+          }
+          const r = taskTable.cancel(m[1]);
+          renderer.chromeLine(
+            r.outcome === 'ok'
+              ? `  [tasks] cancelling ${sanitizeLine(r.childSessionId!.slice(-4))} — this child only; the turn continues`
+              : r.outcome === 'ambiguous'
+                ? `  [tasks] '${sanitizeLine(m[1])}' matches more than one running task — use a longer child-id suffix`
+                : `  [tasks] no running task matches '${sanitizeLine(m[1])}'`,
+          );
+          return true;
+        }
+        return false;
+      });
       try {
         const result = await runTurn(session, userText, { signal: controller.signal });
         renderer.endTurn(result, ctx.maxSteps);
@@ -194,6 +248,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         repairDanglingToolUses(session);
         renderer.turnError(err as Error);
       } finally {
+        io.setMidTurnHandler(null);
+        statusArea.clear(); // readline owns the bottom line at the idle prompt
         io.unmute();
         offInterrupt();
       }

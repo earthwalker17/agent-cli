@@ -36,6 +36,15 @@ export interface ReplIO {
   question(q: string): Promise<string | null>;
   /** Register the Ctrl+C handler for the duration of a turn; returns an unsubscriber. */
   onInterrupt(handler: () => void): () => void;
+  /**
+   * Session 11 — mid-turn command interception, TTY ONLY. While a handler is set and NO read is
+   * pending, a typed `/`-prefixed line is offered to the handler; a true return consumes it,
+   * false falls back to the type-ahead buffer exactly as before. Never active on piped input
+   * (scripted drivers pre-supply future lines — interception would consume them
+   * nondeterministically), and never while a prompt/question is displayed (`pending` set ⇒ the
+   * line answers it — the existing approval-safety pins hold by construction).
+   */
+  setMidTurnHandler(handler: ((line: string) => boolean) | null): void;
   /** Suppress readline echo while a turn is running (input keeps flowing). */
   mute(): void;
   unmute(): void;
@@ -80,6 +89,7 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
   const typedAhead: string[] = [];
   let pending: ((r: ReplLine) => void) | undefined;
   let interruptHandler: (() => void) | undefined;
+  let midTurnHandler: ((line: string) => boolean) | null = null;
 
   const settle = (r: ReplLine): void => {
     const p = pending;
@@ -89,7 +99,16 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
 
   rl.on('line', (text) => {
     if (pending) settle({ kind: 'line', text });
-    else typedAhead.push(text);
+    else if (midTurnHandler !== null && opts.isTTY && text.trimStart().startsWith('/')) {
+      // Mid-turn command (Session 11): offered to the handler; unhandled lines buffer as before.
+      let consumed = false;
+      try {
+        consumed = midTurnHandler(text.trim());
+      } catch {
+        consumed = false; // a throwing handler must never eat input
+      }
+      if (!consumed) typedAhead.push(text);
+    } else typedAhead.push(text);
   });
   rl.on('close', () => {
     closed = true;
@@ -149,6 +168,9 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
       return () => {
         if (interruptHandler === handler) interruptHandler = undefined;
       };
+    },
+    setMidTurnHandler(handler) {
+      midTurnHandler = handler;
     },
     mute() {
       gate.muted = true;

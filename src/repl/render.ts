@@ -55,8 +55,15 @@ export function createRenderer(opts: {
   modelOut: NodeJS.WritableStream;
   chromeOut: NodeJS.WritableStream;
   style: Style;
+  /**
+   * Session 11: the status-aware chrome sink (the sticky status area's write). When present,
+   * EVERY chrome byte goes through it so the area can erase/redraw around ordinary chrome;
+   * absent (tests, one-shot) chrome writes go straight to chromeOut. modelOut is untouched.
+   */
+  chromeSink?: { write(chunk: string): void };
 }): Renderer {
-  const { modelOut, chromeOut, style } = opts;
+  const { modelOut, style } = opts;
+  const chromeOut = opts.chromeSink ?? opts.chromeOut;
   const g = style.glyph;
   let textOpen = false; // assistant text column open on modelOut
   let toolOpen = false; // an unterminated tool line open on chromeOut
