@@ -214,6 +214,47 @@ describe('delegateCapsFromEvents — resume keeps counting', () => {
   });
 });
 
+// ── Crash/resume honesty ─────────────────────────────────────────────────────────────────────
+
+describe('crash mid-group: the replay and the fold stay honest', () => {
+  it('reconstruct names the plan task; the fold reports interrupted with the child-log pointer', async () => {
+    const { reconstruct } = await import('../src/runtime/session.js');
+    seq = 0;
+    const graph = graphOf(T('t1'), T('t2', { dependsOn: ['t1'] }));
+    const events = [
+      ev({ type: 'user.message', text: 'go' }),
+      ev({
+        type: 'assistant.message',
+        text: 'delegating',
+        toolCalls: [{ id: 'c1', name: 'delegate_task', input: { tasks: [] } }],
+        stopReason: 'tool_use',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      ev({ type: 'tool.requested', callId: 'c1', tool: 'delegate_task', input: {} }),
+      ev({
+        type: 'task.started',
+        callId: 'c1', // must join the orphaned tool call, not the helper's synthetic id
+        role: 'executor',
+        childSessionId: 'child-crashed',
+        budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 },
+        planTaskId: 't1',
+      }),
+    ];
+    const r = reconstruct(events, repo);
+    const replay = JSON.stringify(r.messages);
+    expect(replay).toContain("plan task 't1'");
+    expect(replay).toContain('child-crashed');
+    expect(r.orphanedCallIds).toContain('c1');
+
+    const gs = foldGraphState(graph, events);
+    expect(gs.byId.get('t1')).toMatchObject({ state: 'interrupted' });
+    expect(gs.byId.get('t1')!.note).toContain('child-crashed');
+    expect(gs.byId.get('t2')).toMatchObject({ state: 'blocked', blockedOn: ['t1'] });
+    // Interrupted tasks stay re-spawnable — the recovery path after resume.
+    expect(checkDagRules([spec('executor', 't1')], activeGate(graph, events))).toBeNull();
+  });
+});
+
 // ── Part C: the wave flow against real git, with the REAL planContext wiring ────────────────
 
 describe.skipIf(!hasGit)('task-graph execution end to end (real git)', () => {
@@ -323,7 +364,8 @@ describe.skipIf(!hasGit)('task-graph execution end to end (real git)', () => {
     expect((await runTurn(parent, 'start wave 1')).finalText).toBe('wave 1 done');
     const startedEvents = parent.log.events.filter((e) => e.type === 'task.started');
     expect(startedEvents).toHaveLength(2);
-    expect(startedEvents.map((e) => (e.type === 'task.started' ? e.planTaskId : ''))).toEqual(['t1', 't2']);
+    // Parallel group: the two children's started events land in EITHER order.
+    expect(startedEvents.map((e) => (e.type === 'task.started' ? e.planTaskId : '')).sort()).toEqual(['t1', 't2']);
 
     // Early dependent: refused before anything spawns (R4 — t1 captured but not applied).
     expect((await runTurn(parent, 'try t3')).finalText).toBe('saw the dependency refusal');
