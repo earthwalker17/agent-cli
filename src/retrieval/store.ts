@@ -131,13 +131,18 @@ export function loadOrBuildIndex(opts: LoadIndexOptions): IndexBuildResult {
 
   let persisted = true;
   if (dirty) {
+    const tmp = opts.indexFile + `.tmp-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
     try {
       fs.mkdirSync(path.dirname(opts.indexFile), { recursive: true });
-      const tmp = opts.indexFile + `.tmp-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
       fs.writeFileSync(tmp, JSON.stringify(index));
       fs.renameSync(tmp, opts.indexFile);
     } catch {
       persisted = false; // advisory cache; the in-memory index still serves this session
+      try {
+        fs.rmSync(tmp, { force: true }); // never leave orphan tmp files accumulating
+      } catch {
+        /* best effort */
+      }
     }
   }
 

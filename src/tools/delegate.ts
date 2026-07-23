@@ -10,6 +10,7 @@ import {
   type SubagentResult,
 } from '../runtime/subagent.js';
 import fs from 'node:fs';
+import { isInside } from '../shared/pathutil.js';
 import { captureTaskChanges, type CaptureResult } from '../runtime/task-changes.js';
 import { newWorktreeDir, registerWorktree, unregisterWorktree } from '../runtime/worktrees.js';
 import { addWorktree, removeWorktree, worktreeSupport } from '../git/worktree.js';
@@ -158,7 +159,11 @@ export function composeBriefs(
       lines.push(`- Focus — paths this task owns: ${focus.join(', ')}`);
       const missing = focus.filter((p) => {
         try {
-          return !fs.existsSync(path.join(workspaceRoot, p));
+          const abs = path.resolve(workspaceRoot, p);
+          // Never probe outside the workspace: a `..`-escaping focus prefix must not become
+          // an existence oracle that bypasses the out-of-workspace read approval.
+          if (!isInside(workspaceRoot, abs)) return true;
+          return !fs.existsSync(abs);
         } catch {
           return true;
         }

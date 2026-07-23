@@ -35,6 +35,16 @@ describe('composeBriefs', () => {
     expect(groupNotes).toEqual([]);
   });
 
+  it('a ..-escaping focus prefix is never probed on disk (no out-of-workspace existence oracle)', () => {
+    // The parent dir of ws EXISTS; if the guard failed, this would NOT be reported missing.
+    const escaping = '../' + path.basename(path.dirname(ws));
+    const { briefs } = composeBriefs([{ role: 'explorer', focus: [escaping, 'src/runtime'] }], ws);
+    const note = briefs[0]!.find((l) => l.includes('not found in the workspace'));
+    expect(note).toBeDefined();
+    expect(note).toContain(escaping.replace(/\\/g, '/'));
+    expect(note).not.toContain('src/runtime'); // the legitimate existing path is not flagged
+  });
+
   it('flags focus paths that do not exist as a hint, not a refusal', () => {
     const { briefs } = composeBriefs([{ role: 'explorer', focus: ['src/runtime', 'no/such/dir'] }], ws);
     expect(briefs[0]!.some((l) => l.includes('not found in the workspace right now: no/such/dir'))).toBe(true);
@@ -53,6 +63,12 @@ describe('composeBriefs', () => {
     expect(groupNotes).toHaveLength(1);
     expect(groupNotes[0]).toContain('overlapping focus between task 1 and task 2');
     expect(groupNotes[0]).toContain('src/runtime');
+  });
+
+  it('avoid-only briefs render the Avoid line alone', () => {
+    const { briefs, groupNotes } = composeBriefs([{ role: 'explorer', avoid: ['docs', 'dist/'] }], ws);
+    expect(briefs[0]).toEqual(["- Avoid — out of this task's scope: docs, dist"]);
+    expect(groupNotes).toEqual([]);
   });
 
   it('disjoint focus sets produce no warnings', () => {

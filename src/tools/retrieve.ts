@@ -120,7 +120,7 @@ export function createRetrieveTool(handle: RetrievalHandle, opts: { now?: () => 
 
       const header =
         `retrieval over ${handle.inventory.files.length} files (symbols for ${handle.indexedFiles} ts/js/py files; ` +
-        `index ${handle.state === 'partial' ? 'PARTIAL — unindexed files rank by path/git signals only' : 'full'}): ` +
+        `index ${handle.state === 'partial' ? 'PARTIAL — some files unindexed or stale-indexed until a later session (excerpts stay live)' : 'full'}): ` +
         `${rank} hit(s) for "${input.query}"`;
       const footerParts = [
         `indexed at ${handle.index.generatedAt}${handle.index.head !== null ? ` (head ${handle.index.head})` : ''}; excerpts read live from disk`,

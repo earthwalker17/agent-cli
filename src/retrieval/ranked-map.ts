@@ -39,16 +39,18 @@ export async function buildRankedMap(opts: {
   buildBudgetMs?: number;
   rules?: PolicyRules;
 }): Promise<RankedMapResult> {
-  const fallback = async (): Promise<RankedMapResult> => ({
+  const fallback = async (reason?: string): Promise<RankedMapResult> => ({
     map: await buildWorkspaceMapAuto(opts.root, {}, opts.git),
     handle: null,
-    note: null,
+    // A persistent ranked-path defect must stay operator-visible, not silently downgrade
+    // every session to the flat map forever.
+    note: reason !== undefined ? `ranked map unavailable (${reason}); flat file list used` : null,
   });
   if (!opts.git.isRepo || opts.git.gitPath === null || opts.git.probeFailed) return fallback();
 
   try {
     const inventory = await buildInventory(opts.root, opts.git);
-    if (inventory === null) return fallback();
+    if (inventory === null) return fallback('git listing failed');
     const build = loadOrBuildIndex({
       indexFile: indexFilePath(opts.projectDir),
       root: opts.root,
@@ -76,7 +78,7 @@ export async function buildRankedMap(opts: {
     if (build.state === 'partial') noteParts.push(`index PARTIAL (${build.skippedBudget} file(s) deferred to the next session)`);
     if (!build.persisted) noteParts.push('index cache not persisted (in-memory only this session)');
     return { map, handle, note: noteParts.length > 0 ? noteParts.join('; ') : null };
-  } catch {
-    return fallback(); // the ranked path must never block a session
+  } catch (err) {
+    return fallback((err as Error).message); // the ranked path must never block a session
   }
 }

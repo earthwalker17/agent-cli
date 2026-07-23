@@ -166,18 +166,32 @@ describe('renderRepoMap', () => {
     expect(r.text).toContain('retrieve');
   });
 
-  it('respects the budget at several sizes and stays deterministic', () => {
+  it('the budget is HARD at several sizes and rendering stays deterministic', () => {
     const handle = bigHandle();
     for (const budget of [1200, 4000, 16000]) {
       const r1 = renderRepoMap(handle, { budget });
       const r2 = renderRepoMap(handle, { budget });
       expect(r1.text).toBe(r2.text);
-      expect(r1.text.length).toBeLessThanOrEqual(budget + 400); // tree tier + markers have small fixed overhead
+      expect(r1.text.length).toBeLessThanOrEqual(budget);
     }
     // Smaller budgets must not lose the layout tier (the recall backstop).
     const tiny = renderRepoMap(handle, { budget: 1200 });
     expect(tiny.text).toContain('Layout (every directory, with file counts):');
     expect(tiny.truncated).toBe(true);
+  });
+
+  it('hostile long paths cannot blow the budget, and a budget-cut ranked tier sets truncated', () => {
+    const long = 'x'.repeat(240);
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 25; i++) files[`toplevel-${long}-${i}.ts`] = 'export const a = 1;';
+    for (let i = 0; i < 20; i++) files[`deep-${i}/${long}.ts`] = 'export const b = 2;';
+    const dirty = Object.keys(files).slice(0, 20);
+    const handle = makeHandle(files, dirty);
+    const r = renderRepoMap(handle, { budget: 2000 });
+    expect(r.text.length).toBeLessThanOrEqual(2000);
+    expect(r.truncated).toBe(true);
+    // Per-line clipping bounds every rendered path.
+    for (const line of r.text.split('\n')) expect(line.length).toBeLessThanOrEqual(260);
   });
 
   it('sanitizes control characters in paths', () => {

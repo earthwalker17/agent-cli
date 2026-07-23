@@ -149,6 +149,21 @@ describe('loadOrBuildIndex', () => {
     expect(Object.keys(converged.index.entries).length).toBe(6);
   });
 
+  it('budget-deferred CHANGED files carry their stale prior entry (partial, converges later)', () => {
+    writeFile('a.ts', 'export const oldName = 1;');
+    loadOrBuildIndex({ indexFile, root: ws, inventory: fabricateInventory(['a.ts']), head: null });
+    // The file changes, but the warm load's budget expires before re-extraction.
+    writeFile('a.ts', 'export const newName = 12345;');
+    let t = 0;
+    const partial = loadOrBuildIndex({ indexFile, root: ws, inventory: fabricateInventory(['a.ts']), head: null, budgetMs: 1, now: () => (t += 5) });
+    expect(partial.state).toBe('partial');
+    // Stale-but-present beats absent for ranking; the disclosure ('partial') covers it.
+    expect(partial.index.entries['a.ts']!.symbols.map((s) => s.name)).toContain('oldName');
+    const converged = loadOrBuildIndex({ indexFile, root: ws, inventory: fabricateInventory(['a.ts']), head: null });
+    expect(converged.state).toBe('full');
+    expect(converged.index.entries['a.ts']!.symbols.map((s) => s.name)).toContain('newName');
+  });
+
   it('skips secret-named files entirely and marks binary files unextractable', () => {
     writeFile('config/secret.key.ts', 'export const k = 1;'); // basename contains "secret"
     writeFile('bin.ts', 'x'); // will be overwritten binary
