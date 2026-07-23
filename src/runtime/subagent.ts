@@ -126,6 +126,8 @@ export interface SubagentSpec {
    */
   briefLines?: readonly string[];
   parentSessionId: string;
+  /** The approved-plan task this child executes (Session 11) — recorded on task.started. */
+  planTaskId?: string;
 }
 
 export interface SubagentResult {
@@ -233,7 +235,13 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   if (deps.sandboxFacts !== undefined) recordSandboxStatus(child, deps.sandboxFacts);
   if (deps.gitFacts !== undefined) recordGitContext(child, deps.gitFacts);
   recordWorkspaceMap(child, deps.map);
-  deps.reportTask?.({ kind: 'started', role: spec.role, childSessionId: child.id, budget });
+  deps.reportTask?.({
+    kind: 'started',
+    role: spec.role,
+    childSessionId: child.id,
+    budget,
+    ...(spec.planTaskId !== undefined ? { planTaskId: spec.planTaskId } : {}),
+  });
 
   // Cancellation inputs: parent abort, wall clock, token cap. The cause decides the status
   // (and the child's session.ended reason) — the child itself only ever sees "aborted".

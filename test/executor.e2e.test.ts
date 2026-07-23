@@ -6,7 +6,8 @@ import { findGitOnPath, runGit } from '../src/git/client.js';
 import { worktreeSupport } from '../src/git/worktree.js';
 import { createApprovalForwarder } from '../src/runtime/approval-forwarder.js';
 import { loadRegistry, registerWorktree, registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
-import { createDelegateTool, type ExecutorDeps, type PlanGateContext } from '../src/tools/delegate.js';
+import { createDelegateTool, type ExecutorDeps, type PlanGateInfo } from '../src/tools/delegate.js';
+import type { PlanState } from '../src/plan/canonical.js';
 import { pruneTaskBaseCheckpointRefs } from '../src/cli/assemble.js';
 import { createApplyChangesTool, createTaskChangesRegistry, type TaskChangesRegistry } from '../src/tools/apply-changes.js';
 import { startSession, endSession, runTurn, type Session } from '../src/runtime/session.js';
@@ -149,6 +150,23 @@ describe('approval forwarder (serialized, signal-linked)', () => {
   });
 });
 
+/** Old-style status fixture → the Session 11 PlanGateInfo shape (display/gate tests only). */
+function gateInfo(p: { status: 'none' | 'draft' | 'approved' | 'superseded' | 'unknown'; currentSha: string | null; approvedSha: string | null; diverged: boolean }): PlanGateInfo {
+  return {
+    state: {
+      kind: p.status === 'none' ? 'none' : 'canonical',
+      status: p.status,
+      currentSha: p.currentSha,
+      approvedSha: p.approvedSha,
+      diverged: p.diverged,
+      approvedAndCurrent: p.status === 'approved' && p.approvedSha !== null && p.currentSha === p.approvedSha,
+      canonical: null,
+      legacy: null,
+    } as PlanState,
+    graphState: null,
+  };
+}
+
 describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
   interface Harness {
     parent: Session;
@@ -164,7 +182,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     parentScript: ScriptTurn[];
     childScripts: ScriptTurn[][];
     forwardOutcomes?: ApprovalOutcome[];
-    planContext?: () => PlanGateContext;
+    planContext?: () => PlanGateInfo;
   }): Harness {
     const registry = createTaskChangesRegistry();
     const forwarded: ApprovalRequest[] = [];
@@ -178,7 +196,6 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       worktreesRoot: path.join(tmp, 'wt-home'),
       registryFile: registryFile(layout.projectDir),
       snapshots: undefined as never, // set after the parent exists (shares its store)
-      planContext: opts.planContext ?? (() => ({ status: 'none', currentSha: null, approvedSha: null, diverged: false })),
       registerChanges: (id, baseOid, files) => registry.register(id, baseOid, files),
       noteBaseRef: (ref) => baseRefs.push(ref),
       clockIso: () => new Date(0).toISOString(),
@@ -212,7 +229,9 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       },
     };
     parent.tools = [
-      createDelegateTool(deps, parent.id, executorDeps) as Tool,
+      createDelegateTool(deps, parent.id, executorDeps, {
+        planContext: opts.planContext ?? (() => gateInfo({ status: 'none', currentSha: null, approvedSha: null, diverged: false })),
+      }) as Tool,
       createApplyChangesTool(registry, parent.snapshots) as Tool,
     ];
     return { parent, registry, executorDeps, forwarded, baseRefs };
@@ -418,7 +437,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     const h = makeHarness({
       parentScript: [{ say: 'delegating', calls: [EXEC_CALL()] }, { say: 'blocked' }],
       childScripts: [[{ say: 'must never run' }]],
-      planContext: () => ({ status: 'draft', currentSha: 'a'.repeat(64), approvedSha: null, diverged: false }),
+      planContext: () => gateInfo({ status: 'draft', currentSha: 'a'.repeat(64), approvedSha: null, diverged: false }),
     });
     const prompts: ApprovalRequest[] = [];
     h.parent.approver = async (req) => {
@@ -443,10 +462,10 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     const shaA = 'a'.repeat(64);
     const shaB = 'b'.repeat(64);
 
-    const cases: { plan: PlanGateContext; expectLine: string }[] = [
+    const cases: { plan: Parameters<typeof gateInfo>[0]; expectLine: string }[] = [
       {
         plan: { status: 'approved', currentSha: shaA, approvedSha: shaA, diverged: false },
-        expectLine: `plan: APPROVED (sha ${shaA.slice(0, 12)}, matches the user-approved bytes)`,
+        expectLine: `plan: APPROVED (sha ${shaA.slice(0, 12)}, matches the user-approved content)`,
       },
       {
         plan: { status: 'approved', currentSha: shaB, approvedSha: shaA, diverged: true },
@@ -465,7 +484,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       const h = makeHarness({
         parentScript: [{ say: 'delegating', calls: [EXEC_CALL()] }, { say: 'done' }],
         childScripts: [[{ say: 'child done' }]],
-        planContext: () => c.plan,
+        planContext: () => gateInfo(c.plan),
       });
       const prompts: ApprovalRequest[] = [];
       h.parent.approver = async (req) => {

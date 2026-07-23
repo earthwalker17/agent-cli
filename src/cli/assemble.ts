@@ -7,13 +7,14 @@ import { buildRankedMap } from '../retrieval/ranked-map.js';
 import type { RetrievalHandle } from '../retrieval/rank.js';
 import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
 import { loadMemory, type LoadedMemory } from '../memory/load.js';
-import { createDelegateTool, type ExecutorDeps } from '../tools/delegate.js';
+import { createDelegateTool, delegateCapsFromEvents, type ExecutorDeps, type PlanGateInfo } from '../tools/delegate.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
 import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
-import { planApprovalSha, readPlan } from '../plan/store.js';
+import { readPlanState } from '../plan/canonical.js';
+import { foldGraphState } from '../plan/graph-state.js';
 import { deleteCheckpointRefs } from '../git/checkpoint.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
@@ -179,25 +180,23 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
           worktreesRoot: worktreesRoot(layout.projectDir),
           registryFile: registryFile(layout.projectDir),
           snapshots: session.snapshots,
-          // Read fresh per use: the plan file's current bytes are truth; the sha-bound approval
-          // story lives in the events. STATUS gates executor spawns (draft/unknown refuse);
-          // sha divergence is DISPLAYED at the spawn ask — the consent moment (V0.7.1).
-          planContext: () => {
-            const p = readPlan(layout, session.id);
-            const currentSha = p.exists ? p.sha256 : null;
-            const approvedSha = planApprovalSha(session.log.events);
-            return {
-              status: p.exists ? p.status : 'none',
-              currentSha,
-              approvedSha,
-              diverged: approvedSha !== null && currentSha !== null && approvedSha !== currentSha,
-            };
-          },
           registerChanges: (childSessionId, baseOid, files, omittedCount) => changesRegistry.register(childSessionId, baseOid, files, omittedCount),
           noteBaseRef: (ref) => taskBaseRefs.push(ref),
           clockIso: () => session.clock.iso(),
         }
       : undefined;
+
+  // Plan gate state (Session 11), read FRESH per use — the file's current bytes are truth and
+  // the approval binding lives in events. Wired independently of the executor bundle because
+  // DAG bindings gate read-only tasks too. The fold gives the gate live dependency states.
+  const planContext = (): PlanGateInfo => {
+    const state = readPlanState(layout, session.id, session.log.events);
+    const graph = state.canonical?.graph ?? null;
+    return { state, graphState: graph !== null ? foldGraphState(graph, session.log.events) : null };
+  };
+  // Delegation caps REBUILT FROM EVENTS (Session 11): a resumed session keeps counting where it
+  // left off — the changes-registry pattern applied to the budget counters.
+  const delegateCaps = delegateCapsFromEvents(session.log.events);
 
   // Session-end hygiene (V0.7.1): the task-base ref is a live recovery point only while the
   // session runs — blobs + task.changes events are the durable record. Announced + recorded;
@@ -241,6 +240,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       },
       session.id,
       executorDeps,
+      { planContext, caps: delegateCaps },
     ),
     // update_plan and apply_task_changes are likewise parent-only (no role registry contains
     // them): the model's single gated write paths to the plan document and to integration.

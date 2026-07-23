@@ -93,6 +93,8 @@ export interface ReportJson {
     role: string;
     childSessionId: string;
     status: string | null;
+    /** The approved-plan task this child executed (Session 11, additive). */
+    planTaskId?: string;
     steps?: number;
     usage?: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number };
     resultSha256?: string;
@@ -309,6 +311,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
         role: e.role,
         childSessionId: e.childSessionId,
         status: end !== undefined ? end.status : null,
+        ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
         ...(end !== undefined ? { steps: end.steps, usage: end.usage, resultSha256: end.resultSha256 } : {}),
       };
     });
@@ -569,7 +572,9 @@ function renderMarkdown(r: ReportJson): string {
         t.status !== null
           ? `${t.status} — ${t.steps} step(s), ${t.usage?.inputTokens ?? 0} in / ${t.usage?.outputTokens ?? 0} out tokens`
           : `STARTED but never completed — the session ended while it ran`;
-      L.push(`- ${t.role} → child session ${t.childSessionId}: ${state} (evidence: agent report ${t.childSessionId})`);
+      L.push(
+        `- ${t.role}${t.planTaskId !== undefined ? ` [plan task ${t.planTaskId}]` : ''} → child session ${t.childSessionId}: ${state} (evidence: agent report ${t.childSessionId})`,
+      );
     }
     // Cost roll-up (V0.7.1): one COMBINED line so the total spend is visible in one place.
     // The session usage totals elsewhere in this report stay PARENT-ONLY (stated in the footer);

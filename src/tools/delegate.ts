@@ -1,6 +1,9 @@
 import path from 'node:path';
 import { z } from 'zod';
-import type { SubagentRoleName, TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
+import type { SessionEvent, SubagentRoleName, TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
+import type { PlanState } from '../plan/canonical.js';
+import type { GraphState } from '../plan/graph-state.js';
+import type { PlanGraph, PlanTask } from '../plan/schema.js';
 import {
   neutralizeHarnessDelimiters,
   runSubagentTask,
@@ -8,6 +11,7 @@ import {
   TASKS_PER_SESSION,
   type SubagentDeps,
   type SubagentResult,
+  type SubagentSpec,
 } from '../runtime/subagent.js';
 import fs from 'node:fs';
 import { isInside } from '../shared/pathutil.js';
@@ -58,6 +62,15 @@ const TaskSpec = z
       .max(16)
       .optional()
       .describe('Workspace-relative path prefixes this task must NOT spend budget on (covered elsewhere or out of scope).'),
+    plan_task: z
+      .string()
+      .max(41)
+      .optional()
+      .describe(
+        'The approved-plan task id this child executes (Session 11). REQUIRED for executor tasks while an approved ' +
+          'plan is active — the scheduler gates dependencies, conflicts, and re-runs by this binding; unknown ids, ' +
+          'role mismatches, unmet dependencies, and completed re-runs are refused.',
+      ),
   })
   .strict();
 
@@ -72,15 +85,43 @@ const DelegateInput = z
   .strict();
 type DelegateInputT = z.infer<typeof DelegateInput>;
 
-/** Plan gate + consent-display state, read fresh from the file and events (bytes are truth). */
-export interface PlanGateContext {
-  status: 'none' | 'draft' | 'approved' | 'superseded' | 'unknown';
-  /** sha256 of the plan file's CURRENT bytes; null when absent/unreadable. */
-  currentSha: string | null;
-  /** The sha the user last approved (from plan.approved/plan.discarded events); null = none. */
-  approvedSha: string | null;
-  /** status says approved but the file's bytes are no longer the approved bytes. */
-  diverged: boolean;
+/**
+ * Plan gate + consent-display state (Session 11), read FRESH from the file and events per use
+ * (bytes are truth): the unified PlanState plus — for a valid canonical graph — the execution
+ * fold. Lives on its own options seam (not ExecutorDeps): DAG bindings gate read-only tasks
+ * too, and a non-repo session with a canonical plan must still enforce them.
+ */
+export interface PlanGateInfo {
+  state: PlanState;
+  /** The execution fold of the canonical graph; null when no valid canonical graph exists. */
+  graphState: GraphState | null;
+}
+
+/**
+ * Cumulative per-session delegation caps (Session 11): REBUILT FROM EVENTS at assembly (the
+ * changes-registry pattern), so a resumed session keeps counting where it left off instead of
+ * silently resetting its budgets.
+ */
+export interface DelegateCaps {
+  tasksStarted: number;
+  childOutputTokens: number;
+}
+
+export function delegateCapsFromEvents(events: readonly SessionEvent[]): DelegateCaps {
+  const caps: DelegateCaps = { tasksStarted: 0, childOutputTokens: 0 };
+  for (const e of events) {
+    if (e.type === 'task.started') caps.tasksStarted++;
+    else if (e.type === 'task.ended') caps.childOutputTokens += e.usage.outputTokens;
+  }
+  return caps;
+}
+
+/** Per-session wiring for the plan gate and caps (Session 11). */
+export interface DelegateOptions {
+  /** Fresh plan gate state per use (gate at execute; display at the ask). Absent ⇒ gate off. */
+  planContext?: () => PlanGateInfo;
+  /** Session-cumulative counters; assembly passes the events-rebuilt object. */
+  caps?: DelegateCaps;
 }
 
 /** Everything executor orchestration needs from assembly; absent ⇒ executors honestly unavailable. */
@@ -93,8 +134,6 @@ export interface ExecutorDeps {
   worktreesRoot: string;
   registryFile: string;
   snapshots: SnapshotStore;
-  /** Current plan gate state, read fresh per use (gate at execute; display at the ask). */
-  planContext: () => PlanGateContext;
   /**
    * Called with each group's base-checkpoint ref so assembly can prune them at session end
    * (V0.7.1): the ref is a live recovery point only while the session runs — the captured
@@ -194,9 +233,142 @@ export function composeBriefs(
   return { briefs, groupNotes };
 }
 
-export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, executor?: ExecutorDeps): Tool<DelegateInputT> {
-  let tasksStarted = 0;
-  let childOutputTokens = 0;
+/**
+ * The DAG gate (Session 11): rules R1–R9 from the approved plan graph, evaluated BEFORE the base
+ * checkpoint so a refusal spawns nothing. Bindings are enforced against the approved-and-current
+ * canonical plan only — binding a draft/diverged/legacy plan is refused honestly rather than
+ * silently recorded against content the user never consented to. Returns the refusal, or null.
+ */
+export function checkDagRules(
+  tasks: readonly { role: string; plan_task?: string | undefined }[],
+  gate: PlanGateInfo,
+): string | null {
+  const st = gate.state;
+  const activeGraph: PlanGraph | null = st.approvedAndCurrent ? (st.canonical?.graph ?? null) : null;
+  const gs = gate.graphState;
+  if (activeGraph === null || gs === null) {
+    const bound = tasks.findIndex((t) => t.plan_task !== undefined);
+    if (bound !== -1) {
+      return st.kind === 'none'
+        ? `task ${bound + 1} names plan task '${tasks[bound]!.plan_task}' but no plan document exists for this session — drop the binding or write a plan with update_plan`
+        : `task ${bound + 1} names plan task '${tasks[bound]!.plan_task}' but the current plan content is not approved — plan bindings are enforced only against the user-approved plan (/plan approve first)`;
+    }
+    return null;
+  }
+  const byId = new Map(activeGraph.tasks.map((t) => [t.id, t] as const));
+
+  // Pass 1 — binding shape: every binding must name a real plan task with the matching role.
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i]!;
+    if (t.plan_task === undefined) {
+      // R1: while the approved DAG is active, an unbound EXECUTOR would escape re-spawn
+      // refusal, /tasks placement, and traceability — refuse with the honest escape hatches.
+      if (t.role === 'executor') {
+        const readyExec = gs.ready.filter((id) => byId.get(id)?.role === 'executor');
+        return (
+          `an approved plan is active: executor task ${i + 1} must name its plan task via "plan_task"` +
+          (readyExec.length > 0 ? ` (ready executor tasks: ${readyExec.join(', ')})` : ' (no executor tasks are ready)') +
+          ' — or amend the plan with update_plan (this resets approval and requires re-approval), or make the change directly with your own tools'
+        );
+      }
+      continue; // read-only tasks never need a binding
+    }
+    const pt = byId.get(t.plan_task);
+    if (pt === undefined) {
+      // R2
+      return `task ${i + 1} names unknown plan task '${t.plan_task}' — the approved plan defines: ${activeGraph.tasks.map((x) => x.id).join(', ')}`;
+    }
+    if (pt.role !== t.role) {
+      // R3
+      return `task ${i + 1} binds plan task '${t.plan_task}' (plan role: ${pt.role}) but was requested as ${t.role} — roles must match the approved plan`;
+    }
+  }
+
+  // Pass 2 — group composition, BEFORE per-task state: grouping a dependent with its dependency
+  // gets the actionable "sequence them across calls" message rather than R4's "blocked" (which
+  // would otherwise always shadow it — the dep can never be completed while spawning alongside).
+  const bound = tasks.map((t) => t.plan_task).filter((p): p is string => p !== undefined);
+  const dup = bound.find((p, i) => bound.indexOf(p) !== i);
+  // R6: duplicate binding inside one group (sequential calls make a live double-spawn otherwise
+  // impossible — the parent awaits each group before the next call).
+  if (dup !== undefined) return `plan task '${dup}' is bound by more than one task in this group — one live execution per plan task`;
+  for (let i = 0; i < tasks.length; i++) {
+    const a = tasks[i]!.plan_task;
+    if (a === undefined) continue;
+    const pa = byId.get(a)!;
+    if (tasks.length > 1 && (pa.serial || pa.risk === 'high')) {
+      // R8
+      return `plan task '${a}' is marked ${pa.serial ? 'serial' : 'high risk'} and must run alone — spawn it as a single-task group`;
+    }
+    for (let j = 0; j < tasks.length; j++) {
+      if (i === j) continue;
+      const b = tasks[j]!.plan_task;
+      if (b === undefined) continue;
+      if (pa.dependsOn.includes(b)) {
+        // R9
+        return `task ${i + 1} (plan task '${a}') depends on task ${j + 1} (plan task '${b}') in the same group — dependent tasks cannot run in parallel; sequence them across calls`;
+      }
+      if (j > i && tasks[i]!.role === 'executor' && tasks[j]!.role === 'executor') {
+        const pb = byId.get(b)!;
+        const hits = pa.touches.filter((ta) => pb.touches.some((tb) => prefixesOverlap(normalizePrefix(ta), normalizePrefix(tb))));
+        if (hits.length > 0) {
+          // R7 (the capture-time write-set warning stays the declared-vs-actual backstop)
+          return `plan tasks '${a}' and '${b}' declare overlapping touch prefixes (${hits.join(', ')}) — parallel executors must own disjoint paths; run them in separate calls`;
+        }
+      }
+    }
+  }
+
+  // Pass 3 — per-task execution state from the fold.
+  for (const t of tasks) {
+    if (t.plan_task === undefined) continue;
+    const ts = gs.byId.get(t.plan_task);
+    if (ts === undefined) continue;
+    if (ts.state === 'completed') {
+      // R5 (failed/cancelled/interrupted stay re-spawnable — the bounded retry path)
+      return `plan task '${t.plan_task}' is already completed and integrated — re-running it risks duplicated mutations; amend the plan if more work is needed`;
+    }
+    if (ts.state === 'integrating') {
+      return `plan task '${t.plan_task}' has captured changes not yet fully applied — integrate them with apply_task_changes (or resolve the refusals) before re-running it`;
+    }
+    if (ts.state === 'blocked') {
+      // R4 (parent-owned deps auto-satisfy in the fold and surface as a warning, never here)
+      const depsLine = ts.blockedOn.map((d) => `'${d}' is ${gs.byId.get(d)?.state ?? 'unknown'}`).join('; ');
+      return `plan task '${t.plan_task}' is blocked: dependency ${depsLine} — dependencies must be completed AND integrated (apply_task_changes with no refusals) before dependents run`;
+    }
+  }
+  return null;
+}
+
+/** Group-note warnings for bound tasks whose dependencies are parent-owned (asserted, unverifiable). */
+function parentOwnedDepWarnings(
+  tasks: readonly { plan_task?: string | undefined }[],
+  planTaskById: ReadonlyMap<string, PlanTask>,
+  gs: GraphState,
+): string[] {
+  const out: string[] = [];
+  for (const t of tasks) {
+    if (t.plan_task === undefined) continue;
+    const pt = planTaskById.get(t.plan_task);
+    if (pt === undefined) continue;
+    for (const dep of pt.dependsOn) {
+      if (gs.byId.get(dep)?.state === 'parent-owned') {
+        out.push(
+          `NOTE — plan task '${t.plan_task}' depends on parent-owned task '${dep}': the harness cannot verify parent work; spawning '${t.plan_task}' asserts '${dep}' is done.`,
+        );
+      }
+    }
+  }
+  return out;
+}
+
+export function createDelegateTool(
+  deps: SubagentDeps,
+  parentSessionId: string,
+  executor?: ExecutorDeps,
+  opts?: DelegateOptions,
+): Tool<DelegateInputT> {
+  const caps: DelegateCaps = opts?.caps ?? { tasksStarted: 0, childOutputTokens: 0 };
   return {
     name: 'delegate_task',
     description:
@@ -216,55 +388,97 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
     // must SEE whether the plan they approved is still the plan on disk. Read fresh at ask time;
     // the gate below re-reads at execute time (fresher — the safe direction). Never policy.
     approvalContext: (i) => {
-      if (!i.tasks.some((t) => t.role === 'executor') || executor === undefined) return [];
-      const p = executor.planContext();
+      if (!i.tasks.some((t) => t.role === 'executor') || opts?.planContext === undefined) return [];
+      const p = opts.planContext().state;
       const short = (sha: string | null): string => (sha !== null ? sha.slice(0, 12) : '(unknown)');
+      const bindings = i.tasks
+        .filter((t) => t.plan_task !== undefined)
+        .map((t) => `task ${i.tasks.indexOf(t) + 1} → plan task '${t.plan_task}'`);
+      const bindingLines = bindings.length > 0 ? [`plan bindings: ${bindings.join(', ')}`] : [];
       if (p.status === 'none') return ['plan: none — no plan document exists for this session'];
       if (p.status === 'approved') {
         if (p.approvedSha === null) {
-          return ['plan: file says APPROVED but no /plan approve is recorded this session (status possibly hand-edited) — review /plan show'];
+          return ['plan: file says APPROVED but no /plan approve is recorded this session (status possibly hand-edited) — executor tasks will refuse until /plan approve'];
         }
         return p.diverged
-          ? [`plan: APPROVED but DIVERGED after approval (approved ${short(p.approvedSha)}, current ${short(p.currentSha)}) — review /plan show before allowing`]
-          : [`plan: APPROVED (sha ${short(p.currentSha)}, matches the user-approved bytes)`];
+          ? [`plan: APPROVED but DIVERGED after approval (approved ${short(p.approvedSha)}, current ${short(p.currentSha)}) — executor tasks will refuse until re-approval`]
+          : [`plan: APPROVED (sha ${short(p.currentSha)}, matches the user-approved content)`, ...bindingLines];
       }
-      if (p.status === 'superseded') return ['plan: SUPERSEDED (discarded) — executors would run without an active plan'];
-      return [`plan: ${p.status.toUpperCase()} — executor tasks will refuse until /plan approve`];
+      if (p.status === 'superseded') return ['plan: SUPERSEDED (discarded) — executor tasks will refuse until a new plan is approved'];
+      return [`plan: ${String(p.status).toUpperCase()} — executor tasks will refuse until /plan approve`];
     },
     async execute(input, ctx): Promise<ToolResult> {
       const refuse = (error: string): ToolResult => ({ ok: false, output: '', error, durationMs: 0, truncated: false });
       // Group-atomic caps: a group either fully fits the remaining budget or is refused whole —
       // silently starting a partial group would misreport what the model asked for.
-      if (tasksStarted + input.tasks.length > TASKS_PER_SESSION) {
+      if (caps.tasksStarted + input.tasks.length > TASKS_PER_SESSION) {
         return refuse(
-          `task budget exhausted: this session already delegated ${tasksStarted} of ${TASKS_PER_SESSION} tasks and the group of ${input.tasks.length} does not fit; finish the work directly with your own tools`,
+          `task budget exhausted: this session already delegated ${caps.tasksStarted} of ${TASKS_PER_SESSION} tasks and the group of ${input.tasks.length} does not fit; finish the work directly with your own tools`,
         );
       }
-      if (childOutputTokens >= SESSION_CHILD_OUTPUT_TOKEN_CAP) {
+      if (caps.childOutputTokens >= SESSION_CHILD_OUTPUT_TOKEN_CAP) {
         return refuse(
-          `delegation output-token budget exhausted (${childOutputTokens} of ${SESSION_CHILD_OUTPUT_TOKEN_CAP} output tokens across child tasks); finish the work directly with your own tools`,
+          `delegation output-token budget exhausted (${caps.childOutputTokens} of ${SESSION_CHILD_OUTPUT_TOKEN_CAP} output tokens across child tasks); finish the work directly with your own tools`,
         );
       }
 
       // Executor preconditions — all checked BEFORE anything spawns, so a refusal spawns nothing.
       const executorCount = input.tasks.filter((t) => t.role === 'executor').length;
-      let baseOid: string | null = null;
+      let gate: PlanGateInfo | null = null;
+      try {
+        gate = opts?.planContext?.() ?? null;
+      } catch (err) {
+        // Fail closed where the gate matters: an unreadable plan state must not wave executors
+        // or bindings through; unbound read-only groups are unaffected (nothing to gate).
+        if (executorCount > 0 || input.tasks.some((t) => t.plan_task !== undefined)) {
+          return refuse(`plan state unavailable (${(err as Error).message}) — executor tasks and plan bindings are blocked until it can be read`);
+        }
+      }
       if (executorCount > 0) {
         if (executor === undefined) {
           return refuse('executor tasks need a git repository with a probed git binary; none is available in this session');
         }
         const support = worktreeSupport(executor.gitVersion);
         if (!support.ok) return refuse(`executor tasks unavailable: ${support.reason}`);
-        const plan = executor.planContext();
-        if (plan.status === 'draft' || plan.status === 'unknown') {
-          return refuse(
-            `a plan document exists but is not approved (status: ${plan.status}) — executor tasks are blocked until the user runs /plan approve (or /plan discard)`,
-          );
+        // The plan STATUS gate (Session 11 — strict): while any plan document exists, executor
+        // groups run only against the approved CURRENT content. Draft/unknown keep the V0.7
+        // wording; superseded, diverged, and approved-without-recorded-consent now BLOCK
+        // (previously display-only). No plan at all does not block — the per-spawn human ask
+        // remains the consent floor for unplanned executor work.
+        if (gate !== null && gate.state.kind !== 'none') {
+          const st = gate.state;
+          if (st.status === 'draft' || st.status === 'unknown') {
+            return refuse(
+              `a plan document exists but is not approved (status: ${st.status}) — executor tasks are blocked until the user runs /plan approve (or /plan discard)`,
+            );
+          }
+          if (st.status === 'superseded') {
+            return refuse(
+              'the plan was discarded (status: superseded) — write a new plan with update_plan and get it approved before executor delegation',
+            );
+          }
+          if (st.status === 'approved' && !st.approvedAndCurrent) {
+            return refuse(
+              st.approvedSha === null
+                ? 'the plan file says APPROVED but no /plan approve is recorded this session — executor tasks are blocked until the user runs /plan approve'
+                : `the plan on disk has DIVERGED from the approved plan (approved ${st.approvedSha.slice(0, 12)}, current ${st.currentSha?.slice(0, 12) ?? 'unreadable'}) — executor tasks are blocked until the user re-approves (/plan approve) or discards (/plan discard)`,
+            );
+          }
         }
+      }
+
+      // The DAG gate (Session 11): while an approved-and-current canonical plan is active, plan
+      // bindings are enforced for EVERY role — dependencies, conflicts, duplicate and completed
+      // re-runs are refused before anything spawns (group-atomic, like every refusal above).
+      const dagRefusal = gate !== null ? checkDagRules(input.tasks, gate) : null;
+      if (dagRefusal !== null) return refuse(dagRefusal);
+
+      let baseOid: string | null = null;
+      if (executorCount > 0) {
         // ONE base checkpoint per group, created sequentially before any fan-out: every member
         // starts from the same attributable oid, dirty parent state included.
         const base = await createCheckpoint(
-          { gitPath: executor.gitPath, repoRoot: executor.repoRoot, workspaceRoot: deps.workspaceRoot, stateDir: executor.stateDir },
+          { gitPath: executor!.gitPath, repoRoot: executor!.repoRoot, workspaceRoot: deps.workspaceRoot, stateDir: executor!.stateDir },
           parentSessionId,
           { label: 'task base' },
         );
@@ -272,13 +486,39 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
           return refuse(`cannot capture the task-base checkpoint: ${base.error ?? 'unknown error'}`);
         }
         baseOid = base.oid;
-        if (base.ref !== undefined) executor.noteBaseRef(base.ref);
+        if (base.ref !== undefined) executor!.noteBaseRef(base.ref);
       }
-      tasksStarted += input.tasks.length;
+      caps.tasksStarted += input.tasks.length;
+
+      // Plan-informed effective tasks: a bound task with no explicit focus inherits its plan
+      // task's declared touches as the focus brief (sibling coverage then sees it too).
+      const activeGraph = gate !== null && gate.state.approvedAndCurrent ? (gate.state.canonical?.graph ?? null) : null;
+      const planTaskById = new Map((activeGraph?.tasks ?? []).map((t) => [t.id, t] as const));
+      const effectiveTasks = input.tasks.map((t) => {
+        const pt = t.plan_task !== undefined ? planTaskById.get(t.plan_task) : undefined;
+        return pt !== undefined && t.focus === undefined && pt.touches.length > 0 ? { ...t, focus: [...pt.touches] } : t;
+      });
 
       // Brief composition (Session 10): focus/avoid + sibling coverage per task, overlap
-      // warnings for the group — deterministic, before any child exists.
-      const composed = composeBriefs(input.tasks, deps.workspaceRoot);
+      // warnings for the group — deterministic, before any child exists. Session 11 adds the
+      // plan-task identity + verification criteria to each bound task's brief.
+      const composed = composeBriefs(effectiveTasks, deps.workspaceRoot);
+      for (let i = 0; i < input.tasks.length; i++) {
+        const pid = input.tasks[i]!.plan_task;
+        const pt = pid !== undefined ? planTaskById.get(pid) : undefined;
+        if (pt !== undefined) {
+          composed.briefs[i]!.unshift(
+            `- Plan task: ${pt.id} — ${pt.title}`,
+            ...(pt.verify.trim() !== '' ? [`- Verification criteria (the parent will check): ${pt.verify}`] : []),
+          );
+        }
+      }
+      if (gate?.graphState !== null && gate?.graphState !== undefined && activeGraph !== null) {
+        composed.groupNotes.push(`plan execution state: ${gate.graphState.summary}`);
+        for (const note of parentOwnedDepWarnings(input.tasks, planTaskById, gate.graphState)) {
+          composed.groupNotes.push(note);
+        }
+      }
 
       // Fan out. Group size is schema-capped at 3, so Promise.all IS the concurrency limit.
       // Each child gets its own session/log; evidence events interleave at event granularity
@@ -292,6 +532,7 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
             ...(t.context !== undefined ? { context: t.context } : {}),
             ...(t.expected_output !== undefined ? { expectedOutput: t.expected_output } : {}),
             ...(composed.briefs[index]!.length > 0 ? { briefLines: composed.briefs[index]! } : {}),
+            ...(t.plan_task !== undefined ? { planTaskId: t.plan_task } : {}),
           };
           const provider = deps.providerForTask?.(index, spec.role) ?? deps.provider;
           const taskDeps: SubagentDeps = {
@@ -305,7 +546,7 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
           return runExecutorTask(taskDeps, spec, executor!, baseOid!, ctx);
         }),
       );
-      for (const o of outcomes) childOutputTokens += o.result.usage.outputTokens;
+      for (const o of outcomes) caps.childOutputTokens += o.result.usage.outputTokens;
 
       // Overlap detection across the group's captured write-sets (apply order defines the
       // winner; the warning makes the collision visible BEFORE anything integrates).
@@ -377,7 +618,7 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
  */
 async function runExecutorTask(
   taskDeps: SubagentDeps,
-  spec: { role: SubagentRoleName; task: string; parentSessionId: string; context?: string; expectedOutput?: string },
+  spec: SubagentSpec,
   ex: ExecutorDeps,
   baseOid: string,
   ctx: ToolContext,

@@ -124,10 +124,28 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     case 'tasks': {
       const events = ctx.session.log.events;
       const started = events.filter((e) => e.type === 'task.started');
-      if (started.length === 0) {
+      // Session 11: the plan-task DAG view — a pure fold of (canonical graph, events).
+      const planGraph = readPlanState(ctx.layout, ctx.session.id, events).canonical?.graph ?? null;
+      const graphLines: string[] = [];
+      if (planGraph !== null) {
+        const gs = foldGraphState(planGraph, events);
+        graphLines.push(`plan tasks (${gs.summary}):`);
+        for (const t of gs.tasks) {
+          graphLines.push(
+            `  ${t.id} [${t.role}] ${sanitizeLine(t.title)} — ${t.state}` +
+              (t.blockedOn.length > 0 ? ` (on ${t.blockedOn.join(', ')})` : '') +
+              (t.childSessionId !== null ? ` · child ${sanitizeLine(t.childSessionId.slice(-4))}` : '') +
+              (t.attempts > 1 ? ` · attempt ${t.attempts}` : '') +
+              (t.note !== undefined ? ` · ${sanitizeLine(t.note)}` : ''),
+          );
+        }
+      }
+      if (started.length === 0 && graphLines.length === 0) {
         ctx.renderer.chromeLine('no delegated tasks in this session');
         return 'continue';
       }
+      if (graphLines.length > 0) ctx.renderer.chromeLine(graphLines.join('\n'));
+      if (started.length === 0) return 'continue';
       const lines = started.map((s, i) => {
         if (s.type !== 'task.started') return '';
         // Join by childSessionId: one delegate call can start a parallel GROUP (V0.7), so
@@ -137,7 +155,8 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           ended !== undefined && ended.type === 'task.ended'
             ? `${ended.status} · ${ended.steps} step(s) · ${ended.usage.inputTokens} in / ${ended.usage.outputTokens} out tok`
             : 'RUNNING or CRASHED (no task.ended recorded)';
-        return `${i + 1}. ${s.role} ${sanitizeLine(s.childSessionId)} — ${state} — inspect: agent report ${sanitizeLine(s.childSessionId)}`;
+        const planRef = s.planTaskId !== undefined ? ` (plan task ${sanitizeLine(s.planTaskId)})` : '';
+        return `${i + 1}. ${s.role}${planRef} ${sanitizeLine(s.childSessionId)} — ${state} — inspect: agent report ${sanitizeLine(s.childSessionId)}`;
       });
       // Children's summed usage (V0.7.1): /status stays parent-only; this is the labeled sum.
       let childIn = 0;

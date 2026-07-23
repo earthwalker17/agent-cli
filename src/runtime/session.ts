@@ -264,14 +264,16 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
     if (tasks !== undefined && tasks.length > 0) {
       // The delegated task(s) were running at the crash. Each child's OWN evidence log
       // survives — point at every one of them instead of guessing what the children did.
-      const pointers = tasks.map((t) => `child session ${t.childSessionId} (${t.role}) — inspect: agent report ${t.childSessionId}`);
+      const planRef = (t: Extract<SessionEvent, { type: 'task.started' }>): string =>
+        t.planTaskId !== undefined ? `, plan task '${t.planTaskId}'` : '';
+      const pointers = tasks.map((t) => `child session ${t.childSessionId} (${t.role}${planRef(t)}) — inspect: agent report ${t.childSessionId}`);
       const changesNote = taskChangesBy.has(id)
         ? ' Captured task changes survived the crash and can still be integrated with apply_task_changes.'
         : '';
       return toolResultBlock(
         id,
         (tasks.length === 1
-          ? `interrupted: a delegated task (child session ${tasks[0]!.childSessionId}) was running when the session crashed; its own evidence log survives — inspect: agent report ${tasks[0]!.childSessionId}`
+          ? `interrupted: a delegated task (child session ${tasks[0]!.childSessionId}${planRef(tasks[0]!)}) was running when the session crashed; its own evidence log survives — inspect: agent report ${tasks[0]!.childSessionId}`
           : `interrupted: ${tasks.length} delegated tasks were running when the session crashed; each child's own evidence log survives — ${pointers.join('; ')}`) + changesNote,
         true,
       );
@@ -623,7 +625,23 @@ function callSandbox(session: Session, boundary: 'sandbox' | 'unsandboxed' | und
 function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): void {
   switch (e.kind) {
     case 'started':
-      session.log.append({ type: 'task.started', callId, role: e.role, childSessionId: e.childSessionId, budget: e.budget });
+      session.log.append({
+        type: 'task.started',
+        callId,
+        role: e.role,
+        childSessionId: e.childSessionId,
+        budget: e.budget,
+        ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
+      });
+      return;
+    case 'supervision':
+      session.log.append({
+        type: 'task.supervision',
+        callId,
+        childSessionId: e.childSessionId,
+        kind: e.what,
+        ...(e.detail !== undefined ? { detail: e.detail } : {}),
+      });
       return;
     case 'ended':
       session.log.append({
