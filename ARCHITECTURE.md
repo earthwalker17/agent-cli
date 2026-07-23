@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
-How Agent CLI V0.8 (post-Session-10 repository intelligence) is actually built. This describes
-the implemented system, not aspirations — see `ROADMAP.md` for what is deferred.
+How Agent CLI V0.9 (post-Session-11 planning/orchestration lifecycle) is actually built. This
+describes the implemented system, not aspirations — see `ROADMAP.md` for what is deferred.
 
 ## Shape
 
@@ -55,9 +55,11 @@ src/
     index.ts               read_file/list_files/search/write_file/edit_file + registry + schemas.
     run-command.ts         Shell tool on runManaged; applies ctx.sandbox.wrap at spawn time.
     delegate.ts            delegate_task — per-session factory; parallel groups, executor
-                           orchestration, briefs/report-check/delimiter hardening (V0.8).
+                           orchestration, briefs (V0.8); the DAG gate (checkDagRules R1–R9),
+                           plan bindings, group digest, events-rebuilt caps (Session 11).
     retrieve.ts            retrieve — read-only view over the session index (V0.8).
-    update-plan.ts         update_plan — the model's ONLY write path to the plan document.
+    update-plan.ts         update_plan — the model's ONLY plan write path; structured graph
+                           input with full-precision validation errors (Session 11).
     apply-changes.ts       apply_task_changes + the captured-changes registry.
   retrieval/               V0.8 — see "Repository intelligence".
     inventory.ts           Git-backed inventory + dirty paths + path-SET digest.
@@ -79,7 +81,14 @@ src/
     load.ts                Session-start load: three docs, caps, banner, crash note.
     update.ts              End-of-session update: gate, narrative call, roll + atomic write.
   plan/
-    store.ts               Plan documents: lenient reads, atomic writes, harness-owned status.
+    store.ts               LEGACY markdown plan store (V0.7) — resumed old sessions only.
+    schema.ts              Canonical plan graph: zod shape, semantic validation (acyclic,
+                           contained touches, verify-where-mutating), canonicalJson +
+                           planContentSha — the approval-binding CONTENT identity (Session 11).
+    canonical.ts           <id>.plan.json store: amendment contract, approve-refuses-invalid,
+                           readPlanState (the ONE reader, legacy fallback) (Session 11).
+    views.ts               Deterministic user/agent projections + the generated-view writer.
+    graph-state.ts         Pure event fold → per-task execution states (the DAG's truth).
   runtime/
     session.ts             startSession / runTurn / resumeSession / reconstruct / endSession.
     subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn;
@@ -96,9 +105,15 @@ src/
   config/
     config.ts              Layered narrowing-only config.
   repl/
-    repl.ts                runRepl — the prompt→runTurn loop, lifecycle, interrupts.
-    io.ts                  ONE persistent readline: prompts, approvals, SIGINT, type-ahead.
-    render.ts              EventLog.onAppend → live chrome + per-turn summaries.
+    repl.ts                runRepl — the prompt→runTurn loop, lifecycle, interrupts, routing
+                           sigils, plan-note injection, mid-turn command wiring.
+    io.ts                  ONE persistent readline: prompts, approvals, SIGINT, type-ahead;
+                           TTY-only mid-turn /-line interception (Session 11).
+    render.ts              EventLog.onAppend → live chrome + per-turn summaries; all chrome
+                           routes through the status-aware sink (Session 11).
+    status.ts              The sticky status area — the ONLY cursor-moving code; TTY-only,
+                           stderr-only, zero escapes off-TTY (Session 11).
+    live-tasks.ts          Render-only live task table + the /cancel registry (Session 11).
     format.ts              Glyph/color tables, pure labels.
     commands.ts            Slash commands over the live log.
   workspace/
@@ -452,8 +467,9 @@ CONTRACTS (not prompt aliases) and lets one delegate call run a bounded parallel
   report's "Delegated tasks" + "Task changes and integration" sections; `latestSessionId`
   still skips lineage-bearing logs.
 - **Boundaries (deliberate):** depth 1; no inter-child messaging (siblings are blind to each
-  other; the parent integrates); no task resume; per-task cancellation exists as forwarded
-  deny-stop + harness causes only (a full mid-turn task-management UI is deferred);
+  other; the parent integrates); no task resume. Per-task cancellation is now a REAL contract
+  (Session 11): the mid-turn `/cancel` registry + forwarded deny-stop + harness causes; the
+  live task table + sticky status area are the mid-turn management surface.
   `--provider mock --script` still shares one script (tests use the per-task provider seam).
 
 ## Executor isolation and integration (`git/worktree.ts`, `runtime/worktrees.ts`, `runtime/task-changes.ts`, `tools/apply-changes.ts`)
@@ -517,41 +533,108 @@ The mutating role never touches the user's workspace. The chain is: base → wor
   (`task.applied`), one undoable unit. The registry is rebuilt from `task.changes` events on
   resume, so a crash between capture and apply strands nothing.
 
-## Plan mode (`plan/store.ts`, `tools/update-plan.ts`, REPL `/plan`, `@plan`)
+## Planning lifecycle (`plan/`, `tools/update-plan.ts`, REPL `/plan`, `@plan`/`@direct`) — Session 11
 
-Plans are explicit temporary local state — one markdown document per session at
-`<projectDir>/plans/<sessionId>.md` — never disposable narration, and never authority.
+One CANONICAL structured plan per session at `<projectDir>/plans/<sessionId>.plan.json` —
+`{version, planId, status, updated, plan}` wrapping a schema-validated task graph — with two
+deterministic projections: the concise user view (regenerated to `<sessionId>.md`, marked
+`<!-- GENERATED VIEW -->`; a legacy user-authored md is blob-archived before any overwrite) and
+the detailed agent view (the injection note). Never authority; the legacy V0.7 markdown store
+remains readable for resumed old sessions via `readPlanState`, the ONE reader every consumer
+uses.
 
-- **The file's current bytes are truth.** The user may edit it with any editor at any time;
-  the harness re-reads it before every use. Reads never throw (a malformed plan degrades to
-  status `unknown`, content intact); writes are atomic; prior bytes are blob-archived
-  (`prevSha256`) so plan history stays reviewable.
-- **The model writes it ONLY through `update_plan`**, gated by the first-class `Tool.planDoc`
-  policy fact with its own fail-closed engine branch (`plan.update`, allow/`reversible`;
-  planDoc+command/delegates deny; a throwing fact denies) — without it, a mutation-less
-  command-less tool writing harness state would auto-classify observe (the S6 trap, pinned
-  again). The harness owns the frontmatter: model writes can NEVER change `status` (a
-  body-smuggled frontmatter block is stripped); only `/plan approve|discard` do.
-- **Approval is consent evidence:** `/plan approve` records `plan.approved {planId, sha256}` —
-  binding the EXACT approved bytes. Later divergence (model progress updates keep status
-  `approved`; user edits too) is SURFACED on every injection and in the report, never hidden;
-  the enforcement point stays the per-spawn executor `ask`, which since V0.7.1 genuinely
-  DISPLAYS the plan-approval state at the consent moment: the delegate tool's
-  `approvalContext` renders "APPROVED (sha …, matches the user-approved bytes)" /
-  "APPROVED but DIVERGED after approval (approved …, current …)" / none / DRAFT /
-  SUPERSEDED / approved-with-no-recorded-approval (hand-edited frontmatter), derived from
-  `planApprovalSha(events)` — the ONE approval-state derivation shared with the injection
-  note. While a draft/unknown plan exists, the delegate tool refuses executor groups.
-  `/plan discard` records `plan.discarded` and stops injection.
-- **Injection is a standing per-turn harness note** (never the cached system prompt): full
-  plan content only when its sha is NEW to the model (not last-injected, not one the model
-  itself wrote — `plan.updated` events carry the shas), a one-line pointer otherwise; capped
-  at 12 KiB; labeled with the verbatim context-not-authority sovereignty wording. `@plan
-  <request>` forces plan mode via an explicit harness note (investigate → update_plan →
-  present → wait for approval).
-- **Surfaces:** `/plan [show|approve|discard]`; read-only `agent plan [<id>]`; the report's
-  "## Plan" section (writes, approval sha, post-approval divergence, discard) derived purely
-  from events; `plan.updated` flows through the callId-bound `ToolContext.reportPlan` channel.
+- **The plan graph** (`plan/schema.ts`): tasks carry id (slug, stable across amendments),
+  title, intent, role (executor/explorer/reviewer/main), dependsOn, touches (workspace-relative
+  prefixes), verify (required for executor/main), risk, serial. Semantic validation — unique
+  ids, resolvable acyclic deps (the cycle PATH is reported), contained touch prefixes (`..`
+  never disk-probed), size cap — refuses with the COMPLETE error list; `update_plan` returns it
+  verbatim with nothing written (the revision loop is the design). Warnings (non-dep-ordered
+  touch overlap) surface without blocking.
+- **Approval binds the CONTENT sha**: `planContentSha = sha256(canonicalJson(plan))` — sorted
+  keys, no whitespace, the `plan` sub-object only. Status/timestamp flips are sha-neutral BY
+  CONSTRUCTION (the V0.7 approve-rewrites-the-file quirk is structurally gone: the approved
+  sha now EQUALS the write's sha, pin inverted); whitespace/key-order hand-edits are
+  approval-neutral; any semantic change invalidates.
+- **The amendment contract** (`plan/canonical.ts`): a model write keeps `approved` only for a
+  semantic no-op; otherwise → `draft` — including over `superseded` (the V0.7 discard-trap is
+  gone: a new write starts a fresh cycle). `/plan approve` REFUSES a file that does not parse
+  and validate (no consent to garbage bytes); an unparseable/invalid hand-edit reads as status
+  `unknown` with `contentSha` null → gated. `plan.approved {sha256: contentSha}` is the consent
+  record; `approvedAndCurrent` (status approved AND event-sha equality) is THE executor
+  precondition — divergence now BLOCKS (was display-only in V0.7.1).
+- **Routing** (`plan.route`, additive): model-judged per prompt rules (simple → direct; complex
+  → plan first), forced by `@plan` / `@direct` sigils (recorded `source: 'user-sigil'`); the
+  model's first `update_plan` records `{mode:'plan', source:'model'}`. Absence of plan events
+  is the honest evidence of a direct turn. No harness classifier — the hard floor stays
+  structural (executor gates), not linguistic.
+- **Injection**: the standing per-turn note carries the AGENT view when the content sha is new
+  to the model, a pointer otherwise — and the pointer ALWAYS carries the live execution summary
+  (task states change without changing the content sha, so the fold must not hide behind the
+  dedupe). 12 KiB cap; verbatim sovereignty wording; unreadable plans inject an honest header.
+- **Surfaces:** `/plan show` renders the user view (+ approval state incl. INVALIDATED and
+  recorded-but-draft) and opportunistically regenerates the on-disk view; the report's Plan
+  section adds routing and the task-graph summary (`plan.updated.graph`, additive — the report
+  stays a pure Event[] function).
+
+## The task DAG and the scheduler gate (`tools/delegate.ts` `checkDagRules`, `plan/graph-state.ts`) — Session 11
+
+Execution state is a PURE FOLD over (approved graph, events) — no new store; the
+changes-registry pattern. Per-task states: queued / blocked / running / awaiting-approval
+(live-only, from the task table) / integrating (captured, not fully applied) / completed
+(ended-completed AND the applied union covers every applicable captured file; a completed
+EXECUTOR with NO capture event folds to `failed` — capture loss must stay re-runnable, review
+F1) / failed / cancelled / parent-owned (role `main`: auto-satisfies dependents with a surfaced
+warning — asserted, unverifiable) / interrupted (started, never ended, not live — crash
+evidence with the child-log pointer).
+
+`delegate_task` gains `plan_task` (the binding recorded as `task.started.planTaskId` — the DAG
+join key). The gate runs BEFORE the base checkpoint, group-atomic (a refusal spawns nothing):
+
+- **Status gate (strict):** while any plan document exists, executor groups require
+  `approvedAndCurrent` — draft/unknown (pinned V0.7 wording), superseded, DIVERGED, and
+  approved-without-recorded-consent all refuse; a plan APPROVED this session whose document
+  vanished also refuses (review F3). No plan at all does not block: the per-spawn human ask
+  stays the consent floor for unplanned executor work. A throwing planContext fails closed.
+- **DAG rules** (active iff an approved-and-current canonical graph exists): R1 unbound
+  executors refuse (ready ids + escape hatches named); R2 unknown id; R3 role mismatch; then
+  group composition BEFORE per-task state (so "sequence them across calls" is never shadowed):
+  R6 duplicate binding, R9 intra-group dependency, R8 serial/high-risk must run alone, R7
+  overlapping declared touches between executors; then per-task state: R5 completed re-runs
+  refuse (failed/cancelled/interrupted stay re-spawnable — the bounded retry path),
+  integrating refuses until applied, R4 unmet deps refuse naming the dep's state (completed =
+  integrated with zero refusals). Bindings against a non-approved plan refuse honestly.
+- **Plan-informed briefs:** bound tasks inherit plan `touches` as the focus brief when focus is
+  absent, plus plan-task identity and verification-criteria lines; group notes carry the live
+  execution summary and parent-owned-dep warnings.
+- **DelegateCaps** (12 tasks / 150k child-out per session) moved to an injected object REBUILT
+  FROM EVENTS at assembly — a resumed session keeps counting (the V0.7 closure counters
+  silently reset).
+- **Waves are parent-serialized by construction:** one delegate call = one parallel group
+  (≤3); the parent integrates between calls, so the next group's base checkpoint (current
+  working tree) includes applied dependencies. The scheduler is the gate + the fold + guidance
+  notes — deliberately NOT an in-tool wave engine.
+
+## Supervision and task-scoped cancellation (`runtime/subagent.ts`) — Session 11
+
+Harness-side in-flight detection on the existing child onAppend chain + a scaled ticker
+(production constants: 60s stall, 30s cadence; thresholds scale down with narrowed test
+budgets): loop detection over identical consecutive (tool, input) calls — annotate at 3,
+auto-cancel at 5 (status `stalled`); ONE budget-pressure observation at ≥80% of output tokens
+or wall clock; ONE stall observation at the narration threshold. All observations are bounded
+(≤6/task), never-throwing, and dual-surfaced: persisted `task.supervision` events AND
+`SubagentResult.supervision` notes rendered into the delegate tool_result's **group digest** —
+placed at the HEAD of the result so the 70/30 head-biased truncation can never hide a failed
+status, an intervention, or declared-vs-actual touch divergence behind a long child report.
+The model decides between waves (retry, reassign, do directly); the parent stays blocked on the
+group await mid-flight (unchanged invariant).
+
+Task-scoped cancellation is the `registerCancel` seam: once the child exists, the runner
+registers ONE narrow idempotent handle (cause `user-cancelled` → status `cancelled`, childReason
+`aborted` — THIS child only, the group and turn continue), unregistered in finally. The REPL's
+task table owns the registry; a forwarded ask queued for a cancelled child resolves
+`task-aborted` without display (the existing signal-link, cause-agnostic). New `TaskStatus`
+members `cancelled`/`stalled` are additive and flow through every consumer (fold, renderer,
+report, childReason).
 
 ## The REPL (`repl/`)
 
@@ -559,15 +642,32 @@ A consumer of the same runtime: one session, `runTurn` per user line. `io.ts` ow
 persistent readline — idle prompt and approval questions share it; echo is muted during turns
 (Ctrl+C still arrives); typed-ahead lines are buffered; EOF at a pending approval resolves
 null → deny-&-stop. `render.ts` subscribes to `EventLog.onAppend`, so the screen is a live
-view of the persisted evidence. Exactly two render-only incremental channels exist alongside
-it: `onText` (model deltas) and the live command-output preview (sanitized dim lines, 100ms
-cadence, 8 KiB/command cap, stateful per-stream UTF-8 decode); for both, the persisted truth
-remains the events. Stream split: **stdout = model text + requested artifacts only; stderr =
-all chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs and echoes
-accepted input). Slash commands operate on the session's own live log (`/undo` → `applyUndo`
-on the same open log; the model learns of it via a delimited `[[harness note: …]]` in the next
+view of the persisted evidence. Three render-only incremental channels exist alongside it:
+`onText` (model deltas), the live command-output preview (sanitized dim lines, 100ms cadence,
+8 KiB/command cap, stateful per-stream UTF-8 decode), and the structured child-status channel
+(`ChildStatusUpdate` → the task table; Session 11); for all three, the persisted truth remains
+the events. Stream split: **stdout = model text + requested artifacts only; stderr = all
+chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs and echoes accepted
+input). Slash commands operate on the session's own live log (`/undo` → `applyUndo` on the
+same open log; the model learns of it via a delimited `[[harness note: …]]` in the next
 `user.message`). Turn errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as
 `user-quit` — never `completed`.
+
+**The live task surface (Session 11).** `status.ts` is the sticky status area — the ONLY
+cursor-moving code in the codebase, strictly TTY- and stderr-confined: ALL chrome routes
+through its status-aware writer (erase → write → redraw at line boundaries; deferred while a
+chrome line is half-open), approval prompts suspend it, every turn's finally clears it
+(readline owns the bottom line at the idle prompt), content is sanitized + clipped per redraw,
+and `!isTTY` is a pure pass-through emitting ZERO escape bytes (piped transcripts stay
+byte-identical). Its safety rests on one structural fact: the area is populated only during
+delegate flight, when the parent is blocked on the tool call — stderr cursor movement can never
+interleave with stdout model text. `live-tasks.ts` is the render-only table behind it (per
+agent: role·id, plan task, phase incl. WAITING-FOR-APPROVAL, current tool, steps, tokens,
+elapsed, supervision flags; plus the caps line). Mid-turn, on a TTY only, `io.ts` offers typed
+`/`-lines to a handler while NO read is pending (a displayed approval always wins; piped input
+keeps queue semantics verbatim — scripted drivers depend on it): `/tasks` prints the live
+table, `/cancel <child-suffix|plan-task-id>` fires the task-scoped cancel registry. Between
+turns `/tasks` renders the graph fold; `/cancel` explains itself.
 
 ## Policy model (`policy/`)
 
@@ -743,6 +843,12 @@ additive surface, by area (full shapes in `src/types.ts`):
 - **retrieval:** `workspace.mapped.inventorySha256/indexedFiles/indexState` — the file-SET
   digest is the CODEBASE staleness basis; `sha256` keeps meaning "exactly the map text the
   model saw" (V0.8).
+- **planning/orchestration (Session 11):** `plan.route {mode, source}` (routing
+  observability); `plan.updated.graph` (structural task summary — report/resume render the DAG
+  without the file; for canonical writes `sha256` carries the CONTENT sha);
+  `task.started.planTaskId` (the DAG join key); `task.supervision {kind, detail?}` (bounded
+  ≤6/task); `TaskStatus` values `cancelled` (task-scoped /cancel) and `stalled` (the loop
+  intervention).
 
 Bounded static readers `readFirstEvent`/`readLastEvent` (first/last committed line only, never
 throw) support the child-log skip and crash detection without full parses.

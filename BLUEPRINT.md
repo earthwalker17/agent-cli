@@ -80,32 +80,14 @@ workflow packs all observe the same truth.
 
 ## 4. Indicative Session Sequence
 
-### Session 11 — Iterative Planning, Task Graphs, and Parallel-First Execution
+### Session 11 — Iterative Planning, Task Graphs, and Parallel-First Execution: COMPLETE (V0.9)
 
-Strengthen plan mode into a complete human-in-the-loop planning lifecycle and connect it to execution.
-
-Use one canonical structured plan state rather than two independently editable documents. Derive:
-
-- a concise user-facing projection for review and approval;
-- a detailed agent-facing projection containing dependencies, candidate files, risks, ownership,
-  verification criteria, and evidence references.
-
-User feedback should amend the canonical plan, invalidate the previous approval, regenerate both
-views, and return to review until the current plan bytes are approved. Complexity routing should be
-observable and overridable through explicit plan invocation.
-
-Convert approved plans into a bounded task graph rather than a flat narrative checklist. Each task
-should carry an id, owner/role, dependencies, expected touch set, status, budget, verification rule,
-and evidence lineage. The scheduler should prefer safe parallelism where dependency and path-conflict
-analysis supports it, while keeping core, tightly coupled, or high-risk work serial.
-
-Add a live task surface for both the main agent and user: queued, running, blocked, awaiting approval,
-integrating, verifying, recovering, completed, failed, and cancelled. Mid-turn inspection and
-task-scoped cancellation should become real contracts; crash/resume should not silently duplicate a
-completed mutation or lose a blocked task.
-
-The scheduler must remain bounded. It is not an autonomous swarm and should not introduce general
-inter-agent chat unless repository evidence proves it necessary.
+Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md`. One canonical
+JSON plan with content-sha approval (amendment structurally invalidates; superseded un-trapped),
+user/agent projections, observable routing (`@plan`/`@direct` + `plan.route`), the DAG gate
+(R1–R9) with plan bindings and events-rebuilt caps, bounded supervision (loop/budget/stall) with
+the head-of-result group digest, task-scoped `/cancel`, the TTY sticky status area + live task
+table, and crash/resume honesty (interrupted tasks re-spawnable; capture loss folds to failed).
 
 ### Session 12 — Unified Verification Gate and Typed Recovery
 
@@ -307,14 +289,15 @@ Research current implementations again when each session begins.
 
 ## 9. Readiness Gates
 
-### Before automatic parallel execution becomes the default consideration
+### Before automatic parallel execution becomes the default consideration — ALL LANDED
 
 - targeted explorer briefs and non-overlapping scopes — LANDED (Session 10);
 - structured explorer evidence — LANDED (Session 10: six-section contract + harness check);
-- canonical approved plan state;
-- explicit task dependency and expected-touch metadata;
-- task-scoped cancellation and visible status;
-- conflict-aware integration and deterministic cleanup.
+- canonical approved plan state — LANDED (Session 11: content-sha binding, strict gate);
+- explicit task dependency and expected-touch metadata — LANDED (Session 11: the plan graph);
+- task-scoped cancellation and visible status — LANDED (Session 11: /cancel + the live surface);
+- conflict-aware integration and deterministic cleanup — LANDED (V0.7 drift-refusing apply +
+  Session 11 R7/declared-vs-actual divergence in the digest).
 
 ### Before automatic recovery
 
@@ -344,6 +327,20 @@ Research current implementations again when each session begins.
 
 ## 10. Recently Completed
 
+- **Session 11 — iterative planning, task graphs, parallel-first execution: COMPLETE (V0.9).**
+  Canonical `<id>.plan.json` task graph with `planContentSha` approval binding (amendment →
+  draft + invalidation, structurally; approve-refuses-invalid; legacy md fallback); structured
+  `update_plan` whose validation errors return complete with nothing written; observable
+  routing (`plan.route`, `@plan`/`@direct`); the delegate DAG gate R1–R9 (strict status gate:
+  diverged/superseded/vanished-approved now BLOCK) with plan bindings (`task.started.planTaskId`),
+  plan-informed briefs, and events-rebuilt DelegateCaps; bounded supervision (loop 3/5,
+  budget-pressure 80%, stall) dual-surfaced as `task.supervision` events + the head-of-result
+  group digest; task-scoped `/cancel` (idempotent registry seam) + statuses cancelled/stalled;
+  the TTY-only sticky status area (all chrome through one status-aware writer; zero escapes
+  off-TTY) + the live task table + mid-turn `/tasks`. Suite 574→645+1; 3-lens hand-verified
+  review (kernel lens: zero findings; fixes: capture-loss false-completed, vanished-plan gate,
+  display honesty); two-phase live E2E with a deliberate mid-wave SIGKILL and resume (see
+  ROADMAP for the evidence).
 - **Session 10 — repository intelligence and focused exploration: COMPLETE (V0.8).** Ranked
   incremental repository index (regex ts/js+py extraction, import-graph centrality, honest
   partial states, assembly-only writes) rendering a hard-budget tiered map whose complete

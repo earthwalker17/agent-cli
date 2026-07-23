@@ -7,6 +7,126 @@ attempted, verified, decided, and left open.
 
 ---
 
+## Session 11 (2026-07-23/24) — V0.9: iterative planning, task graphs, parallel-first execution
+
+### Objective
+
+Complete the planning/orchestration lifecycle (the BLUEPRINT Session 11 direction): one
+canonical structured plan with sha-bound REapproval and user/agent projections, observable
+complexity routing, a dependency-aware task DAG with a bounded scheduler gate, live task/agent
+visibility with a sticky status area, harness supervision with model-side decisions, and
+task-scoped cancellation — all as system contracts, every kernel invariant preserved.
+
+### Planning provenance
+
+3 Explore recon lenses + 1 Plan-agent design pass, load-bearing claims hand-verified; three
+user decisions asked and answered up front (JSON canonical plan + generated views; TTY sticky
+status area; typed mid-turn commands). Load-bearing design choices: approval binds a CONTENT
+sha (`sha256(canonicalJson(plan))`) so status flips are sha-neutral BY CONSTRUCTION — the V0.7
+approve-rewrites-the-file quirk died structurally (the `repl.test.ts:439` pin deliberately
+INVERTED); no per-task status field in the plan (execution state is a pure event fold — one
+writable truth); the scheduler is a GATE in the delegate tool + the fold + guidance, not an
+in-tool wave engine (the parent integrates between waves, so dependents' base checkpoints
+naturally include applied deps); mid-turn interception is TTY-only (piped drivers pre-supply
+lines — determinism is a contract); the status area is safe because the parent is BLOCKED
+during delegate flight (stderr cursor movement can never interleave with stdout model text).
+
+### What was implemented (commits `d8f7587`, `c841fa9`, `ddab676`, `dffb745`, `aa1f8d8`, `8c3f922`, `5250aca`, + docs)
+
+Full contracts in ARCHITECTURE (Planning lifecycle / Task DAG / Supervision / Live surface):
+
+1. **`feat(plan)` canonical core** — `plan/schema.ts` (zod graph, semantic validation with
+   cycle paths, canonicalJson + planContentSha), `canonical.ts` (amendment contract,
+   approve-refuses-invalid, `readPlanState` with legacy fallback), `views.ts` (projections,
+   generated-view marker, legacy-md archiving), `graph-state.ts` (the pure fold).
+2. **`feat(plan,repl,prompt,report)` lifecycle** — structured `update_plan` (validation errors
+   verbatim, nothing written), `/plan` on the canonical store, `@direct` + `plan.route`
+   events, the agent-view injection note (pointer keeps the LIVE execution summary),
+   routing rules in the system prompt, report routing/graph lines.
+3. **`feat(tools,runtime,cli)` the DAG gate** — `plan_task` bindings → `task.started.planTaskId`;
+   `checkDagRules` R1–R9 before the base checkpoint (group-atomic); the strict status gate
+   (diverged/superseded/hand-edited-approved now BLOCK); plan-informed briefs; DelegateCaps
+   rebuilt from events (the resume-reset gap closed).
+4. **`feat(runtime,tools,repl)` supervision + cancellation** — loop detect (annotate 3 /
+   cancel 5 → `stalled`), single-shot budget-pressure (80% tokens/wall), stall observation;
+   ≤6 `task.supervision` events/task + `SubagentResult.supervision`; the HEAD-of-result group
+   digest (survives 70/30 truncation); the idempotent `registerCancel` seam → `cancelled`.
+5. **`feat(repl,runtime,cli)` the live surface** — `status.ts` (the ONLY cursor-moving code;
+   all chrome through one status-aware writer; zero escapes off-TTY), `live-tasks.ts` (table +
+   cancel registry), the structured `ChildStatusUpdate` channel, mid-turn `/tasks` +
+   `/cancel` via `io.setMidTurnHandler` (TTY-only; displayed approvals always win).
+6. **`fix` review batch** — capture-loss no longer folds to a false `completed` (R5 could
+   strand lost work); a VANISHED approved plan refuses executors; `/plan show` approval line
+   honest beside draft; double-`/cancel` deduped; the id-reuse amendment boundary stated to
+   the model; status-area clip/resize docs made honest.
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite 574→**645 passed / 1 skipped
+across 55 files (+71)** — schema/canonical/fold matrices, the R1–R9 gate matrix, caps-rebuild pins,
+supervision (loop annotate→cancel, pressure single-shot, stall, /cancel evidence + cleanup,
+digest-survives-truncation), exact escape-byte status-area assertions (zero ESC off-TTY), the
+mid-turn interception matrix (displayed-approval-wins, piped immunity), the real-git wave flow
+(parallel disjoint pair → early dependent refused → integrate → hand-edit DIVERGED → byte-
+restore re-enables → dependent builds on the integrated base → completed re-run refused), and
+the crash-mid-group replay/fold case. Bounded adversarial review: 3 read-only lenses over the
+session diff, findings hand-verified — kernel-invariant lens **zero findings across all 8
+invariants**; 1 MEDIUM + 5 LOW fixed (item 6); accepted limitations recorded below.
+
+**Live proof** (`C:\Users\A\Desktop\agent-cli-s11-live\` — driver-s11.mjs, VALIDATION.md,
+per-phase artifacts, validate.mjs): a two-phase piped run against real claude-opus-4-8,
+**18/18 post-hoc checks over the persisted evidence**. Phase A: a simple typo request stayed
+DIRECT (no plan events); the complex linkkit request auto-routed to planning
+(`plan.route {plan, model}`); `/plan show` → approve → a feedback amendment INVALIDATED the
+approval live (both shas surfaced) → re-approve bound the amended content sha; one parallel
+group of two executors spawned BOUND (`plan bindings: task 1 → 'url-module', task 2 →
+'slug-module'` displayed at the consent ask) — then a deliberate SIGKILL mid-wave. Phase B:
+`agent resume` → `/tasks` folded both tasks as `interrupted` with child-log pointers and the
+parent-owned check task labeled unverifiable → the model re-ran BOTH as one parallel group
+(same bindings, `attempt 2` visible), integrated with zero refusals, wrote and ran the check
+(real exit 0), `/report`, clean quit — 40 uncached parent input tokens (cache 216k read), the
+crash orphans swept, worktree registry empty.
+
+### Decisions (and why)
+
+- **Content-sha approval identity** — consent must survive harness bookkeeping and die on
+  semantic change; hashing a normalized projection of the graph gives exactly that boundary.
+- **Execution state is derived, never written** — a second writable status would be the
+  double-truth trap; the fold re-derives identically on resume.
+- **Group rules before per-task state in the gate** — otherwise R4 "blocked" shadows the
+  actionable "sequence them across calls" for the group-a-dependent-with-its-dep mistake.
+- **A completed executor without a capture event folds FAILED** — capture loss must reopen
+  the retry path, not read as done (review F1).
+- **No harness complexity classifier** — routing is model judgment + user sigils + recorded
+  evidence; the hard floor stays structural (gates), not linguistic.
+- **The status area is TTY-only and chrome-only** — piped byte-identity is a contract the
+  drivers depend on; zero escapes off-TTY is asserted, not assumed.
+
+### Open issues / boundaries (deliberate, documented)
+
+- Sibling-task chrome can print over a DISPLAYED forwarded-approval prompt (pre-existing
+  stderr behavior; the io-redesign pool item). `/cancel` typed at a displayed approval answers
+  it as a deny (fail-safe, documented).
+- The status-area clip counts code units, not display columns — safe while status lines stay
+  structurally ASCII (slug ids, enum roles); a width-aware clip is required before free-form
+  text lands there. A terminal SHRUNK after a draw can leave a cosmetic stale fragment above
+  the region.
+- A completed plan-task id stays completed across amendments (id-stability boundary) — the
+  model is told to give materially changed work a NEW id.
+- Deleting only the canonical JSON (generated view surviving) blocks executors via the legacy
+  `unknown` fallback, while deleting both files degrades to ask-only-with-refusal-on-approval
+  — asymmetric but both fail-safe.
+- The sticky area + mid-turn commands have no piped-driver proof (TTY-gated by design):
+  covered by exact escape-byte tests + the manual Windows Terminal smoke in VALIDATION.md.
+
+### Recommended next step
+
+Session 12 per BLUEPRINT: the unified verification gate and typed recovery — typed check
+adapters with normalized results feeding the plan tasks' `verify` criteria, a failure
+classifier, and the bounded repair policy over the now-complete task graph.
+
+---
+
 ## Session 10 (2026-07-23) — V0.8: repository intelligence and focused exploration
 
 ### Objective
@@ -105,96 +225,29 @@ bounded dependency-aware scheduler over the now retrieval-informed exploration l
 
 ---
 
-## Session 9 (2026-07-22/23) — pre-expansion consolidation, hardening, and the live V0.7 proof
-
-### Objective
-
-Audit the repository against the recorded open issues, fix the verified session-sized gaps that
-matter before expansion, produce the missing LIVE-API proof of the complete V0.7 loop, and
-reconcile the docs — no new capability, no speculative abstraction.
-
-### Audit provenance
-
-3 bounded Explore lenses + 1 Plan-agent critique, hand-verified. The audit CONFIRMED two real
-V0.7 defects (items 1–2), verified the teams layer otherwise SOUND, and found two recorded
-items already closed. The critique caught three design flaws before code: a naive registry lock
-would break the in-process serialization Promise.all relies on; base-ref deletion after capture
-would remove a user-visible recovery point (moved to session end); approvalContext needed a
-render contract (folded into `detail` to inherit sanitize + cap).
-
-### What was implemented (commits `4e630ef`, `0255f8b`, `a8df0a8`, `7ba0fb8`, `0e8d376`, + docs)
-
-Mechanisms in ARCHITECTURE (worktree registry concurrency; approvalContext; grants):
-
-1. **`fix(worktrees)` concurrent-session worktree safety [HIGH]** — the startup sweep could
-   destroy a live sibling session's executor worktree and registry RMW was unlocked. Now:
-   owner-stamped entries, in-process mutex + token `O_EXCL` lock file, live-pid sweep skip with
-   a 2h age hatch, merge-on-save. A live same-pid holder is NEVER reclaimed (group members
-   share the pid — the event-log's same-pid rule must not be copied here).
-2. **`fix(plan,runtime,tools)` plan consent at the executor spawn ask [MED-HIGH]** — the human
-   approving a spawn could not see plan-approval state. Now the display-only
-   `Tool.approvalContext` seam renders APPROVED / DIVERGED (both shas) / DRAFT / SUPERSEDED at
-   the consent moment; policy untouched; the gate still blocks only draft/unknown.
-3. **`fix(git,tools,cli)` task-base ref hygiene [LOW-MED]** — refs accumulated forever; now
-   pruned at SESSION END (they are recovery points until quit), announced and recorded as
-   `git.checkpoint.pruned`; a crash leaks refs to manual `agent checkpoint prune`.
-4. **`fix(exec,repl,cli,tools,report)` robustness batch [LOW]** — onSpawn-throw containment;
-   stateful preview decode (split runes); one-shot approval Ctrl+C; `omittedCount` at apply;
-   combined parent+children token roll-up; dead code + stale docblocks removed.
-5. **`fix(runtime,policy)` command grants — the live-E2E finding** — a forwarded command
-   offered a session grant that was a silent no-op, atop a latent hole where a grant on a
-   future command-bearing tool would become standing shell permission keyed on a label. Both
-   display and enforcement now key on the command FACT (grant stored only when `tool.command`
-   is undefined; `[s]` hidden for command asks; forwarded `[s]` reads "THIS TASK").
-
-### The live-API E2E
-
-One scripted expect-style run (driver + pattern table preserved in
-`C:\Users\A\Desktop\agent-cli-s9-live\VALIDATION.md`, with transcript, decisions log, all 5
-session reports, plan document) against real claude-opus-4-8: `@plan` → approve (sha-bound) →
-ONE delegate call → TWO parallel worktree executors (group wall 17.7s) each running a real
-node assert-suite → forwarded verifications → capture → `apply_task_changes` ×2 → `/undo` →
-honest recovery → a 16-assertion parent-written check (exit 0) → a 2-lens reviewer panel whose
-`run_command` attempts all AUTO-DENIED, the parent re-running the load-bearing probe itself →
-`/report`/`/diff`/`/quit` → task-base refs pruned live (`refs/agent-cli/` empty). 42 uncached
-input tokens; AGENT.md steering held; the consent fix observed live in the spawn ask.
-Sovereignty observed unprompted: told (wrongly) that applied files were gone, the model checked
-the workspace and proceeded from observable state.
-
-### Verification evidence
-
-Typecheck + build clean per commit; suite 498→**515 passed / 1 skipped across 44 files (+17)**:
-full lock-protocol matrix, live/dead/aged sweep discrimination against real worktrees, all four
-consent-display cases, ref-prune provenance + apply-after-prune, the approval options-line
-matrix, and the command-grant e2e pin. Plus the recorded live run (driver exit 0, 11/11 steps,
-8 approvals all answered post-display).
-
-### Decisions (and why)
-
-- **The registry lock never copies the event-log's same-pid reclaim** — group members share one
-  pid; staleness is dead-pid or over-age only.
-- **Sweep liveness errs toward keeping** (a recycled pid delays a sweep, never destroys live
-  work), bounded by the age hatch grounded in the fixed executor budget.
-- **Base refs die at session end, not capture** — recovery points until quit; deletion is
-  EVIDENCE, never silent.
-- **Display mirrors enforcement for grants** — what the prompt offers must be exactly what the
-  runtime would store; both derive from the command FACT.
-- **The live driver never pre-supplies approval answers** — consent evidence must show the
-  prompt preceding the answer.
-
-### Open issues / boundaries (deliberate, documented)
-
-- The apply-as-one-undo-unit path is mock-proven only (in the live run `/undo` correctly hit a
-  later write — last-mutation semantics as designed).
-- Command labels stay noisy (cosmetic; labels never grant or gate). The stale-forwarded-prompt
-  wart stands: the discard is LOUD but the typed line is consumed (io redesign, deferred pool).
-
----
-
-## Earlier Milestones (Sessions 1–8 — compressed per the rolling-docs policy)
+## Earlier Milestones (Sessions 1–9 — compressed per the rolling-docs policy)
 
 Contract detail for everything below lives in `ARCHITECTURE.md`; entries here keep the
 objective, the lasting decisions (with why), the evidence, and what stayed open.
+
+### Session 9 (2026-07-22/23) — pre-expansion consolidation + the live V0.7 proof
+
+Audit-driven fixes (3 Explore lenses + 1 Plan critique, hand-verified), no new capability.
+Landed: concurrent-session worktree safety (owner-stamped registry entries, in-process mutex +
+token `O_EXCL` lock, live-pid sweep skip with a 2h age hatch, merge-on-save — a live same-pid
+holder is NEVER reclaimed, group members share the pid); plan-approval state displayed at the
+executor spawn ask (the display-only `approvalContext` seam); task-base refs pruned at session
+end with `git.checkpoint.pruned` provenance; command grants keyed on the command FACT (a
+session grant is stored only when `tool.command` is undefined; `[s]` hidden where no grant
+would store — found live). Suite 498→515+1. The live V0.7 proof (evidence:
+`C:\Users\A\Desktop\agent-cli-s9-live\`): `@plan` → sha-bound approve → ONE call → TWO
+parallel worktree executors with real node assert-suites → forwarded approvals → capture →
+apply ×2 → `/undo` → honest recovery → reviewer panel auto-denied its shell attempts and the
+parent re-ran the probe itself → refs pruned live; 42 uncached input tokens; sovereignty
+observed unprompted (told applied files were gone, the model checked the workspace instead).
+Lasting decisions: sweep liveness errs toward keeping; display mirrors enforcement for grants;
+live drivers never pre-supply approval answers. Still relevant: the stale-forwarded-prompt
+line-consumption wart (io redesign, deferred pool); command labels stay cosmetic-noisy.
 
 ### Session 8 (2026-07-22) — V0.7: coordinated parallelism + the minimal agent-teams layer
 
@@ -331,14 +384,20 @@ extract interface, more languages (go/rust/java/c#) as data-shaped table additio
 config knob for the map budget; /map REPL-branch + mapNote chrome tests; a post-group child
 read-set overlap metric (child logs already carry the evidence); retrieval-aware journal
 topics; ranked→flat staleness over-marking (transient, safe direction) if it ever bites.
-**Task/subagent follow-ups (post-S8/S9):** a mid-turn per-task management UI (list/cancel
-while running — today: forwarded deny-stop + harness causes); task resume/continue
-(SendMessage-style); deeper scanning of child reports for instruction-shaped content (v1
-ships delimiters + provenance labels); the stale-displayed-forwarded-prompt line-consumption
-wart (the discard is LOUD since S8, but the typed line is still consumed — needs an io
-redesign); per-child sandbox scratch TEMP isolation; a per-child `--script` seam for the
-mock provider (tests use the providerForTask seam; production children share one script);
-a structural (not prompt-shaped) review gate. **Memory follow-ups (post-S7):** journal
+**Planning/orchestration follow-ups (post-S11):** a width-aware status-area clip before any
+free-form text may land in status lines (today: structurally ASCII + a 2-column margin);
+sibling-task chrome printing over a DISPLAYED forwarded-approval prompt (pre-existing, part
+of the io redesign); the completed-id-across-amendments boundary (prompt-mitigated — a
+structural "content hash per task" variant if it bites); plan-file pruning (one canonical
+JSON + generated md per session accumulate); a `/cancel` surface for non-TTY sessions;
+richer wave guidance (the model still chooses group composition; the gate only refuses).
+**Task/subagent follow-ups (post-S8/S9):** task resume/continue (SendMessage-style); deeper
+scanning of child reports for instruction-shaped content (v1 ships delimiters + provenance
+labels); the stale-displayed-forwarded-prompt line-consumption wart (the discard is LOUD
+since S8, but the typed line is still consumed — needs an io redesign); per-child sandbox
+scratch TEMP isolation; a per-child `--script` seam for the mock provider (tests use the
+providerForTask seam; production children share one script); a structural (not
+prompt-shaped) review gate. **Memory follow-ups (post-S7):** journal
 topic files / retrieval beyond the newest-first inject window; a memory relocation/config
 knob; a cross-process memory-doc lock (today: a seconds-wide last-writer-wins window at
 simultaneous quits); model-generated compaction of assistant/user text (deterministic
