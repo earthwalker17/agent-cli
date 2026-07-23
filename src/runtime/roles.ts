@@ -24,6 +24,8 @@ export interface RolePromptArgs {
   sandbox?: EnforcementFacts | undefined;
   git?: GitFacts | undefined;
   agentMd?: { text: string; truncated: boolean } | undefined;
+  /** Session 10: whether this child's registry actually includes the retrieve tool. */
+  retrieve?: boolean | undefined;
 }
 
 export interface RoleContract {
@@ -38,7 +40,15 @@ export interface RoleContract {
   buildPrompt(args: RolePromptArgs): string;
 }
 
-const READ_ONLY_TOOLS = ['read_file', 'list_files', 'search', 'run_command'] as const;
+/**
+ * 'retrieve' (Session 10) is named here but exists only as a per-session instance — the
+ * subagent runner admits it from SubagentDeps.retrieveTool iff the role contract names it AND
+ * the instance is structurally command/delegates/planDoc-free. The EXECUTOR list deliberately
+ * omits it: the parent's index describes the parent workspace, not the executor's worktree —
+ * wrong-tree line references by construction.
+ */
+const READ_ONLY_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 'retrieve'] as const;
+const EXECUTOR_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 'write_file', 'edit_file'] as const;
 const READ_ONLY_BUDGET: TaskBudget = { maxSteps: 15, timeoutMs: 300_000, maxOutputTokens: 30_000 };
 
 /**
@@ -54,7 +64,7 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
     toolNames: READ_ONLY_TOOLS,
     budget: READ_ONLY_BUDGET,
     approvals: 'auto-deny',
-    buildPrompt: (a) => buildExplorerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd),
+    buildPrompt: (a) => buildExplorerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve),
   },
   planner: {
     name: 'planner',
@@ -62,7 +72,7 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
     toolNames: READ_ONLY_TOOLS,
     budget: READ_ONLY_BUDGET,
     approvals: 'auto-deny',
-    buildPrompt: (a) => buildPlannerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd),
+    buildPrompt: (a) => buildPlannerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve),
   },
   reviewer: {
     name: 'reviewer',
@@ -70,12 +80,12 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
     toolNames: READ_ONLY_TOOLS,
     budget: READ_ONLY_BUDGET,
     approvals: 'auto-deny',
-    buildPrompt: (a) => buildReviewerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd),
+    buildPrompt: (a) => buildReviewerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve),
   },
   executor: {
     name: 'executor',
     access: 'mutating-worktree',
-    toolNames: [...READ_ONLY_TOOLS, 'write_file', 'edit_file'],
+    toolNames: EXECUTOR_TOOLS,
     budget: EXECUTOR_BUDGET,
     approvals: 'forward',
     buildPrompt: (a) => buildExecutorSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd),

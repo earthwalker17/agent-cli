@@ -8,6 +8,7 @@ import type { RetrievalHandle } from '../retrieval/rank.js';
 import { buildSystemPrompt, type SystemPromptMemory } from '../workspace/system-prompt.js';
 import { loadMemory, type LoadedMemory } from '../memory/load.js';
 import { createDelegateTool, type ExecutorDeps } from '../tools/delegate.js';
+import { createRetrieveTool } from '../tools/retrieve.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
@@ -207,12 +208,18 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       : (): Promise<string | null> =>
           pruneTaskBaseCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, taskBaseRefs.splice(0), session.log);
 
+  // retrieve (Session 10): a per-session READ-ONLY view over the assembly-built index. The
+  // parent gets it directly; read-only child roles get the SAME instance through the named
+  // SubagentDeps.retrieveTool seam (executors deliberately not — wrong tree).
+  const retrieveTool = ranked.handle !== null ? createRetrieveTool(ranked.handle) : undefined;
+
   // The delegate tool is a PER-SESSION instance appended to a fresh array (never TOOLS.push):
   // parents get it; child sessions have fixed role registries without it, so delegation depth
   // is 1 by construction. Children inherit the PROBED sandbox instance (no re-probe), the
   // narrowing rules, and the user constitution.
   session.tools = [
     ...session.tools,
+    ...(retrieveTool !== undefined ? [retrieveTool] : []),
     createDelegateTool(
       {
         layout,
@@ -226,6 +233,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         gitFacts,
         map,
         forwardAsk: (req, signal) => forwarder.ask(req, signal),
+        ...(retrieveTool !== undefined ? { retrieveTool } : {}),
         ...(memory.agent.status === 'ok' || memory.agent.status === 'oversize'
           ? { agentMd: { text: memory.agent.text, truncated: memory.agent.truncated } }
           : {}),

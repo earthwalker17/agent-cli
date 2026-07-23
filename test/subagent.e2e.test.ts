@@ -14,6 +14,9 @@ import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
 import { fixedClock } from '../src/shared/clock.js';
 import { seededIdGen } from '../src/shared/ids.js';
 import { sha256 } from '../src/shared/hash.js';
+import { createRetrieveTool } from '../src/tools/retrieve.js';
+import { loadOrBuildIndex } from '../src/retrieval/store.js';
+import { buildRetrievalHandle } from '../src/retrieval/rank.js';
 import type { Tool } from '../src/types.js';
 import type { WorkspaceMap } from '../src/workspace/map.js';
 
@@ -331,6 +334,47 @@ describe('delegate_task end to end', () => {
       expect(types, `missing ${t}`).toContain(t);
     }
     expect(parent.log.events.find((e) => e.type === 'task.ended')).toMatchObject({ status: 'aborted' });
+  });
+
+  it('explorer child can call the admitted retrieve tool; its prompt states it (Session 10)', async () => {
+    // A real handle over the real temp workspace (a.txt exists from the fixture).
+    fs.writeFileSync(path.join(ws, 'target.ts'), 'export const findme = 1;\n');
+    const st = fs.statSync(path.join(ws, 'target.ts'));
+    const inventory = {
+      files: [{ relPath: 'target.ts', size: st.size, mtimeMs: st.mtimeMs }],
+      dirtyPaths: [],
+      inventorySha256: 'i'.repeat(64),
+      capped: false,
+    };
+    const build = loadOrBuildIndex({ indexFile: path.join(tmp, 'state', 'r.json'), root: ws, inventory, head: null });
+    const retrieveTool = createRetrieveTool(buildRetrievalHandle(ws, inventory, build));
+
+    const parent = makeParent(
+      [{ say: 'delegating', calls: [{ name: 'delegate_task', input: { tasks: [{ role: 'explorer', task: 'find findme' }] } }] }, { say: 'done' }],
+      subagentDeps(
+        [
+          { say: 'looking', calls: [{ name: 'retrieve', input: { query: 'findme' } }] },
+          { say: 'REPORT: found in target.ts' },
+        ],
+        { retrieveTool: retrieveTool as Tool },
+      ),
+    );
+    await runTurn(parent, 'go');
+    endSession(parent, 'completed');
+
+    const started = parent.log.events.find((e) => e.type === 'task.started')!;
+    const childId = started.type === 'task.started' ? started.childSessionId : '';
+    const child = EventLog.readLenient(layout.sessionFile(childId));
+    // The child's retrieve call executed as observe/allow and produced ranked output.
+    const req = child.events.find((e) => e.type === 'tool.requested' && e.tool === 'retrieve');
+    expect(req).toBeDefined();
+    const dec = child.events.find((e) => e.type === 'policy.decision');
+    expect(dec).toMatchObject({ decision: 'allow', classification: 'observe' });
+    const done = child.events.find((e) => e.type === 'tool.completed');
+    expect(done !== undefined && done.type === 'tool.completed' && done.outputPreview).toContain('target.ts');
+    // The child's system prompt honestly names retrieve.
+    const childStart = child.events.find((e) => e.type === 'session.started');
+    expect(childStart !== undefined && childStart.type === 'session.started').toBe(true);
   });
 });
 

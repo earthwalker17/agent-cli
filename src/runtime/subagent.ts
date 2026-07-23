@@ -20,6 +20,7 @@ import type {
   TaskBudget,
   TaskEvidence,
   TaskStatus,
+  Tool,
   Usage,
 } from '../types.js';
 
@@ -40,6 +41,26 @@ import type {
 /** Cumulative delegation caps per parent session (enforced by the delegate tool's closure). */
 export const TASKS_PER_SESSION = 12;
 export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 150_000;
+
+/**
+ * A child's tool registry (Session 10): the static TOOLS filtered by the role contract, plus —
+ * for roles that NAME it — the parent's per-session retrieve instance, admitted only when it is
+ * structurally free of command/delegates/planDoc facts. Fail closed by dropping: a
+ * wrongly-shaped instance simply never reaches a child.
+ */
+export function childTools(toolNames: readonly string[], retrieveTool?: Tool): Tool[] {
+  const tools: Tool[] = TOOLS.filter((t) => toolNames.includes(t.name));
+  if (
+    retrieveTool !== undefined &&
+    toolNames.includes(retrieveTool.name) &&
+    retrieveTool.command === undefined &&
+    retrieveTool.delegates === undefined &&
+    retrieveTool.planDoc === undefined
+  ) {
+    tools.push(retrieveTool);
+  }
+  return tools;
+}
 
 export interface SubagentDeps {
   layout: ProjectLayout;
@@ -82,6 +103,14 @@ export interface SubagentDeps {
    * leaves this unset: the shared streaming provider is stateless per request.
    */
   providerForTask?: (index: number, role: SubagentRoleName) => Provider;
+  /**
+   * Session 10: the parent session's read-only retrieve tool instance, admitted into a child
+   * ONLY when the role contract names it AND the instance is structurally free of
+   * command/delegates/planDoc facts — a NAMED single-tool seam, deliberately not a generic
+   * extra-tools list, so the depth-1 guarantee (children never see delegate/apply/update_plan)
+   * stays a property of construction rather than a convention.
+   */
+  retrieveTool?: Tool;
 }
 
 export interface SubagentSpec {
@@ -149,6 +178,9 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
             controller.signal,
           )
       : autoDenyApprover;
+  // Tools first, prompt second: the prompt states exactly the registry this child actually has
+  // (retrieve is admitted per-session; the wording must not promise an absent tool).
+  const tools = childTools(contract.toolNames, deps.retrieveTool);
   let system: string;
   try {
     system = contract.buildPrompt({
@@ -157,6 +189,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       sandbox: deps.sandboxFacts,
       git: deps.gitFacts,
       agentMd: deps.agentMd,
+      retrieve: tools.some((t) => t.name === 'retrieve'),
     });
   } catch (err) {
     return fail(`subagent failed to start: ${(err as Error).message}`);
@@ -173,7 +206,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       system,
       maxSteps: budget.maxSteps,
       maxTokens: deps.maxTokens,
-      tools: TOOLS.filter((t) => contract.toolNames.includes(t.name)),
+      tools,
       saltHex: randomSaltHex(),
       lineage: { parentSessionId: spec.parentSessionId, role: spec.role },
       ...(deps.rules !== undefined ? { rules: deps.rules } : {}),

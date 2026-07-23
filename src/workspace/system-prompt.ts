@@ -82,6 +82,8 @@ interface SubagentPromptArgs {
   sandbox?: EnforcementFacts | undefined;
   git?: GitFacts | undefined;
   agentMd?: { text: string; truncated: boolean } | undefined;
+  /** Session 10: true when this child's registry actually includes the retrieve tool. */
+  retrieve?: boolean | undefined;
 }
 
 function buildReadOnlySubagentPrompt(intro: string, reportRule: string, args: SubagentPromptArgs): string {
@@ -89,7 +91,7 @@ function buildReadOnlySubagentPrompt(intro: string, reportRule: string, args: Su
     intro,
     '',
     'Operating rules:',
-    '- You have READ-ONLY tools: read_file, list_files, search, run_command. You have NO write tools — you cannot modify anything, and you must not try.',
+    `- You have READ-ONLY tools: read_file, list_files, search${args.retrieve === true ? ', retrieve (ranked task-directed lookup — use it FIRST to find relevant files, then verify by reading them)' : ''}, run_command. You have NO write tools — you cannot modify anything, and you must not try.`,
     '- No human is attached to this task: any tool call that would need approval is DENIED AUTOMATICALLY. Do not retry a denied call — find a read-only alternative or report what you could not inspect.',
     ...sandboxRuleLines(args.sandbox),
     ...(args.git?.isRepo
@@ -120,11 +122,12 @@ export function buildExplorerSystemPrompt(
   sandbox?: EnforcementFacts,
   git?: GitFacts,
   agentMd?: { text: string; truncated: boolean },
+  retrieve?: boolean,
 ): string {
   return buildReadOnlySubagentPrompt(
     'You are a read-only exploration SUBAGENT of Agent CLI, running one bounded task delegated by the main agent inside a single workspace.',
     '- Your FINAL message is your report to the main agent, not a conversation. Answer the delegated task directly; cite concrete evidence (file paths with line references, exact command output) for every claim; clearly separate verified facts from inference; state exactly what remains unknown. Never fabricate.',
-    { workspaceRoot, map, sandbox, git, agentMd },
+    { workspaceRoot, map, sandbox, git, agentMd, retrieve },
   );
 }
 
@@ -134,11 +137,12 @@ export function buildPlannerSystemPrompt(
   sandbox?: EnforcementFacts,
   git?: GitFacts,
   agentMd?: { text: string; truncated: boolean },
+  retrieve?: boolean,
 ): string {
   return buildReadOnlySubagentPrompt(
     'You are a read-only planning SUBAGENT of Agent CLI: you draft an implementation plan for the main agent, grounded in the actual repository, inside a single workspace.',
     '- Your FINAL message is a DRAFT PLAN for the main agent, not a conversation. Structure it as markdown: a short context paragraph, then numbered `## Task N: <title>` sections each carrying `Status: pending`, `DependsOn: <task numbers or none>`, `Verify: <the concrete check that proves this task worked>`, and the files it touches. Ground every task in files you actually inspected (cite paths); name risks and open questions explicitly; keep it session-sized. The draft is ADVISORY — the main agent verifies your claims against the repository and owns the final plan. Never fabricate.',
-    { workspaceRoot, map, sandbox, git, agentMd },
+    { workspaceRoot, map, sandbox, git, agentMd, retrieve },
   );
 }
 
@@ -148,11 +152,12 @@ export function buildReviewerSystemPrompt(
   sandbox?: EnforcementFacts,
   git?: GitFacts,
   agentMd?: { text: string; truncated: boolean },
+  retrieve?: boolean,
 ): string {
   return buildReadOnlySubagentPrompt(
     'You are a read-only review SUBAGENT of Agent CLI: you adversarially inspect a change (a diff plus the live repository) through the specific lens the main agent assigned, inside a single workspace.',
     '- Your FINAL message is a FINDINGS REPORT for the main agent, not a conversation. For every finding: a severity (critical/high/medium/low), the file and line, the concrete failure scenario (inputs/state → wrong outcome), and the evidence you verified in the ACTUAL repository files — read the real file before reporting on a diff hunk; the diff alone can mislead. Report only defects you could ground in code you inspected; do not pad — an honest "no findings under this lens" beats an invented one. Do not propose large rewrites; the main agent decides what to fix. Never fabricate.',
-    { workspaceRoot, map, sandbox, git, agentMd },
+    { workspaceRoot, map, sandbox, git, agentMd, retrieve },
   );
 }
 
