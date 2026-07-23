@@ -1,7 +1,7 @@
 # ARCHITECTURE
 
-How Agent CLI V0.7 (post-Session-9 consolidation) is actually built. This describes the
-implemented system, not aspirations — see `ROADMAP.md` for what is deferred.
+How Agent CLI V0.8 (post-Session-10 repository intelligence) is actually built. This describes
+the implemented system, not aspirations — see `ROADMAP.md` for what is deferred.
 
 ## Shape
 
@@ -64,10 +64,33 @@ src/
     delegate.ts            delegate_task — per-session factory (never in static TOOLS); V0.7: 1–3
                            tasks per call run as a PARALLEL GROUP; orchestrates executor worktrees
                            (base checkpoint → worktree → capture → removal) and all group caps.
+                           V0.8: focus/avoid briefs + sibling coverage + overlap warnings;
+                           explorer report-section check; delimiter neutralization.
+    retrieve.ts            V0.8: retrieve — per-session read-only view over the assembly-built
+                           index; ranked hits with signal attributions; excerpts read LIVE.
     update-plan.ts         update_plan — the model's ONLY write path to the plan document (V0.7);
                            gated by the explicit planDoc policy branch; status is never model-writable.
     apply-changes.ts       apply_task_changes + the captured-changes registry (V0.7): declared
                            mutations from capture evidence, per-file drift-refuse integration.
+  retrieval/
+    inventory.ts           V0.8: git-backed file inventory (ls-files + stats + per-file dirty
+                           paths) with a render-independent path-SET digest (inventorySha256).
+    extract.ts             V0.8: regex symbol/import extraction (ts/js family + python only,
+                           declared); identifier-charset captures are the injection defense;
+                           secret-named/binary/oversize files skipped.
+    graph.ts               V0.8: relative-import resolution (NodeNext .js→.ts guessing) →
+                           in-degree + bounded damped PageRank centrality.
+    store.ts               V0.8: persisted incremental index <projectDir>/index/retrieval.json —
+                           written ONLY at assembly; stat-diff refresh; corrupt/version-mismatch
+                           rebuilds bounded; budget exhaustion = honest 'partial' that converges
+                           across sessions; lock-less by design (idempotent derived cache).
+    rank.ts                V0.8: structural prior (centrality/entry-points/dirty/test-penalty) +
+                           task-directed query ranking; every hit carries signal attributions.
+    render.ts              V0.8: tiered ranked-map render under a HARD char budget (header /
+                           dirty tier / complete dir tree = recall backstop / ranked key files,
+                           NO line numbers / footer); paths sanitized at interpolation.
+    ranked-map.ts          V0.8: the assembly-only entry point (inventory→index→handle→render);
+                           ANY failure falls back to the flat map with the reason in chrome.
   net/
     transport.ts           Reusable proxy-aware transport factory (pure resolver + custom fetch).
   provider/
@@ -118,8 +141,10 @@ src/
     commands.ts            /help /status /undo /diff /commit /checkpoint /plan /tasks /report
                            /map /quit over the live log.
   workspace/
-    map.ts                 Bounded workspace map + digest: `git ls-files` in trusted repos (nested
-                           gitignore correct), pure walker fallback (and always pre-trust).
+    map.ts                 The FLAT map (sorted path list) + WorkspaceMap type. Since V0.8 this is
+                           the fallback form (pre-trust `agent map`, non-repo, executor worktrees,
+                           any ranked failure); git listing itself lives in retrieval/inventory.ts.
+                           Additive optional fields: inventorySha256/indexedFiles/indexState.
     system-prompt.ts       System prompt: honesty statement, git context + VCS-mutation prohibition
                            (in-repo) or the original no-git rule (non-repo), the map.
   report/
@@ -150,8 +175,11 @@ against the repo) → **orphaned-worktree sweep** (V0.7: registry-driven, path-g
 blocks a session; V0.7.1: skips entries whose owning pid is alive — a concurrent sibling
 session's live worktrees are never touched — with a 2h age hatch for recycled pids, and all
 registry access goes through the cross-process lock, skipping the sweep if contended) →
-workspace map (git-backed in a repo, walker otherwise) → **project-memory
-load** (post-trust by construction: the trust decision is a parameter of assembleSession) →
+**ranked map + retrieval index** (V0.8: `buildRankedMap` — inventory, incremental index
+load/refresh/persist under a wall budget, handle, tiered render; ANY failure falls back to the
+flat map with the reason surfaced as a chrome note; non-repo workspaces keep the flat walker
+map) → **project-memory load** (post-trust by construction: the trust decision is a parameter
+of assembleSession) →
 system prompt → start/resume → post-start records in a fixed order (trust.verified,
 config.loaded, sandbox.status, git.context, workspace.mapped, memory.loaded) → per-session
 tool attachment (delegate_task with the executor bundle + forwarding queue, update_plan,
@@ -217,6 +245,57 @@ messages, and the last 4 assistant steps are untouched; outputs smaller than the
 skipped. `session.messages` and the log are NEVER mutated; an additive `context.compacted`
 event records exactly which outputs the model can no longer see (rendered live, with a warning
 when even full elision exceeds the target — assistant/user text is deliberately not compacted).
+
+## Repository intelligence (`retrieval/`, `tools/retrieve.ts`) — V0.8
+
+Large-repo understanding is selective and ranked, not a broad file dump. One in-memory
+**RetrievalHandle** is built per session at assembly and read everywhere else.
+
+- **Inventory** (`inventory.ts`): `git ls-files` (the exact V0.5 listing, refactored here) +
+  per-file size/mtime + per-file dirty paths (`status --porcelain=v2 -z -uall`, subdir-prefix
+  aware), capped at 20k files. `inventorySha256` digests the sorted path SET — deliberately
+  independent of rendering, so map-format changes cannot flap CODEBASE staleness.
+- **Extraction** (`extract.ts`): line-anchored regex symbols/imports for the ts/js family +
+  python ONLY (declared everywhere; other languages rank via path/git signals). Injection
+  defense is structural: symbol captures are bounded identifier classes, import specifiers are
+  charset-filtered — repo prose/delimiters cannot enter the system prompt through extraction.
+  Secret-named (builtin + config `secretPatterns`), binary, and >256 KiB files are never read.
+- **Index** (`store.ts`): `<projectDir>/index/retrieval.json` `{version, head, generatedAt,
+  entries}` — a derived, idempotent cache written ONLY at assembly (a command-less observe tool
+  must never mutate durable state — the S6 trap, kept closed). Warm loads stat-diff
+  (size+mtime) and re-extract only changes; corrupt/missing/version-mismatch rebuilds cold;
+  the ~10s wall budget yields an honest `'partial'` that CONVERGES across sessions (measured:
+  a fresh 3k-file monorepo on a cold Windows FS extracted ~400–700 files per 10s load —
+  several sessions to full, each one honestly labeled). Deliberately
+  lock-less: any consistent snapshot is valid, atomic tmp+rename prevents torn reads, rebuild
+  is the recovery (contrast the worktree registry, whose entries must MERGE). Known limit:
+  same-size+same-mtime edits are invisible to stat-diff — a misrank at worst, never a wrong
+  line (excerpts are live).
+- **Ranking** (`rank.ts`): a task-agnostic structural prior (bounded PageRank over resolved
+  relative imports, entry-point/manifest heuristics, uncommitted-change boost, depth and
+  test/vendor penalties) plus `rankForQuery` (path/symbol term matches + graph-neighbor boost
+  + the prior). Deterministic (sorted iteration, relPath tie-break), and every hit carries
+  human-readable `signals` — traceable selection is a contract, not a debug feature.
+- **Rendered map** (`render.ts`): tiers under a HARD 16k-char budget (every tier charged as
+  appended, footer reserved, per-line clipping; any cut sets `truncated`): coverage-honesty
+  header → uncommitted files (≤20) → the COMPLETE directory tree with per-dir counts (the
+  recall backstop — ranking orders detail but never hides that a directory exists; collapse is
+  depth-wise and announced) → ranked key files with top exported symbols and **no line
+  numbers** (line numbers only ever come from live reads) → footer pointing at
+  retrieve/search/list_files. `WorkspaceMap.sha256` remains `sha256(text)` — "exactly what the
+  model saw" — with the additive `inventorySha256` beside it.
+- **The `retrieve` tool** (`tools/retrieve.ts`): per-session factory over the handle. Input
+  `{query, max_results≤50, scope_paths?}`; output = ranked hits with signals + symbols +
+  excerpt lines read LIVE at query time (≤64 files/≤500ms; secret/binary skipped; vanished
+  files dropped and counted) + a coverage footer (`indexed at <generatedAt> (head …); excerpts
+  read live`). Policy: no command/delegates/planDoc facts, empty mutation plan, declared
+  `readsPaths` → observe/auto-allow in-workspace, ask on out-of-workspace scopes (the search
+  precedent). Excerpt exposure is exact parity with the existing search tool.
+- **Consumers:** the parent session (tool + system prompt, which gains a retrieval-first rule
+  and the ranked-map header only in ranked sessions); read-only child roles (below); `/map`
+  (re-renders the session handle, no disk write); `workspace.mapped` additive evidence fields;
+  CODEBASE staleness. Executor children and pre-trust `agent map` deliberately stay on the
+  flat map (the parent index describes the parent tree, not a worktree).
 
 ## Managed execution (`exec/`)
 
@@ -323,7 +402,12 @@ status recorded in the `memory.loaded` event):
   inside an entry) survive byte-verbatim until their entry is compressed.
 - **`<projectDir>/memory/CODEBASE.md`** (harness-managed; cap 16 KiB): a model-written
   architecture summary, provenance-stamped with the writing session's id + workspace-map digest
-  + HEAD. At load, a digest mismatch labels it "(may be stale)" in the prompt.
+  + HEAD. At load, a digest mismatch labels it "(may be stale)" in the prompt. V0.8: stamps are
+  DUAL — legacy `map-digest` (sha of the rendered map text) plus additive `inventory-digest`
+  (sha of the file SET); staleness compares inventory digests when both sides have one (immune
+  to map-format changes) and falls back to the legacy exact-text compare otherwise. Known soft
+  spot: a ranked→flat map-mode transition (transient git failure) over-marks stale for a
+  session or two — the safe direction, accepted and documented.
 
 **Write path** (`update.ts`): runs BEFORE `endSession`, on clean ends only (reasons
 completed/user-quit/max-steps — never error, never `aborted`: a Ctrl+C'd session must not fire
@@ -360,7 +444,24 @@ CONTRACTS (not prompt aliases) and lets one delegate call run a bounded parallel
   tools ⇒ depth 1 and no self-integration, structurally), role prompt builder, harness-fixed
   budget (read-only roles 15 steps / 5 min / 30k out; executor 30 / 12 min / 50k — approval
   wait counts against its wall clock), and approval mode (`auto-deny` | `forward`). A load-time
-  check pins the two tables consistent.
+  check pins the two tables consistent. V0.8: read-only roles also name `retrieve`; the
+  per-session instance reaches children ONLY through the named `SubagentDeps.retrieveTool`
+  seam — `childTools()` admits it iff the contract names it AND the instance is structurally
+  free of command/delegates/planDoc (fail closed by dropping; deliberately not a generic
+  extra-tools list, so depth-1 stays a property of construction). The executor list omits
+  retrieve: the parent index describes the parent workspace, not the worktree. Child prompts
+  name retrieve only when actually admitted.
+- **Briefs and reports (V0.8).** TaskSpec carries optional `focus`/`avoid` path-prefix lists;
+  the delegate tool composes deterministic per-task brief lines (focus, avoid, missing-path
+  hints — `..`-escaping prefixes are never disk-probed — and sibling coverage: "task 2 owns
+  src/x, do not spend budget there") rendered into the child's first message, and warns the
+  group on pairwise focus overlap. Guidance + measurement, not enforcement. Explorer reports
+  have a REQUIRED section contract (Scope inspected / Scope skipped / Findings / Change sites
+  and risks / Tests / Open questions + confidence); a non-blocking harness check lists missing
+  sections in the tool_result ("treat those areas as UNEXAMINED") — informational, never a
+  manufactured failure. Child report text and forwarded context are delimiter-hardened
+  (`neutralizeHarnessDelimiters`): a line mimicking the harness report/context delimiters is
+  visibly neutralized with a middle dot, never hidden.
 - **One runtime, parallelism in the TOOL.** A child task = another `Session` driven by the SAME
   `runTurn`, in-process; a task is exactly ONE turn. `delegate_task` takes `tasks: [1..3]`; the
   tasks of one call run concurrently via `Promise.all` (the schema max IS the concurrency cap)
@@ -688,33 +789,32 @@ and `/status` depend on this) — and observable via `onAppend`, fired after the
 with observer throws swallowed (the single point the REPL renders from). `readLenient` is a
 lock-free, never-throwing reader for the report and session listing.
 
-Event schema stays v1; V0.2 added three additive event types (`turn.aborted {phase}`,
-`trust.verified {source}`, `config.loaded {sources}`), V0.3 added `command.started {callId, pid,
-shell, cwd, timeoutMs}` (actual spawn — execution evidence, distinct from `tool.requested`) and
-`command.ended {callId, termination, exitCode|null, durationMs, killDetail?, drainTimedOut?}`,
-V0.4 adds `sandbox.status {mode, enforced, summary, confines, doesNotConfine, detail}` plus an
-additive `sandbox` field on `command.started`, and V0.5 adds `git.context` (the probed repo
-state), `git.commit`, `git.checkpoint`, `git.restore` (user-commanded git provenance),
-`context.compacted` (which tool outputs the wire history elided), additive
-`file.mutated.linesAdded/linesRemoved` (write-time diffstat), and additive
-`usage.cacheRead/CreationInputTokens` on `assistant.message`. V0.6 adds `memory.loaded`
-(exactly which docs reached the prompt, with sha/bytes/truncated/status), `memory.narrative`
-(the end-of-session provider call — status, duration, usage), `memory.updated` (per-doc write
-outcome), `task.started`/`task.ended` (delegated-task lifecycle, callId-bound), an additive
-`lineage {parentSessionId, role}` field on `session.started` (child sessions only), and
-additive `session.ended.reason` values `aborted` and `budget`. V0.7 adds `task.changes`
-(captured executor diffs — the durable record that outlives the worktree), `task.applied`
-(per-file integration outcomes), `worktree.created`/`worktree.removed` (lifecycle honesty,
-`ok:false` = sweep evidence), `plan.updated`/`plan.approved`/`plan.discarded` (plan lifecycle;
-approval binds the sha), the additive `TaskStatus` value `user-stopped`, and the additive
-`approval.resolved.source` value `task-aborted`. Session 9 (V0.7.1) adds
-`git.checkpoint.pruned {kind:'task-base', refs, failed}` — the session-end deletion of this
-session's task-base checkpoint refs (a silent ref delete would violate the evidence
-invariant) — and an additive `omittedCount` passthrough into the rebuilt changes registry.
-Bounded static readers
-`readFirstEvent`/`readLastEvent` (first/last committed line only, never throw) support the
-child-log skip and crash detection without full parses. Additive types/fields are
-lenient-reader-safe; bumping the version would lock old binaries out of new logs, so v stays 1.
+Event schema stays v1; every extension has been ADDITIVE (new event types or optional fields —
+lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The accumulated
+additive surface, by area (full shapes in `src/types.ts`):
+
+- **turn/consent/config:** `turn.aborted {phase}`, `trust.verified {source}`,
+  `config.loaded {sources}` (V0.2).
+- **execution:** `command.started`/`command.ended` (actual spawn + typed termination — execution
+  evidence distinct from `tool.requested`; V0.3), `sandbox.status` + `command.started.sandbox`
+  (V0.4).
+- **git/context:** `git.context`, `git.commit`, `git.checkpoint`, `git.restore` (user-commanded
+  provenance), `context.compacted`, `file.mutated.linesAdded/Removed`, cache-usage fields on
+  `assistant.message` (V0.5); `git.checkpoint.pruned {kind:'task-base'}` — session-end task-base
+  ref deletion is evidence, never silent (V0.7.1).
+- **memory:** `memory.loaded` / `memory.narrative` / `memory.updated` (V0.6).
+- **tasks/plans:** `task.started`/`task.ended` (callId-bound), `session.started.lineage`,
+  `session.ended.reason` values `aborted`/`budget` (V0.6); `task.changes` (the durable executor
+  diff that outlives the worktree), `task.applied`, `worktree.created`/`worktree.removed`
+  (`ok:false` = sweep evidence), `plan.updated`/`plan.approved`/`plan.discarded` (approval binds
+  the sha), `TaskStatus` `user-stopped`, `approval.resolved.source` `task-aborted` (V0.7),
+  `task.changes.omittedCount` passthrough (V0.7.1).
+- **retrieval:** `workspace.mapped.inventorySha256/indexedFiles/indexState` — the file-SET
+  digest is the CODEBASE staleness basis; `sha256` keeps meaning "exactly the map text the
+  model saw" (V0.8).
+
+Bounded static readers `readFirstEvent`/`readLastEvent` (first/last committed line only, never
+throw) support the child-log skip and crash detection without full parses.
 
 ## Recovery (`store/snapshots.ts`, `runtime/undo.ts`)
 
@@ -755,30 +855,27 @@ render as `killed: timed out/aborted by user … no exit code`, and a `command.s
 completion renders `STARTED but never completed … effects unknown` (plus honesty-footer lines) —
 the derivation stays anchored on `tool.requested`+`tool.completed`, with command events as
 enrichment only. Each command carries its actual boundary marker (`[sandboxed: windows-lowil]` /
-`[unsandboxed]`), and a header block renders the session's `sandbox.status` — mode, whether it was
-ENFORCED, and the verbatim `confines`/`doesNotConfine` scope — plus the probed `git.context`
-line ("at session start", never live state). V0.5 adds a `+n/−m` churn column per changed file
-(summed from write-time `file.mutated` diffstat evidence, so the report stays a pure event
-function) and, when present, "Commits (user-commanded)", "Checkpoints", and "Checkpoint
-restores" sections from the git provenance events. V0.6 adds "Delegated tasks (subagents)"
-(from `task.started`/`task.ended` pairs, joined by childSessionId since V0.7 groups share a
-callId; an orphan renders "STARTED but never completed") plus footer lines stating that child
-usage is NOT in the parent totals and that subagent reports are narration with the child's own
-log as the record; V0.7.1 adds one labeled "combined tokens (parent + children)" roll-up line
-to the section (and a matching children-total line in `/tasks`) — the session totals
-everywhere else remain parent-only, so the stated invariant is kept, not contradicted. V0.7 adds "## Plan" (writes, the approval sha, post-approval divergence,
-discard), "## Task changes and integration" (captures, applies, per-file refusals, and the
-honest "NOT applied" case), and an executor honesty footer (worktree visibility, the
-gitignored-files gap, forwarded approvals running unsandboxed when approved). The reviewable CONTENT lives in a separate
-surface: `report/diff.ts` builds the attributable session diff (first pre-image blob → current
-disk bytes per session-mutated path, undo folded in, external edits flagged DRIFTED), rendered
-by `/diff` and `agent diff` with per-line sanitization. A log without
-`session.ended` renders as "IN PROGRESS or CRASHED/UNKNOWN" (the in-session `/report` is the
-in-progress case). The report always states that assistant narrative is not evidence and the
-footer is mode-aware: it explains what a `[sandboxed]` command was OS-prevented from doing (and
-what it was not — reads/network) and that an `[unsandboxed]` command ran at full privilege.
-PowerShell invocations are passed via `-EncodedCommand` and append `; exit $LASTEXITCODE` so a
-failing inner command cannot masquerade as exit 0 → a false CHECKED.
+`[unsandboxed]`), and a header block renders the session's `sandbox.status` — mode, whether it
+was ENFORCED, and the verbatim `confines`/`doesNotConfine` scope — plus the probed
+`git.context` line ("at session start", never live state).
+
+Accumulated sections (all derived purely from events): per-file `+n/−m` churn from write-time
+diffstat; "Commits (user-commanded)" / "Checkpoints" / "Checkpoint restores" from git
+provenance; "Delegated tasks (subagents)" joined `task.started`↔`task.ended` by childSessionId
+(orphans render "STARTED but never completed") with footer lines that child usage is NOT in
+the parent totals and subagent reports are narration — plus ONE labeled
+"combined tokens (parent + children)" roll-up line (matching `/tasks`; session totals
+everywhere else stay parent-only); "## Plan" (writes, approval sha, post-approval divergence,
+discard); "## Task changes and integration" (captures, applies, per-file refusals, the honest
+"NOT applied" case) and the executor honesty footer. The reviewable CONTENT lives in a
+separate surface: `report/diff.ts` builds the attributable session diff (first pre-image blob
+→ current disk bytes, undo folded in, external edits flagged DRIFTED), rendered by `/diff` and
+`agent diff` with per-line sanitization. A log without `session.ended` renders as
+"IN PROGRESS or CRASHED/UNKNOWN" (the in-session `/report` is the in-progress case). The
+report always states that assistant narrative is not evidence; the footer is mode-aware
+(sandboxed vs unsandboxed semantics). PowerShell invocations run via `-EncodedCommand` and
+append `; exit $LASTEXITCODE` so a failing inner command cannot masquerade as exit 0 → a
+false CHECKED.
 
 ## Providers
 

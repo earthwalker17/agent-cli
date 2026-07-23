@@ -20,13 +20,21 @@ authority) and the first **delegated subagent tasks**. V0.7 grew that into a min
 bounded **agent-teams layer**: explicit role contracts (explorer/planner/reviewer read-only;
 executor mutating), parallel task groups, **plan mode** with an explicit user approval gate,
 and **worktree-isolated executors** whose approvals forward to you and whose changes reach
-the workspace only through reviewed, drift-refusing integration.
+the workspace only through reviewed, drift-refusing integration. V0.8 added **repository
+intelligence**: a ranked, incrementally indexed workspace map under a hard context budget
+(the complete directory tree is always visible — ranking orders detail, it never hides
+existence), a **`retrieve` tool** whose ranked hits explain WHY they matched and whose line
+excerpts are always read live from disk, and **non-overlapping explorer briefs** with a
+structured report contract — so large codebases are explored selectively instead of scanned.
 
-> **Status:** V0.7, consolidated and **proven live end-to-end** (plan → approval → two
+> **Status:** V0.8, **proven live end-to-end twice** — the V0.7 loop (plan → approval → two
 > parallel executors → forwarded approvals → reviewed integration → undo → review panel →
-> session memory), with 515 tests incl. real-OS sandbox, real-repository git, and
-> adversarial-review suites. This is an open, build-in-public engineering effort — see
-> `PROJECT.md` for the thesis and `ROADMAP.md` for what is done, deferred, and next.
+> session memory) and the V0.8 large-repo run (a 3,064-file monorepo where the old flat map
+> showed 0 of 14 packages and the ranked map shows all 14; two disjoint-focus explorers with
+> zero overlapping reads; every load-bearing claim re-verified first-hand) — with 574 tests
+> incl. real-OS sandbox, real-repository git, and adversarial-review suites. This is an open,
+> build-in-public engineering effort — see `PROJECT.md` for the thesis and `ROADMAP.md` for
+> what is done, deferred, and next.
 
 ## Install
 
