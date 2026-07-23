@@ -667,6 +667,14 @@ function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): 
 
 /** Persist a tool-reported plan-document write under the runtime-bound callId (V0.7). */
 function recordPlanEvidence(session: Session, callId: string, e: PlanEvidence): void {
+  // Routing observability (Session 11): the model calling update_plan IS the plan-path routing
+  // decision — record it once, before the session's first plan.updated, unless a sigil already
+  // routed. Absence of any plan events remains the honest evidence of a direct turn.
+  const hasRoute = session.log.events.some((ev) => ev.type === 'plan.route');
+  const hasUpdate = session.log.events.some((ev) => ev.type === 'plan.updated');
+  if (!hasRoute && !hasUpdate) {
+    session.log.append({ type: 'plan.route', mode: 'plan', source: 'model' });
+  }
   session.log.append({
     type: 'plan.updated',
     callId,
@@ -675,6 +683,7 @@ function recordPlanEvidence(session: Session, callId: string, e: PlanEvidence): 
     bytes: e.bytes,
     prevSha256: e.prevSha256,
     status: e.status,
+    ...(e.graph !== undefined ? { graph: e.graph } : {}),
   });
 }
 

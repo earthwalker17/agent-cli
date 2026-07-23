@@ -8,7 +8,10 @@ import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from 
 import { checkTrust } from '../cli/trust-check.js';
 import { assembleSession, type Assembled } from '../cli/assemble.js';
 import { runMemoryUpdate } from '../memory/update.js';
-import { planApprovalSha, readPlan, PLAN_INJECT_CAP_CHARS } from '../plan/store.js';
+import { PLAN_INJECT_CAP_CHARS } from '../plan/store.js';
+import { readPlanState } from '../plan/canonical.js';
+import { foldGraphState } from '../plan/graph-state.js';
+import { renderAgentPlanView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { createReplIO, type ReplIO } from './io.js';
@@ -144,8 +147,9 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         continue;
       }
 
-      // @plan — explicit plan-mode invocation: the request routes into planning, and the
-      // harness note makes the no-execution-before-approval contract explicit to the model.
+      // @plan / @direct — explicit routing sigils (Session 11): the user forces the path, the
+      // harness records the routing decision as evidence, and the note makes the contract
+      // explicit to the model. The sigil itself is routing, never message content.
       if (/^@plan\b/i.test(line)) {
         const rest = line.replace(/^@plan\b/i, '').trim();
         if (rest.length === 0) {
@@ -153,8 +157,20 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
           continue;
         }
         line = rest;
+        session.log.append({ type: 'plan.route', mode: 'plan', source: 'user-sigil' });
         pendingNotes.push(
           'the user explicitly invoked PLAN MODE for this request: investigate as needed (read-only; delegate explorer tasks where useful), write or update the plan with update_plan, and present it — do NOT begin implementation or any mutating work until the user approves the plan (/plan approve)',
+        );
+      } else if (/^@direct\b/i.test(line)) {
+        const rest = line.replace(/^@direct\b/i, '').trim();
+        if (rest.length === 0) {
+          renderer.chromeLine('usage: @direct <request> — skip plan ceremony and do the work directly');
+          continue;
+        }
+        line = rest;
+        session.log.append({ type: 'plan.route', mode: 'direct', source: 'user-sigil' });
+        pendingNotes.push(
+          'the user explicitly chose the DIRECT path for this request: skip the plan document and do the work with your own tools, keeping it bounded. If it genuinely requires multi-step mutating orchestration, SAY SO instead of silently planning. Executor delegation still requires an approved plan.',
         );
       }
 
@@ -212,40 +228,81 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
 }
 
 /**
- * Build the per-turn standing plan note (V0.7). Reads the plan file FRESH every turn — the
- * file's current bytes are truth (the user may have edited it between turns). Full content is
- * injected only when the sha is NEW to the model (not last-injected, not written by the model
- * itself via update_plan); otherwise a one-line pointer. The sovereignty wording is load-bearing.
+ * Build the per-turn standing plan note. Reads the plan FRESH every turn — the file's current
+ * bytes are truth (the user may have edited it between turns). Full content is injected only
+ * when the sha is NEW to the model (not last-injected, not written by the model itself via
+ * update_plan); otherwise a one-line pointer. The sovereignty wording is load-bearing.
+ *
+ * Session 11: canonical plans dedupe on the CONTENT sha and inject the detailed agent-facing
+ * projection; the pointer line still carries the LIVE execution summary (task states change
+ * without changing the content sha, so the fold result must not be hidden behind the dedupe).
+ * Legacy markdown plans keep the V0.7 raw-bytes behavior.
+ *
+ * Exported for tests: the hand-edit path (a sha the model has never seen → full injection)
+ * cannot be reached through the scripted REPL driver, which owns the whole file lifecycle.
  */
-function buildPlanNote(
+export function buildPlanNote(
   layout: ProjectLayout,
   session: Session,
   lastInjectedSha: string | null,
 ): { note: string; sha: string } | null {
-  const plan = readPlan(layout, session.id);
-  if (!plan.exists || plan.sha256 === null || plan.status === 'superseded') return null;
+  const state = readPlanState(layout, session.id, session.log.events);
+  if (state.kind === 'none' || state.status === 'superseded') return null;
 
-  const approvedSha = planApprovalSha(session.log.events);
   const knownShas = new Set<string>(lastInjectedSha !== null ? [lastInjectedSha] : []);
   for (const e of session.log.events) {
     if (e.type === 'plan.updated') knownShas.add(e.sha256);
   }
-  const divergence =
-    approvedSha !== null && approvedSha !== plan.sha256
-      ? ` NOTE: the file changed after approval (approved sha ${approvedSha.slice(0, 12)}, current ${plan.sha256.slice(0, 12)}).`
-      : '';
-  const header =
-    `Active plan for this session — status: ${plan.status.toUpperCase()}.${divergence} ` +
-    `The plan is CONTEXT, NOT AUTHORITY: the user's current request and the observable repository state outrank it. ` +
-    `The file's current bytes are the truth (the user may edit it directly): ${plan.file}`;
-  if (knownShas.has(plan.sha256)) {
-    return { note: `${header} (content unchanged since last shown)`, sha: plan.sha256 };
+
+  if (state.kind === 'legacy') {
+    const plan = state.legacy!;
+    if (plan.sha256 === null) return null;
+    const divergence =
+      state.approvedSha !== null && state.approvedSha !== plan.sha256
+        ? ` NOTE: the file changed after approval (approved sha ${state.approvedSha.slice(0, 12)}, current ${plan.sha256.slice(0, 12)}).`
+        : '';
+    const header =
+      `Active plan for this session — status: ${plan.status.toUpperCase()}.${divergence} ` +
+      `The plan is CONTEXT, NOT AUTHORITY: the user's current request and the observable repository state outrank it. ` +
+      `The file's current bytes are the truth (the user may edit it directly): ${plan.file}`;
+    if (knownShas.has(plan.sha256)) {
+      return { note: `${header} (content unchanged since last shown)`, sha: plan.sha256 };
+    }
+    const body =
+      plan.text.length > PLAN_INJECT_CAP_CHARS
+        ? `${plan.text.slice(0, PLAN_INJECT_CAP_CHARS)}\n[… truncated for injection; the full plan is on disk]`
+        : plan.text;
+    return { note: `${header}\nCurrent plan content:\n--- plan begin ---\n${body}\n--- plan end ---`, sha: plan.sha256 };
   }
+
+  const doc = state.canonical!;
+  if (doc.contentSha === null || doc.graph === null) {
+    // Unreadable/invalid canonical plan: the model must know it cannot rely on a plan right
+    // now — a short honest header, no body (there is no valid content to show).
+    return {
+      note:
+        `Active plan for this session is currently UNREADABLE (${doc.parseError ?? 'invalid'}) — status unknown, executor ` +
+        `delegation is blocked. The plan is CONTEXT, NOT AUTHORITY. File: ${doc.file}`,
+      sha: 'unreadable',
+    };
+  }
+  const graphState = foldGraphState(doc.graph, session.log.events);
+  const divergence = state.diverged
+    ? ` NOTE: the plan changed after approval — the approval is INVALIDATED (approved ${state.approvedSha!.slice(0, 12)}, current ${doc.contentSha.slice(0, 12)}); executor tasks are blocked until the user re-approves (/plan approve).`
+    : '';
+  const header =
+    `Active plan for this session — status: ${doc.status.toUpperCase()}.${divergence} ` +
+    `The plan is CONTEXT, NOT AUTHORITY: the user's current request and the observable repository state outrank it. ` +
+    `The file's current bytes are the truth (the user may edit it directly): ${doc.file}`;
+  if (knownShas.has(doc.contentSha)) {
+    return { note: `${header} (plan content unchanged since last shown; execution: ${graphState.summary})`, sha: doc.contentSha };
+  }
+  const view = renderAgentPlanView(doc, graphState);
   const body =
-    plan.text.length > PLAN_INJECT_CAP_CHARS
-      ? `${plan.text.slice(0, PLAN_INJECT_CAP_CHARS)}\n[… truncated for injection; the full plan is on disk]`
-      : plan.text;
-  return { note: `${header}\nCurrent plan content:\n--- plan begin ---\n${body}\n--- plan end ---`, sha: plan.sha256 };
+    view.length > PLAN_INJECT_CAP_CHARS
+      ? `${view.slice(0, PLAN_INJECT_CAP_CHARS)}\n[… truncated for injection; the full plan is on disk]`
+      : view;
+  return { note: `${header}\nCurrent plan content:\n--- plan begin ---\n${body}\n--- plan end ---`, sha: doc.contentSha };
 }
 
 /** endSession appends to the log; if THAT is what is failing, still release and stay honest. */

@@ -7,6 +7,9 @@ import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { renderRepoMap } from '../retrieval/render.js';
 import type { RetrievalHandle } from '../retrieval/rank.js';
 import { readPlan, setPlanStatus } from '../plan/store.js';
+import { readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
+import { foldGraphState } from '../plan/graph-state.js';
+import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
@@ -152,57 +155,120 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
 
     case 'plan': {
       const sub = arg.trim().toLowerCase();
-      const plan = readPlan(ctx.layout, ctx.session.id);
+      const state = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
+
+      // Legacy markdown plans (resumed pre-Session-11 sessions) keep the V0.7 flow verbatim.
+      if (state.kind === 'legacy') {
+        const plan = state.legacy!;
+        if (sub === '' || sub === 'show') {
+          const taskLines = plan.tasks.map((t, i) => `  ${i + 1}. ${sanitizeLine(t.title)}${t.status !== null ? ` — ${sanitizeLine(t.status)}` : ''}`);
+          ctx.renderer.chromeLine(
+            [
+              `plan ${sanitizeLine(plan.planId)} — status: ${plan.status}${plan.truncated ? ' (display truncated)' : ''} (legacy markdown plan)`,
+              `  file (editable): ${sanitizeLine(plan.file)}`,
+              `  sha256: ${plan.sha256 ?? 'unreadable'} · ${plan.bytes} bytes`,
+              ...(taskLines.length > 0 ? ['  tasks:', ...taskLines] : []),
+            ].join('\n'),
+          );
+          ctx.modelOut.write(plan.text + (plan.text.endsWith('\n') ? '' : '\n'));
+          return 'continue';
+        }
+        if (sub === 'approve') {
+          if (plan.status === 'approved') {
+            ctx.renderer.chromeLine('plan is already approved');
+            return 'continue';
+          }
+          const w = await setPlanStatus(ctx.layout, ctx.session.id, 'approved', ctx.session.snapshots, ctx.session.clock);
+          if ('error' in w) {
+            ctx.renderer.chromeLine(`cannot approve: ${w.error}`);
+            return 'continue';
+          }
+          ctx.session.log.append({ type: 'plan.approved', planId: ctx.session.id, sha256: w.sha256 });
+          ctx.pendingNotes.push(`the user APPROVED the plan (sha256 ${w.sha256.slice(0, 12)}); planned execution may begin`);
+          ctx.renderer.chromeLine(`plan approved (sha256 ${w.sha256.slice(0, 12)}…) — recorded as consent evidence`);
+          return 'continue';
+        }
+        if (sub === 'discard') {
+          const w = await setPlanStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
+          if ('error' in w) {
+            ctx.renderer.chromeLine(`cannot discard: ${w.error}`);
+            return 'continue';
+          }
+          ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id });
+          ctx.pendingNotes.push('the user DISCARDED the plan; do not follow it — ask for direction if the next step is unclear');
+          ctx.renderer.chromeLine('plan discarded (status: superseded; the file remains on disk for reference)');
+          return 'continue';
+        }
+        ctx.renderer.chromeLine('usage: /plan [show | approve | discard]');
+        return 'continue';
+      }
+
+      // Canonical structured plans (Session 11).
       if (sub === '' || sub === 'show') {
-        if (!plan.exists) {
+        if (state.kind === 'none') {
           ctx.renderer.chromeLine('no plan document for this session (ask for one, or use @plan <request>)');
           return 'continue';
         }
-        const taskLines = plan.tasks.map((t, i) => `  ${i + 1}. ${sanitizeLine(t.title)}${t.status !== null ? ` — ${sanitizeLine(t.status)}` : ''}`);
+        const doc = state.canonical!;
+        const approvalLine =
+          state.approvedSha === null
+            ? 'approval: none recorded — /plan approve to consent'
+            : state.diverged
+              ? `approval: INVALIDATED — the plan changed after approval (approved ${state.approvedSha.slice(0, 12)}, current ${state.currentSha?.slice(0, 12) ?? 'unreadable'}); re-approve with /plan approve`
+              : `approval: current (content sha ${state.approvedSha.slice(0, 12)} approved)`;
+        const execLine =
+          doc.graph !== null ? `  execution: ${foldGraphState(doc.graph, ctx.session.log.events).summary}` : null;
         ctx.renderer.chromeLine(
           [
-            `plan ${sanitizeLine(plan.planId)} — status: ${plan.status}${plan.truncated ? ' (display truncated)' : ''}`,
-            `  file (editable): ${sanitizeLine(plan.file)}`,
-            `  sha256: ${plan.sha256 ?? 'unreadable'} · ${plan.bytes} bytes`,
-            ...(taskLines.length > 0 ? ['  tasks:', ...taskLines] : []),
+            `plan ${sanitizeLine(doc.planId)} — status: ${doc.status}${doc.parseError !== undefined ? ` (${sanitizeLine(doc.parseError)})` : ''}`,
+            `  ${approvalLine}`,
+            ...(execLine !== null ? [sanitizeLine(execLine)] : []),
+            `  canonical (editable JSON): ${sanitizeLine(doc.file)}`,
+            `  content sha: ${doc.contentSha ?? 'unreadable'} · ${doc.bytes} bytes`,
           ].join('\n'),
         );
-        ctx.modelOut.write(plan.text + (plan.text.endsWith('\n') ? '' : '\n'));
+        // The full review view goes to the model-text stream (like /report, /diff); regenerate
+        // the on-disk view opportunistically so it never lags the canonical file.
+        void (await writeUserView(ctx.layout, ctx.session.id, doc, ctx.session.snapshots));
+        ctx.modelOut.write(renderUserPlanView(doc).split('\n').map(sanitizeLine).join('\n') + '\n');
         return 'continue';
       }
       if (sub === 'approve') {
-        if (!plan.exists) {
+        if (state.kind === 'none') {
           ctx.renderer.chromeLine('no plan document to approve');
           return 'continue';
         }
-        if (plan.status === 'approved') {
-          ctx.renderer.chromeLine('plan is already approved');
+        if (state.approvedAndCurrent) {
+          ctx.renderer.chromeLine('plan is already approved (the approval matches the current content)');
           return 'continue';
         }
-        const w = await setPlanStatus(ctx.layout, ctx.session.id, 'approved', ctx.session.snapshots, ctx.session.clock);
+        const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'approved', ctx.session.snapshots, ctx.session.clock);
         if ('error' in w) {
-          ctx.renderer.chromeLine(`cannot approve: ${w.error}`);
+          ctx.renderer.chromeLine(`cannot approve: ${sanitizeLine(w.error)}`);
           return 'continue';
         }
-        // The consent record binds the EXACT approved bytes; later divergence is surfaced, never hidden.
-        ctx.session.log.append({ type: 'plan.approved', planId: ctx.session.id, sha256: w.sha256 });
-        ctx.pendingNotes.push(`the user APPROVED the plan (sha256 ${w.sha256.slice(0, 12)}); planned execution may begin`);
-        ctx.renderer.chromeLine(`plan approved (sha256 ${w.sha256.slice(0, 12)}…) — recorded as consent evidence`);
+        // The consent record binds the CONTENT sha — status/timestamp flips are sha-neutral by
+        // construction, so this approval survives exactly until the next semantic change.
+        ctx.session.log.append({ type: 'plan.approved', planId: ctx.session.id, sha256: w.contentSha });
+        void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
+        ctx.pendingNotes.push(`the user APPROVED the plan (content sha ${w.contentSha.slice(0, 12)}); planned execution may begin`);
+        ctx.renderer.chromeLine(`plan approved (content sha ${w.contentSha.slice(0, 12)}…) — recorded as consent evidence`);
         return 'continue';
       }
       if (sub === 'discard') {
-        if (!plan.exists) {
+        if (state.kind === 'none') {
           ctx.renderer.chromeLine('no plan document to discard');
           return 'continue';
         }
-        const w = await setPlanStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
+        const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
         if ('error' in w) {
-          ctx.renderer.chromeLine(`cannot discard: ${w.error}`);
+          ctx.renderer.chromeLine(`cannot discard: ${sanitizeLine(w.error)}`);
           return 'continue';
         }
         ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id });
-        ctx.pendingNotes.push('the user DISCARDED the plan; do not follow it — ask for direction if the next step is unclear');
-        ctx.renderer.chromeLine('plan discarded (status: superseded; the file remains on disk for reference)');
+        void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
+        ctx.pendingNotes.push('the user DISCARDED the plan; do not follow it — a new update_plan write starts a fresh draft');
+        ctx.renderer.chromeLine('plan discarded (status: superseded; a new update_plan write starts a fresh draft)');
         return 'continue';
       }
       ctx.renderer.chromeLine('usage: /plan [show | approve | discard]');

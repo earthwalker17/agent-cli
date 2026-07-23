@@ -130,10 +130,44 @@ describe('report: plan section (V0.7)', () => {
       evt({ type: 'session.ended', reason: 'user-quit' }),
     ];
     const { json, md } = buildReport({ events });
-    expect(json.plan).toEqual({ planId: 'p-1', updates: 2, lastSha256: 'ccc3', approvedSha256: 'bbb2', discarded: false });
+    expect(json.plan).toEqual({
+      planId: 'p-1',
+      updates: 2,
+      lastSha256: 'ccc3',
+      approvedSha256: 'bbb2',
+      discarded: false,
+      route: null,
+      taskCount: null,
+    });
     expect(md).toContain('## Plan');
     expect(md).toContain('APPROVED by the user');
     expect(md).toContain('changed AFTER approval');
+  });
+
+  it('routing and the structured graph summary render when the events carry them (Session 11)', () => {
+    seq = 0;
+    const events = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'w', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({ type: 'plan.route', mode: 'plan', source: 'model' }),
+      evt({
+        type: 'plan.updated',
+        callId: 'call_1',
+        planId: 'p-1',
+        sha256: 'aaa1',
+        bytes: 100,
+        prevSha256: null,
+        status: 'draft',
+        graph: [
+          { id: 't1', role: 'executor', dependsOn: [] },
+          { id: 't2', role: 'main', dependsOn: ['t1'] },
+        ],
+      }),
+      evt({ type: 'session.ended', reason: 'user-quit' }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.plan).toMatchObject({ route: { mode: 'plan', source: 'model' }, taskCount: 2 });
+    expect(md).toContain("routing: plan path (the model's judgment)");
+    expect(md).toContain('latest graph has 2 task(s)');
   });
 
   it('a discarded plan renders honestly; no plan events → no section', () => {

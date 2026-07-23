@@ -112,6 +112,10 @@ export interface ReportPlan {
   lastSha256: string | null;
   approvedSha256: string | null;
   discarded: boolean;
+  /** How this session's complexity was routed (Session 11, additive): the first plan.route event. */
+  route?: { mode: 'plan' | 'direct'; source: 'user-sigil' | 'model' } | null;
+  /** Task count of the latest structured plan write (Session 11, additive; null for legacy plans). */
+  taskCount?: number | null;
 }
 
 export interface ReportInput {
@@ -315,11 +319,14 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   let planLastSha: string | null = null;
   let planApprovedSha: string | null = null;
   let planDiscarded = false;
+  let planRoute: ReportPlan['route'] = null;
+  let planTaskCount: number | null = null;
   for (const e of events) {
     if (e.type === 'plan.updated') {
       planId = e.planId;
       planUpdates++;
       planLastSha = e.sha256;
+      if (e.graph !== undefined) planTaskCount = e.graph.length;
     } else if (e.type === 'plan.approved') {
       planId = e.planId;
       planLastSha = e.sha256; // approval rewrites the status line, so the approved bytes ARE the latest
@@ -328,12 +335,22 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     } else if (e.type === 'plan.discarded') {
       planId = e.planId;
       planDiscarded = true;
+    } else if (e.type === 'plan.route' && planRoute === null) {
+      planRoute = { mode: e.mode, source: e.source };
     }
   }
   const planState: ReportPlan | null =
     planId === null
       ? null
-      : { planId, updates: planUpdates, lastSha256: planLastSha, approvedSha256: planApprovedSha, discarded: planDiscarded };
+      : {
+          planId,
+          updates: planUpdates,
+          lastSha256: planLastSha,
+          approvedSha256: planApprovedSha,
+          discarded: planDiscarded,
+          route: planRoute,
+          taskCount: planTaskCount,
+        };
 
   const taskChanges = events
     .filter((e): e is Extract<SessionEvent, { type: 'task.changes' }> => e.type === 'task.changes')
@@ -526,7 +543,12 @@ function renderMarkdown(r: ReportJson): string {
 
   if (r.plan !== null && r.plan !== undefined) {
     L.push(`## Plan`);
-    L.push(`- plan ${r.plan.planId}: ${r.plan.updates} write(s) via update_plan; latest sha256 ${short(r.plan.lastSha256)}`);
+    if (r.plan.route !== null && r.plan.route !== undefined) {
+      L.push(`- routing: ${r.plan.route.mode} path (${r.plan.route.source === 'user-sigil' ? 'forced by the user' : "the model's judgment"})`);
+    }
+    L.push(
+      `- plan ${r.plan.planId}: ${r.plan.updates} write(s) via update_plan${r.plan.taskCount !== null && r.plan.taskCount !== undefined ? `; latest graph has ${r.plan.taskCount} task(s)` : ''}; latest sha256 ${short(r.plan.lastSha256)}`,
+    );
     if (r.plan.approvedSha256 !== null) {
       const divergence =
         r.plan.lastSha256 !== null && r.plan.lastSha256 !== r.plan.approvedSha256

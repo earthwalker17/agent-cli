@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { runRepl } from '../src/repl/repl.js';
+import { runRepl, buildPlanNote } from '../src/repl/repl.js';
+import { writeCanonicalPlan } from '../src/plan/canonical.js';
+import { PlanGraphSchema } from '../src/plan/schema.js';
+import { SnapshotStore } from '../src/store/snapshots.js';
+import type { Session } from '../src/runtime/session.js';
 import { createRenderer } from '../src/repl/render.js';
 import { detectStyle } from '../src/repl/format.js';
 import { installSigintAbort } from '../src/cli/index.js';
@@ -415,13 +419,23 @@ describe('REPL: automatic command review', () => {
   });
 });
 
-describe('REPL: plan mode (V0.7)', () => {
-  const PLAN_BODY = '# Plan: demo\n\n## Task 1: do the thing\nStatus: pending\nDependsOn: none\nVerify: npm test\n';
+describe('REPL: plan mode (Session 11 — canonical structured plans)', () => {
+  const PLAN_GRAPH = {
+    objective: 'demo objective',
+    tasks: [
+      { id: 't1', title: 'do the thing', intent: 'build it', role: 'executor', verify: 'npm test', touches: ['src/x'] },
+      { id: 't2', title: 'check it', intent: 'verify the result', role: 'main', verify: 'run the app', dependsOn: ['t1'] },
+    ],
+  };
+  const AMENDED_GRAPH = {
+    ...PLAN_GRAPH,
+    tasks: [{ ...PLAN_GRAPH.tasks[0]!, title: 'do the thing differently' }, PLAN_GRAPH.tasks[1]!],
+  };
 
   it('update_plan → /plan approve → the next turn carries the approved plan as labeled context', async () => {
     const r = await drive(
       [
-        { say: 'planning', calls: [{ name: 'update_plan', input: { content: PLAN_BODY } }] },
+        { say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN_GRAPH } }] },
         { say: 'plan written — awaiting approval' },
         { say: 'executing per plan' },
       ],
@@ -429,31 +443,43 @@ describe('REPL: plan mode (V0.7)', () => {
     );
     expect(r.code).toBe(0);
 
-    // Evidence chain: the gated write (callId-bound) and the user's approval (sha-bound).
+    // Evidence chain: the routing decision, the gated write (callId-bound, with the graph
+    // summary), and the user's approval (content-sha-bound).
+    expect(r.events.find((e) => e.type === 'plan.route')).toMatchObject({ mode: 'plan', source: 'model' });
     const updated = r.events.find((e) => e.type === 'plan.updated');
     expect(updated).toBeDefined();
     expect(updated && 'callId' in updated && typeof updated.callId === 'string' && updated.callId.length > 0).toBe(true);
+    expect(updated?.type === 'plan.updated' ? updated.graph : undefined).toEqual([
+      { id: 't1', role: 'executor', dependsOn: [] },
+      { id: 't2', role: 'main', dependsOn: ['t1'] },
+    ]);
     const approved = r.events.find((e) => e.type === 'plan.approved');
     expect(approved).toBeDefined();
-    // Approval rewrites the status line, so the approved sha differs from the draft write's.
-    expect(approved && updated && approved.type === 'plan.approved' && updated.type === 'plan.updated' && approved.sha256 !== updated.sha256).toBe(true);
+    // THE Session 11 quirk fix, pinned inverted: approval binds the CONTENT sha, and a status
+    // flip is sha-neutral by construction — so the approved sha EQUALS the write's sha.
+    expect(approved && updated && approved.type === 'plan.approved' && updated.type === 'plan.updated' && approved.sha256 === updated.sha256).toBe(true);
 
-    // /plan showed the doc: status chrome + full text on stdout (model-text stream).
+    // /plan showed the doc: status chrome + the generated user view on stdout (model-text stream).
     expect(r.chromeOut).toContain('status: draft');
-    expect(r.modelOut).toContain('## Task 1: do the thing');
+    expect(r.modelOut).toContain('| t1 |');
+    expect(r.modelOut).toContain('do the thing');
     expect(r.chromeOut).toContain('plan approved');
 
-    // The post-approval turn carried the standing note: full content (new sha), sovereignty wording.
+    // The post-approval turn carried the standing note. The content sha is UNCHANGED by
+    // approval and the model wrote it, so the note is the pointer form — with the LIVE
+    // execution summary (task states must never hide behind the content-sha dedupe).
     const goMsg = r.events.filter((e) => e.type === 'user.message').find((e) => e.type === 'user.message' && e.text.includes('go ahead'));
     expect(goMsg).toBeDefined();
     const text = goMsg!.type === 'user.message' ? goMsg!.text : '';
     expect(text).toContain('status: APPROVED');
     expect(text).toContain('CONTEXT, NOT AUTHORITY');
-    expect(text).toContain('--- plan begin ---');
+    expect(text).toContain('plan content unchanged since last shown');
+    expect(text).toContain('execution: 0/2 completed');
+    expect(text).toContain('ready: t1');
     expect(text).toContain('the user APPROVED the plan');
   });
 
-  it('@plan routes into plan mode with the explicit no-execution-before-approval note', async () => {
+  it('@plan routes into plan mode with the explicit note and a user-sigil route event', async () => {
     const r = await drive([{ say: 'ack planning request' }], ['@plan refactor the widget\n', '/quit\n']);
     const msg = r.events.find((e) => e.type === 'user.message');
     const text = msg?.type === 'user.message' ? msg.text : '';
@@ -461,27 +487,41 @@ describe('REPL: plan mode (V0.7)', () => {
     expect(text).toContain('do NOT begin implementation');
     expect(text).toContain('refactor the widget');
     expect(text).not.toContain('@plan'); // the sigil is routing, not message content
+    expect(r.events.find((e) => e.type === 'plan.route')).toMatchObject({ mode: 'plan', source: 'user-sigil' });
   });
 
-  it('a post-approval rewrite surfaces divergence, and /plan discard stops injection', async () => {
+  it('@direct routes into the direct path with a user-sigil route event', async () => {
+    const r = await drive([{ say: 'doing it directly' }], ['@direct fix the typo\n', '/quit\n']);
+    const msg = r.events.find((e) => e.type === 'user.message');
+    const text = msg?.type === 'user.message' ? msg.text : '';
+    expect(text).toContain('DIRECT path');
+    expect(text).toContain('fix the typo');
+    expect(text).not.toContain('@direct');
+    expect(r.events.find((e) => e.type === 'plan.route')).toMatchObject({ mode: 'direct', source: 'user-sigil' });
+  });
+
+  it('an amendment INVALIDATES the approval; discard stops injection; a new write starts a fresh draft', async () => {
     const r = await drive(
       [
-        { say: 'planning', calls: [{ name: 'update_plan', input: { content: PLAN_BODY } }] },
+        { say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN_GRAPH } }] },
         { say: 'written' },
-        { say: 'tweaking', calls: [{ name: 'update_plan', input: { content: PLAN_BODY + '\n## Task 2: extra\nStatus: pending\n' } }] },
-        { say: 'tweaked' },
-        { say: 'observing divergence' },
+        { say: 'amending', calls: [{ name: 'update_plan', input: { plan: AMENDED_GRAPH } }] },
+        { say: 'amended' },
+        { say: 'observing invalidation' },
         { say: 'after discard' },
+        { say: 'replanning', calls: [{ name: 'update_plan', input: { plan: PLAN_GRAPH } }] },
+        { say: 'fresh draft written' },
       ],
-      ['plan it\n', '/plan approve\n', 'tweak the plan\n', 'another turn\n', '/plan discard\n', 'now what\n', '/quit\n'],
+      ['plan it\n', '/plan approve\n', 'amend the plan\n', 'another turn\n', '/plan discard\n', 'now what\n', 'plan again\n', '/quit\n'],
     );
-    // After the post-approval rewrite, the injected note must surface the divergence between
-    // the approved sha and the file's current sha (content itself collapses to a pointer —
-    // the model wrote it, so it is a known sha).
+    // The amendment flipped the file back to draft (structural invalidation)...
+    const updates = r.events.filter((e) => e.type === 'plan.updated');
+    expect(updates[1]).toMatchObject({ status: 'draft' });
+    // ...and the injected note names the invalidation with both shas' prefixes.
     const divergentMsg = r.events.filter((e) => e.type === 'user.message').find((e) => e.type === 'user.message' && e.text.includes('another turn'));
     const divText = divergentMsg?.type === 'user.message' ? divergentMsg.text : '';
-    expect(divText).toContain('the file changed after approval');
-    expect(divText).toContain('status: APPROVED');
+    expect(divText).toContain('approval is INVALIDATED');
+    expect(divText).toContain('status: DRAFT');
 
     // Discard: consent recorded, injection stops, the model is told.
     expect(r.events.some((e) => e.type === 'plan.discarded')).toBe(true);
@@ -489,6 +529,57 @@ describe('REPL: plan mode (V0.7)', () => {
     const text = lastMsg?.type === 'user.message' ? lastMsg.text : '';
     expect(text).not.toContain('Active plan');
     expect(text).toContain('the user DISCARDED the plan');
+
+    // The superseded un-trap: a fresh write after discard is a new DRAFT and injection resumes.
+    expect(updates[2]).toMatchObject({ status: 'draft' });
+    const replanned = r.events.filter((e) => e.type === 'user.message').find((e) => e.type === 'user.message' && e.text.includes('plan again'));
+    expect(replanned?.type === 'user.message' ? replanned.text : '').not.toContain('Active plan'); // note lands NEXT turn
+  });
+
+  it('a hand-edited canonical plan (sha the model never saw) injects the FULL agent view', async () => {
+    // The scripted driver owns the whole file lifecycle, so the hand-edit path is unit-tested:
+    // a canonical plan written out-of-band is exactly what a user edit between turns produces.
+    const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: state }, ensure: true });
+    const snapshots = new SnapshotStore(layout.objectsDir);
+    const graph = PlanGraphSchema.parse({
+      objective: 'edited by hand',
+      tasks: [{ id: 'h1', title: 'hand task', intent: 'added by the user', role: 'explorer' }],
+    });
+    const w = await writeCanonicalPlan(layout, 'sess-x', graph, snapshots);
+    expect('error' in w).toBe(false);
+    const fakeSession = { id: 'sess-x', log: { events: [] } } as unknown as Session;
+
+    const note = buildPlanNote(layout, fakeSession, null);
+    expect(note).not.toBeNull();
+    expect(note!.note).toContain('--- plan begin ---');
+    expect(note!.note).toContain('hand task');
+    expect(note!.note).toContain('CONTEXT, NOT AUTHORITY');
+
+    // Once shown, the same content collapses to the pointer form with the live execution summary.
+    const again = buildPlanNote(layout, fakeSession, note!.sha);
+    expect(again!.note).toContain('plan content unchanged since last shown');
+    expect(again!.note).not.toContain('--- plan begin ---');
+  });
+
+  it('semantic validation errors come back verbatim with NOTHING written', async () => {
+    const cyclic = {
+      objective: 'broken',
+      tasks: [
+        { id: 't1', title: 'a', intent: 'x', role: 'executor', verify: 'v', dependsOn: ['t2'] },
+        { id: 't2', title: 'b', intent: 'y', role: 'executor', verify: 'v', dependsOn: ['t1'] },
+      ],
+    };
+    const r = await drive(
+      [{ say: 'planning', calls: [{ name: 'update_plan', input: { plan: cyclic } }] }, { say: 'saw the errors' }],
+      ['plan it\n', '/quit\n'],
+    );
+    // The tool refused with the exact error; no plan.updated event, no canonical file.
+    expect(r.events.some((e) => e.type === 'plan.updated')).toBe(false);
+    const completed = r.events.find((e) => e.type === 'tool.completed');
+    expect(completed).toMatchObject({ ok: false });
+    expect(completed?.type === 'tool.completed' ? completed.outputPreview : '').toContain('dependency cycle');
+    const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: state } });
+    expect(fs.existsSync(layout.plansDir) && fs.readdirSync(layout.plansDir).some((f) => f.endsWith('.plan.json'))).toBe(false);
   });
 });
 
