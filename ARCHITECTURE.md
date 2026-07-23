@@ -13,6 +13,8 @@ runtime dependencies: `@anthropic-ai/sdk`, `zod` (v4, one schema source per tool
 (gitignore fallback walker), `undici` (proxy transport), and `diff` (jsdiff — line diffs for
 review evidence).
 
+One orientation line per file; the sections below carry the contracts.
+
 ```
 src/
   types.ts                 All shared contracts (no logic).
@@ -21,145 +23,97 @@ src/
     hash.ts                sha256, the single truncation contract, HMAC secret redaction.
     pathutil.ts            caseFold + isInside (trailing-separator boundary containment).
     text.ts                sanitizeLine — escapes bidi/zero-width/control chars for display.
-    diff.ts                jsdiff wrapper: lineDiffStat, unifiedDiff, shared binary/size guards.
+    diff.ts                jsdiff wrapper: lineDiffStat, unifiedDiff, binary/size guards.
     errors.ts              Typed error classes (branch on class, never on message).
   policy/
-    paths.ts               validatePath — Windows-first boundary/hard-reject gate (+ config-declared
-                           extraProtected roots).
+    paths.ts               validatePath — Windows-first boundary/hard-reject gate.
     engine.ts              classify + decide + Grants. Pure. The single policy choke point.
-    command-review.ts      analyzeCommand — deterministic positive-proof auto-run gate (see below).
+    command-review.ts      analyzeCommand — deterministic positive-proof auto-run gate.
   store/
-    layout.ts              State-dir resolution (resolveStateRoot) + refuse-if-inside-workspace.
+    layout.ts              State-dir resolution + refuse-if-inside-workspace.
     event-log.ts           Append-only JSONL log: lock, tail-repair, corruption/version handling.
-                           `events` is LIVE (appends visible immediately) and observable via onAppend.
-    snapshots.ts           Content-addressed pre-image blob store; capture/restore with drift refuse.
+    snapshots.ts           Content-addressed pre-image blobs; capture/restore with drift refuse.
   exec/
-    env.ts                 buildChildEnv — child-process env hygiene: ci dedupe, secret-name drops,
-                           non-excludable core floor + proxy passthrough, AGENT_CLI=1 marker.
-    kill.ts                killTree — verified best-effort tree kill (taskkill /T /F, 0|128 benign,
-                           bounded liveness probes) + isAlive.
-    run.ts                 runManaged — the managed-subprocess runner: structured ExecOutcome,
-                           kill/drain state machine, head+tail capped capture. Policy- and log-free.
+    env.ts                 buildChildEnv — env hygiene (secret drops, core floor, proxy pass).
+    kill.ts                killTree — verified best-effort tree kill + isAlive.
+    run.ts                 runManaged — the managed-subprocess runner. Policy- and log-free.
   git/
     types.ts               GitFacts / GitResult / porcelain contracts (harness capability, NOT tools).
-    client.ts              runGit over runManaged: absolute-path git, fsmonitor off, optional-locks
-                           off, GIT_* scrub, no prompts/stdin, bounded timeouts (see "GitOps").
-    facts.ts               detectGitFacts — the session-start probe; explicit nulls on every degrade.
-    porcelain.ts           Pure `status --porcelain=v2 -z` parser (NUL records, rename pairs).
-    commit.ts              prepareCommit/performCommit/runCommitFlow — the deliberate-commit flow.
-    checkpoint.ts          create/list/prune + planRestore/runRestoreFlow — hidden-ref checkpoints.
-    worktree.ts            V0.7: detached task worktrees — version gate, add, honest EBUSY-retrying
-                           removal (rm fallback + prune; failure is sweep evidence, never silent).
+    client.ts              runGit over runManaged — hardened on every invocation (see "GitOps").
+    facts.ts               detectGitFacts — session-start probe; explicit nulls on every degrade.
+    porcelain.ts           Pure `status --porcelain=v2 -z` parser.
+    commit.ts              The deliberate-commit flow.
+    checkpoint.ts          Hidden-ref checkpoints: create/list/prune + restore flows.
+    worktree.ts            Detached task worktrees: version gate, add, honest retrying removal.
   sandbox/
-    types.ts               SandboxBackend + EnforcementFacts contracts (re-exports ExecSandbox).
-    bootstrap.ts           The versioned PowerShell + inline-C# (Add-Type P/Invoke) Low-IL host script.
+    types.ts               SandboxBackend + EnforcementFacts contracts.
+    bootstrap.ts           The versioned PowerShell + inline-C# Low-IL host script.
     windows-lowil.ts       The enforced Windows backend: transform-at-spawn (wrapSpec) + probe.
-    none.ts                Honest no-enforcement backend (non-Windows / probe failed); identity wrap.
-    index.ts               selectSandbox — platform → backend (no probe; caller runs ensureAvailable).
+    none.ts                Honest no-enforcement backend; identity wrap.
+    index.ts               selectSandbox — platform → backend.
   tools/
-    index.ts               read_file, list_files, search, write_file, edit_file + registry + JSON-Schema derivation.
-    run-command.ts         Shell tool on runManaged: PowerShell -EncodedCommand $LASTEXITCODE wrapper,
-                           filtered env, stdin ignored, per-termination messages, lifecycle + sandbox
-                           evidence; applies ctx.sandbox.wrap at spawn time.
-    delegate.ts            delegate_task — per-session factory (never in static TOOLS); V0.7: 1–3
-                           tasks per call run as a PARALLEL GROUP; orchestrates executor worktrees
-                           (base checkpoint → worktree → capture → removal) and all group caps.
-                           V0.8: focus/avoid briefs + sibling coverage + overlap warnings;
-                           explorer report-section check; delimiter neutralization.
-    retrieve.ts            V0.8: retrieve — per-session read-only view over the assembly-built
-                           index; ranked hits with signal attributions; excerpts read LIVE.
-    update-plan.ts         update_plan — the model's ONLY write path to the plan document (V0.7);
-                           gated by the explicit planDoc policy branch; status is never model-writable.
-    apply-changes.ts       apply_task_changes + the captured-changes registry (V0.7): declared
-                           mutations from capture evidence, per-file drift-refuse integration.
-  retrieval/
-    inventory.ts           V0.8: git-backed file inventory (ls-files + stats + per-file dirty
-                           paths) with a render-independent path-SET digest (inventorySha256).
-    extract.ts             V0.8: regex symbol/import extraction (ts/js family + python only,
-                           declared); identifier-charset captures are the injection defense;
-                           secret-named/binary/oversize files skipped.
-    graph.ts               V0.8: relative-import resolution (NodeNext .js→.ts guessing) →
-                           in-degree + bounded damped PageRank centrality.
-    store.ts               V0.8: persisted incremental index <projectDir>/index/retrieval.json —
-                           written ONLY at assembly; stat-diff refresh; corrupt/version-mismatch
-                           rebuilds bounded; budget exhaustion = honest 'partial' that converges
-                           across sessions; lock-less by design (idempotent derived cache).
-    rank.ts                V0.8: structural prior (centrality/entry-points/dirty/test-penalty) +
-                           task-directed query ranking; every hit carries signal attributions.
-    render.ts              V0.8: tiered ranked-map render under a HARD char budget (header /
-                           dirty tier / complete dir tree = recall backstop / ranked key files,
-                           NO line numbers / footer); paths sanitized at interpolation.
-    ranked-map.ts          V0.8: the assembly-only entry point (inventory→index→handle→render);
-                           ANY failure falls back to the flat map with the reason in chrome.
+    index.ts               read_file/list_files/search/write_file/edit_file + registry + schemas.
+    run-command.ts         Shell tool on runManaged; applies ctx.sandbox.wrap at spawn time.
+    delegate.ts            delegate_task — per-session factory; parallel groups, executor
+                           orchestration, briefs/report-check/delimiter hardening (V0.8).
+    retrieve.ts            retrieve — read-only view over the session index (V0.8).
+    update-plan.ts         update_plan — the model's ONLY write path to the plan document.
+    apply-changes.ts       apply_task_changes + the captured-changes registry.
+  retrieval/               V0.8 — see "Repository intelligence".
+    inventory.ts           Git-backed inventory + dirty paths + path-SET digest.
+    extract.ts             Regex symbol/import extraction (ts/js + python, declared).
+    graph.ts               Relative-import resolution → in-degree + bounded PageRank.
+    store.ts               Persisted incremental index; written ONLY at assembly.
+    rank.ts                Structural prior + task-directed query ranking with signals.
+    render.ts              Tiered ranked-map render under a HARD char budget.
+    ranked-map.ts          Assembly-only entry point; any failure → flat-map fallback.
   net/
-    transport.ts           Reusable proxy-aware transport factory (pure resolver + custom fetch).
+    transport.ts           Proxy-aware transport factory (pure resolver + custom fetch).
   provider/
-    mock.ts                Scripted, offline provider (backbone of the tests); `hang` turns for abort tests.
+    mock.ts                Scripted offline provider (test backbone); `hang` turns for aborts.
     anthropic.ts           Streaming SDK adapter + pure response mapping + coalesceUserMessages.
   memory/
-    store.ts               Capped never-throwing doc reads, atomic tmp+rename writes, frontmatter.
-    journal.ts             JOURNAL.md format: parse / entry build / rolling policy. Pure.
-    codebase.ts            CODEBASE.md provenance stamp + map-digest staleness. Pure.
-    load.ts                Session-start load: the three docs, caps, banner line, crash note.
+    store.ts               Capped never-throwing doc reads, atomic writes, frontmatter.
+    journal.ts             JOURNAL.md parse / entry build / rolling policy. Pure.
+    codebase.ts            CODEBASE.md provenance stamps + staleness. Pure.
+    load.ts                Session-start load: three docs, caps, banner, crash note.
     update.ts              End-of-session update: gate, narrative call, roll + atomic write.
   plan/
-    store.ts               V0.7 plan documents: lenient reads (never throw), atomic writes with
-                           blob-archived priors, harness-owned frontmatter (status is user-only).
+    store.ts               Plan documents: lenient reads, atomic writes, harness-owned status.
   runtime/
-    session.ts             startSession (structurally-fresh id via exclusive log create) / runTurn
-                           (abortable) / resumeSession / reconstruct / repairDanglingToolUses /
-                           endReasonForTurn / endSession.
-    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn,
-                           role-parameterized from ROLE_CONTRACTS (V0.7).
-    roles.ts               V0.7: the runtime role contracts (tool registry, prompt builder, budget,
-                           approval mode per role) over the policy fact table in types.ts.
-    worktrees.ts           V0.7: worktree home under the OS temp dir, crash registry, path-guarded
-                           startup sweep (never touches a dir it did not create). V0.7.1: entries
-                           owner-stamped (session+pid); mutations under an in-process mutex + a
-                           token O_EXCL lock file; the sweep skips live owners (2h age hatch).
-    task-changes.ts        V0.7: bounded executor change capture — porcelain enumerate vs the base,
-                           binary-safe base bytes via read-tree + checkout-index staging, blobs.
-    approval-forwarder.ts  V0.7: serialized child→parent approval queue wrapping the SESSION
-                           approver; signal-linked entries; loud discard of stale answers.
-    elision.ts             elideHistory — pure, monotone wire-history budget (see "Context budget").
-    approvals.ts           auto-deny, dangerous, and interactive approvers (injectable io);
-                           formatApprovalPrompt hides [s] for non-grantable classes AND for all
-                           command asks (grants never store shell authority — V0.7.1), and
-                           renders forwarded-task headers + THIS-TASK deny-stop wording (V0.7).
+    session.ts             startSession / runTurn / resumeSession / reconstruct / endSession.
+    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn;
+                           childTools admission; delimiter neutralization.
+    roles.ts               Runtime role contracts over the policy fact table in types.ts.
+    worktrees.ts           Worktree home, crash registry (owner-stamped, locked), guarded sweep.
+    task-changes.ts        Bounded binary-safe executor change capture to blobs.
+    approval-forwarder.ts  Serialized child→parent approval queue; signal-linked entries.
+    elision.ts             elideHistory — pure, monotone wire-history budget.
+    approvals.ts           Approvers + prompt formatting ([s] hidden where no grant would store).
     undo.ts                applyUndo (last / all) over the recorded mutations.
   trust/
-    store.ts               trust.json + trust.log at the state root; hard error on corruption.
-    gate.ts                ensureTrusted — the consent gate + honest prompt copy.
-    commands.ts            `agent trust [--revoke|--list]`.
+    store.ts, gate.ts, commands.ts   trust.json + audit log; consent gate; `agent trust`.
   config/
-    config.ts              Layered narrowing-only config: user prefs + workspace narrowing knobs.
+    config.ts              Layered narrowing-only config.
   repl/
-    repl.ts                runRepl — the prompt→runTurn loop, session lifecycle, interrupts.
-    io.ts                  ONE persistent readline: prompts, approvals, SIGINT, mute, type-ahead.
-    render.ts              EventLog.onAppend → live tool activity + per-turn summaries.
-    format.ts              Glyph/color tables (ASCII fallback for legacy consoles), pure labels.
-    commands.ts            /help /status /undo /diff /commit /checkpoint /plan /tasks /report
-                           /map /quit over the live log.
+    repl.ts                runRepl — the prompt→runTurn loop, lifecycle, interrupts.
+    io.ts                  ONE persistent readline: prompts, approvals, SIGINT, type-ahead.
+    render.ts              EventLog.onAppend → live chrome + per-turn summaries.
+    format.ts              Glyph/color tables, pure labels.
+    commands.ts            Slash commands over the live log.
   workspace/
-    map.ts                 The FLAT map (sorted path list) + WorkspaceMap type. Since V0.8 this is
-                           the fallback form (pre-trust `agent map`, non-repo, executor worktrees,
-                           any ranked failure); git listing itself lives in retrieval/inventory.ts.
-                           Additive optional fields: inventorySha256/indexedFiles/indexState.
-    system-prompt.ts       System prompt: honesty statement, git context + VCS-mutation prohibition
-                           (in-repo) or the original no-git rule (non-repo), the map.
+    map.ts                 The FLAT map + WorkspaceMap type — since V0.8 the fallback form
+                           (pre-trust `agent map`, non-repo, executor worktrees, ranked failure).
+    system-prompt.ts       System prompt builders (main + per-role), honesty statements, the map.
   report/
     report.ts              Pure Event[] → { md, json } evidence report.
-    diff.ts                buildSessionDiff/renderSessionDiff — attributable session change review
-                           (+ sessionMutationState, the single attribution source for /diff and /commit).
+    diff.ts                Attributable session diff (+ sessionMutationState, the single
+                           attribution source for /diff and /commit).
   cli/
-    index.ts               parseArgs dispatch: REPL / run / resume / undo / diff / commit /
-                           checkpoint / report / sessions / map / memory / trust.
-    context.ts             buildRunContext (shared primitives; mode precedence --no-input >
-                           --interactive > isTTY) + latestSessionId (skips subagent child logs).
-    assemble.ts            assembleSession — the ONE construction path both interfaces consume:
-                           probes → memory load → map → system prompt → session + post-start records
-                           + delegate-tool attachment. Takes the trust decision as a parameter, so
-                           assembly is structurally impossible untrusted.
+    index.ts               parseArgs dispatch for all subcommands.
+    context.ts             buildRunContext + latestSessionId (skips subagent child logs).
+    assemble.ts            assembleSession — the ONE construction path both interfaces consume;
+                           trust is a parameter, so assembly is structurally impossible untrusted.
     trust-check.ts         The CLI-side trust gate (prompt only on a real TTY).
 ```
 
@@ -169,22 +123,17 @@ For every session-starting command (one-shot and REPL), the order is:
 workspace realpath → **state-root-inside-workspace refusal** (also checked in `ensureTrusted`,
 so a folder cannot plant a `trust.json` that grants itself consent) → **trust gate** → config
 load (the workspace file is untrusted bytes until trust passes) → per-project state creation →
-then `assembleSession` (V0.6: the single factored construction path both interfaces consume):
-**sandbox select + probe** → **git probe** (`detectGitFacts`, post-trust — it executes git
-against the repo) → **orphaned-worktree sweep** (V0.7: registry-driven, path-guarded, never
-blocks a session; V0.7.1: skips entries whose owning pid is alive — a concurrent sibling
-session's live worktrees are never touched — with a 2h age hatch for recycled pids, and all
-registry access goes through the cross-process lock, skipping the sweep if contended) →
-**ranked map + retrieval index** (V0.8: `buildRankedMap` — inventory, incremental index
-load/refresh/persist under a wall budget, handle, tiered render; ANY failure falls back to the
-flat map with the reason surfaced as a chrome note; non-repo workspaces keep the flat walker
-map) → **project-memory load** (post-trust by construction: the trust decision is a parameter
-of assembleSession) →
+then `assembleSession` (the single factored construction path both interfaces consume):
+**sandbox select + probe** → **git probe** (post-trust — it executes git against the repo) →
+**orphaned-worktree sweep** (registry-driven, path-guarded, never blocks a session; concurrency
+rules in "Executor isolation") → **ranked map + retrieval index** (`buildRankedMap`; ANY
+failure falls back to the flat map with the reason surfaced as a chrome note; non-repo
+workspaces keep the flat walker map) → **project-memory load** (post-trust by construction) →
 system prompt → start/resume → post-start records in a fixed order (trust.verified,
 config.loaded, sandbox.status, git.context, workspace.mapped, memory.loaded) → per-session
-tool attachment (delegate_task with the executor bundle + forwarding queue, update_plan,
-apply_task_changes with the changes registry rebuilt from events on resume). The probed
-truths feed the banner, the events, and the system prompt.
+tool attachment (retrieve, delegate_task with the executor bundle + forwarding queue,
+update_plan, apply_task_changes with the changes registry rebuilt from events on resume). The
+probed truths feed the banner, the events, and the system prompt.
 Read-only commands (`report`/`sessions`/`undo`/`diff`/`map`) are ungated, never create state
 dirs, and never run git; `agent commit`/`agent checkpoint` ARE trust-gated (they execute repo
 hooks / write `.git`); `map` reads workspace bytes but sends nothing to a model (documented
@@ -264,13 +213,11 @@ Large-repo understanding is selective and ranked, not a broad file dump. One in-
   entries}` — a derived, idempotent cache written ONLY at assembly (a command-less observe tool
   must never mutate durable state — the S6 trap, kept closed). Warm loads stat-diff
   (size+mtime) and re-extract only changes; corrupt/missing/version-mismatch rebuilds cold;
-  the ~10s wall budget yields an honest `'partial'` that CONVERGES across sessions (measured:
-  a fresh 3k-file monorepo on a cold Windows FS extracted ~400–700 files per 10s load —
-  several sessions to full, each one honestly labeled). Deliberately
-  lock-less: any consistent snapshot is valid, atomic tmp+rename prevents torn reads, rebuild
-  is the recovery (contrast the worktree registry, whose entries must MERGE). Known limit:
-  same-size+same-mtime edits are invisible to stat-diff — a misrank at worst, never a wrong
-  line (excerpts are live).
+  the ~10s wall budget yields an honest `'partial'` that CONVERGES across sessions (measured
+  live on a 3k-file monorepo — see ROADMAP S10). Deliberately lock-less: any consistent
+  snapshot is valid, atomic tmp+rename prevents torn reads, rebuild is the recovery (contrast
+  the worktree registry, whose entries must MERGE). Known limit: same-size+same-mtime edits
+  are invisible to stat-diff — a misrank at worst, never a wrong line (excerpts are live).
 - **Ranking** (`rank.ts`): a task-agnostic structural prior (bounded PageRank over resolved
   relative imports, entry-point/manifest heuristics, uncommitted-change boost, depth and
   test/vendor penalties) plus `rankForQuery` (path/symbol term matches + graph-neighbor boost
@@ -291,11 +238,10 @@ Large-repo understanding is selective and ranked, not a broad file dump. One in-
   read live`). Policy: no command/delegates/planDoc facts, empty mutation plan, declared
   `readsPaths` → observe/auto-allow in-workspace, ask on out-of-workspace scopes (the search
   precedent). Excerpt exposure is exact parity with the existing search tool.
-- **Consumers:** the parent session (tool + system prompt, which gains a retrieval-first rule
-  and the ranked-map header only in ranked sessions); read-only child roles (below); `/map`
-  (re-renders the session handle, no disk write); `workspace.mapped` additive evidence fields;
-  CODEBASE staleness. Executor children and pre-trust `agent map` deliberately stay on the
-  flat map (the parent index describes the parent tree, not a worktree).
+- **Consumers:** the parent session (tool + retrieval-first prompt rule, ranked sessions only);
+  read-only child roles (admission rules under "Tasks, roles"); `/map` (re-renders the session
+  handle, no disk write); `workspace.mapped` additive fields; CODEBASE staleness. Executor
+  children and pre-trust `agent map` deliberately stay on the flat map.
 
 ## Managed execution (`exec/`)
 
@@ -409,19 +355,16 @@ status recorded in the `memory.loaded` event):
   spot: a ranked→flat map-mode transition (transient git failure) over-marks stale for a
   session or two — the safe direction, accepted and documented.
 
-**Write path** (`update.ts`): runs BEFORE `endSession`, on clean ends only (reasons
-completed/user-quit/max-steps — never error, never `aborted`: a Ctrl+C'd session must not fire
-a model call), gated on real activity (an executed tool / mutation / spawned command). The
-narrative is ONE provider call that reuses the exact cached prefix (same system, same tools,
-same elided message view + one strict-JSON instruction); tool-use answers, schema mismatches,
-throws, and timeouts all degrade to a deterministic skeleton entry marked "narrative
-unavailable". The call bypasses `runTurn` and is therefore recorded as its own `memory.narrative`
-event carrying usage — never as fake message events (they would replay into a resumed
-conversation). The journal is RE-READ from disk at quit (two-terminal safety), rolled, and
-written atomically (same-dir random temp + rename, one EPERM retry); an unreadable existing
-journal is refused, never overwritten. Failures append `memory.updated {status:'failed'}` and
-never block the quit. User-layer-only config toggle `memoryUpdates` (workspace config stays
-narrowing-only — attacker-influencable ground must not steer harness memory writes).
+**Write path** (`update.ts`): runs BEFORE `endSession`, on clean ends only (never error, never
+`aborted` — a Ctrl+C'd session must not fire a model call), gated on real activity. The
+narrative is ONE provider call reusing the exact cached prefix; every failure mode degrades to
+a deterministic skeleton entry marked "narrative unavailable". The call bypasses `runTurn` and
+is recorded as its own `memory.narrative` event — never as fake message events (they would
+replay into a resumed conversation). The journal is RE-READ from disk at quit (two-terminal
+safety), rolled, and written atomically; an unreadable existing journal is refused, never
+overwritten. Failures append `memory.updated {status:'failed'}` and never block the quit.
+User-layer-only toggle `memoryUpdates` (workspace config stays narrowing-only —
+attacker-influencable ground must not steer harness memory writes).
 
 **Sovereignty wording is load-bearing:** the injected memory section states verbatim that the
 generated docs are "CONTEXT, NOT AUTHORITY … the current user request and the observable
@@ -555,19 +498,15 @@ The mutating role never touches the user's workspace. The chain is: base → wor
   assembly-time sweep removes crash orphans and is PATH-GUARDED — entries outside this
   project's worktree home are dropped from the registry but never touched on disk.
 - **The registry is concurrency-safe (V0.7.1):** two parent sessions in one project are
-  supported, so entries are OWNER-STAMPED (`ownerSessionId` + `pid`) and the sweep skips any
-  entry whose pid is alive (conservative direction — a recycled pid delays a sweep, never
-  destroys live work), with a 2h age hatch grounded in the harness-fixed executor budget
-  (no live task's worktree can be hours old). Every registry mutation runs under an
-  in-process async mutex (register/unregister execute inside the group's Promise.all
-  fan-out) PLUS a token-based `O_EXCL` lock file for cross-process callers: a live same-pid
-  holder is NEVER reclaimed (group members share the pid — the event-log's same-pid rule
-  must not be copied here); staleness is dead-pid or over-age only; a stale break is
-  delete-then-retry-create so exactly one contender wins. The lock is held only at registry
-  read/write edges — never across git removals — and the sweep's final save is a MERGE
-  (re-read, drop only what it disposed of), so a sibling's concurrent registration always
-  survives. Lock contention: register fails the executor setup honestly; the sweep skips
-  that startup. Legacy entries (no pid) remain sweepable exactly as before.
+  supported. Entries are OWNER-STAMPED (`ownerSessionId` + `pid`); the sweep skips live-pid
+  entries (a recycled pid delays a sweep, never destroys live work) with a 2h age hatch
+  grounded in the fixed executor budget. Every mutation runs under an in-process async mutex
+  (fan-out members share the process) PLUS a token `O_EXCL` lock file for cross-process
+  callers — a live same-pid holder is NEVER reclaimed (group members share the pid; the
+  event-log's same-pid rule must not be copied here); staleness is dead-pid or over-age only.
+  The lock is held only at registry read/write edges — never across git removals — and the
+  sweep's save is a MERGE, so a sibling's concurrent registration always survives. Contention
+  fails an executor setup honestly / skips that startup's sweep; legacy entries stay sweepable.
 - **Integration (`apply_task_changes`, parent-only):** `mutates()` declares the concrete
   apply-ELIGIBLE workspace paths from the captured evidence (never null — the S6 observe-trap;
   conflicted files are not declared, so they are never snapshotted and never pollute
@@ -617,22 +556,18 @@ Plans are explicit temporary local state — one markdown document per session a
 ## The REPL (`repl/`)
 
 A consumer of the same runtime: one session, `runTurn` per user line. `io.ts` owns the ONE
-persistent readline — the idle prompt and every approval question share it (via the approver's
-injectable `question` seam); readline echo is muted during turns (input keeps flowing so Ctrl+C
-still arrives as the 'SIGINT' event); typed-ahead lines are buffered; EOF at a pending approval
-resolves null → deny-&-stop. `render.ts` subscribes to `EventLog.onAppend`, so the screen is a
-live view of the persisted evidence (tool lines, approval outcomes, `(pid N)` on spawn, honest
-kill lines for killed commands, per-turn files/commands/steps/token summaries). Two — and only
-two — render-only incremental channels exist alongside the event view: `onText` (model deltas)
-and the V0.3 live command-output preview (`Session.onCommandOutput` → sanitized dim lines,
-100ms cadence, 8 KiB/command display cap, stateful per-stream UTF-8 decode so a rune split
-across pipe chunks never renders as replacement chars); for both, the persisted truth remains
-the recorded events. Stream split: **stdout = model text + requested artifacts
-only; stderr = all chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs and
-echoes accepted input lines for readable transcripts). Slash commands operate on the session's
-own live log (`/undo` → `applyUndo` + `undo.applied` on the same open log; the model learns of
-it via a delimited `[[harness note: …]]` in the next `user.message`). Turn errors repair and
-re-prompt; `/quit`, EOF, and double-Ctrl+C end as `user-quit` — never `completed`.
+persistent readline — idle prompt and approval questions share it; echo is muted during turns
+(Ctrl+C still arrives); typed-ahead lines are buffered; EOF at a pending approval resolves
+null → deny-&-stop. `render.ts` subscribes to `EventLog.onAppend`, so the screen is a live
+view of the persisted evidence. Exactly two render-only incremental channels exist alongside
+it: `onText` (model deltas) and the live command-output preview (sanitized dim lines, 100ms
+cadence, 8 KiB/command cap, stateful per-stream UTF-8 decode); for both, the persisted truth
+remains the events. Stream split: **stdout = model text + requested artifacts only; stderr =
+all chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs and echoes
+accepted input). Slash commands operate on the session's own live log (`/undo` → `applyUndo`
+on the same open log; the model learns of it via a delimited `[[harness note: …]]` in the next
+`user.message`). Turn errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as
+`user-quit` — never `completed`.
 
 ## Policy model (`policy/`)
 
@@ -752,30 +687,26 @@ vector); `GIT_OPTIONAL_LOCKS=0` (a probe never rewrites the user's index); `GIT_
 and no stdin; repo-targeting `GIT_*` env scrubbed; bounded timeouts (a probe degrades honestly,
 never hangs a session). Parsed output is always `-z`/porcelain-v2.
 
-**Deliberate commits** (`commit.ts`): default scope stages ONLY session-attributed paths —
-`sessionMutationState` over `file.mutated` events (undo folded in) intersected with
-`git status --untracked-files=all`, so every stage pathspec provably exists in git's view.
-Blockers where attribution would corrupt: missing identity (never set for the user), pre-staged
-index in session scope. Warnings: externally-modified session files; unattributable
-`run_command` effects (`--all` includes everything deliberately). Ordinary `add` + `commit -F
-<state-dir file>`: hooks run, failures are honest, staged state is stated. Message carries a
-`Session:` line + `Co-authored-by: Agent CLI <agent-cli@localhost>` (disableable).
+**Deliberate commits** (`commit.ts`): default scope stages ONLY session-attributed paths
+(`sessionMutationState` over `file.mutated` events, undo folded in, intersected with git
+status so every pathspec provably exists in git's view). Blockers where attribution would
+corrupt (missing identity — never set for the user; pre-staged index in session scope);
+warnings for externally-modified session files and unattributable `run_command` effects.
+Ordinary `add` + `commit -F`: hooks run, failures are honest. Message carries a `Session:`
+line + `Co-authored-by: Agent CLI <agent-cli@localhost>` (disableable).
 
-**Checkpoints** (`checkpoint.ts`): plumbing against a temp `GIT_INDEX_FILE` under the state dir
-(read-tree HEAD → add -A → write-tree → commit-tree → `refs/agent-cli/checkpoints/<session>/<n>`);
-the user-visible git state is byte-identical before/after (tested), unborn repos use the empty
-tree with no parent, plumbing identity is explicit env, gitignored files are never swept, and a
-large untracked set requires confirmation. Honesty: **low-pollution, not zero** — loose objects
-+ hidden refs are written; `prune` deletes refs so gc can collect. **Restore**: affected set =
-`diff-tree(current-temp-tree, checkpoint)` filtered to the workspace prefix (a moved HEAD makes
-outside-subtree files differ — those are never touched), INCLUDING deleting files the checkpoint
-predates; content materializes via a second temp index + `checkout-index --prefix` staging
-(binary-safe, git-native worktree form under the repo's filters); all current bytes snapshot
-FIRST under one synthetic callId, so the whole restore is a single `applyUndo('last')` unit.
-`git restore`/`git checkout` are never run against the user's worktree.
-
-**Future isolation seam:** everything is repoRoot/workspace-scoped with no globals — a worktree
-(Session 7+) is just another `GitClient`/`CheckpointContext` instance over its own path.
+**Checkpoints** (`checkpoint.ts`): plumbing against a temp `GIT_INDEX_FILE` under the state
+dir → `refs/agent-cli/checkpoints/<session>/<n>`; the user-visible git state is byte-identical
+before/after (tested), unborn repos use the empty tree, gitignored files are never swept, a
+large untracked set requires confirmation. Honesty: **low-pollution, not zero** — loose
+objects + hidden refs are written; `prune` frees them. **Restore**: affected set from
+diff-tree filtered to the workspace prefix (files a moved HEAD changed outside the subtree
+are never touched), including deleting files the checkpoint predates; content materializes
+binary-safely via a second temp index + `checkout-index --prefix` staging; all current bytes
+snapshot FIRST under one synthetic callId, so the whole restore is a single
+`applyUndo('last')` unit. `git restore`/`git checkout` are never run against the user's
+worktree. Everything is repoRoot-scoped with no globals — a task worktree is just another
+`GitClient`/`CheckpointContext` instance over its own path.
 
 ## Event log (`store/event-log.ts`)
 
