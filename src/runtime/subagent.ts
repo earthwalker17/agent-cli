@@ -119,6 +119,12 @@ export interface SubagentSpec {
   /** Verbatim supporting material from the parent (findings, a scoped diff); joins the delegation prompt. */
   context?: string;
   expectedOutput?: string;
+  /**
+   * Session 10: harness-composed brief lines (focus/avoid scope, sibling coverage) rendered
+   * between the task and the context. Composed by the delegate tool from the group's structured
+   * fields — never model-authored free text.
+   */
+  briefLines?: readonly string[];
   parentSessionId: string;
 }
 
@@ -339,16 +345,27 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   return out;
 }
 
+/**
+ * Session 10 hardening: a line inside child output or forwarded context that mimics a harness
+ * delimiter would fake a provenance boundary the model trusts. A visible middle dot breaks the
+ * mimicry without hiding any content. Applied to child reports (delegate tool) and to the
+ * context block below.
+ */
+export function neutralizeHarnessDelimiters(text: string): string {
+  return text.replace(/^(\s*)(--- (?:subagent report|context) (?:begin|end))/gm, '$1·$2');
+}
+
 function delegationPrompt(spec: SubagentSpec): string {
   return [
     `Delegated task from the main agent:`,
     spec.task,
+    ...(spec.briefLines !== undefined && spec.briefLines.length > 0 ? ['', 'Brief (scope discipline for this task):', ...spec.briefLines] : []),
     ...(spec.context !== undefined && spec.context.length > 0
       ? [
           '',
           'Supporting context from the main agent (verbatim; verify anything load-bearing against the repository):',
           '--- context begin ---',
-          spec.context,
+          neutralizeHarnessDelimiters(spec.context),
           '--- context end ---',
         ]
       : []),

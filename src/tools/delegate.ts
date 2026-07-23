@@ -2,12 +2,14 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { SubagentRoleName, TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
 import {
+  neutralizeHarnessDelimiters,
   runSubagentTask,
   SESSION_CHILD_OUTPUT_TOKEN_CAP,
   TASKS_PER_SESSION,
   type SubagentDeps,
   type SubagentResult,
 } from '../runtime/subagent.js';
+import fs from 'node:fs';
 import { captureTaskChanges, type CaptureResult } from '../runtime/task-changes.js';
 import { newWorktreeDir, registerWorktree, unregisterWorktree } from '../runtime/worktrees.js';
 import { addWorktree, removeWorktree, worktreeSupport } from '../git/worktree.js';
@@ -45,6 +47,16 @@ const TaskSpec = z
       .optional()
       .describe('Verbatim supporting material for the child (findings, a scoped diff, the relevant plan tasks). It has its OWN context window — include what it needs, nothing more.'),
     expected_output: z.string().max(1000).optional().describe('Optional: the shape of the report you want back'),
+    focus: z
+      .array(z.string().min(1).max(260))
+      .max(16)
+      .optional()
+      .describe('Workspace-relative path prefixes this task OWNS (e.g. ["src/runtime"]). Parallel tasks should have non-overlapping focus sets; each task sees its siblings\' focus as territory to avoid.'),
+    avoid: z
+      .array(z.string().min(1).max(260))
+      .max(16)
+      .optional()
+      .describe('Workspace-relative path prefixes this task must NOT spend budget on (covered elsewhere or out of scope).'),
   })
   .strict();
 
@@ -99,6 +111,82 @@ interface TaskOutcome {
   /** Extra harness lines for this task's report section (capture summary, worktree warnings). */
   notes: string[];
   capturedPaths: string[];
+}
+
+/**
+ * Session 10: the required section headers of a completed explorer report. Prompt-enforced;
+ * the harness CHECK below is informational only (a budget-cut report is legitimately partial —
+ * flagging it must inform the parent, never manufacture failure).
+ */
+export const EXPLORER_REPORT_SECTIONS = [
+  '## Scope inspected',
+  '## Scope skipped',
+  '## Findings',
+  '## Change sites and risks',
+  '## Tests',
+  '## Open questions',
+] as const;
+
+/** Explorer-only: which required report sections a report lacks. */
+export function missingExplorerSections(finalText: string): string[] {
+  return EXPLORER_REPORT_SECTIONS.filter((s) => !finalText.includes(s));
+}
+
+function normalizePrefix(p: string): string {
+  return p.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+}
+
+function prefixesOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
+}
+
+/**
+ * Session 10: per-task brief lines (focus/avoid + sibling coverage) and group-level overlap
+ * warnings, composed deterministically from the structured fields. Guidance and measurement,
+ * deliberately NOT enforcement: read-only exploration crossing a path boundary is a cost
+ * problem, not a safety problem, and pretending otherwise would be enforcement theater.
+ */
+export function composeBriefs(
+  tasks: ReadonlyArray<{ role: string; focus?: string[] | undefined; avoid?: string[] | undefined }>,
+  workspaceRoot: string,
+): { briefs: string[][]; groupNotes: string[] } {
+  const focusSets = tasks.map((t) => (t.focus ?? []).map(normalizePrefix).filter((p) => p.length > 0));
+  const briefs = tasks.map((t, i) => {
+    const lines: string[] = [];
+    const focus = focusSets[i]!;
+    if (focus.length > 0) {
+      lines.push(`- Focus — paths this task owns: ${focus.join(', ')}`);
+      const missing = focus.filter((p) => {
+        try {
+          return !fs.existsSync(path.join(workspaceRoot, p));
+        } catch {
+          return true;
+        }
+      });
+      if (missing.length > 0) {
+        lines.push(`- note: focus path(s) not found in the workspace right now: ${missing.join(', ')} — treat as a hint, not truth`);
+      }
+    }
+    const avoid = (t.avoid ?? []).map(normalizePrefix).filter((p) => p.length > 0);
+    if (avoid.length > 0) lines.push(`- Avoid — out of this task's scope: ${avoid.join(', ')}`);
+    for (let j = 0; j < tasks.length; j++) {
+      if (j === i || focusSets[j]!.length === 0) continue;
+      lines.push(`- Sibling task ${j + 1} (${tasks[j]!.role}) owns: ${focusSets[j]!.join(', ')} — do not spend budget there.`);
+    }
+    return lines;
+  });
+  const groupNotes: string[] = [];
+  for (let i = 0; i < tasks.length; i++) {
+    for (let j = i + 1; j < tasks.length; j++) {
+      const shared = focusSets[i]!.filter((a) => focusSets[j]!.some((b) => prefixesOverlap(a, b)));
+      if (shared.length > 0) {
+        groupNotes.push(
+          `WARNING — overlapping focus between task ${i + 1} and task ${j + 1} (${shared.join(', ')}): expect duplicated exploration; prefer disjoint focus sets.`,
+        );
+      }
+    }
+  }
+  return { briefs, groupNotes };
 }
 
 export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, executor?: ExecutorDeps): Tool<DelegateInputT> {
@@ -183,6 +271,10 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
       }
       tasksStarted += input.tasks.length;
 
+      // Brief composition (Session 10): focus/avoid + sibling coverage per task, overlap
+      // warnings for the group — deterministic, before any child exists.
+      const composed = composeBriefs(input.tasks, deps.workspaceRoot);
+
       // Fan out. Group size is schema-capped at 3, so Promise.all IS the concurrency limit.
       // Each child gets its own session/log; evidence events interleave at event granularity
       // through the shared callId-bound reportTask channel (join key: childSessionId).
@@ -194,6 +286,7 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
             parentSessionId,
             ...(t.context !== undefined ? { context: t.context } : {}),
             ...(t.expected_output !== undefined ? { expectedOutput: t.expected_output } : {}),
+            ...(composed.briefs[index]!.length > 0 ? { briefLines: composed.briefs[index]! } : {}),
           };
           const provider = deps.providerForTask?.(index, spec.role) ?? deps.provider;
           const taskDeps: SubagentDeps = {
@@ -211,7 +304,7 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
 
       // Overlap detection across the group's captured write-sets (apply order defines the
       // winner; the warning makes the collision visible BEFORE anything integrates).
-      const groupNotes: string[] = [];
+      const groupNotes: string[] = [...composed.groupNotes];
       if (executorCount > 1) {
         const seen = new Map<string, number>();
         for (const o of outcomes) for (const p of o.capturedPaths) seen.set(p, (seen.get(p) ?? 0) + 1);
@@ -236,12 +329,24 @@ export function createDelegateTool(deps: SubagentDeps, parentSessionId: string, 
       const sections = outcomes.map((o, i) => {
         const t = input.tasks[i]!;
         const r = o.result;
+        // Explorer report contract (Session 10): informational section check — a missing
+        // section marks coverage incomplete for the parent; it never converts to failure.
+        const sectionNote =
+          t.role === 'explorer' && r.status === 'completed'
+            ? ((): string[] => {
+                const missing = missingExplorerSections(r.finalText);
+                return missing.length > 0
+                  ? [`[harness] explorer report missing section(s): ${missing.join(', ')} — treat those areas as UNEXAMINED`]
+                  : [];
+              })()
+            : [];
         return [
           `${results.length > 1 ? `=== task ${i + 1} — ` : ''}subagent ${r.status.toUpperCase()} — role ${t.role} · ${r.steps} step(s) · ${r.usage.inputTokens} in / ${r.usage.outputTokens} out tokens`,
           `child session: ${r.childSessionId || '(never started)'}${r.childSessionId !== '' ? ` — evidence: agent report ${r.childSessionId}` : ''}`,
           ...o.notes,
+          ...sectionNote,
           '--- subagent report begin (narration by the subagent — NOT verified evidence; verify load-bearing claims against the repository) ---',
-          r.finalText,
+          neutralizeHarnessDelimiters(r.finalText),
           '--- subagent report end ---',
         ].join('\n');
       });

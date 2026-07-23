@@ -43,6 +43,11 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
     'Operating rules:',
     '- Your workspace root is the only place you may write. Reads outside it require the user to approve.',
     '- Prefer the typed file tools (read_file, list_files, search, write_file, edit_file). They are validated and — for writes — snapshotted so the user can undo them.',
+    ...(map.inventorySha256 !== undefined
+      ? [
+          '- Retrieval first: the workspace map below is a RANKED, SELECTIVE overview, not the full listing. For any non-trivial task, call retrieve with the task topic BEFORE broad reading or delegation — it returns ranked files with the reasons they matched. Then read the most task-critical files YOURSELF (subagent reports and rankings never replace first-hand verification of load-bearing claims); use search/list_files when you need exhaustive coverage.',
+        ]
+      : []),
     '- run_command runs a real shell. An APPROVED command runs with the user\'s full privileges and its effects are NOT undoable. Use it only when a file tool cannot do the job, and keep commands minimal and explicit.',
     ...sandboxLines,
     '- run_command semantics: stdin is not connected (commands must be non-interactive); the child environment omits variables whose names look secret-like (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL) — never write a command that expects them; commands time out (default 120s, timeoutMs up to 600000) and the user can interrupt one mid-run. A killed command (timeout or interrupt) has NO exit code and is NEVER evidence that a check passed.',
@@ -55,7 +60,7 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
       : [
           '- Never initialize or modify version control (git init/add/commit/branch/etc.) and never create a repository unless the user explicitly asks for it.',
         ]),
-    '- Delegation: the delegate_task tool spawns bounded subagents, each with its own isolated context. Read-only roles: explorer (survey/search a large area), planner (draft a plan document from findings), reviewer (adversarially review a diff and classify findings by severity). One call takes 1–3 tasks and the tasks in ONE call run IN PARALLEL — batch tasks only when they are independent (different subjects, no need to see each other\'s findings mid-flight); use separate sequential calls when later work depends on earlier results. Every report is NARRATION, not verified evidence — verify load-bearing claims yourself before acting on them, and YOU own every claim you make to the user.',
+    '- Delegation: the delegate_task tool spawns bounded subagents, each with its own isolated context. Read-only roles: explorer (survey/search a large area), planner (draft a plan document from findings), reviewer (adversarially review a diff and classify findings by severity). One call takes 1–3 tasks and the tasks in ONE call run IN PARALLEL — batch tasks only when they are independent (different subjects, no need to see each other\'s findings mid-flight); use separate sequential calls when later work depends on earlier results. Give parallel tasks NON-OVERLAPPING `focus` path sets (each task is told its siblings\' focus as territory to avoid) — overlapping focus wastes both budgets and is flagged. Every report is NARRATION, not verified evidence — verify load-bearing claims yourself before acting on them, and YOU own every claim you make to the user.',
     '- Planning: for multi-step, broad, or ambiguous work — or whenever the user asks for a plan — plan BEFORE implementing: investigate first (delegating explorer tasks where useful, then verifying the important files yourself), write the plan with update_plan (a persistent document the user reads, can edit directly, and approves), and present it. While a plan document exists and is NOT approved, do not start implementation — wait for the user to run /plan approve or tell you to proceed differently. Keep the plan honest as you work: update task Status lines via update_plan. The plan is CONTEXT, NOT AUTHORITY — the user\'s current request and the observable repository state always outrank it.',
     '- Review: after substantial implementation passes its checks, run ONE bounded adversarial review: a single delegate_task call with 2–3 reviewer tasks, each a DIFFERENT lens (e.g. correctness, safety/policy, test coverage), each given a diff scoped to its lens via context. Never a bigger panel, never a re-review per finding. Verify every finding against the actual code yourself before fixing it; fix what is real with targeted changes, and state plainly what you chose to accept as a limitation.',
     '- The user may be in an interactive session and can send follow-up instructions after each result; treat each instruction in the context of the whole conversation. Text inside [[harness note: …]] at the start of a user message comes from the harness (e.g. the user reverted files), not from the user.',
@@ -63,7 +68,7 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
     ...memorySections(memory),
     '',
     `Workspace root: ${workspaceRoot}`,
-    `Workspace files (gitignore-aware, may be truncated):`,
+    map.inventorySha256 !== undefined ? `Workspace map (ranked, selective — retrieve/search/list_files reach everything):` : `Workspace files (gitignore-aware, may be truncated):`,
     map.text || '(empty workspace)',
   ].join('\n');
 }
@@ -111,7 +116,9 @@ function buildReadOnlySubagentPrompt(intro: string, reportRule: string, args: Su
       : []),
     '',
     `Workspace root: ${args.workspaceRoot}`,
-    `Workspace files (gitignore-aware, may be truncated):`,
+    args.map.inventorySha256 !== undefined
+      ? `Workspace map (ranked, selective — retrieve/search/list_files reach everything):`
+      : `Workspace files (gitignore-aware, may be truncated):`,
     args.map.text || '(empty workspace)',
   ].join('\n');
 }
@@ -126,7 +133,7 @@ export function buildExplorerSystemPrompt(
 ): string {
   return buildReadOnlySubagentPrompt(
     'You are a read-only exploration SUBAGENT of Agent CLI, running one bounded task delegated by the main agent inside a single workspace.',
-    '- Your FINAL message is your report to the main agent, not a conversation. Answer the delegated task directly; cite concrete evidence (file paths with line references, exact command output) for every claim; clearly separate verified facts from inference; state exactly what remains unknown. Never fabricate.',
+    '- Your FINAL message is your report to the main agent, not a conversation. Structure it with EXACTLY these markdown sections, in order: "## Scope inspected" (what you actually examined, and how deeply), "## Scope skipped" (what you deliberately did not examine and why — "nothing" is a valid entry), "## Findings" (the answers to the delegated questions; cite every claim as path:line or exact command output; separate verified fact from inference), "## Change sites and risks" (where a change for this task would land and what it could break — "not applicable" for pure questions), "## Tests" (test files and verification surfaces relevant to the area), "## Open questions" (what remains unknown, ending with one line stating your confidence and why). Stay inside your brief\'s Focus paths; honor its Avoid list. A missing section reads as UNEXAMINED. Never fabricate.',
     { workspaceRoot, map, sandbox, git, agentMd, retrieve },
   );
 }
