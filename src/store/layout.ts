@@ -21,6 +21,8 @@ export interface ProjectLayout {
   sessionFile(sessionId: string): string;
   lockFile(sessionId: string): string;
   planFile(planId: string): string;
+  /** Canonical structured plan (Session 11): `<projectDir>/plans/<planId>.plan.json`. */
+  canonicalPlanFile(planId: string): string;
 }
 
 function realIfExists(p: string): string {
@@ -87,5 +89,6 @@ export function resolveLayout(
     sessionFile: (id) => path.join(sessionsDir, `${id}.jsonl`),
     lockFile: (id) => path.join(sessionsDir, `${id}.lock`),
     planFile: (id) => path.join(plansDir, `${id}.md`),
+    canonicalPlanFile: (id) => path.join(plansDir, `${id}.plan.json`),
   };
 }

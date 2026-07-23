@@ -77,8 +77,20 @@ export function subagentRoleAccess(role: string): SubagentRoleAccess | undefined
 /**
  * How a delegated subagent task ended (V0.6; 'user-stopped' added in V0.7 — the user answered
  * a forwarded approval with deny-&-stop, ending THAT child only, not the parent turn).
+ * Session 11 (additive): 'cancelled' = task-scoped user cancellation (/cancel — this child only,
+ * not the turn); 'stalled' = the harness supervisor cancelled a child stuck repeating the same
+ * tool call (the bounded loop intervention).
  */
-export type TaskStatus = 'completed' | 'error' | 'budget-steps' | 'budget-tokens' | 'timeout' | 'aborted' | 'user-stopped';
+export type TaskStatus =
+  | 'completed'
+  | 'error'
+  | 'budget-steps'
+  | 'budget-tokens'
+  | 'timeout'
+  | 'aborted'
+  | 'user-stopped'
+  | 'cancelled'
+  | 'stalled';
 
 /** The harness-fixed budget a delegated task runs under (never model-controlled). */
 export interface TaskBudget {
@@ -106,7 +118,25 @@ export interface TaskChangeFile {
 }
 
 export type TaskEvidence =
-  | { kind: 'started'; role: string; childSessionId: string; budget: TaskBudget }
+  | {
+      kind: 'started';
+      role: string;
+      childSessionId: string;
+      budget: TaskBudget;
+      /** The approved-plan task this child is bound to (Session 11, additive) — the DAG join key. */
+      planTaskId?: string;
+    }
+  | {
+      /**
+       * A harness supervision observation about a running child (Session 11): stall, repeated
+       * identical calls, budget pressure, or a task-scoped cancellation. Bounded (≤6 per task);
+       * bookkeeping only — it annotates evidence and never replaces the task's own status.
+       */
+      kind: 'supervision';
+      childSessionId: string;
+      what: 'stall' | 'loop' | 'budget-pressure' | 'cancelled';
+      detail?: string;
+    }
   | {
       kind: 'ended';
       childSessionId: string;
@@ -135,13 +165,20 @@ export type TaskEvidence =
       refused: { relPath: string; reason: string }[];
     };
 
-/** Structured plan-document facts reported by the update_plan tool; the runtime binds the callId. */
+/**
+ * Structured plan-document facts reported by the update_plan tool; the runtime binds the callId.
+ * For canonical (Session 11) writes, `sha256` carries the plan CONTENT sha — the approval-binding
+ * identity — while `prevSha256` stays the raw-bytes blob pointer of the replaced file.
+ */
 export interface PlanEvidence {
   planId: string;
   sha256: string;
   bytes: number;
   prevSha256: string | null;
   status: 'draft' | 'approved' | 'superseded' | 'unknown';
+  /** Structural summary of the written task graph (Session 11, additive) — lets the report and
+   *  resume render the DAG purely from events, without reading the plan file. */
+  graph?: { id: string; role: string; dependsOn: string[] }[];
 }
 
 export interface ToolContext {
@@ -605,6 +642,21 @@ export type EventBody =
       role: string;
       childSessionId: string;
       budget: TaskBudget;
+      /** The approved-plan task this child executes (Session 11, additive) — the DAG join key. */
+      planTaskId?: string;
+    }
+  | {
+      /**
+       * A harness supervision observation about a running child (Session 11, additive): stall,
+       * repeated identical tool calls, budget pressure, or task-scoped cancellation. Bounded
+       * per task; evidence of the supervisor's bounded interventions, never a status of record
+       * (task.ended carries the status).
+       */
+      type: 'task.supervision';
+      callId: string;
+      childSessionId: string;
+      kind: 'stall' | 'loop' | 'budget-pressure' | 'cancelled';
+      detail?: string;
     }
   | {
       /** A delegated subagent task finished (V0.6). Usage is the CHILD's spend, recorded once
@@ -669,6 +721,20 @@ export type EventBody =
       bytes: number;
       prevSha256: string | null;
       status: 'draft' | 'approved' | 'superseded' | 'unknown';
+      /** Structural task-graph summary for canonical writes (Session 11, additive). */
+      graph?: { id: string; role: string; dependsOn: string[] }[];
+    }
+  | {
+      /**
+       * How this turn's complexity was routed (Session 11, additive): into plan mode or the
+       * direct path, by the model's judgment or a user sigil (@plan / @direct). Observability
+       * for proportionate routing — absence of any plan events IS the evidence of a direct
+       * turn, so this is recorded when planning begins or a sigil forces a path.
+       */
+      type: 'plan.route';
+      mode: 'plan' | 'direct';
+      source: 'user-sigil' | 'model';
+      reason?: string;
     }
   | {
       /**
