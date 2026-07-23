@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ignore from 'ignore';
 import { sha256 } from '../shared/hash.js';
-import { runGit } from '../git/client.js';
+import { BUILTIN_EXCLUDE_DIRS, listGitFiles } from '../retrieval/inventory.js';
 import type { GitFacts } from '../git/types.js';
 
 export interface WorkspaceMap {
@@ -10,10 +10,18 @@ export interface WorkspaceMap {
   text: string;
   fileCount: number;
   truncated: boolean;
+  /** sha256 of `text` — evidence of exactly what the model saw. NEVER an inventory digest. */
   sha256: string;
+  /**
+   * Session 10 (additive, ranked maps only): digest of the sorted file SET, independent of
+   * rendering — the basis for CODEBASE.md staleness, which must not flap on format changes.
+   */
+  inventorySha256?: string;
+  /** Session 10 (additive): files with extracted symbols, and the index build state. */
+  indexedFiles?: number;
+  indexState?: 'full' | 'partial';
 }
 
-const BUILTIN_EXCLUDE_DIRS = new Set(['node_modules', '.git', '.agent-cli', 'dist', 'coverage']);
 const DEFAULT_BUDGET = 8000;
 const MAX_FILES = 4000;
 
@@ -22,10 +30,12 @@ function toPosix(p: string): string {
 }
 
 /**
- * A bounded, gitignore-aware map of the workspace: a sorted list of relative file paths. Kept
- * deliberately simple in V0.1 (no tree-sitter ranking — that is a documented V0.2 upgrade). The
- * returned text is what feeds the model, and its sha256 is recorded so the report can prove
- * exactly what the model saw. Only the root .gitignore is honored (nested ones are V0.2).
+ * A bounded, gitignore-aware map of the workspace: a sorted list of relative file paths. This
+ * flat form remains the fallback everywhere the ranked map (Session 10, `buildRankedMap` in
+ * cli/assemble.ts) does not apply: pre-trust `agent map`, non-repo workspaces, executor
+ * worktrees, and any index failure. The returned text is what feeds the model, and its sha256
+ * is recorded so the report can prove exactly what the model saw. Only the root .gitignore is
+ * honored by this walker (git-backed listing honors nested ones natively).
  */
 export function buildWorkspaceMap(root: string, opts: { budget?: number } = {}): WorkspaceMap {
   const budget = opts.budget ?? DEFAULT_BUDGET;
@@ -95,29 +105,18 @@ function finalizeMap(files: string[], budget: number): WorkspaceMap {
   return { text, fileCount: files.length, truncated, sha256: sha256(text) };
 }
 
-function hasExcludedSegment(rel: string): boolean {
-  return rel.split('/').some((seg) => BUILTIN_EXCLUDE_DIRS.has(seg));
-}
-
 /**
  * Map builder for a TRUSTED workspace (V0.5): inside a git repository, list files via
- * `git ls-files --cached --others --exclude-standard` — nested .gitignore files are honored
- * natively (the walker reads only the root one), and the index is faster than a directory walk
- * on large repos. Tracked-but-deleted files are subtracted (`ls-files -d`), the builtin exclude
- * set still applies, and ANY git failure falls back to the walker. The pre-trust `agent map`
- * command deliberately keeps using the pure walker: running git against an untrusted repo's
- * .git is an attack surface the read-only exception must not take on.
+ * `git ls-files --cached --others --exclude-standard` (through retrieval/inventory.ts since
+ * Session 10) — nested .gitignore files are honored natively, and the index is faster than a
+ * directory walk on large repos. ANY git failure falls back to the walker. The pre-trust
+ * `agent map` command deliberately keeps using the pure walker: running git against an
+ * untrusted repo's .git is an attack surface the read-only exception must not take on.
  */
 export async function buildWorkspaceMapAuto(root: string, opts: { budget?: number } = {}, git?: GitFacts): Promise<WorkspaceMap> {
-  if (git?.isRepo && git.gitPath !== null && !git.probeFailed) {
-    const budget = opts.budget ?? DEFAULT_BUDGET;
-    const listed = await runGit({ gitPath: git.gitPath, argv: ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd: root });
-    if (listed.ok) {
-      const deleted = await runGit({ gitPath: git.gitPath, argv: ['ls-files', '-z', '--deleted'], cwd: root });
-      const gone = new Set(deleted.ok ? deleted.stdout.split('\0').filter((p) => p.length > 0) : []);
-      const files = [...new Set(listed.stdout.split('\0').filter((p) => p.length > 0 && !gone.has(p) && !hasExcludedSegment(p)))];
-      return finalizeMap(files, budget);
-    }
+  if (git !== undefined && git.isRepo && git.gitPath !== null && !git.probeFailed) {
+    const files = await listGitFiles(root, git);
+    if (files !== null) return finalizeMap(files, opts.budget ?? DEFAULT_BUDGET);
   }
   return buildWorkspaceMap(root, opts);
 }
