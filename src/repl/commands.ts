@@ -237,7 +237,9 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             ? 'approval: none recorded — /plan approve to consent'
             : state.diverged
               ? `approval: INVALIDATED — the plan changed after approval (approved ${state.approvedSha.slice(0, 12)}, current ${state.currentSha?.slice(0, 12) ?? 'unreadable'}); re-approve with /plan approve`
-              : `approval: current (content sha ${state.approvedSha.slice(0, 12)} approved)`;
+              : doc.status !== 'approved'
+                ? `approval: recorded for this content (sha ${state.approvedSha.slice(0, 12)}) but status is ${doc.status} — /plan approve to re-activate`
+                : `approval: current (content sha ${state.approvedSha.slice(0, 12)} approved)`;
         const execLine =
           doc.graph !== null ? `  execution: ${foldGraphState(doc.graph, ctx.session.log.events).summary}` : null;
         ctx.renderer.chromeLine(

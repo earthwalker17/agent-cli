@@ -315,8 +315,12 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   pushStatus({ phase: 'running', role: spec.role, ...(spec.planTaskId !== undefined ? { planTaskId: spec.planTaskId } : {}) });
 
   // Task-scoped cancellation (Session 11): expose ONE narrow handle — cancel THIS child as
-  // 'user-cancelled'. Registered only after the child exists; unregistered in finally.
+  // 'user-cancelled'. Registered only after the child exists; unregistered in finally. The
+  // handle is idempotent: a rapid double-/cancel must not record duplicate supervision evidence.
+  let userCancelFired = false;
   const unregisterCancel = deps.registerCancel?.(child.id, () => {
+    if (userCancelFired) return;
+    userCancelFired = true;
     supervise('cancelled', 'task-scoped user cancellation (/cancel)');
     cancel('user-cancelled');
   });

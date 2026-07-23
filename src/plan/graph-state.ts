@@ -129,6 +129,18 @@ export function foldGraphState(
 
     if (end.status === 'completed') {
       const cap = captured.get(childSessionId);
+      // Review F1 (Session 11): an EXECUTOR always records a task.changes event on successful
+      // capture — even an empty one. A completed executor binding with NO capture event means
+      // the capture failed (or the session crashed between end and capture): the work may be
+      // lost and must stay re-runnable, never fold to a false 'completed' that R5 would block.
+      if (task.role === 'executor' && cap === undefined) {
+        states.set(id, {
+          ...base,
+          state: 'failed',
+          note: 'child completed but no change capture was recorded — the work may be lost; re-run the task',
+        });
+        continue;
+      }
       const applicable = (cap?.files ?? []).filter((f) => f.kind === 'delete' || (f.blobSha256 !== null && f.oversize !== true));
       const appliedSet = applied.get(childSessionId) ?? new Set<string>();
       const unapplied = applicable.filter((f) => !appliedSet.has(f.relPath));

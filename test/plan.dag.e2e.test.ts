@@ -163,6 +163,16 @@ describe('checkDagRules — the scheduler gate matrix (pure)', () => {
     expect(checkDagRules([spec('executor', 't1'), spec('executor', 't3')], activeGate(g))).toBeNull();
   });
 
+  it('review F3: an approved plan whose document VANISHED refuses executors (never "no plan, no gate")', () => {
+    const vanished: PlanGateInfo = {
+      state: { kind: 'none', status: 'none', currentSha: null, approvedSha: 'a'.repeat(64), diverged: false, approvedAndCurrent: false, canonical: null, legacy: null },
+      graphState: null,
+    };
+    expect(checkDagRules([spec('executor')], vanished)).toContain('document is now missing');
+    // Read-only work continues — only executor authority is held back.
+    expect(checkDagRules([spec('explorer')], vanished)).toBeNull();
+  });
+
   it('bindings without an approved-and-current plan refuse honestly (none / unapproved)', () => {
     const none: PlanGateInfo = {
       state: { kind: 'none', status: 'none', currentSha: null, approvedSha: null, diverged: false, approvedAndCurrent: false, canonical: null, legacy: null },

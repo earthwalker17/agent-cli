@@ -102,9 +102,29 @@ describe('foldGraphState', () => {
   });
 
   it('a retry binding governs; attempts counts the history', () => {
-    const events = [started('t1', 'c-fail'), endedWith('c-fail', 'error'), started('t1', 'c-retry'), endedWith('c-retry', 'completed')];
+    const events = [
+      started('t1', 'c-fail'),
+      endedWith('c-fail', 'error'),
+      started('t1', 'c-retry'),
+      endedWith('c-retry', 'completed'),
+      changes('c-retry', []), // executor completion requires a recorded capture (may be empty)
+    ];
     const st = foldGraphState(GRAPH, events).byId.get('t1')!;
     expect(st).toMatchObject({ state: 'completed', attempts: 2, childSessionId: 'c-retry' });
+  });
+
+  it('review F1: a completed EXECUTOR with no capture event folds to failed (re-runnable), never completed', () => {
+    // Capture failure (or a crash between task.ended and task.changes) records no changes
+    // event; a false 'completed' would let R5 block the retry and strand the lost work.
+    const events = [started('t1', 'c-lost'), endedWith('c-lost', 'completed')];
+    const st = foldGraphState(GRAPH, events).byId.get('t1')!;
+    expect(st.state).toBe('failed');
+    expect(st.note).toContain('no change capture was recorded');
+    expect(foldGraphState(GRAPH, events).byId.get('t2')!.state).toBe('blocked'); // dep NOT satisfied
+
+    // An executor that legitimately changed nothing still records an (empty) capture → completed.
+    const clean = [started('t1', 'c-clean'), endedWith('c-clean', 'completed'), changes('c-clean', [])];
+    expect(foldGraphState(GRAPH, clean).byId.get('t1')!.state).toBe('completed');
   });
 
   it('started-without-ended is live-phase with the overlay, interrupted without it (resume honesty)', () => {

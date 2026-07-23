@@ -244,6 +244,12 @@ export function checkDagRules(
   gate: PlanGateInfo,
 ): string | null {
   const st = gate.state;
+  // Review F3 (Session 11): an approval event with NO plan document means an approved plan
+  // VANISHED (hand-deleted, crash). Waving executors through as "no plan" would silently drop
+  // the DAG's protections for content the user consented to — refuse until a plan exists again.
+  if (st.kind === 'none' && st.approvedSha !== null && tasks.some((t) => t.role === 'executor')) {
+    return 'a plan was approved this session but its document is now missing — write a new plan with update_plan and get it approved (or proceed without executor delegation)';
+  }
   const activeGraph: PlanGraph | null = st.approvedAndCurrent ? (st.canonical?.graph ?? null) : null;
   const gs = gate.graphState;
   if (activeGraph === null || gs === null) {

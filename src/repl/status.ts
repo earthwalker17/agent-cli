@@ -15,8 +15,15 @@ import { sanitizeLine } from '../shared/text.js';
  *   suspend() the region, and the REPL clear()s it before every idle prompt — readline owns
  *   the bottom line whenever it is live.
  * - Status content is sanitized (sanitizeLine strips \r and escapes) and clipped to the
- *   terminal width per redraw, so untrusted text can never move the cursor itself. Wide
- *   terminals shrink/resize self-heal on the next redraw (one-frame glitch at worst).
+ *   terminal width per redraw, so untrusted text can never move the cursor itself. The clip
+ *   counts UTF-16 code units, not display columns — safe today because every status line is
+ *   structurally ASCII-narrow (slug ids, role enums, tool names) plus a couple of ambiguous-
+ *   width glyphs covered by the 2-column margin; a width-aware clip is required before any
+ *   free-form user text may land here.
+ * - A terminal SHRUNK after a draw can reflow the on-screen region; the next erase then
+ *   under-counts physical rows and may leave a stale fragment ABOVE the region until it
+ *   scrolls away (cosmetic; real output above the region is never touched — the cursor never
+ *   moves above the region's own top row).
  * - stdout is untouched: during delegate flight the parent is blocked on the tool call, so no
  *   model text streams while the region redraws — stderr cursor movement cannot interleave
  *   with stdout content by construction.
@@ -74,7 +81,7 @@ export function createStatusArea(opts: { chromeOut: NodeJS.WritableStream; isTTY
       dirty = true; // a chrome line is half-open — defer to the next newline-terminated write
       return;
     }
-    const width = columns() - 1;
+    const width = columns() - 2; // margin for the ambiguous-width glyphs (▸ ⚑ ·) in status lines
     for (const l of lines) {
       const clean = sanitizeLine(l);
       chromeOut.write(`${clean.length > width ? `${clean.slice(0, Math.max(0, width - 1))}…` : clean}\n`);
