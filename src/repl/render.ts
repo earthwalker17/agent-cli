@@ -241,6 +241,10 @@ export function createRenderer(opts: {
           );
           break;
         }
+        case 'task.supervision': {
+          chromeLine(style.yellow(`  ${g.warn} task ${sanitizeLine(e.childSessionId.slice(-4))} supervision: ${e.kind}${e.detail !== undefined ? ` — ${sanitizeLine(e.detail)}` : ''}`));
+          break;
+        }
         case 'task.changes': {
           chromeLine(
             style.dim(

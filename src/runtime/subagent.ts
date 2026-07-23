@@ -111,6 +111,19 @@ export interface SubagentDeps {
    * stays a property of construction rather than a convention.
    */
   retrieveTool?: Tool;
+  /**
+   * Session 11: task-scoped cancellation seam. Called once the child session exists with a
+   * handle that cancels THIS child only (cause 'user-cancelled' → status 'cancelled'); the
+   * returned unregister runs when the task ends. The registry lives REPL-side (/cancel); the
+   * runner only exposes the handle — never a way to widen authority.
+   */
+  registerCancel?: (childSessionId: string, cancel: () => void) => (() => void) | void;
+}
+
+/** A supervision observation attached to a task's result (also persisted as task.supervision). */
+export interface SupervisionNote {
+  what: 'stall' | 'loop' | 'budget-pressure' | 'cancelled';
+  detail?: string;
 }
 
 export interface SubagentSpec {
@@ -140,6 +153,8 @@ export interface SubagentResult {
   childLogPath: string;
   durationMs: number;
   budget: TaskBudget;
+  /** Harness supervision observations (Session 11) — surfaced in the delegate group digest. */
+  supervision: SupervisionNote[];
 }
 
 /** Never throws. Exactly one child runTurn; the child log/lock is always released. */
@@ -161,16 +176,36 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     childLogPath: '',
     durationMs: Math.max(0, clock.now() - startedAt),
     budget,
+    supervision: [],
   });
 
   // Cause-tracked cancellation machinery is created BEFORE the session so the forwarding
   // approver can be signal-linked from birth (a forwarded ask must die with its task).
+  // Session 11 causes: 'user-cancelled' (task-scoped /cancel — this child only) and
+  // 'stalled-loop' (the supervisor's bounded loop intervention).
   const controller = new AbortController();
-  let cause: 'parent-abort' | 'timeout' | 'budget-tokens' | null = null;
+  let cause: 'parent-abort' | 'timeout' | 'budget-tokens' | 'user-cancelled' | 'stalled-loop' | null = null;
   const cancel = (c: NonNullable<typeof cause>): void => {
     if (cause === null) {
       cause = c;
       controller.abort();
+    }
+  };
+
+  // Supervision recorder (Session 11): bounded (≤6/task), never throws, dual-surfaced — the
+  // persisted task.supervision event (parent evidence) and the result notes (the group digest).
+  const SUPERVISION_CAP = 6;
+  const supervisionNotes: SupervisionNote[] = [];
+  const childIdRef = { id: '' };
+  const supervise = (what: SupervisionNote['what'], detail?: string): void => {
+    if (supervisionNotes.length >= SUPERVISION_CAP) return;
+    const note: SupervisionNote = { what, ...(detail !== undefined ? { detail } : {}) };
+    supervisionNotes.push(note);
+    try {
+      deps.reportTask?.({ kind: 'supervision', childSessionId: childIdRef.id, what, ...(detail !== undefined ? { detail } : {}) });
+      deps.onProgress?.(`${spec.role}·${childIdRef.id.slice(-4)} supervision: ${what}${detail !== undefined ? ` — ${detail}` : ''}`);
+    } catch {
+      /* supervision bookkeeping must never break the child */
     }
   };
 
@@ -230,6 +265,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   }
 
   taskIdBox.childSessionId = child.id;
+  childIdRef.id = child.id;
   // Child evidence completeness: the probed facts still hold (same process, same workspace),
   // so `agent report <childId>` renders the same header sections as any session.
   if (deps.sandboxFacts !== undefined) recordSandboxStatus(child, deps.sandboxFacts);
@@ -243,30 +279,74 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     ...(spec.planTaskId !== undefined ? { planTaskId: spec.planTaskId } : {}),
   });
 
+  // Task-scoped cancellation (Session 11): expose ONE narrow handle — cancel THIS child as
+  // 'user-cancelled'. Registered only after the child exists; unregistered in finally.
+  const unregisterCancel = deps.registerCancel?.(child.id, () => {
+    supervise('cancelled', 'task-scoped user cancellation (/cancel)');
+    cancel('user-cancelled');
+  });
+
   // Cancellation inputs: parent abort, wall clock, token cap. The cause decides the status
   // (and the child's session.ended reason) — the child itself only ever sees "aborted".
   const onParentAbort = (): void => cancel('parent-abort');
   if (parentSignal?.aborted) onParentAbort();
   else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
   const timer = setTimeout(() => cancel('timeout'), budget.timeoutMs);
-  // Stall VISIBILITY (render-only): a silent child is probably mid-provider-call or waiting on
-  // a forwarded approval — both legitimate — so this only narrates; the wall clock enforces.
+  // Stall + budget-pressure ticker. Thresholds scale down with narrowed test budgets but are
+  // the production constants (60s stall, 30s cadence) at the real role budgets. A silent child
+  // is probably mid-provider-call or waiting on a forwarded approval — both legitimate — so
+  // stall only narrates + records ONE supervision observation; the wall clock enforces.
+  const stallAfterMs = Math.min(60_000, Math.max(50, Math.floor(budget.timeoutMs / 2)));
+  // timeout/8 so a tick reliably lands between the 80% wall-pressure threshold and the timeout
+  // itself; capped at the production 30s cadence for the real role budgets.
+  const tickMs = Math.min(30_000, Math.max(25, Math.floor(budget.timeoutMs / 8)));
   let lastActivity = clock.now();
+  let stallNoted = false;
+  let wallPressureNoted = false;
   const stallTimer = setInterval(() => {
     const idleMs = clock.now() - lastActivity;
-    if (idleMs >= 60_000) {
+    if (idleMs >= stallAfterMs) {
       deps.onProgress?.(`${spec.role}·${child.id.slice(-4)} no activity for ${Math.round(idleMs / 1000)}s (hard timeout at ${Math.round(budget.timeoutMs / 1000)}s)`);
+      if (!stallNoted) {
+        stallNoted = true;
+        supervise('stall', `no activity for ${Math.round(idleMs / 1000)}s`);
+      }
     }
-  }, 30_000);
+    const elapsed = clock.now() - startedAt;
+    if (!wallPressureNoted && elapsed >= budget.timeoutMs * 0.8) {
+      wallPressureNoted = true;
+      supervise('budget-pressure', `wall clock at ${Math.round((100 * elapsed) / budget.timeoutMs)}% of ${Math.round(budget.timeoutMs / 1000)}s`);
+    }
+  }, tickMs);
 
+  // Loop detection (Session 11): consecutive IDENTICAL tool calls (same tool, same input hash,
+  // nothing between). 3 → annotate; 5 → the bounded hard intervention (cancel as 'stalled').
+  const LOOP_ANNOTATE_AT = 3;
+  const LOOP_CANCEL_AT = 5;
+  let lastCallSig = '';
+  let identicalCalls = 0;
   let outputTokens = 0;
+  let tokenPressureNoted = false;
   child.log.onAppend = (e): void => {
     try {
       lastActivity = clock.now();
       if (e.type === 'assistant.message') {
         outputTokens += e.usage.outputTokens;
         if (outputTokens > budget.maxOutputTokens) cancel('budget-tokens');
+        else if (!tokenPressureNoted && outputTokens >= budget.maxOutputTokens * 0.8) {
+          tokenPressureNoted = true;
+          supervise('budget-pressure', `output tokens at ${Math.round((100 * outputTokens) / budget.maxOutputTokens)}% of ${budget.maxOutputTokens}`);
+        }
       } else if (e.type === 'tool.requested') {
+        const sig = sha256(`${e.tool} ${JSON.stringify(e.input)}`);
+        identicalCalls = sig === lastCallSig ? identicalCalls + 1 : 1;
+        lastCallSig = sig;
+        if (identicalCalls === LOOP_ANNOTATE_AT) {
+          supervise('loop', `${identicalCalls} identical consecutive ${e.tool} calls`);
+        } else if (identicalCalls >= LOOP_CANCEL_AT) {
+          supervise('loop', `auto-cancelled at ${identicalCalls} identical consecutive ${e.tool} calls`);
+          cancel('stalled-loop');
+        }
         const i = e.input as Record<string, unknown> | null;
         const target = typeof i?.['path'] === 'string' ? i['path'] : typeof i?.['pattern'] === 'string' ? i['pattern'] : typeof i?.['command'] === 'string' ? i['command'] : '';
         // Task identity in every line: parallel group members interleave on one chrome stream.
@@ -288,6 +368,11 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     clearInterval(stallTimer);
     parentSignal?.removeEventListener('abort', onParentAbort);
     child.log.onAppend = undefined;
+    try {
+      unregisterCancel?.();
+    } catch {
+      /* unregister is best-effort */
+    }
   }
 
   const status: TaskStatus =
@@ -298,7 +383,11 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
           ? 'timeout'
           : cause === 'budget-tokens'
             ? 'budget-tokens'
-            : 'aborted'
+            : cause === 'user-cancelled'
+              ? 'cancelled' // task-scoped /cancel: this child only, the parent turn continues
+              : cause === 'stalled-loop'
+                ? 'stalled' // the supervisor's bounded loop intervention
+                : 'aborted'
         : result!.stopped && result!.steps >= budget.maxSteps
           ? 'budget-steps'
           : result!.stopped
@@ -309,7 +398,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       ? 'completed'
       : status === 'budget-steps'
         ? 'max-steps'
-        : status === 'aborted' || status === 'user-stopped'
+        : status === 'aborted' || status === 'user-stopped' || status === 'cancelled' || status === 'stalled'
           ? 'aborted'
           : status === 'error'
             ? 'error'
@@ -340,6 +429,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     childLogPath: deps.layout.sessionFile(child.id),
     durationMs: Math.max(0, clock.now() - startedAt),
     budget,
+    supervision: supervisionNotes,
   };
   deps.reportTask?.({
     kind: 'ended',

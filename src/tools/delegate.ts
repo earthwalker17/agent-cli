@@ -564,6 +564,36 @@ export function createDelegateTool(
 
       const results = outcomes.map((o) => o.result);
       const allCompleted = results.every((r) => r.status === 'completed');
+
+      // Group digest (Session 11) — at the HEAD of the result, so head-biased truncation can
+      // never hide a failed status or a supervision intervention behind a long child report.
+      const digest: string[] = [
+        'group digest: ' +
+          outcomes
+            .map((o, i) => {
+              const t = input.tasks[i]!;
+              const r = o.result;
+              const id4 = r.childSessionId === '' ? '----' : r.childSessionId.slice(-4);
+              const cap = o.capturedPaths.length > 0 ? `, ${o.capturedPaths.length} file(s) captured` : '';
+              const sup = r.supervision.length > 0 ? ` [supervision: ${r.supervision.map((s) => s.what).join(', ')}]` : '';
+              return `task ${i + 1}${t.plan_task !== undefined ? ` (${t.plan_task})` : ''} ${t.role}·${id4} ${r.status.toUpperCase()} — ${r.steps} step(s), ${r.usage.outputTokens} out tok${cap}${sup}`;
+            })
+            .join(' · '),
+        ...outcomes.flatMap((o, i) =>
+          o.result.supervision.map((s) => `supervision task ${i + 1}: ${s.what}${s.detail !== undefined ? ` — ${s.detail}` : ''}`),
+        ),
+        // Declared-vs-actual honesty: an executor that wrote outside its plan-declared touches.
+        ...outcomes.flatMap((o, i) => {
+          const pid = input.tasks[i]!.plan_task;
+          const declared = pid !== undefined ? (planTaskById.get(pid)?.touches ?? []) : [];
+          if (declared.length === 0 || o.capturedPaths.length === 0) return [];
+          const outside = o.capturedPaths.filter((p) => !declared.some((d) => p === d || p.startsWith(`${d}/`)));
+          return outside.length > 0
+            ? [`NOTE — plan task '${pid}' wrote outside its declared touches: ${outside.slice(0, 5).join(', ')}${outside.length > 5 ? ` (+${outside.length - 5})` : ''}`]
+            : [];
+        }),
+        '',
+      ];
       const groupHeader =
         results.length === 1
           ? [...groupNotes, ...(groupNotes.length > 0 ? [''] : [])]
@@ -596,7 +626,7 @@ export function createDelegateTool(
           '--- subagent report end ---',
         ].join('\n');
       });
-      const raw = [...groupHeader, ...sections].join('\n');
+      const raw = [...digest, ...groupHeader, ...sections].join('\n');
       const tr = truncateForModel(raw);
       const failed = results.filter((r) => r.status !== 'completed');
       return {
@@ -633,6 +663,7 @@ async function runExecutorTask(
       childLogPath: '',
       durationMs: 0,
       budget: { maxSteps: 0, timeoutMs: 0, maxOutputTokens: 0 },
+      supervision: [],
     },
     notes: [],
     capturedPaths: [],
