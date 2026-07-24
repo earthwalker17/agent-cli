@@ -7,6 +7,143 @@ attempted, verified, decided, and left open.
 
 ---
 
+## Session 11.5 (2026-07-24) — The durable session: lifecycle completion, acceptance boundary, crash-proof continuation
+
+### Objective
+
+A focused consolidation before Session 12: make a session a durable, self-contained unit of
+work — every artifact needed to continue or audit it at clear local paths, resume that
+reconstructs cleanup debts as well as conversation, attempt/definition state that survives
+amendment and crash, and an EXPLICIT completion boundary (user acceptance) that gates cleanup
+and drives the memory handoff. Also correct BLUEPRINT's stale post-Session-10 framing.
+
+### Planning provenance
+
+3 Explore recon lenses + 1 Plan-agent adversarial critique, load-bearing claims hand-verified;
+three user decisions asked up front (supersede-in-place plan retirement — the critique showed
+archive-by-delete adds a 4-step crash-window cluster to save two tiny files; retry ceiling
+excludes crash-interrupted attempts; spill scope = commands + delegates only — file reads are
+recoverable from files, and spilling them would persist full out-of-workspace reads). The
+critique also caught: post-accept executor behavior was mis-designed (F3 refuses on a vanished
+approved plan — retirement must go through plan.discarded); reusing `git.checkpoint` for base
+refs would let old readers misattribute harness plumbing as user consent (new event type
+instead); and the pre-existing `deleteCheckpointRefs` missing-ref-counts-as-failed bug that
+would have made event-seeded retries re-fail forever.
+
+### What was implemented (commits `c940e9f`, `ff52273`, `dbc7987`, `5e2f7fb`, `f436f26`, `efdc57a`, `901ebec`, `025bca4`, + docs)
+
+Full contracts in ARCHITECTURE (spill choke point / task DAG definition identity / acceptance
+boundary / executor base-ref lifecycle):
+
+1. **`fix(git,repl)`** — `deleteCheckpointRefs` treats an already-missing ref as deleted
+   (show-ref probe, exit 1 = gone; retries converge, never re-fail forever); live-table cap
+   denominators derived from the enforced constants.
+2. **`feat` crash-covered task-base refs** — additive `task.base-checkpoint {callId, ref, oid}`
+   at creation (deliberately NOT `git.checkpoint`: that is user-consent provenance); assembly
+   seeds the owed prune list FROM EVENTS (creations minus successfully-pruned), so a SIGKILLed
+   life's leaked refs are pruned at the resumed life's quit or /accept. Crash-covered except
+   the creation instant (documented; `agent checkpoint prune` backstop).
+3. **`feat` truncation spill blobs** — transient `ToolResult.fullOutput` attached ONLY by
+   run_command and delegate_task; the tool.completed choke point stores the pre-truncation
+   bytes as `objects/<fullOutputSha256>` + `fullOutputSaved` (skipped under ANY redaction,
+   2 MiB cap, never turn-failing, flagged only on verified hash equality). reconstruct never
+   reads blobs back (the model never saw the full bytes live). Report wording: "captured
+   output preserved" — never "full" (the exec capture cap may have dropped bytes first).
+4. **`feat` definition identity + attempt history** — `task.started.planTaskSha` (canonical
+   per-task sha, dependsOn sorted); the fold re-opens a completed task whose definition
+   changed (note carries the completed-as sha; legacy sha-less bindings stay id-sticky;
+   integrating integrates first); `attemptHistory` (every binding with outcome + sha) +
+   `definitionSha` on PlanTaskState; the interrupted note states provable re-run safety
+   honestly (worktree captured nothing; external shell side effects unknown).
+5. **`feat` R10** — the bounded retry ceiling: 3 genuine failures (error/timeout/budget/
+   stalled) per CURRENT definition refuse identical retries, naming every hatch; crashes and
+   user terminations (cancelled/user-stopped/aborted) never count; amendment resets.
+6. **`feat` the acceptance boundary** — `runtime/acceptance.ts` pure fold (COMPLETE = plan
+   fully executed AND every applicable capture applied, registry-wide; a DRAFT plan is
+   deliberately not silently complete); `/accept` (user-typed consent, stateless
+   `/accept confirm` for partial, idempotent, piped-deterministic) records `session.accepted`,
+   prunes refs now, retires a fully-executed approved plan via the existing discard flow
+   (`plan.discarded reason:'accepted'`, file kept); `/status` + quit summary completion line;
+   report `## Completion`; deterministic journal `### Handoff` built inside runMemoryUpdate
+   (one-shot parity); resume-after-accept startup note.
+7. **`feat` mid-turn /tasks unification** — the fold+live-overlay `[plan]` line (first
+   production wiring of livePhases; same visibility gate as idle /tasks); overlay-fed
+   summaries name running/awaiting-approval work.
+8. **`fix` review batch** — 3 read-only lenses over the session diff, hand-verified: the
+   accept's own retirement no longer reads as work-since (duplicate-consent trap); the
+   crash-limbo (killed between accepted and retirement) repairs idempotently on the next
+   /accept; R10 stopped counting user stops as failures; acceptance STALENESS is honest on
+   every surface (the handoff lists the LIVE blockers, never the frozen accepted list;
+   one-shots say not-applicable; resume pointer keys off live incompleteness).
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite 645→**688 passed / 1 skipped
+across 57 files (+43)** — ref-tolerance + event-seeded prune fold (incl. failed-prune retry),
+real-git creation-event + prune e2e, the spill matrix (sha equality, redaction skip, size cap,
+putBlob failure, file-tools-excluded pin, real-spawn >16k, delegate long-report), the
+definition-reopen matrix (A→B→A, legacy stickiness, integrating-not-reopened), attemptHistory,
+R10 matrix (interrupted + user-stop exclusions, legacy counting, amendment reset), /accept
+flows (refuse→confirm, retire, idempotence incl. the self-retirement pin, piped determinism),
+buildHandoffLines unit matrix (stale acceptance, one-shot wording), report rendering pins
+(Completion, task-base section, spill pointer wording, retirement provenance). Bounded
+adversarial review: 3 lenses, findings hand-verified — 2 MEDIUM + 1 MEDIUM-plausible + 3 LOW
+fixed (item 8); kernel-invariant lens: 7 of 8 HOLD, the 1 violation (duplicate consent) fixed
+and pinned.
+
+**Live proof** (`C:\Users\A\Desktop\agent-cli-s11.5-live\` — driver.mjs, validate.mjs,
+VALIDATION.md, per-phase transcripts): three-life piped run against real claude-opus-4-8,
+**30/30 post-hoc checks over persisted evidence only**. Phase A: `@plan` → 3-task canonical
+plan → sha-bound approve → one 2-executor wave (single group approval, bindings displayed) →
+deliberate SIGKILL mid-wave. Phase B: resume → orphaned worktrees swept → `/tasks` folds both
+`interrupted` → re-run as one group with IDENTICAL planTaskShas (`attempt 2` displayed) → 8
+forwarded approvals → integrate (zero refusals) → parent runs both delivered test files (real
+exit 0) → a 20,001-char command output spills to a verified blob → `/accept`: both task-base
+refs pruned INCLUDING the phase-A crash-leaked one, plan retired, acceptance recorded. Then an
+UNPLANNED second kill (a driver bug crashed the pipe after /accept) — absorbed by design.
+Phase C: resume announced "accepted (complete) … covers only work up to that point" → clean
+quit → journal Handoff (`accepted: yes (complete)`; `plan retired (accepted) · captures
+integrated`). 26 uncached parent input tokens across all three lives (cache 156k read); the
+workspace carries ZERO agent-cli refs; the delivered tests re-verified exit 0 at validation.
+
+### Decisions (and why)
+
+- **Supersede-in-place, never archive-by-delete** — the desired end state already existed as
+  the discard flow; deletion would have added the system's only un-undoable act plus crash
+  reconciliation, to reclaim two small files.
+- **A NEW event type for base-ref creation** — `git.checkpoint` is user-consent provenance;
+  for old readers, misattribution is strictly worse than skipping an unknown type.
+- **Spill is a runtime evidence write, not a tool mutation** — same category as snapshots
+  (content-addressed, state-dir, never model-visible); the S6 observe-trap stays closed.
+- **`completed` binds to the definition that ran** — re-running too much beats silently
+  skipping changed work; legacy logs keep the conservative id-sticky reading.
+- **The retry ceiling counts only model failures** — crashes and user interventions are not
+  the model retrying; counting them mislabeled user pauses as failed attempts.
+- **Acceptance is recorded consent with live-state honesty** — the event freezes what was
+  accepted; every surface derives freshness (staleness) rather than replaying the frozen view.
+
+### Open issues / boundaries (deliberate, documented)
+
+- Cleanup at acceptance is deliberately conservative: snapshots, capture blobs, spill blobs,
+  plan files, and session logs are never deleted (rollback/audit/resume outrank disk); blob
+  GC remains pooled.
+- The report's `## Completion` renders the frozen acceptance event (its provenance); staleness
+  annotations live on /status, the quit line, and the journal handoff.
+- The journal Handoff evaporates when its entry is compressed by the roll (newest-2 stay full
+  — by then the pointer is stale anyway).
+- The mid-turn `[plan]` line is TTY-gated like the rest of the mid-turn surface: exact-pattern
+  unit tests + the fold pins; no piped-driver proof by design.
+- One-shot sessions cannot accept (documented; their handoff says not-applicable) — a
+  post-hoc `agent accept <id>` CLI remains pooled.
+
+### Recommended next step
+
+Session 12 per BLUEPRINT: the unified verification gate and typed recovery — typed check
+adapters feeding the plan tasks' `verify` criteria, a failure classifier over the now-complete
+attempt history, and the bounded repair policy on top of R10's ceiling.
+
+---
+
 ## Session 11 (2026-07-23/24) — V0.9: iterative planning, task graphs, parallel-first execution
 
 ### Objective
@@ -127,108 +264,32 @@ classifier, and the bounded repair policy over the now-complete task graph.
 
 ---
 
-## Session 10 (2026-07-23) — V0.8: repository intelligence and focused exploration
-
-### Objective
-
-Replace the broad file-list map with selective, ranked, task-directed retrieval and disciplined
-parallel exploration (the BLUEPRINT Session 10 direction), preserving every kernel invariant and
-the flat-map fallback everywhere it still belongs.
-
-### Planning provenance
-
-3 Explore recon lenses + 1 Plan-agent adversarial critique, every load-bearing claim
-hand-verified. The critique caught two CRITICAL design flaws before code: redefining
-`WorkspaceMap.sha256` as an inventory digest would silently change an existing evidence field
-("exactly what the model saw") — fixed as the additive `inventorySha256`; and letting the
-retrieve tool write the index at query time would make a command-less observe tool mutate
-durable state (the S6 trap) — fixed as assembly-only index writes with a read-only in-memory
-handle. Also from the critique: a NAMED `retrieveTool` deps seam (not a generic extra-tools
-list — depth-1 stays structural); executor children keep the flat worktree map (parent-index
-line refs would be wrong-tree); extraction scoped to ts/js + python (tree-sitter deliberately
-not adopted — node-gyp Windows hazard, wasm asset weight — same interface if recall pressure
-ever demands it).
-
-### What was implemented (commits `3a6bd2d`, `6d10689`, `c704dbe`, `9596ff5`, `9ed0426`, + docs)
-
-Full contracts in ARCHITECTURE ("Repository intelligence" + the roles/briefs additions):
-
-1. **`feat(retrieval)` core** — `src/retrieval/`: inventory + digest, charset-constrained regex
-   extraction, import graph + PageRank, the persisted incremental index (honest `partial`,
-   converges, lock-less), signal-attributed ranking, and the tiered hard-budget map render.
-2. **`feat(workspace,memory,repl,cli)`** — `buildRankedMap` at assembly with flat-map fallback
-   (reason surfaced in chrome); additive `workspace.mapped` fields; dual CODEBASE stamps so
-   map-format changes cannot flap staleness; `/map` re-renders the session handle.
-3. **`feat(tools,runtime,roles)`** — the `retrieve` tool (observe/auto-allow; live-read
-   excerpts) for the parent and, via the structurally-checked `retrieveTool` seam, the
-   read-only child roles; executor deliberately excluded.
-4. **`feat(tools,runtime,prompt)`** — TaskSpec `focus`/`avoid` briefs with sibling coverage and
-   pairwise overlap warnings; the six-section explorer report contract with a non-blocking
-   presence check; delimiter neutralization of child reports and forwarded context;
-   retrieval-first prompt rules.
-5. **`fix(retrieval,tools)` review batch** — render budget made genuinely HARD (hostile long
-   paths pinned); `..`-escaping focus prefixes never disk-probed (no out-of-workspace existence
-   oracle); tmp-file cleanup on failed index writes; fallback reasons in chrome; partial-state
-   wording names stale-symbol carryover.
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite 515→**574 passed / 1 skipped
-across 50 files (+59)** — hostile-fixture extraction, graph/rank determinism, store
-incremental/corrupt/budget/secret/stale-carry paths, hard-budget renders, dual-stamp staleness
-matrix, retrieve policy shape + excerpt freshness + admission fail-closed pins, and
-briefs/overlap/section/delimiter e2e through the real delegation path. Bounded adversarial
-review: 3 read-only lenses over the session diff, findings hand-verified — 2 MEDIUM + 4 LOW
-fixed (item 5); every invariant verdict HOLDS (policy choke point, depth-1, executor scoping,
-secrets, additive-v1, approval surfaces).
-
-**Live proof** (`C:\Users\A\Desktop\agent-cli-s10-live\` — AB-EVIDENCE.md, VALIDATION.md,
-transcript, drivers): on a 3,064-file vitest clone the OLD flat map showed 272 paths, **0 of 14
-packages visible**; the ranked map shows **14/14** in ≤16k chars with honest PARTIAL disclosure
-and measured convergence (689→1,071 files over two 10s loads). Live REPL run (real
-claude-opus-4-8, exit 0, zero approval prompts): parent used retrieve first, ran TWO explorers
-with disjoint focus (zero shared reads), a child's chained grep auto-denied and it adapted,
-both finished in budget, all six report sections present, and the parent re-verified every
-load-bearing claim before naming the exact change site (`inlineSnapshot.ts:123`) with its
-plumbing chain. 16 uncached parent input tokens (cache 182.7k read) — caching intact.
-
-### Decisions (and why)
-
-- **The map digest split in two**: `sha256` stays the evidence contract; `inventorySha256`
-  (file SET) drives staleness. One-time stamp churn accepted.
-- **Index writes are assembly-only**; the tool holds a read-only handle — the S6 observe-trap
-  closed structurally, and child concurrency needs no lock.
-- **Excerpts/line numbers ALWAYS come from live reads** — a stale index may misrank, never
-  fabricate a line reference (`indexed at …` disclosed on every output).
-- **Recall backstop over ranking confidence** — the complete directory tree renders in every
-  map; ranking orders detail, never hides existence.
-- **Regex extraction over tree-sitter** for v1 — Windows-first, no native deps, declared
-  coverage; tree-sitter remains a drop-in under demonstrated recall pressure.
-- **Briefs are guidance + measurement, not enforcement** — read-only overlap is a cost problem;
-  pretending a policy boundary would be dishonest.
-
-### Open issues / boundaries (deliberate, documented)
-
-- CODEBASE staleness over-marks (safe direction) for a session or two across ranked→flat→ranked
-  map-mode transitions; stat-diff cannot see same-size same-mtime edits (misrank at worst).
-- Partial-index sessions may carry stale symbols for budget-deferred files (disclosed);
-  convergence is multi-session on a cold Windows FS.
-- `/map`'s REPL branches + mapNote chrome untested (recorded gap); retrieve excerpts keep exact
-  search-tool exposure parity; delimiter neutralization is a soft defense layered with the
-  provenance framing, not a boundary.
-
-### Recommended next step
-
-Session 11 per BLUEPRINT: iterative planning, task graphs, and parallel-first execution — one
-canonical plan state with user/agent projections, approval-invalidating amendments, and a
-bounded dependency-aware scheduler over the now retrieval-informed exploration layer.
-
----
-
-## Earlier Milestones (Sessions 1–9 — compressed per the rolling-docs policy)
+## Earlier Milestones (Sessions 1–10 — compressed per the rolling-docs policy)
 
 Contract detail for everything below lives in `ARCHITECTURE.md`; entries here keep the
 objective, the lasting decisions (with why), the evidence, and what stayed open.
+
+### Session 10 (2026-07-23) — V0.8: repository intelligence and focused exploration
+
+Selective, ranked, task-directed retrieval replaced the broad file-list map (commits
+`3a6bd2d`…`9ed0426`; suite 515→574+1). Landed: `src/retrieval/` (git-backed inventory +
+path-SET digest, charset-constrained regex extraction for ts/js+py, import-graph PageRank, a
+persisted incremental index written ONLY at assembly with honest `partial` states, tiered
+hard-budget map render whose complete directory tree is the recall backstop); the read-only
+`retrieve` tool (signal-attributed hits, live-read excerpts) for the parent and read-only
+child roles via the NAMED structural admission seam; explorer focus/avoid briefs with sibling
+coverage + overlap warnings; the six-section explorer report contract (non-blocking check);
+delimiter neutralization of child reports. The Plan-agent critique caught two CRITICAL flaws
+pre-code: never redefine `WorkspaceMap.sha256` (additive `inventorySha256` instead) and never
+let an observe tool write the index at query time (the S6 trap). Live proof on a 3,064-file
+vitest clone: flat map 0/14 packages visible → ranked map 14/14 in ≤16k chars; two
+disjoint-focus explorers, zero shared reads; 16 uncached parent input tokens. Evidence:
+ROADMAP git history + `test/retrieval.*` (the s10 live dir was later cleaned up). Lasting
+decisions: excerpts/line numbers ALWAYS from live reads (a stale index may misrank, never
+fabricate); recall backstop over ranking confidence; regex over tree-sitter (Windows-first, no
+native deps; same interface if recall pressure demands). Still relevant: CODEBASE staleness
+over-marks transiently across map-mode flips (safe direction); partial-index stale-symbol
+carryover is disclosed; `/map` REPL-branch chrome untested.
 
 ### Session 9 (2026-07-22/23) — pre-expansion consolidation + the live V0.7 proof
 
@@ -384,13 +445,20 @@ extract interface, more languages (go/rust/java/c#) as data-shaped table additio
 config knob for the map budget; /map REPL-branch + mapNote chrome tests; a post-group child
 read-set overlap metric (child logs already carry the evidence); retrieval-aware journal
 topics; ranked→flat staleness over-marking (transient, safe direction) if it ever bites.
+**Durable-session follow-ups (post-S11.5):** blob-store GC/retention (snapshots, capture
+blobs, and now spill blobs accumulate with no refcount — a reference walk over event-named
+shas is the likely shape); a post-hoc `agent accept <id>` CLI so one-shot sessions can reach
+the acceptance boundary; the report's `## Completion` deliberately renders the frozen
+acceptance event (staleness lives on /status, the quit line, and the journal handoff) — an
+annotation there if it ever misleads; the journal Handoff evaporates when its entry
+compresses (accepted-by-then, deliberate).
 **Planning/orchestration follow-ups (post-S11):** a width-aware status-area clip before any
 free-form text may land in status lines (today: structurally ASCII + a 2-column margin);
 sibling-task chrome printing over a DISPLAYED forwarded-approval prompt (pre-existing, part
-of the io redesign); the completed-id-across-amendments boundary (prompt-mitigated — a
-structural "content hash per task" variant if it bites); plan-file pruning (one canonical
-JSON + generated md per session accumulate); a `/cancel` surface for non-TTY sessions;
-richer wave guidance (the model still chooses group composition; the gate only refuses).
+of the io redesign); plan-file pruning (one canonical JSON + generated md per session
+accumulate; S11.5's retirement deliberately keeps the files as audit); a `/cancel` surface
+for non-TTY sessions; richer wave guidance (the model still chooses group composition; the
+gate only refuses).
 **Task/subagent follow-ups (post-S8/S9):** task resume/continue (SendMessage-style); deeper
 scanning of child reports for instruction-shaped content (v1 ships delimiters + provenance
 labels); the stale-displayed-forwarded-prompt line-consumption wart (the discard is LOUD

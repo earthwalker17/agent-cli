@@ -2,9 +2,9 @@
 
 ## 1. Purpose
 
-This is the rolling near-term direction guide for Agent CLI after Session 10.
+This is the rolling near-term direction guide for Agent CLI after Session 11.5.
 
-It begins from the implemented and live-proven V0.8 state described in `ARCHITECTURE.md` and
+It begins from the implemented and live-proven V0.9 state described in `ARCHITECTURE.md` and
 `ROADMAP.md`. It does not replace the enduring thesis in `PROJECT.md`, and it should not become a
 detailed implementation checklist. Each session must still begin in plan mode, inspect the current
 repository, validate the assumptions below, and propose a session-sized design from evidence.
@@ -20,10 +20,11 @@ This is not a reason to inflate `runTurn` into a workflow engine. The coding flo
 first optimized workflow layer built on the small kernel, and should establish reusable contracts
 for later document, PDF, image, and video packs.
 
-## 2. Current Starting Point (post-Session 10, V0.8)
+## 2. Current Starting Point (post-Session 11.5, V0.9)
 
-The foundation is already substantial and has two recorded live proofs (the V0.7 loop and the
-V0.8 large-repo retrieval run):
+The foundation is already substantial and has four recorded live proofs (the V0.7 loop, the V0.8
+large-repo retrieval run, the V0.9 crash/resume planning run, and the Session 11.5 durable-session
+run through interrupt → resume → acceptance → cleanup):
 
 - one shared `runTurn` for one-shot, REPL, parent, and child sessions;
 - a central fail-closed policy choke point, recorded approvals, and narrowing-only configuration;
@@ -31,28 +32,24 @@ V0.8 large-repo retrieval run):
 - managed subprocess execution with typed termination and real cancellation;
 - a probed Windows Low-IL write/lifecycle sandbox, honestly separate from approval;
 - Git-aware diff, checkpoints, restore, and worktree-isolated executor groups;
-- persistent sha-bound plan documents and explicit plan approval;
-- explicit planner, explorer, executor, and reviewer role contracts;
-- bounded parallel task groups, approval forwarding, captured task changes, drift-refusing
-  integration, and attributable parent/child lineage;
-- a bounded adversarial review pattern and a live V0.7 loop through plan, parallel execution,
-  integration, review, undo, and memory;
-- Session 10: a ranked, incrementally indexed repository map under a hard budget (complete
-  dir-tree recall backstop, honest partial states, flat-map fallback everywhere it belongs),
-  a task-directed `retrieve` tool with signal-attributed hits and live-read excerpts (parent +
-  read-only roles), non-overlapping explorer focus/avoid briefs with sibling coverage, the
-  six-section explorer report contract with a non-blocking harness check, and delimiter
-  hardening of child reports/context — live-proven on a 3k-file monorepo.
+- ranked incremental repository retrieval, focused explorer briefs, and structured child reports;
+- one canonical structured plan per session with content-sha approval, amendment invalidation,
+  observable routing, and user/agent projections;
+- a dependency-aware task DAG gate (R1–R10) over bounded parallel executor groups, plan bindings
+  with per-definition identity, events-rebuilt budgets, bounded supervision, task-scoped
+  cancellation, and the live TTY task surface;
+- Session 11.5 — the durable session: crash-covered task-base ref lifecycle (creation events +
+  resume-seeded pruning), truncation spill blobs (command/delegate output survives as
+  content-addressed evidence), per-attempt history with a bounded retry ceiling, completed-state
+  bound to the task definition that ran, and the explicit acceptance boundary (`/accept` →
+  recorded consent → plan retirement + cleanup → journal handoff with resume pointers).
 
-The largest remaining coding-flow gaps are now coordination and product quality rather than basic
-agent capability:
+The largest remaining coding-flow gaps are now verification and delivery quality rather than
+coordination:
 
-- plan approval exists, but plan revision and user-facing versus execution-facing views need a
-  stronger contract;
-- parallel execution exists, but there is no persistent task graph or complete mid-turn task
-  management surface;
 - verification is still mainly command-oriented rather than a typed gate with project-aware checks;
-- failure handling lacks a structured classifier and bounded repair policy;
+- failure handling lacks a structured classifier and bounded repair policy (the fold's
+  attemptHistory and the R10 ceiling are the ground it will build on);
 - no managed long-running preview process or browser/visual verification path exists;
 - the final review stage is still prompt-shaped rather than a structural completion gate;
 - Git recovery is strong, but automatic phase-level audit history needs a policy that does not
@@ -88,6 +85,14 @@ user/agent projections, observable routing (`@plan`/`@direct` + `plan.route`), t
 (R1–R9) with plan bindings and events-rebuilt caps, bounded supervision (loop/budget/stall) with
 the head-of-result group digest, task-scoped `/cancel`, the TTY sticky status area + live task
 table, and crash/resume honesty (interrupted tasks re-spawnable; capture loss folds to failed).
+
+### Session 11.5 — The Durable Session (consolidation): COMPLETE
+
+Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md`. A session is
+now a durable, self-contained unit of work: crash-covered task-base ref lifecycle, truncation
+spill blobs, definition-bound completed state with per-attempt history, the R10 retry ceiling,
+and the explicit `/accept` completion boundary with cleanup and journal handoff — live-proven
+through a deliberate mid-wave SIGKILL, resume, completion, acceptance, and memory handoff.
 
 ### Session 12 — Unified Verification Gate and Typed Recovery
 
@@ -327,6 +332,17 @@ Research current implementations again when each session begins.
 
 ## 10. Recently Completed
 
+- **Session 11.5 — the durable session (consolidation): COMPLETE.** Crash-covered task-base ref
+  lifecycle (`task.base-checkpoint` creation events, resume-seeded pruning, missing-ref-tolerant
+  deletion); truncation spill blobs for command/delegate output (redaction-guarded, size-capped,
+  "captured" never "full"); per-attempt history + definition-bound completed state (an amendment
+  re-opens changed completed tasks; R10 caps genuine failures at 3 per definition, user stops and
+  crashes excluded); the `/accept` boundary (recorded consent, plan retirement via supersede,
+  immediate ref pruning, staleness-aware surfaces, deterministic journal Handoff with resume
+  pointers, one-shot parity). Suite 645→688+1; 3-lens hand-verified review (6 findings fixed);
+  live three-life E2E: SIGKILL mid-wave → resume → attempt-2 re-run → integrate → verify →
+  /accept → crash-leaked ref pruned → a second unplanned kill absorbed → resume → journal
+  handoff → clean quit, 30/30 evidence checks (see ROADMAP).
 - **Session 11 — iterative planning, task graphs, parallel-first execution: COMPLETE (V0.9).**
   Canonical `<id>.plan.json` task graph with `planContentSha` approval binding (amendment →
   draft + invalidation, structurally; approve-refuses-invalid; legacy md fallback); structured

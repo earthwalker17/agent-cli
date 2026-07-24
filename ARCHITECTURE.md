@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI V0.9 (post-Session-11 planning/orchestration lifecycle) is actually built. This
+How Agent CLI V0.9 (post-Session-11.5 durable-session consolidation) is actually built. This
 describes the implemented system, not aspirations — see `ROADMAP.md` for what is deferred.
 
 ## Shape
@@ -55,8 +55,9 @@ src/
     index.ts               read_file/list_files/search/write_file/edit_file + registry + schemas.
     run-command.ts         Shell tool on runManaged; applies ctx.sandbox.wrap at spawn time.
     delegate.ts            delegate_task — per-session factory; parallel groups, executor
-                           orchestration, briefs (V0.8); the DAG gate (checkDagRules R1–R9),
-                           plan bindings, group digest, events-rebuilt caps (Session 11).
+                           orchestration, briefs (V0.8); the DAG gate (checkDagRules R1–R10),
+                           plan bindings with definition shas, group digest, events-rebuilt
+                           caps (Sessions 11/11.5).
     retrieve.ts            retrieve — read-only view over the session index (V0.8).
     update-plan.ts         update_plan — the model's ONLY plan write path; structured graph
                            input with full-precision validation errors (Session 11).
@@ -99,6 +100,8 @@ src/
     approval-forwarder.ts  Serialized child→parent approval queue; signal-linked entries.
     elision.ts             elideHistory — pure, monotone wire-history budget.
     approvals.ts           Approvers + prompt formatting ([s] hidden where no grant would store).
+    acceptance.ts          The session completion fold: complete/unfinished + recorded /accept
+                           state + staleness (Session 11.5).
     undo.ts                applyUndo (last / all) over the recorded mutations.
   trust/
     store.ts, gate.ts, commands.ts   trust.json + audit log; consent gate; `agent trust`.
@@ -181,6 +184,19 @@ never forge another call's evidence) and `onOutput` (live chunks to `Session.onC
 render-only). It records `file.mutated` (kind, before/after hashes, created dirs) for snapshotted
 paths, and `tool.completed`. The **model sees the real tool output**; the **persisted log
 redacts** secret-classified reads.
+
+The persisted `tool.completed` is also the SPILL choke point (Session 11.5): when a tool
+attached the transient `ToolResult.fullOutput` (only `run_command` and `delegate_task` do —
+file reads are recoverable from the files themselves, and spilling them would persist full
+out-of-workspace reads) and the output was truncated, the runtime stores the full
+pre-truncation bytes as the content-addressed blob `objects/<fullOutputSha256>` and marks the
+event `fullOutputSaved` — skipped under ANY redaction (redacted outputs stay deliberately
+non-replayable), capped at 2 MiB, never turn-failing, and flagged only when the stored blob's
+hash verifiably equals the recorded sha. The model's view is unchanged, and `reconstruct`
+deliberately does NOT read blobs back (the model never saw the full bytes live; resume must
+not show more than the original turn did). The report points at the blob with "captured
+output preserved" wording — never "full", since the exec capture cap may itself have dropped
+bytes before the sha was taken.
 
 ### Abort and repair
 
@@ -357,7 +373,9 @@ status recorded in the `memory.loaded` event):
   Summary/Decisions/Open-issues/Next-steps sections (explicitly labeled "model-written") with a
   deterministic **Evidence** section derived from the session's event log via `buildReport`
   (files/commands/commits/usage/log path — PROJECT.md §8 rules 5+8: grounded in events, with
-  provenance, never recollection). Rolling policy: insert-or-replace by session id (resume-safe),
+  provenance, never recollection) and — Session 11.5 — a deterministic **Handoff** section
+  (acceptance state incl. staleness, the LIVE unfinished list, the `agent resume <id>` pointer
+  when work remains; one-shot sessions state acceptance is not applicable). Rolling policy: insert-or-replace by session id (resume-safe),
   newest 2 entries full, older compressed to stubs that keep the evidence pointer, 24 KiB budget
   enforced by dropping the oldest stubs behind a leading marker. User edits (a preamble, notes
   inside an entry) survive byte-verbatim until their entry is compressed.
@@ -484,8 +502,16 @@ The mutating role never touches the user's workspace. The chain is: base → wor
   whole-workspace recovery point until quit, then the clean end paths delete this session's
   task-base refs (best-effort `update-ref -d`), announce it in chrome, and record the
   additive `git.checkpoint.pruned` provenance event — integration never needs the ref (apply
-  reads captured blobs), the baseOid stays in `task.changes`, and a crash leaks the refs to
-  manual `agent checkpoint prune`.
+  reads captured blobs), the baseOid stays in `task.changes`. **Crash-covered (Session 11.5):**
+  creation appends `task.base-checkpoint {callId, ref, oid}` through the callId-bound
+  reportTask channel (deliberately NOT a `git.checkpoint` event — that type is user-commanded
+  consent provenance, and an old reader misattributing harness plumbing would be worse than
+  skipping an unknown type), and assembly seeds the owed prune list FROM EVENTS (creations
+  minus successfully-pruned refs), so a SIGKILLed session's leaked refs are pruned at the
+  resumed life's clean quit or `/accept`. `deleteCheckpointRefs` counts an already-missing ref
+  as deleted (show-ref probe, exit 1 = gone), so retries converge instead of re-failing
+  forever. Residual window: a kill between `update-ref` and the event append leaks one ref to
+  the `agent checkpoint prune` backstop — crash-covered except the creation instant.
 - **Worktree per task:** `git worktree add --detach` at the base oid, under
   `<os-tmp>/agent-cli-worktrees/<projectSlug>/` — placement DICTATED by `validatePath` (the
   state dir and any `.agent-cli` segment are write-denied, and the workspace must not contain
@@ -576,7 +602,7 @@ uses.
   section adds routing and the task-graph summary (`plan.updated.graph`, additive — the report
   stays a pure Event[] function).
 
-## The task DAG and the scheduler gate (`tools/delegate.ts` `checkDagRules`, `plan/graph-state.ts`) — Session 11
+## The task DAG and the scheduler gate (`tools/delegate.ts` `checkDagRules`, `plan/graph-state.ts`) — Sessions 11/11.5
 
 Execution state is a PURE FOLD over (approved graph, events) — no new store; the
 changes-registry pattern. Per-task states: queued / blocked / running / awaiting-approval
@@ -585,7 +611,19 @@ changes-registry pattern. Per-task states: queued / blocked / running / awaiting
 EXECUTOR with NO capture event folds to `failed` — capture loss must stay re-runnable, review
 F1) / failed / cancelled / parent-owned (role `main`: auto-satisfies dependents with a surfaced
 warning — asserted, unverifiable) / interrupted (started, never ended, not live — crash
-evidence with the child-log pointer).
+evidence; the note states the provable re-run safety: the isolated worktree captured nothing,
+while external side effects of user-approved shell commands stay honestly unknown).
+
+**Definition identity (Session 11.5): `completed` belongs to the definition that RAN, not the
+id.** Every bound spawn records `task.started.planTaskSha` (sha256 of the task's canonical
+form, `dependsOn` sorted — reorder-neutral per task), and the fold re-opens a completed task
+whose current definition no longer matches the completing binding (note names the sha it
+completed as; dependents re-block — the conservative direction). Legacy sha-less bindings keep
+the id-sticky reading; an `integrating` task integrates its captured old-definition work before
+the reopen can apply. `PlanTaskState` carries the full `attemptHistory` (every binding with
+outcome + sha — the ground truth for the retry ceiling and the Session-12 recovery policy),
+`attemptsForCurrentDefinition` via that history, and `definitionSha`. Overlay-fed folds surface
+live work in the summary (`running: …`), so running never reads as silently not-completed.
 
 `delegate_task` gains `plan_task` (the binding recorded as `task.started.planTaskId` — the DAG
 join key). The gate runs BEFORE the base checkpoint, group-atomic (a refusal spawns nothing):
@@ -601,8 +639,13 @@ join key). The gate runs BEFORE the base checkpoint, group-atomic (a refusal spa
   R6 duplicate binding, R9 intra-group dependency, R8 serial/high-risk must run alone, R7
   overlapping declared touches between executors; then per-task state: R5 completed re-runs
   refuse (failed/cancelled/interrupted stay re-spawnable — the bounded retry path),
-  integrating refuses until applied, R4 unmet deps refuse naming the dep's state (completed =
-  integrated with zero refusals). Bindings against a non-approved plan refuse honestly.
+  integrating refuses until applied, **R10 (Session 11.5)** refuses a task with
+  `MAX_TASK_ATTEMPTS` (3) genuine failure outcomes (error/timeout/budget/stalled) under its
+  CURRENT definition — crash-interrupted and user-terminated (cancelled/user-stopped/aborted)
+  attempts never count, a definition change resets the ceiling, and the refusal names every
+  hatch (revise the task, do it as parent, ask the user) — then R4 unmet deps refuse naming
+  the dep's state (completed = integrated with zero refusals). Bindings against a non-approved
+  plan refuse honestly.
 - **Plan-informed briefs:** bound tasks inherit plan `touches` as the focus brief when focus is
   absent, plus plan-task identity and verification-criteria lines; group notes carry the live
   execution summary and parent-owned-dep warnings.
@@ -636,6 +679,43 @@ task table owns the registry; a forwarded ask queued for a cancelled child resol
 members `cancelled`/`stalled` are additive and flow through every consumer (fold, renderer,
 report, childReason).
 
+## The acceptance boundary (`runtime/acceptance.ts`, REPL `/accept`) — Session 11.5
+
+A session's completion is an EXPLICIT, recorded boundary — never a side effect of quitting.
+`computeAcceptance` is a pure fold (the house pattern) over (plan state, graph fold, events):
+COMPLETE = the plan is fully executed (every task completed/parent-owned; a DRAFT plan is
+deliberately NOT silently complete — accepting work the user never approved a plan for is a
+consent mismatch) AND every applicable capture is applied, registry-wide including
+plan-unbound executor work (same applicability rule as the graph fold). One derivation feeds
+`/accept`, `/status`, the quit summary, the report, and the journal handoff.
+
+- **`/accept`** (user-typed = consent, the `/plan approve` precedent; between-turns only,
+  piped-deterministic — never in the mid-turn intercept set): on COMPLETE, appends
+  `session.accepted {complete, summary}` and runs bounded cleanup — prune this session's
+  task-base refs now, and retire a fully-executed approved-and-current plan through the
+  EXISTING discard flow (`superseded` + `plan.discarded` with additive `reason: 'accepted'`;
+  the file stays on disk as audit; zero new crash windows). With unfinished work it refuses
+  with the honest list; the STATELESS `/accept confirm` records a partial acceptance
+  (`complete: false`, the list preserved as `unfinished`) and retires nothing. The model
+  learns of every acceptance via pendingNotes.
+- **Idempotence + crash repair:** re-accepting with no work since the last acceptance is a
+  no-op (the accept's own retirement is excluded from `workSince`; a real user `/plan discard`
+  still counts) — and the no-op branch finishes an INTERRUPTED acceptance cleanup (a kill
+  between the accepted event and the retirement leaves an approved-but-accepted plan; the
+  re-typed `/accept` retires it idempotently).
+- **Staleness is honest:** work-shaped events after an acceptance mark it stale
+  (`acceptedStale`), and `/status`, the quit summary, and the journal handoff say "work has
+  happened since" while the unfinished list and resume pointer always follow the LIVE
+  derivation, never the frozen accepted list. A resumed accepted session announces the
+  boundary crossing at startup.
+- **Surfaces:** the report's `## Completion` renders the latest `session.accepted` (and the
+  Plan section distinguishes RETIRED-at-acceptance from user-DISCARDED); the journal entry
+  gains a deterministic `### Handoff` block (accepted state, live unfinished list, `agent
+  resume <id>` pointer when incomplete) built inside `runMemoryUpdate` — one code path, so
+  one-shot sessions get it too (theirs says acceptance is not applicable). Cleanup never
+  erases rollback/audit/resume material: snapshots, captured-change blobs, spill blobs, plan
+  files, and session logs all remain.
+
 ## The REPL (`repl/`)
 
 A consumer of the same runtime: one session, `runTurn` per user line. `io.ts` owns the ONE
@@ -651,7 +731,9 @@ chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs and ech
 input). Slash commands operate on the session's own live log (`/undo` → `applyUndo` on the
 same open log; the model learns of it via a delimited `[[harness note: …]]` in the next
 `user.message`). Turn errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as
-`user-quit` — never `completed`.
+`user-quit` — never `completed`. Session 11.5: `/accept` is the completion boundary (see "The
+acceptance boundary"); `/status` and the quit path print the derived completion line
+(staleness-marked); a resumed accepted session announces the boundary at startup.
 
 **The live task surface (Session 11).** `status.ts` is the sticky status area — the ONLY
 cursor-moving code in the codebase, strictly TTY- and stderr-confined: ALL chrome routes
@@ -667,7 +749,10 @@ elapsed, supervision flags; plus the caps line). Mid-turn, on a TTY only, `io.ts
 `/`-lines to a handler while NO read is pending (a displayed approval always wins; piped input
 keeps queue semantics verbatim — scripted drivers depend on it): `/tasks` prints the live
 table, `/cancel <child-suffix|plan-task-id>` fires the task-scoped cancel registry. Between
-turns `/tasks` renders the graph fold; `/cancel` explains itself.
+turns `/tasks` renders the graph fold; `/cancel` explains itself. Session 11.5: the mid-turn
+`/tasks` also renders the fold overlaid with the table's live phases as a `[plan]` line — the
+same fold as the idle view (same visibility gate: any canonical graph, status-labeled when not
+approved), so the agent-centric table and the plan-centric DAG view can never disagree.
 
 ## Policy model (`policy/`)
 
@@ -849,6 +934,12 @@ additive surface, by area (full shapes in `src/types.ts`):
   `task.started.planTaskId` (the DAG join key); `task.supervision {kind, detail?}` (bounded
   ≤6/task); `TaskStatus` values `cancelled` (task-scoped /cancel) and `stalled` (the loop
   intervention).
+- **durable session (Session 11.5):** `task.base-checkpoint {callId, ref, oid}` (executor-group
+  base creation — the resume-seeded prune list's source); `task.started.planTaskSha` (the
+  definition identity completed-state binds to); `tool.completed.fullOutputSaved` (the
+  truncated-away output survives as `objects/<fullOutputSha256>`); `session.accepted
+  {complete, summary, unfinished?}` (the user's completion consent); `plan.discarded.reason:
+  'accepted'` (retirement provenance vs a user discard).
 
 Bounded static readers `readFirstEvent`/`readLastEvent` (first/last committed line only, never
 throw) support the child-log skip and crash detection without full parses.
@@ -878,6 +969,10 @@ disk), a snapshot without a matching mutation is flagged **unknown post-state**,
 evidence log — one delegate call can start a parallel group — and, when a `task.changes`
 exists, notes that the captured changes can still be integrated via apply_task_changes).
 Grants and the system prompt/map are regenerated fresh — current state outranks stale context.
+Rebuilt from events at assembly (the changes-registry pattern): the captured-changes registry,
+DelegateCaps, and — Session 11.5 — the owed task-base ref list (`taskBaseRefsFromEvents`:
+creations minus successfully-pruned), so a crashed life's cleanup debts survive into the
+resumed life instead of resetting.
 
 ## Verification (`report/report.ts`)
 
@@ -898,7 +993,10 @@ was ENFORCED, and the verbatim `confines`/`doesNotConfine` scope — plus the pr
 
 Accumulated sections (all derived purely from events): per-file `+n/−m` churn from write-time
 diffstat; "Commits (user-commanded)" / "Checkpoints" / "Checkpoint restores" from git
-provenance; "Delegated tasks (subagents)" joined `task.started`↔`task.ended` by childSessionId
+provenance; "Task-base checkpoints (hidden refs, harness-created)" kept apart from
+user-commanded consent provenance, per-command `captured output preserved: objects/<sha>`
+pointers for spilled outputs, and "## Completion" rendering the latest `session.accepted`
+with retirement provenance in the Plan section (Session 11.5); "Delegated tasks (subagents)" joined `task.started`↔`task.ended` by childSessionId
 (orphans render "STARTED but never completed") with footer lines that child usage is NOT in
 the parent totals and subagent reports are narration — plus ONE labeled
 "combined tokens (parent + children)" roll-up line (matching `/tasks`; session totals
