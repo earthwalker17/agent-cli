@@ -142,6 +142,21 @@ Session 12 per BLUEPRINT: the unified verification gate and typed recovery — t
 adapters feeding the plan tasks' `verify` criteria, a failure classifier over the now-complete
 attempt history, and the bounded repair policy on top of R10's ceiling.
 
+### Addendum (2026-07-24/25) — the recorded capability demo and the fix it forced
+
+A live recorded demo (ConPTY → xterm.js → Playwright, real claude-opus-4-8; evidence + the
+4-minute MP4 at `C:\Users\A\Desktop\arcade-demo\`) exposed one real defect: a plan whose tasks
+were all `role: main` produced the on-camera contradiction "session accepted (complete) —
+plan 0/4 completed". Fixed as `4d86650` (fold summaries count parent-owned tasks apart —
+"X/Y completed · N parent-owned (asserted)" / "all N task(s) parent-owned"; update_plan's
+role guidance now states the executor-vs-main division of labor, because the demo model had
+put an entire buildable app under `main`, silently opting out of orchestration and
+verification). Suite 689 passed / 1 skipped. The re-recorded demo then showed the intended
+lifecycle end to end: auto-routed plan → sha-bound approval → one parallel executor wave
+(bound, definition-sha'd, live status area + mid-turn `[plan]` line) → drift-checked
+integration (8 files, 0 refusals) → parent-run verification → `/accept` (complete; plan
+retired; refs pruned) → memory handoff → the built app played on camera.
+
 ---
 
 ## Session 11 (2026-07-23/24) — V0.9: iterative planning, task graphs, parallel-first execution
