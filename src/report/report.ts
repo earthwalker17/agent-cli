@@ -94,6 +94,8 @@ export interface ReportJson {
   gitRestores: { ref: string; oid: string; restored: number; refused: { path: string; reason: string }[] }[];
   /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
    *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
+  /** The latest user /accept (Session 11.5, additive) — the explicit completion boundary. */
+  accepted?: { complete: boolean; summary: string; unfinished?: string[] };
   tasksDelegated: {
     callId: string;
     role: string;
@@ -120,6 +122,8 @@ export interface ReportPlan {
   lastSha256: string | null;
   approvedSha256: string | null;
   discarded: boolean;
+  /** 'accepted' when the retirement came from /accept, not a user /plan discard (Session 11.5). */
+  discardedReason?: 'accepted';
   /** How this session's complexity was routed (Session 11, additive): the first plan.route event. */
   route?: { mode: 'plan' | 'direct'; source: 'user-sigil' | 'model' } | null;
   /** Task count of the latest structured plan write (Session 11, additive; null for legacy plans). */
@@ -333,6 +337,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   let planLastSha: string | null = null;
   let planApprovedSha: string | null = null;
   let planDiscarded = false;
+  let planDiscardedReason: 'accepted' | undefined;
   let planRoute: ReportPlan['route'] = null;
   let planTaskCount: number | null = null;
   for (const e of events) {
@@ -346,9 +351,11 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       planLastSha = e.sha256; // approval rewrites the status line, so the approved bytes ARE the latest
       planApprovedSha = e.sha256;
       planDiscarded = false;
+      planDiscardedReason = undefined;
     } else if (e.type === 'plan.discarded') {
       planId = e.planId;
       planDiscarded = true;
+      planDiscardedReason = e.reason;
     } else if (e.type === 'plan.route' && planRoute === null) {
       planRoute = { mode: e.mode, source: e.source };
     }
@@ -362,9 +369,18 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
           lastSha256: planLastSha,
           approvedSha256: planApprovedSha,
           discarded: planDiscarded,
+          ...(planDiscardedReason !== undefined ? { discardedReason: planDiscardedReason } : {}),
           route: planRoute,
           taskCount: planTaskCount,
         };
+
+  // The acceptance boundary (Session 11.5): the LATEST recorded /accept governs.
+  let accepted: ReportJson['accepted'];
+  for (const e of events) {
+    if (e.type === 'session.accepted') {
+      accepted = { complete: e.complete, summary: e.summary, ...(e.unfinished !== undefined ? { unfinished: e.unfinished } : {}) };
+    }
+  }
 
   const taskChanges = events
     .filter((e): e is Extract<SessionEvent, { type: 'task.changes' }> => e.type === 'task.changes')
@@ -426,6 +442,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     gitRestores,
     tasksDelegated,
     plan: planState,
+    ...(accepted !== undefined ? { accepted } : {}),
     taskChanges,
     taskApplies,
     integrity: {
@@ -586,7 +603,20 @@ function renderMarkdown(r: ReportJson): string {
     } else {
       L.push(`- never approved by the user${r.plan.discarded ? '' : ' (draft)'}`);
     }
-    if (r.plan.discarded) L.push(`- DISCARDED by the user (status: superseded)`);
+    if (r.plan.discarded) {
+      L.push(
+        r.plan.discardedReason === 'accepted'
+          ? `- RETIRED at acceptance (/accept; status: superseded — the plan was fully executed)`
+          : `- DISCARDED by the user (status: superseded)`,
+      );
+    }
+    L.push('');
+  }
+
+  if (r.accepted !== undefined) {
+    L.push(`## Completion`);
+    L.push(`- ACCEPTED by the user (${r.accepted.complete ? 'complete' : 'partial'}): ${r.accepted.summary}`);
+    for (const u of r.accepted.unfinished ?? []) L.push(`  - unfinished: ${u}`);
     L.push('');
   }
 

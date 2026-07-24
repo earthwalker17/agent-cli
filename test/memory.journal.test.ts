@@ -33,6 +33,7 @@ function fixtureReport(overrides: Partial<ReportJson> = {}): ReportJson {
     gitCheckpoints: [],
     taskBaseCheckpoints: [],
     gitRestores: [],
+    // (accepted stays absent by default — the Handoff section is driven by the handoff arg)
     tasksDelegated: [],
     integrity: { truncatedTail: false },
     ...overrides,
@@ -94,6 +95,23 @@ describe('journal entries', () => {
     expect(e.body).toContain('narrative unavailable');
     expect(e.body).not.toContain('model-written');
     expect(e.body).toContain('### Evidence (derived from the session log)');
+  });
+
+  it('renders the Handoff section when handoff lines are provided (Session 11.5)', () => {
+    const e = buildEntry({
+      sessionId: 's-handoff',
+      endedAt: '2026-07-24T10:00:00.000Z',
+      endedReason: 'user-quit',
+      report: fixtureReport(),
+      logPath: 'C:\\state\\sessions\\s-handoff.jsonl',
+      narrative: null,
+      handoff: ['- accepted: no — 2 unfinished item(s)', '  - plan task \'t1\' is failed', '- resume: agent resume s-handoff'],
+    });
+    expect(e.body).toContain('### Handoff (derived from the session log)');
+    expect(e.body).toContain('- accepted: no — 2 unfinished item(s)');
+    expect(e.body).toContain('- resume: agent resume s-handoff');
+    // Absent handoff lines render no empty section.
+    expect(entryFor('s-plain').body).not.toContain('### Handoff');
   });
 });
 

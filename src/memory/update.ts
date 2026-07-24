@@ -9,6 +9,9 @@ import type { ContentBlock, ProviderRequest, Usage } from '../types.js';
 import { buildEntry, parseJournal, rollJournal, type Narrative } from './journal.js';
 import { stampCodebase } from './codebase.js';
 import { memoryDir, readDocCapped, writeDocAtomic } from './store.js';
+import { readPlanState } from '../plan/canonical.js';
+import { foldGraphState } from '../plan/graph-state.js';
+import { computeAcceptance } from '../runtime/acceptance.js';
 
 /**
  * End-of-session project-memory update. Runs BEFORE endSession (so the memory.* evidence lands
@@ -94,6 +97,7 @@ async function runInner(session: Session, deps: MemoryUpdateDeps): Promise<void>
     logPath: deps.layout.sessionFile(session.id),
     narrative: outcome.narrative,
     ...(outcome.narrative === null && outcome.detail !== undefined ? { narrativeUnavailableReason: outcome.detail } : {}),
+    handoff: buildHandoffLines(deps.layout, session),
   });
   const journalFile = path.join(dir, 'JOURNAL.md');
   const current = readDocCapped(journalFile, 'JOURNAL.md', ROLL_READ_CAP_CHARS);
@@ -134,6 +138,36 @@ async function runInner(session: Session, deps: MemoryUpdateDeps): Promise<void>
     deps.announce?.('memory: codebase summary updated');
   } catch (err) {
     session.log.append({ type: 'memory.updated', doc: 'codebase', status: 'failed', detail: (err as Error).message });
+  }
+}
+
+/**
+ * The deterministic Handoff block (Session 11.5): acceptance state, plan execution, unfinished
+ * work, and the resume pointer — derived from events + the plan file, one code path for the
+ * REPL and one-shot alike. Never throws (memory must never block a session end).
+ */
+function buildHandoffLines(layout: ProjectLayout, session: Session): string[] {
+  try {
+    const events = session.log.events;
+    const state = readPlanState(layout, session.id, events);
+    const graph = state.canonical?.graph ?? null;
+    const acc = computeAcceptance(state, graph !== null ? foldGraphState(graph, events) : null, events);
+    const lines: string[] = [];
+    lines.push(
+      acc.accepted !== null
+        ? `- accepted: yes (${acc.accepted.complete ? 'complete' : `partial — ${acc.accepted.unfinished.length} unfinished item(s) recorded`})`
+        : `- accepted: no — ${acc.complete ? 'work is complete but was not accepted' : `${acc.unfinished.length} unfinished item(s)`}`,
+    );
+    lines.push(`- completion: ${acc.summary}`);
+    const unfinished = acc.accepted !== null ? acc.accepted.unfinished : acc.unfinished;
+    for (const u of unfinished.slice(0, 8)) lines.push(`  - ${u}`);
+    if (unfinished.length > 8) lines.push(`  - (+${unfinished.length - 8} more — see the session log)`);
+    if (acc.accepted === null || !acc.accepted.complete) {
+      lines.push(`- resume: agent resume ${session.id}`);
+    }
+    return lines;
+  } catch {
+    return [];
   }
 }
 

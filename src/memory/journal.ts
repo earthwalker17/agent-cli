@@ -76,6 +76,8 @@ export interface BuildEntryArgs {
   narrative: Narrative | null;
   /** Why the narrative is absent (recorded honestly in the entry). */
   narrativeUnavailableReason?: string;
+  /** Deterministic handoff lines (Session 11.5): acceptance, unfinished work, resume pointer. */
+  handoff?: string[];
 }
 
 export function buildEntry(args: BuildEntryArgs): JournalEntry {
@@ -99,6 +101,9 @@ export function buildEntry(args: BuildEntryArgs): JournalEntry {
     );
   }
   parts.push('### Evidence (derived from the session log)', ...evidenceLines(args.report, args.endedReason, args.logPath));
+  if (args.handoff !== undefined && args.handoff.length > 0) {
+    parts.push('', '### Handoff (derived from the session log)', ...args.handoff);
+  }
   return { sessionId: args.sessionId, heading, body: `${parts.join('\n')}\n` };
 }
 

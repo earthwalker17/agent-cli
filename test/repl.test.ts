@@ -583,6 +583,60 @@ describe('REPL: plan mode (Session 11 — canonical structured plans)', () => {
   });
 });
 
+describe('REPL: /accept — the completion boundary (Session 11.5)', () => {
+  it('a direct session accepts as complete; re-accept with nothing new is a no-op', async () => {
+    const r = await drive([{ say: 'hi' }], ['hello\n', '/accept\n', '/accept\n', '/quit\n']);
+    expect(r.code).toBe(0);
+    expect(r.chromeOut).toContain('session accepted (complete)');
+    expect(r.chromeOut).toContain('already accepted');
+    const acc = r.events.filter((e) => e.type === 'session.accepted');
+    expect(acc).toHaveLength(1); // the no-op re-accept records NO duplicate consent event
+    expect(acc[0]).toMatchObject({ complete: true });
+    // The quit summary carries the accepted state.
+    expect(r.chromeOut).toContain('completion:');
+    expect(r.chromeOut).toContain('accepted (complete)');
+    // The model learns of the acceptance on the next turn — via pendingNotes (none here: quit).
+  });
+
+  it('a draft plan refuses /accept; /accept confirm records an honest PARTIAL acceptance', async () => {
+    const PLAN = { objective: 'obj', tasks: [{ id: 't1', title: 'x', intent: 'y', role: 'executor', verify: 'v' }] };
+    const r = await drive(
+      [{ say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN } }] }, { say: 'plan written' }],
+      ['plan it\n', '/accept\n', '/accept confirm\n', '/quit\n'],
+    );
+    expect(r.chromeOut).toContain('cannot accept as complete');
+    expect(r.chromeOut).toContain('plan draft pending approval');
+    expect(r.chromeOut).toContain('session accepted (partial)');
+    const acc = r.events.find((e) => e.type === 'session.accepted');
+    expect(acc).toMatchObject({ complete: false });
+    const unfinished = acc?.type === 'session.accepted' ? (acc.unfinished ?? []) : [];
+    expect(unfinished.some((u) => u.includes('plan draft pending approval'))).toBe(true);
+    // A partial acceptance retires nothing.
+    expect(r.events.some((e) => e.type === 'plan.discarded')).toBe(false);
+  });
+
+  it('a COMPLETE acceptance retires the fully-executed approved plan (superseded, reason: accepted)', async () => {
+    const PLAN = { objective: 'obj', tasks: [{ id: 'm1', title: 'parent work', intent: 'do it', role: 'main', verify: 'read it' }] };
+    const r = await drive(
+      [{ say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN } }] }, { say: 'plan written' }],
+      ['plan it\n', '/plan approve\n', '/accept\n', '/quit\n'],
+    );
+    expect(r.chromeOut).toContain('session accepted (complete)');
+    expect(r.chromeOut).toContain('plan retired');
+    expect(r.events.find((e) => e.type === 'session.accepted')).toMatchObject({ complete: true });
+    expect(r.events.find((e) => e.type === 'plan.discarded')).toMatchObject({ reason: 'accepted' });
+    // The quit summary reflects the retirement provenance.
+    expect(r.chromeOut).toContain('plan retired (accepted)');
+  });
+
+  it('/status carries the completion line; /accept works piped (typed-command consent)', async () => {
+    const r = await drive([{ say: 'hi' }], ['hello\n', '/status\n', '/accept\n', '/status\n', '/quit\n']);
+    expect(r.chromeOut).toContain('completion: complete');
+    expect(r.chromeOut).toContain('not accepted'); // the first /status, before /accept
+    expect(r.chromeOut).toContain('accepted (complete)'); // the second, after
+  });
+});
+
 describe('renderer: live command output unit behavior', () => {
   let seq = 0;
   function ev(body: Record<string, unknown>): SessionEvent {

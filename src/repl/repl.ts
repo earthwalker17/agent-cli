@@ -19,7 +19,7 @@ import { createRenderer, type Renderer } from './render.js';
 import { createStatusArea } from './status.js';
 import { createTaskTable } from './live-tasks.js';
 import { detectStyle } from './format.js';
-import { dispatchSlash, type CommandContext } from './commands.js';
+import { completionLine, dispatchSlash, sessionAcceptance, type CommandContext } from './commands.js';
 
 /**
  * The interactive REPL: a loop of `prompt → runTurn` over ONE session and ONE event log, sharing
@@ -141,7 +141,26 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   }
 
   const pendingNotes: string[] = [];
-  const commandCtx: CommandContext = { session, layout, renderer, modelOut: streams.modelOut, pendingNotes, question: (q) => question(q), retrieval: assembled.retrieval };
+  const commandCtx: CommandContext = {
+    session,
+    layout,
+    renderer,
+    modelOut: streams.modelOut,
+    pendingNotes,
+    question: (q) => question(q),
+    retrieval: assembled.retrieval,
+    ...(assembled.pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs: assembled.pruneTaskBaseRefs } : {}),
+  };
+  // Resume-after-accept honesty (Session 11.5): a resumed session that was already accepted
+  // says so up front — further work is allowed, but the boundary crossing is visible.
+  if (opts.resumeId !== undefined) {
+    const acceptedEv = [...session.log.events].reverse().find((e) => e.type === 'session.accepted');
+    if (acceptedEv !== undefined && acceptedEv.type === 'session.accepted') {
+      renderer.chromeLine(
+        style.dim(`  note: this session was accepted (${acceptedEv.complete ? 'complete' : 'partial'}) at ${acceptedEv.ts} — new work re-opens it`),
+      );
+    }
+  }
   let exitCode = 0;
   let consecutiveInterrupts = 0;
   // Plan injection dedupe: content already shown to the model (by injection or its own
@@ -259,6 +278,14 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     io.close();
     streams.chromeOut.write(`fatal: ${(err as Error).message}\n`);
     return 1;
+  }
+
+  // The honest completion summary at the boundary (Session 11.5): what the fold says is done,
+  // what remains, and whether the user accepted — one line, derived, never blocking the quit.
+  try {
+    renderer.chromeLine(style.dim(`  ${completionLine(commandCtx)}${sessionAcceptance(commandCtx).acc.accepted === null ? ' (state retained for resume)' : ''}`));
+  } catch {
+    /* a summary failure must never block the quit */
   }
 
   // Session-end hygiene BEFORE the memory update and endSession: the provenance event must

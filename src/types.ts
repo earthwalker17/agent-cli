@@ -798,9 +798,28 @@ export type EventBody =
       sha256: string;
     }
   | {
-      /** The USER discarded the plan (/plan discard): status → superseded (V0.7). */
+      /**
+       * The USER discarded the plan (/plan discard): status → superseded (V0.7).
+       * reason 'accepted' (Session 11.5, additive) marks the /accept retirement of a fully
+       * executed plan — same mechanics, different provenance.
+       */
       type: 'plan.discarded';
       planId: string;
+      reason?: 'accepted';
+    }
+  | {
+      /**
+       * The USER accepted the session result (/accept, Session 11.5) — the explicit completion
+       * boundary. `complete` records whether the acceptance was clean (all plan tasks
+       * completed/parent-owned, every applicable capture integrated) or a confirmed partial
+       * acceptance; `unfinished` preserves the honest blocker list for the handoff. Cleanup
+       * (task-base ref pruning, plan retirement) keys off this consent — never off mere
+       * session end.
+       */
+      type: 'session.accepted';
+      complete: boolean;
+      summary: string;
+      unfinished?: string[];
     }
   | {
       /**

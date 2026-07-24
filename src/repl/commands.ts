@@ -9,6 +9,7 @@ import type { RetrievalHandle } from '../retrieval/rank.js';
 import { readPlan, setPlanStatus } from '../plan/store.js';
 import { readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
 import { foldGraphState } from '../plan/graph-state.js';
+import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { Session } from '../runtime/session.js';
@@ -32,6 +33,8 @@ export interface CommandContext {
   question?: (q: string) => Promise<string | null>;
   /** Session 10: the assembled read-only retrieval handle; /map renders it when present. */
   retrieval?: RetrievalHandle | null;
+  /** Session 11.5: /accept runs the task-base ref prune immediately (the assembled closure). */
+  pruneTaskBaseRefs?: () => Promise<string | null>;
 }
 
 export const HELP = [
@@ -52,6 +55,11 @@ export const HELP = [
   '  /plan [show | approve | discard]',
   '                  show the plan document for this session; approve it (records consent and',
   '                  unblocks planned execution) or discard it. You can also edit the file directly.',
+  '  /accept [confirm]',
+  '                  accept the session result (the completion boundary): verifies the plan is',
+  '                  fully executed and every capture integrated, records the acceptance, prunes',
+  '                  task-base refs, and retires a completed plan. With unfinished work, /accept',
+  '                  lists it and "/accept confirm" records a partial acceptance instead.',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -62,6 +70,25 @@ export const HELP = [
 ].join('\n');
 
 export type SlashOutcome = 'continue' | 'quit';
+
+/** One derivation for /accept, /status, and the quit summary: plan state + the acceptance fold. */
+export function sessionAcceptance(ctx: Pick<CommandContext, 'session' | 'layout'>): {
+  state: ReturnType<typeof readPlanState>;
+  acc: AcceptanceState;
+} {
+  const events = ctx.session.log.events;
+  const state = readPlanState(ctx.layout, ctx.session.id, events);
+  const graph = state.canonical?.graph ?? null;
+  return { state, acc: computeAcceptance(state, graph !== null ? foldGraphState(graph, events) : null, events) };
+}
+
+/** The one-line completion summary used by /status and the quit path. */
+export function completionLine(ctx: Pick<CommandContext, 'session' | 'layout'>): string {
+  const { acc } = sessionAcceptance(ctx);
+  const acceptedBit =
+    acc.accepted !== null ? ` · accepted (${acc.accepted.complete ? 'complete' : 'partial'})` : ' · not accepted';
+  return `completion: ${acc.summary}${acceptedBit}`;
+}
 
 /** Parse `/commit` arguments: [-m "msg"] [--all] [--no-trailer]. Exported for tests. */
 export function parseCommitArgs(arg: string): { all: boolean; noTrailer: boolean; message?: string; error?: string } {
@@ -117,10 +144,82 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           `  workspace: ${sanitizeLine(s.workspaceRoot)}`,
           `  model: ${s.model} · provider: ${s.provider.name}`,
           `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out${cache}`,
+          `  ${completionLine(ctx)}`,
           ...(s.gitFacts?.isRepo ? [`  git (at session start): ${sanitizeLine(s.gitFacts.detail)}`] : []),
           `  state: ${sanitizeLine(s.stateDir)}`,
         ].join('\n'),
       );
+      return 'continue';
+    }
+
+    case 'accept': {
+      const sub = arg.trim().toLowerCase();
+      if (sub !== '' && sub !== 'confirm') {
+        ctx.renderer.chromeLine('usage: /accept [confirm]');
+        return 'continue';
+      }
+      const { state, acc } = sessionAcceptance(ctx);
+
+      // Idempotence: re-accepting with no work since the last acceptance is a no-op, never a
+      // duplicate consent event.
+      if (acc.accepted !== null && !workSince(ctx.session.log.events, acc.accepted.seq)) {
+        ctx.renderer.chromeLine(
+          `session already accepted (${acc.accepted.complete ? 'complete' : 'partial'}); nothing has changed since`,
+        );
+        return 'continue';
+      }
+
+      if (!acc.complete && sub !== 'confirm') {
+        ctx.renderer.chromeLine(
+          [
+            'cannot accept as complete — unfinished work:',
+            ...acc.unfinished.map((u) => `  - ${sanitizeLine(u)}`),
+            'finish the work, or type "/accept confirm" to record a PARTIAL acceptance (the list above becomes the handoff).',
+          ].join('\n'),
+        );
+        return 'continue';
+      }
+
+      // The recorded consent. complete=false only through the explicit confirm path.
+      ctx.session.log.append({
+        type: 'session.accepted',
+        complete: acc.complete,
+        summary: acc.summary,
+        ...(acc.unfinished.length > 0 ? { unfinished: acc.unfinished } : {}),
+      });
+      ctx.pendingNotes.push(
+        acc.complete
+          ? 'the user ACCEPTED the session result as COMPLETE (/accept). Treat the delivered work as accepted; do not re-run plan tasks.'
+          : `the user recorded a PARTIAL acceptance (/accept confirm) with ${acc.unfinished.length} known unfinished item(s). Do not silently resume that work — ask before continuing it.`,
+      );
+
+      // Cleanup (a): prune this session's task-base refs now (idempotent; the quit path's
+      // prune then finds an empty owed list).
+      if (ctx.pruneTaskBaseRefs !== undefined) {
+        try {
+          const pruneLine = await ctx.pruneTaskBaseRefs();
+          if (pruneLine !== null) ctx.renderer.chromeLine(`  checkpoints: ${pruneLine}`);
+        } catch {
+          /* best-effort hygiene — acceptance itself is already recorded */
+        }
+      }
+
+      // Cleanup (b): a COMPLETE acceptance retires the fully-executed approved plan via the
+      // existing discard flow (status → superseded; the file stays on disk as the audit
+      // trail; approval clears via the plan.discarded event). Partial accepts retire nothing.
+      if (acc.complete && state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent) {
+        const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
+        if ('error' in w) {
+          ctx.renderer.chromeLine(`  plan not retired: ${sanitizeLine(w.error)} (acceptance itself is recorded)`);
+        } else {
+          ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id, reason: 'accepted' });
+          void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
+          ctx.pendingNotes.push('the fully-executed plan was RETIRED (superseded) as part of the acceptance; a new update_plan write starts a fresh draft');
+          ctx.renderer.chromeLine('  plan retired (accepted → superseded; the file remains on disk for reference)');
+        }
+      }
+
+      ctx.renderer.chromeLine(`session accepted (${acc.complete ? 'complete' : 'partial'}) — ${sanitizeLine(acc.summary)}`);
       return 'continue';
     }
 
