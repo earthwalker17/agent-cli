@@ -144,25 +144,32 @@ async function runInner(session: Session, deps: MemoryUpdateDeps): Promise<void>
 /**
  * The deterministic Handoff block (Session 11.5): acceptance state, plan execution, unfinished
  * work, and the resume pointer — derived from events + the plan file, one code path for the
- * REPL and one-shot alike. Never throws (memory must never block a session end).
+ * REPL and one-shot alike. The LIVE derivation governs the unfinished list and the resume
+ * pointer (review F1: a recorded acceptance freezes ITS list, but work after it must never
+ * hide behind a stale "accepted (complete)"). Never throws (memory must never block an end).
+ * Exported for tests.
  */
-function buildHandoffLines(layout: ProjectLayout, session: Session): string[] {
+export function buildHandoffLines(layout: ProjectLayout, session: Session): string[] {
   try {
     const events = session.log.events;
     const state = readPlanState(layout, session.id, events);
     const graph = state.canonical?.graph ?? null;
     const acc = computeAcceptance(state, graph !== null ? foldGraphState(graph, events) : null, events);
     const lines: string[] = [];
-    lines.push(
-      acc.accepted !== null
-        ? `- accepted: yes (${acc.accepted.complete ? 'complete' : `partial — ${acc.accepted.unfinished.length} unfinished item(s) recorded`})`
-        : `- accepted: no — ${acc.complete ? 'work is complete but was not accepted' : `${acc.unfinished.length} unfinished item(s)`}`,
-    );
+    if (acc.accepted !== null) {
+      lines.push(
+        `- accepted: yes (${acc.accepted.complete ? 'complete' : `partial — ${acc.accepted.unfinished.length} unfinished item(s) recorded`})` +
+          (acc.acceptedStale ? ' — work has happened SINCE the acceptance; it covers only work up to that point' : ''),
+      );
+    } else if (session.mode === 'non-interactive') {
+      lines.push('- accepted: not applicable (one-shot session — /accept is a REPL boundary)');
+    } else {
+      lines.push(`- accepted: no — ${acc.complete ? 'work is complete but was not accepted' : `${acc.unfinished.length} unfinished item(s)`}`);
+    }
     lines.push(`- completion: ${acc.summary}`);
-    const unfinished = acc.accepted !== null ? acc.accepted.unfinished : acc.unfinished;
-    for (const u of unfinished.slice(0, 8)) lines.push(`  - ${u}`);
-    if (unfinished.length > 8) lines.push(`  - (+${unfinished.length - 8} more — see the session log)`);
-    if (acc.accepted === null || !acc.accepted.complete) {
+    for (const u of acc.unfinished.slice(0, 8)) lines.push(`  - ${u}`);
+    if (acc.unfinished.length > 8) lines.push(`  - (+${acc.unfinished.length - 8} more — see the session log)`);
+    if (!acc.complete) {
       lines.push(`- resume: agent resume ${session.id}`);
     }
     return lines;

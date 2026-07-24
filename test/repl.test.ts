@@ -619,12 +619,16 @@ describe('REPL: /accept — the completion boundary (Session 11.5)', () => {
     const PLAN = { objective: 'obj', tasks: [{ id: 'm1', title: 'parent work', intent: 'do it', role: 'main', verify: 'read it' }] };
     const r = await drive(
       [{ say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN } }] }, { say: 'plan written' }],
-      ['plan it\n', '/plan approve\n', '/accept\n', '/quit\n'],
+      ['plan it\n', '/plan approve\n', '/accept\n', '/accept\n', '/quit\n'],
     );
     expect(r.chromeOut).toContain('session accepted (complete)');
     expect(r.chromeOut).toContain('plan retired');
     expect(r.events.find((e) => e.type === 'session.accepted')).toMatchObject({ complete: true });
     expect(r.events.find((e) => e.type === 'plan.discarded')).toMatchObject({ reason: 'accepted' });
+    // Review F1 pinned: the accept's own retirement is not "work since" — the second /accept
+    // is a no-op with exactly ONE consent event on the log.
+    expect(r.chromeOut).toContain('already accepted');
+    expect(r.events.filter((e) => e.type === 'session.accepted')).toHaveLength(1);
     // The quit summary reflects the retirement provenance.
     expect(r.chromeOut).toContain('plan retired (accepted)');
   });

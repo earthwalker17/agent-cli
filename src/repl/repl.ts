@@ -157,7 +157,9 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     const acceptedEv = [...session.log.events].reverse().find((e) => e.type === 'session.accepted');
     if (acceptedEv !== undefined && acceptedEv.type === 'session.accepted') {
       renderer.chromeLine(
-        style.dim(`  note: this session was accepted (${acceptedEv.complete ? 'complete' : 'partial'}) at ${acceptedEv.ts} — new work re-opens it`),
+        style.dim(
+          `  note: this session was accepted (${acceptedEv.complete ? 'complete' : 'partial'}) at ${acceptedEv.ts} — the acceptance covers only work up to that point`,
+        ),
       );
     }
   }
@@ -241,13 +243,16 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
           );
           // One truth, two views (Session 11.5): the same fold that drives the idle /tasks,
           // here overlaid with the LIVE phases — the agent-centric table above and this
-          // plan-centric line can never disagree about what is running.
+          // plan-centric line can never disagree about what is running. Same visibility gate
+          // as the idle /tasks (any canonical graph — review F3): a non-approved plan's line
+          // is labeled with its status instead of silently missing.
           try {
             const state = readPlanState(layout, session.id, session.log.events);
             const graph = state.canonical?.graph ?? null;
-            if (graph !== null && state.approvedAndCurrent) {
+            if (graph !== null) {
               const gs = foldGraphState(graph, session.log.events, taskTable.livePhases());
-              renderer.chromeLine(`  [plan] ${sanitizeLine(gs.summary)}`);
+              const label = state.approvedAndCurrent ? '' : ` (plan ${state.status === 'approved' ? 'diverged' : state.status})`;
+              renderer.chromeLine(`  [plan]${label} ${sanitizeLine(gs.summary)}`);
             }
           } catch {
             /* the live table above already answered; the plan line is additive */

@@ -27,6 +27,9 @@ export interface AcceptanceState {
   unfinished: string[];
   /** The latest recorded /accept, when any. */
   accepted: RecordedAcceptance | null;
+  /** True when work-shaped events landed AFTER the recorded acceptance — it covers only work
+   *  up to its point, and every surface must say so rather than show a fresh-looking accept. */
+  acceptedStale: boolean;
 }
 
 /** Event types that count as "work happened" after an acceptance (idempotence boundary). */
@@ -44,9 +47,16 @@ const WORK_EVENT_TYPES = new Set([
   'command.started',
 ]);
 
-/** True when any work-shaped event landed after `seq` (a re-accept is then meaningful). */
+/**
+ * True when any work-shaped event landed after `seq` (a re-accept is then meaningful).
+ * The acceptance's OWN retirement (`plan.discarded` reason 'accepted') is excluded — the
+ * cleanup an accept performs must never read as "work happened since the accept" (review
+ * F1: it made the very next /accept append a duplicate consent event).
+ */
 export function workSince(events: readonly SessionEvent[], seq: number): boolean {
-  return events.some((e) => e.seq > seq && WORK_EVENT_TYPES.has(e.type));
+  return events.some(
+    (e) => e.seq > seq && WORK_EVENT_TYPES.has(e.type) && !(e.type === 'plan.discarded' && e.reason === 'accepted'),
+  );
 }
 
 export function computeAcceptance(
@@ -94,12 +104,14 @@ export function computeAcceptance(
     }
   }
   let capturesSeen = 0;
+  let capturesOutstanding = false;
   for (const [child, files] of captured) {
     const appliedSet = applied.get(child) ?? new Set<string>();
     const applicable = files.filter((f) => f.kind === 'delete' || (f.blobSha256 !== null && f.oversize !== true));
     capturesSeen += applicable.length;
     const unapplied = applicable.filter((f) => !appliedSet.has(f.relPath));
     if (unapplied.length > 0) {
+      capturesOutstanding = true;
       unfinished.push(`${unapplied.length} captured file(s) from task ${child.slice(-4)} not applied — apply_task_changes (child ${child})`);
     }
   }
@@ -121,11 +133,17 @@ export function computeAcceptance(
         : planState.status === 'superseded' && retiredByAccept
           ? 'plan retired (accepted)'
           : `plan ${planState.status}`;
-  const capturesBit = capturesSeen > 0 ? (unfinished.some((u) => u.includes('not applied')) ? 'captures outstanding' : 'captures integrated') : null;
+  const capturesBit = capturesSeen > 0 ? (capturesOutstanding ? 'captures outstanding' : 'captures integrated') : null;
   const summary =
     unfinished.length === 0
       ? `complete — ${planBit}${capturesBit !== null ? ` · ${capturesBit}` : ''}`
       : `${unfinished.length} unfinished — ${planBit}${capturesBit !== null ? ` · ${capturesBit}` : ''}`;
 
-  return { complete: unfinished.length === 0, summary, unfinished, accepted };
+  return {
+    complete: unfinished.length === 0,
+    summary,
+    unfinished,
+    accepted,
+    acceptedStale: accepted !== null && workSince(events, accepted.seq),
+  };
 }

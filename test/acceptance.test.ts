@@ -136,12 +136,23 @@ describe('computeAcceptance', () => {
     const accepted = ev({ type: 'session.accepted', complete: true, summary: 's' });
     const acc = computeAcceptance(NO_PLAN, null, [accepted]);
     expect(acc.accepted).toMatchObject({ complete: true, seq: accepted.seq });
+    expect(acc.acceptedStale).toBe(false);
 
     expect(workSince([accepted], accepted.seq)).toBe(false);
     const chatter = ev({ type: 'user.message', text: 'hi' });
     expect(workSince([accepted, chatter], accepted.seq)).toBe(false); // conversation is not work
     const work = ev({ type: 'file.mutated', callId: 'c', path: 'x', kind: 'modify', beforeSha256: 'a', afterSha256: 'b', createdDirs: [] });
     expect(workSince([accepted, work], accepted.seq)).toBe(true);
+    expect(computeAcceptance(NO_PLAN, null, [accepted, work]).acceptedStale).toBe(true);
+  });
+
+  it("the accept's OWN retirement never reads as work-since (review F1: no duplicate consent)", () => {
+    const accepted = ev({ type: 'session.accepted', complete: true, summary: 's' });
+    const retirement = ev({ type: 'plan.discarded', planId: 'p', reason: 'accepted' });
+    expect(workSince([accepted, retirement], accepted.seq)).toBe(false);
+    // A plain user /plan discard after an acceptance IS work (a real state change).
+    const userDiscard = ev({ type: 'plan.discarded', planId: 'p' });
+    expect(workSince([accepted, userDiscard], accepted.seq)).toBe(true);
   });
 
   it('the retired-by-accept summary names the provenance', () => {

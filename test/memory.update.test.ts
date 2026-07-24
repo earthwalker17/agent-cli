@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startSession, endSession, endReasonForTurn, runTurn, recordWorkspaceMap, type Session, type TurnResult } from '../src/runtime/session.js';
-import { runMemoryUpdate } from '../src/memory/update.js';
+import { buildHandoffLines, runMemoryUpdate } from '../src/memory/update.js';
 import { parseJournal } from '../src/memory/journal.js';
 import { parseCodebase } from '../src/memory/codebase.js';
 import { memoryDir } from '../src/memory/store.js';
@@ -192,5 +192,58 @@ describe('endReasonForTurn', () => {
     expect(endReasonForTurn({ ...base, stopped: true, steps: 20 }, 20)).toBe('max-steps');
     expect(endReasonForTurn({ ...base, stopped: true }, 20)).toBe('user-quit');
     expect(endReasonForTurn(base, 20)).toBe('completed');
+  });
+});
+
+describe('buildHandoffLines (Session 11.5 — the deterministic handoff)', () => {
+  function sessionWith(events: Record<string, unknown>[], mode: 'interactive' | 'non-interactive' = 'interactive'): Session {
+    const s = makeSession([]);
+    (s as { mode: string }).mode = mode;
+    for (const e of events) s.log.append(e as never);
+    return s;
+  }
+  const capture = (child: string) => ({
+    type: 'task.changes',
+    callId: 'c',
+    childSessionId: child,
+    baseOid: 'b',
+    files: [{ relPath: 'a.ts', kind: 'modify', baseSha256: 'x', blobSha256: 'y', bytes: 1 }],
+  });
+
+  it('complete, not accepted, interactive: says so and emits NO resume pointer for done work', () => {
+    const s = sessionWith([]);
+    const lines = buildHandoffLines(layout, s);
+    expect(lines[0]).toBe('- accepted: no — work is complete but was not accepted');
+    expect(lines.some((l) => l.startsWith('- resume:'))).toBe(false);
+    endSession(s, 'completed');
+  });
+
+  it('incomplete work lists the blockers and the resume pointer', () => {
+    const s = sessionWith([capture('c-1111')]);
+    const lines = buildHandoffLines(layout, s);
+    expect(lines[0]).toContain('1 unfinished item(s)');
+    expect(lines.some((l) => l.includes('not applied'))).toBe(true);
+    expect(lines.some((l) => l === `- resume: agent resume ${s.id}`)).toBe(true);
+    endSession(s, 'completed');
+  });
+
+  it('a STALE acceptance is annotated and the LIVE unfinished list governs (review F1)', () => {
+    const s = sessionWith([
+      { type: 'session.accepted', complete: true, summary: 'complete — no plan' },
+      capture('c-2222'), // work AFTER the acceptance leaves it stale and the session incomplete
+    ]);
+    const lines = buildHandoffLines(layout, s);
+    expect(lines[0]).toContain('accepted: yes (complete)');
+    expect(lines[0]).toContain('work has happened SINCE the acceptance');
+    expect(lines.some((l) => l.includes('not applied'))).toBe(true); // live blockers, not the frozen []
+    expect(lines.some((l) => l.startsWith('- resume:'))).toBe(true);
+    endSession(s, 'completed');
+  });
+
+  it('one-shot sessions say acceptance is not applicable', () => {
+    const s = sessionWith([], 'non-interactive');
+    const lines = buildHandoffLines(layout, s);
+    expect(lines[0]).toBe('- accepted: not applicable (one-shot session — /accept is a REPL boundary)');
+    endSession(s, 'completed');
   });
 });

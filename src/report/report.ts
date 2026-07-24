@@ -92,10 +92,10 @@ export interface ReportJson {
   taskBaseCheckpoints: { ref: string; oid: string }[];
   /** User-commanded checkpoint restores (each an undoable batch; V0.5 logs). */
   gitRestores: { ref: string; oid: string; restored: number; refused: { path: string; reason: string }[] }[];
-  /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
-   *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
   /** The latest user /accept (Session 11.5, additive) — the explicit completion boundary. */
   accepted?: { complete: boolean; summary: string; unfinished?: string[] };
+  /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
+   *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
   tasksDelegated: {
     callId: string;
     role: string;

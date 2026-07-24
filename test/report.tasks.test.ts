@@ -207,3 +207,78 @@ describe('reconstruct: crash mid-delegate', () => {
     expect(text).toContain('evidence log survives');
   });
 });
+
+describe('report: Session 11.5 surfaces (completion, task-base checkpoints, spill pointers, retirement)', () => {
+  it('## Completion renders the LATEST acceptance with its unfinished list', () => {
+    seq = 0;
+    const events: SessionEvent[] = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'C:\ws', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({ type: 'session.accepted', complete: false, summary: '2 unfinished — plan 1/3 completed', unfinished: ["plan task 't2' is failed", '1 captured file(s) from task c-99 not applied'] }),
+      evt({ type: 'session.ended', reason: 'user-quit' }),
+    ];
+    const r = buildReport({ events });
+    expect(r.json.accepted).toEqual({
+      complete: false,
+      summary: '2 unfinished — plan 1/3 completed',
+      unfinished: ["plan task 't2' is failed", '1 captured file(s) from task c-99 not applied'],
+    });
+    expect(r.md).toContain('## Completion');
+    expect(r.md).toContain('- ACCEPTED by the user (partial): 2 unfinished — plan 1/3 completed');
+    expect(r.md).toContain("  - unfinished: plan task 't2' is failed");
+    // No acceptance → no section.
+    const none = buildReport({ events: events.filter((e) => e.type !== 'session.accepted') });
+    expect(none.json.accepted).toBeUndefined();
+    expect(none.md).not.toContain('## Completion');
+  });
+
+  it('task-base checkpoints render under their own harness-created heading, never as user checkpoints', () => {
+    seq = 0;
+    const events: SessionEvent[] = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'C:\ws', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({ type: 'task.base-checkpoint', callId: 'call_1', ref: 'refs/agent-cli/checkpoints/p-1/1', oid: 'a'.repeat(40) }),
+    ];
+    const r = buildReport({ events });
+    expect(r.json.taskBaseCheckpoints).toEqual([{ ref: 'refs/agent-cli/checkpoints/p-1/1', oid: 'a'.repeat(40) }]);
+    expect(r.json.gitCheckpoints).toEqual([]); // NEVER misattributed to the user
+    expect(r.md).toContain('## Task-base checkpoints (hidden refs, harness-created)');
+    expect(r.md).not.toContain('## Checkpoints (hidden refs, user-commanded)');
+  });
+
+  it('a saved spill blob renders the honest pointer — "captured", never "full"', () => {
+    seq = 0;
+    const sha = 'b'.repeat(64);
+    const events: SessionEvent[] = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'C:\ws', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({ type: 'tool.requested', callId: 'c1', tool: 'run_command', input: { command: 'npm test' } }),
+      evt({ type: 'policy.decision', callId: 'c1', classification: 'external', decision: 'ask', rule: 'command.default', reason: 'r' }),
+      evt({ type: 'approval.resolved', callId: 'c1', decision: 'allow', scope: 'once', source: 'user' }),
+      evt({ type: 'command.started', callId: 'c1', pid: 1, shell: 'powershell.exe', cwd: 'C:\ws', timeoutMs: 1000 }),
+      evt({ type: 'command.ended', callId: 'c1', termination: 'exited', exitCode: 0, durationMs: 5 }),
+      evt({ type: 'tool.completed', callId: 'c1', ok: true, outputPreview: 'x', durationMs: 5, exitCode: 0, truncated: true, fullOutputSha256: sha, fullOutputSaved: true }),
+    ];
+    const r = buildReport({ events });
+    expect(r.json.commands[0]).toMatchObject({ command: 'npm test', outputBlobSha256: sha });
+    expect(r.md).toContain(`captured output preserved: objects/${sha}`);
+    expect(r.md).not.toContain('full output preserved');
+    // Truncated WITHOUT the saved flag → no pointer (nothing was persisted).
+    const unsaved = events.map((e) => (e.type === 'tool.completed' ? { ...e, fullOutputSaved: undefined } : e)) as SessionEvent[];
+    expect(buildReport({ events: unsaved }).md).not.toContain('captured output preserved');
+  });
+
+  it('plan retirement provenance: RETIRED at acceptance vs DISCARDED by the user', () => {
+    seq = 0;
+    const base: SessionEvent[] = [
+      evt({ type: 'session.started', sessionId: 'p-1', workspaceRoot: 'C:\ws', model: 'm', mode: 'interactive', providerName: 'mock', argv: [] }),
+      evt({ type: 'plan.updated', callId: 'c1', planId: 'p-1', sha256: 'c'.repeat(64), bytes: 10, prevSha256: null, status: 'draft' }),
+      evt({ type: 'plan.approved', planId: 'p-1', sha256: 'c'.repeat(64) }),
+    ];
+    const retired = buildReport({ events: [...base, evt({ type: 'plan.discarded', planId: 'p-1', reason: 'accepted' })] });
+    expect(retired.json.plan?.discardedReason).toBe('accepted');
+    expect(retired.md).toContain('RETIRED at acceptance');
+    expect(retired.md).not.toContain('DISCARDED by the user');
+    seq = 3;
+    const discarded = buildReport({ events: [...base, evt({ type: 'plan.discarded', planId: 'p-1' })] });
+    expect(discarded.md).toContain('DISCARDED by the user');
+    expect(discarded.md).not.toContain('RETIRED at acceptance');
+  });
+});

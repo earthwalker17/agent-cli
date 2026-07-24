@@ -151,7 +151,7 @@ describe('checkDagRules — the scheduler gate matrix (pure)', () => {
     const shaStarted = (child: string, s: string): SessionEvent =>
       ev({ type: 'task.started', callId: 'c', role: 'executor', childSessionId: child, budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 }, planTaskId: 't1', planTaskSha: s });
     const failures = (n: number, s: string): SessionEvent[] =>
-      Array.from({ length: n }, (_, i) => [shaStarted(`cf${i}`, s), endedAs(`cf${i}`, i % 2 === 0 ? 'error' : 'cancelled')]).flat();
+      Array.from({ length: n }, (_, i) => [shaStarted(`cf${i}`, s), endedAs(`cf${i}`, i % 2 === 0 ? 'error' : 'timeout')]).flat();
 
     // Below the ceiling: retries stay allowed.
     expect(checkDagRules([spec('executor', 't1')], activeGate(g, failures(MAX_TASK_ATTEMPTS - 1, sha)))).toBeNull();
@@ -159,7 +159,7 @@ describe('checkDagRules — the scheduler gate matrix (pure)', () => {
     // At the ceiling: refuse with the statuses and every hatch named.
     const r = checkDagRules([spec('executor', 't1')], activeGate(g, failures(MAX_TASK_ATTEMPTS, sha)));
     expect(r).toContain(`has already failed ${MAX_TASK_ATTEMPTS} attempt(s)`);
-    expect(r).toContain('error, cancelled, error');
+    expect(r).toContain('error, timeout, error');
     expect(r).toContain('update_plan');
     expect(r).toContain('directly as the parent');
     expect(r).toContain('ask the user');
@@ -167,6 +167,19 @@ describe('checkDagRules — the scheduler gate matrix (pure)', () => {
     // Crash-interrupted attempts never count: 2 failures + 1 interrupted stays allowed.
     const withInterrupted = [...failures(MAX_TASK_ATTEMPTS - 1, sha), shaStarted('c-int', sha)];
     expect(checkDagRules([spec('executor', 't1')], activeGate(g, withInterrupted))).toBeNull();
+
+    // User terminations never count either (review F3): the ceiling guards MODEL retry
+    // loops — 2 failures + a /cancel + a deny-stop + a turn abort stays allowed.
+    const userStops = [
+      ...failures(MAX_TASK_ATTEMPTS - 1, sha),
+      shaStarted('c-can', sha),
+      endedAs('c-can', 'cancelled'),
+      shaStarted('c-ust', sha),
+      endedAs('c-ust', 'user-stopped'),
+      shaStarted('c-abt', sha),
+      endedAs('c-abt', 'aborted'),
+    ];
+    expect(checkDagRules([spec('executor', 't1')], activeGate(g, userStops))).toBeNull();
 
     // Legacy sha-less bindings count conservatively toward the current definition.
     const legacy = (child: string): SessionEvent[] => [started('t1', child), endedAs(child, 'error')];

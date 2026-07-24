@@ -86,7 +86,9 @@ export function sessionAcceptance(ctx: Pick<CommandContext, 'session' | 'layout'
 export function completionLine(ctx: Pick<CommandContext, 'session' | 'layout'>): string {
   const { acc } = sessionAcceptance(ctx);
   const acceptedBit =
-    acc.accepted !== null ? ` · accepted (${acc.accepted.complete ? 'complete' : 'partial'})` : ' · not accepted';
+    acc.accepted !== null
+      ? ` · accepted (${acc.accepted.complete ? 'complete' : 'partial'})${acc.acceptedStale ? ' — work has happened since' : ''}`
+      : ' · not accepted';
   return `completion: ${acc.summary}${acceptedBit}`;
 }
 
@@ -161,8 +163,19 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       const { state, acc } = sessionAcceptance(ctx);
 
       // Idempotence: re-accepting with no work since the last acceptance is a no-op, never a
-      // duplicate consent event.
+      // duplicate consent event (the accept's own retirement is excluded from workSince).
       if (acc.accepted !== null && !workSince(ctx.session.log.events, acc.accepted.seq)) {
+        // Crash-limbo repair (review F2): a kill between the accepted event and the plan
+        // retirement leaves an approved-but-accepted plan that a re-typed /accept would
+        // otherwise no-op past forever. Finish the interrupted cleanup now, idempotently.
+        if (acc.accepted.complete && state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent) {
+          const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
+          if (!('error' in w)) {
+            ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id, reason: 'accepted' });
+            void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
+            ctx.renderer.chromeLine('  completing the interrupted acceptance cleanup: plan retired (accepted → superseded)');
+          }
+        }
         ctx.renderer.chromeLine(
           `session already accepted (${acc.accepted.complete ? 'complete' : 'partial'}); nothing has changed since`,
         );

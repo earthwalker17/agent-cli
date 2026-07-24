@@ -108,9 +108,11 @@ export interface DelegateCaps {
 }
 
 /**
- * R10 (Session 11.5): the per-task retry ceiling — ended-and-not-completed attempts under the
- * current task definition before the gate refuses identical retries. Interrupted (crash)
- * attempts never count; a definition change resets the count.
+ * R10 (Session 11.5): the per-task retry ceiling — genuine failure outcomes (error, timeout,
+ * budget exhaustion, stalled) under the current task definition before the gate refuses
+ * identical retries. Crash-interrupted and user-terminated (cancelled/user-stopped/aborted)
+ * attempts never count — the ceiling guards MODEL retry loops, not user intervention; a
+ * definition change resets the count.
  */
 export const MAX_TASK_ATTEMPTS = 3;
 
@@ -344,17 +346,17 @@ export function checkDagRules(
     if (ts.state === 'integrating') {
       return `plan task '${t.plan_task}' has captured changes not yet fully applied — integrate them with apply_task_changes (or resolve the refusals) before re-running it`;
     }
-    // R10 (Session 11.5) — the bounded-retry ceiling: ended-and-not-completed attempts under
-    // the CURRENT definition. 'interrupted' never counts (a crash is not the model retrying);
-    // legacy sha-less bindings count conservatively toward any definition; a definition change
-    // resets the ceiling (the attempts belong to the old sha).
+    // R10 (Session 11.5) — the bounded-retry ceiling: genuine FAILURE outcomes under the
+    // CURRENT definition. The ceiling guards model-driven retry loops, so only the model's
+    // own terminal failures count: 'interrupted' (crash), 'cancelled'/'user-stopped' (the
+    // user intervened), and 'aborted' (the user aborted the turn) never do — none of those
+    // is the model retrying (review F3: counting user cancellations mislabeled them as
+    // "failed attempts" and could lock a task the user merely paused). Legacy sha-less
+    // bindings count conservatively; a definition change resets the ceiling (the attempts
+    // belong to the old sha).
+    const NON_FAILURE = new Set(['completed', 'interrupted', 'running', 'awaiting-approval', 'cancelled', 'user-stopped', 'aborted']);
     const spent = ts.attemptHistory.filter(
-      (a) =>
-        a.outcome !== 'completed' &&
-        a.outcome !== 'interrupted' &&
-        a.outcome !== 'running' &&
-        a.outcome !== 'awaiting-approval' &&
-        (a.planTaskSha === undefined || a.planTaskSha === ts.definitionSha),
+      (a) => !NON_FAILURE.has(a.outcome) && (a.planTaskSha === undefined || a.planTaskSha === ts.definitionSha),
     );
     if (spent.length >= MAX_TASK_ATTEMPTS) {
       return (
