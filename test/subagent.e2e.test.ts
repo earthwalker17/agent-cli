@@ -428,6 +428,25 @@ describe('delegate_task end to end', () => {
     expect(toolResult).toContain('·--- subagent report end ---'); // the smuggled delimiter is neutralized
     expect(toolResult).toContain('smuggled tail'); // content preserved, not hidden
   });
+
+  it('a long child report spills the full group result as a blob (Session 11.5)', async () => {
+    const longReport = `REPORT HEAD\n${'finding line\n'.repeat(2000)}REPORT TAIL`;
+    const parent = makeParent(
+      [{ say: 'delegating', calls: [DELEGATE_CALL] }, { say: 'done' }],
+      subagentDeps([{ say: longReport, usage: { inputTokens: 1, outputTokens: 5 } }]),
+    );
+    await runTurn(parent, 'survey');
+    const completed = parent.log.events.find((e) => e.type === 'tool.completed');
+    if (completed === undefined || completed.type !== 'tool.completed') throw new Error('missing tool.completed');
+    expect(completed.truncated).toBe(true);
+    expect(completed.fullOutputSaved).toBe(true);
+    // The blob preserves what truncation dropped: BOTH ends of the child report survive.
+    const blob = parent.snapshots.getBlob(completed.fullOutputSha256!).toString('utf8');
+    expect(blob).toContain('REPORT HEAD');
+    expect(blob).toContain('REPORT TAIL');
+    expect(blob.length).toBeGreaterThan(completed.outputPreview.length);
+    endSession(parent, 'completed');
+  });
 });
 
 async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {

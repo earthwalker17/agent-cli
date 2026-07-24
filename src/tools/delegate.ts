@@ -647,6 +647,10 @@ export function createDelegateTool(
         // Group wall time = slowest member (children ran concurrently; deterministic under the injected clock).
         durationMs: Math.max(0, ...results.map((r) => r.durationMs)),
         ...(tr.fullSha256 !== undefined ? { fullOutputSha256: tr.fullSha256 } : {}),
+        // Spill seam (Session 11.5): a long group result loses child-report bytes to the 70/30
+        // truncation; the runtime preserves the full text as a blob so audits and resumed
+        // sessions can still read what the children actually reported.
+        ...(tr.fullSha256 !== undefined ? { fullOutput: raw } : {}),
         ...(allCompleted ? {} : { error: `task(s) not completed: ${failed.map((r) => r.status).join(', ')}` }),
       };
     },

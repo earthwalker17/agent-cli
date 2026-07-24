@@ -883,6 +883,7 @@ async function runExecution<I>(
     truncated: result.truncated,
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
     ...(result.fullOutputSha256 ? { fullOutputSha256: result.fullOutputSha256 } : {}),
+    ...(spillFullOutput(session, tool, result, decision) ? { fullOutputSaved: true as const } : {}),
   });
 
   // The model sees the REAL output; only the persisted log is redacted.
@@ -895,6 +896,30 @@ function redactedForLog<I>(session: Session, tool: Tool<I>, result: ToolResult, 
   if (tool.redactForLog) return tool.redactForLog(result, session.saltHex);
   if (decision.redactOutput && result.output) return { ...result, output: redactSecret(result.output, session.saltHex) };
   return result;
+}
+
+/** Defensive spill ceiling — the exec capture cap already bounds real inputs well below this. */
+const SPILL_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Preserve truncated-away tool output as a content-addressed blob (Session 11.5). Opt-in per
+ * tool via the transient ToolResult.fullOutput (run_command + delegate only — file reads are
+ * recoverable from the files themselves); skipped whenever ANY redaction applies (redacted
+ * outputs are deliberately non-replayable and must never persist un-redacted); never fails
+ * the turn. Returns true only when the blob verifiably landed under the recorded sha.
+ */
+function spillFullOutput<I>(session: Session, tool: Tool<I>, result: ToolResult, decision: PolicyDecision): boolean {
+  if (result.fullOutput === undefined || result.fullOutputSha256 === undefined || !result.truncated) return false;
+  if (tool.redactForLog !== undefined || decision.redactOutput === true) return false;
+  try {
+    const bytes = Buffer.from(result.fullOutput, 'utf8');
+    if (bytes.byteLength > SPILL_MAX_BYTES) return false;
+    // putBlob hashes the bytes itself; equality with the tool-reported sha is the honesty check
+    // (both sides digest the same utf8 string — pinned by test).
+    return session.snapshots.putBlob(bytes) === result.fullOutputSha256;
+  } catch {
+    return false;
+  }
 }
 
 /** Ancestor directories of `target` (below `root`) that do not currently exist. */

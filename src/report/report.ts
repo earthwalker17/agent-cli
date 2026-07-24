@@ -39,6 +39,8 @@ export interface ReportCommand {
   termination?: CommandTermination;
   /** True when command.started exists but the call never completed (session died while it ran). */
   neverCompleted?: boolean;
+  /** The truncated-away captured output survives as objects/<sha> (Session 11.5 logs). */
+  outputBlobSha256?: string;
   /** The execution boundary this command actually ran under (V0.4+ logs). */
   sandbox?: 'none' | 'windows-lowil';
 }
@@ -219,6 +221,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
       ...(term !== undefined ? { termination: term } : {}),
       ...(sbx !== undefined ? { sandbox: sbx } : {}),
+      ...(e.fullOutputSaved === true && e.fullOutputSha256 !== undefined ? { outputBlobSha256: e.fullOutputSha256 } : {}),
     });
     commandCompletions.push({
       command: cmd,
@@ -501,6 +504,11 @@ function renderMarkdown(r: ReportJson): string {
         L.push(`- \`${c.command}\`  → failed to spawn${box}`);
       } else {
         L.push(`- \`${c.command}\`  → exit ${c.exitCode ?? '—'} (${c.durationMs} ms)${box}`);
+      }
+      if (c.outputBlobSha256 !== undefined) {
+        // "Captured", never "full": for a command whose live capture was itself capped, the
+        // blob holds the capped stream, not everything the process printed.
+        L.push(`  (output was truncated for the model; captured output preserved: objects/${c.outputBlobSha256})`);
       }
     }
   }

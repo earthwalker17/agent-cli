@@ -240,6 +240,14 @@ export interface ToolResult {
   truncated: boolean;
   /** sha256 of the full untruncated output, present only when truncated. */
   fullOutputSha256?: string;
+  /**
+   * TRANSIENT (Session 11.5): the full pre-truncation output, attached ONLY by tools whose
+   * output is otherwise unrecoverable (run_command's bounded capture, delegate group results
+   * — never file reads, whose content lives on disk). The runtime spills it to a
+   * content-addressed blob at the tool.completed choke point (skipped under any redaction)
+   * and it is never persisted verbatim, never sent to the model.
+   */
+  fullOutput?: string;
   /** How a command actually ended (run_command only). Absent exitCode + 'timeout'/'aborted' = killed. */
   termination?: CommandTermination;
   /** Honest kill mechanics when a kill was attempted (best-effort tree kill + verification probe). */
@@ -485,6 +493,13 @@ export type EventBody =
       durationMs: number;
       truncated: boolean;
       fullOutputSha256?: string;
+      /**
+       * The truncated-away bytes were preserved as the content-addressed blob
+       * objects/<fullOutputSha256> (Session 11.5, additive). "Captured" output, honestly:
+       * for a command whose live capture was itself capped, the blob holds the capped
+       * stream, not everything the process printed.
+       */
+      fullOutputSaved?: true;
     }
   | {
       /** A shell command actually spawned (post-approval). Distinct from tool.requested: this is execution. */

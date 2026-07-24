@@ -98,6 +98,11 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
       truncated: t.truncated || outcome.captureTruncated,
       termination: outcome.termination,
       ...(t.fullSha256 ? { fullOutputSha256: t.fullSha256 } : {}),
+      // Spill seam (Session 11.5): command output is unrecoverable once truncated (bounded live
+      // capture, nothing on disk) — hand the runtime the captured string so the truncated-away
+      // bytes survive as a blob. Only when model-truncation actually dropped bytes: t.fullSha256
+      // is the blob key, and it describes the CAPTURED stream (capture caps may have applied).
+      ...(t.fullSha256 ? { fullOutput: outcome.combined + drainNote } : {}),
       ...(outcome.killDetail !== undefined ? { killDetail: outcome.killDetail } : {}),
     };
 
