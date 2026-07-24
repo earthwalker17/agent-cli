@@ -163,6 +163,16 @@ export type TaskEvidence =
       childSessionId: string;
       applied: string[];
       refused: { relPath: string; reason: string }[];
+    }
+  | {
+      /**
+       * The executor group's task-base checkpoint was created (Session 11.5) — creation
+       * evidence for the resume-rebuilt prune list. Group-scoped (one per delegate call
+       * with executors), so no childSessionId.
+       */
+      kind: 'base-checkpoint';
+      ref: string;
+      oid: string;
     };
 
 /**
@@ -657,6 +667,22 @@ export type EventBody =
       childSessionId: string;
       kind: 'stall' | 'loop' | 'budget-pressure' | 'cancelled';
       detail?: string;
+    }
+  | {
+      /**
+       * The task-base checkpoint captured for an executor group (Session 11.5, additive).
+       * The ref is a live recovery point only while the session runs; recording CREATION lets
+       * a resumed session rebuild its prune list, so a crash no longer leaks the refs forever.
+       * Crash-covered except the creation instant: a kill between update-ref and this append
+       * still leaks one ref to the `agent checkpoint prune` backstop. Deliberately NOT a
+       * `git.checkpoint` event — that type is user-commanded consent provenance, and an old
+       * reader misattributing harness plumbing to the user would be worse than skipping an
+       * unknown type.
+       */
+      type: 'task.base-checkpoint';
+      callId: string;
+      ref: string;
+      oid: string;
     }
   | {
       /** A delegated subagent task finished (V0.6). Usage is the CHILD's spend, recorded once

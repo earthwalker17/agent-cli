@@ -31,6 +31,7 @@ function fixtureReport(overrides: Partial<ReportJson> = {}): ReportJson {
     undos: [],
     gitCommits: [{ oid: 'abcdef0123456789', subject: 'feat: widget', files: 2, scope: 'session', trailer: true }],
     gitCheckpoints: [],
+    taskBaseCheckpoints: [],
     gitRestores: [],
     tasksDelegated: [],
     integrity: { truncatedTail: false },

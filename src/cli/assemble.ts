@@ -175,7 +175,11 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     if (e.type === 'task.changes') changesRegistry.register(e.childSessionId, e.baseOid, e.files, e.omittedCount);
   }
   // Task-base checkpoint refs created for executor groups this session; pruned at session end.
-  const taskBaseRefs: string[] = [];
+  // SEEDED FROM EVENTS on resume (Session 11.5, the changes-registry pattern): creation events
+  // minus refs a prior life SUCCESSFULLY pruned — so a crashed session's leaked refs are pruned
+  // at this life's clean quit instead of leaking forever. Failed prunes stay seeded (retried;
+  // deleteCheckpointRefs treats an already-missing ref as deleted, so retries converge).
+  const taskBaseRefs: string[] = taskBaseRefsFromEvents(session.log.events);
   // Executor orchestration bundle — absent (⇒ honest tool-level refusal) without a probed repo.
   const executorDeps: ExecutorDeps | undefined =
     gitFacts.isRepo && gitFacts.gitPath !== null && gitFacts.repoRoot !== null
@@ -269,6 +273,26 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),
   };
+}
+
+/**
+ * Task-base refs still owed a prune, folded purely from events (Session 11.5): every
+ * `task.base-checkpoint` creation minus every ref a `git.checkpoint.pruned` records as
+ * successfully deleted. Refs whose deletion FAILED stay owed (retried at the next quit;
+ * the missing-ref tolerance in deleteCheckpointRefs makes retries converge).
+ */
+export function taskBaseRefsFromEvents(events: readonly SessionEvent[]): string[] {
+  const refs: string[] = [];
+  for (const e of events) {
+    if (e.type === 'task.base-checkpoint') refs.push(e.ref);
+    else if (e.type === 'git.checkpoint.pruned' && e.kind === 'task-base') {
+      const gone = new Set(e.refs);
+      for (let i = refs.length - 1; i >= 0; i--) {
+        if (gone.has(refs[i]!)) refs.splice(i, 1);
+      }
+    }
+  }
+  return refs;
 }
 
 /**

@@ -84,6 +84,10 @@ export interface ReportJson {
   gitCommits: { oid: string; subject: string; files: number; scope: string; trailer: boolean }[];
   /** User-commanded recovery checkpoints (hidden refs) captured during the session (V0.5 logs). */
   gitCheckpoints: { ref: string; oid: string; label: string | null; filesChanged: number }[];
+  /** Harness-created executor-group base checkpoints (Session 11.5, additive) — plumbing, not
+   *  user consent provenance; pruned at clean session end (a crash leaves them until the next
+   *  resumed quit or `agent checkpoint prune`). */
+  taskBaseCheckpoints: { ref: string; oid: string }[];
   /** User-commanded checkpoint restores (each an undoable batch; V0.5 logs). */
   gitRestores: { ref: string; oid: string; restored: number; refused: { path: string; reason: string }[] }[];
   /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
@@ -289,6 +293,10 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     .filter((e): e is Extract<SessionEvent, { type: 'git.checkpoint' }> => e.type === 'git.checkpoint')
     .map((e) => ({ ref: e.ref, oid: e.oid, label: e.label, filesChanged: e.filesChanged }));
 
+  const taskBaseCheckpoints = events
+    .filter((e): e is Extract<SessionEvent, { type: 'task.base-checkpoint' }> => e.type === 'task.base-checkpoint')
+    .map((e) => ({ ref: e.ref, oid: e.oid }));
+
   const gitRestores = events
     .filter((e): e is Extract<SessionEvent, { type: 'git.restore' }> => e.type === 'git.restore')
     .map((e) => ({ ref: e.ref, oid: e.oid, restored: e.restored.length, refused: e.refused }));
@@ -411,6 +419,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     undos,
     gitCommits,
     gitCheckpoints,
+    taskBaseCheckpoints,
     gitRestores,
     tasksDelegated,
     plan: planState,
@@ -522,6 +531,14 @@ function renderMarkdown(r: ReportJson): string {
     L.push(`## Checkpoints (hidden refs, user-commanded)`);
     for (const c of r.gitCheckpoints) {
       L.push(`- ${c.oid.slice(0, 12)} ${c.ref}${c.label ? ` "${c.label}"` : ''} — ${c.filesChanged} file(s) differ from HEAD`);
+    }
+    L.push('');
+  }
+
+  if (r.taskBaseCheckpoints.length > 0) {
+    L.push(`## Task-base checkpoints (hidden refs, harness-created)`);
+    for (const c of r.taskBaseCheckpoints) {
+      L.push(`- ${c.oid.slice(0, 12)} ${c.ref} — executor-group base; pruned at clean session end`);
     }
     L.push('');
   }

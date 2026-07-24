@@ -8,7 +8,7 @@ import { createApprovalForwarder } from '../src/runtime/approval-forwarder.js';
 import { loadRegistry, registerWorktree, registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
 import { createDelegateTool, type ExecutorDeps, type PlanGateInfo } from '../src/tools/delegate.js';
 import type { PlanState } from '../src/plan/canonical.js';
-import { pruneTaskBaseCheckpointRefs } from '../src/cli/assemble.js';
+import { pruneTaskBaseCheckpointRefs, taskBaseRefsFromEvents } from '../src/cli/assemble.js';
 import { createApplyChangesTool, createTaskChangesRegistry, type TaskChangesRegistry } from '../src/tools/apply-changes.js';
 import { startSession, endSession, runTurn, type Session } from '../src/runtime/session.js';
 import { applyUndo } from '../src/runtime/undo.js';
@@ -609,6 +609,14 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     expect(h.baseRefs[0]).toMatch(/^refs\/agent-cli\/checkpoints\//);
     expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout).toContain(h.baseRefs[0]!);
 
+    // Session 11.5: creation is EVIDENCE now — a resumed session re-derives the owed prune
+    // list from the log, so a SIGKILL before the clean-quit prune no longer leaks the ref.
+    expect(h.parent.log.events.find((e) => e.type === 'task.base-checkpoint')).toMatchObject({
+      ref: h.baseRefs[0]!,
+      oid: expect.stringMatching(/^[0-9a-f]{40}$/),
+    });
+    expect(taskBaseRefsFromEvents(h.parent.log.events)).toEqual(h.baseRefs);
+
     // What assembly's pruneTaskBaseRefs does at session end: delete + record + summarize.
     const line = await pruneTaskBaseCheckpointRefs(REAL_GIT!, repo, h.baseRefs, h.parent.log);
     expect(line).toBe('pruned 1 task-base checkpoint ref(s)');
@@ -619,6 +627,9 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       refs: h.baseRefs,
       failed: [],
     });
+    // After the recorded prune the event fold owes nothing — the crash-leak loop is closed.
+    expect(taskBaseRefsFromEvents(h.parent.log.events)).toEqual([]);
+
     // Empty ref list = nothing to do, no event, no line.
     const evCount = h.parent.log.events.length;
     expect(await pruneTaskBaseCheckpointRefs(REAL_GIT!, repo, [], h.parent.log)).toBeNull();

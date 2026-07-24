@@ -680,6 +680,9 @@ function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): 
     case 'applied':
       session.log.append({ type: 'task.applied', callId, childSessionId: e.childSessionId, applied: e.applied, refused: e.refused });
       return;
+    case 'base-checkpoint':
+      session.log.append({ type: 'task.base-checkpoint', callId, ref: e.ref, oid: e.oid });
+      return;
   }
 }
 

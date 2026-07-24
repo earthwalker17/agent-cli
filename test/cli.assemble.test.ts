@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assembleSession, type AssembleDeps } from '../src/cli/assemble.js';
+import { assembleSession, taskBaseRefsFromEvents, type AssembleDeps } from '../src/cli/assemble.js';
 import { endSession } from '../src/runtime/session.js';
 import { resolveLayout } from '../src/store/layout.js';
 import { createNoneSandbox } from '../src/sandbox/none.js';
@@ -162,5 +162,30 @@ describe.skipIf(REAL_GIT === null)('assembleSession — ranked map (git-backed, 
     expect(resumed.map.inventorySha256).toBe(assembled.map.inventorySha256);
     expect(resumed.mapNote).toBeUndefined();
     endSession(resumed.session, 'completed');
+  });
+});
+
+describe('taskBaseRefsFromEvents (Session 11.5 — the crash-leak fold)', () => {
+  const ev = (body: Record<string, unknown>): SessionEvent => ({ v: 1, seq: 0, ts: '2026-01-01T00:00:00Z', ...body }) as unknown as SessionEvent;
+
+  it('owes created refs, subtracts successfully-pruned ones, keeps failed ones for retry', () => {
+    const events = [
+      ev({ type: 'task.base-checkpoint', callId: 'c1', ref: 'refs/agent-cli/checkpoints/s/1', oid: 'a'.repeat(40) }),
+      ev({ type: 'task.base-checkpoint', callId: 'c2', ref: 'refs/agent-cli/checkpoints/s/2', oid: 'b'.repeat(40) }),
+      // A prior life pruned ref 1 but FAILED on ref 2: only the success leaves the owed list.
+      ev({ type: 'git.checkpoint.pruned', kind: 'task-base', refs: ['refs/agent-cli/checkpoints/s/1'], failed: ['refs/agent-cli/checkpoints/s/2'] }),
+      // Work after the crash-resume creates a third base.
+      ev({ type: 'task.base-checkpoint', callId: 'c3', ref: 'refs/agent-cli/checkpoints/s/3', oid: 'c'.repeat(40) }),
+    ];
+    expect(taskBaseRefsFromEvents(events)).toEqual(['refs/agent-cli/checkpoints/s/2', 'refs/agent-cli/checkpoints/s/3']);
+  });
+
+  it('a fully pruned life owes nothing; user-checkpoint prunes (no kind) are ignored', () => {
+    const events = [
+      ev({ type: 'task.base-checkpoint', callId: 'c1', ref: 'refs/x/1', oid: 'a'.repeat(40) }),
+      ev({ type: 'git.checkpoint.pruned', kind: 'task-base', refs: ['refs/x/1'], failed: [] }),
+    ];
+    expect(taskBaseRefsFromEvents(events)).toEqual([]);
+    expect(taskBaseRefsFromEvents([])).toEqual([]);
   });
 });

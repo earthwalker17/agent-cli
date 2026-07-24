@@ -492,7 +492,12 @@ export function createDelegateTool(
           return refuse(`cannot capture the task-base checkpoint: ${base.error ?? 'unknown error'}`);
         }
         baseOid = base.oid;
-        if (base.ref !== undefined) executor!.noteBaseRef(base.ref);
+        if (base.ref !== undefined) {
+          executor!.noteBaseRef(base.ref);
+          // Creation evidence (Session 11.5): lets a RESUMED session rebuild the prune list,
+          // so a crash between here and the clean-quit prune no longer leaks the ref forever.
+          ctx.reportTask?.({ kind: 'base-checkpoint', ref: base.ref, oid: base.oid });
+        }
       }
       caps.tasksStarted += input.tasks.length;
 

@@ -235,6 +235,10 @@ export function createRenderer(opts: {
           );
           break;
         }
+        case 'task.base-checkpoint': {
+          chromeLine(style.dim(`  ${g.bullet} task-base checkpoint ${e.oid.slice(0, 12)} (harness recovery point; pruned at session end)`));
+          break;
+        }
         case 'task.started': {
           counters.tasks++;
           chromeLine(style.dim(`  ${g.bullet} task ${sanitizeLine(e.role)}·${sanitizeLine(e.childSessionId.slice(-4))} started — child session ${sanitizeLine(e.childSessionId)}`));
