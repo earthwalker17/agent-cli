@@ -239,6 +239,19 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
                   .map((l) => `  ${sanitizeLine(l)}`)
                   .join('\n'),
           );
+          // One truth, two views (Session 11.5): the same fold that drives the idle /tasks,
+          // here overlaid with the LIVE phases — the agent-centric table above and this
+          // plan-centric line can never disagree about what is running.
+          try {
+            const state = readPlanState(layout, session.id, session.log.events);
+            const graph = state.canonical?.graph ?? null;
+            if (graph !== null && state.approvedAndCurrent) {
+              const gs = foldGraphState(graph, session.log.events, taskTable.livePhases());
+              renderer.chromeLine(`  [plan] ${sanitizeLine(gs.summary)}`);
+            }
+          } catch {
+            /* the live table above already answered; the plan line is additive */
+          }
           return true;
         }
         const m = /^\/cancel(?:\s+(\S+))?$/i.exec(line);

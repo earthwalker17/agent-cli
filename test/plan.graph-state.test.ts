@@ -139,8 +139,12 @@ describe('foldGraphState', () => {
     const events = [started('t1', 'c-live')];
     const live = new Map([['c-live', 'running' as const]]);
     expect(foldGraphState(GRAPH, events, live).byId.get('t1')!.state).toBe('running');
+    // Session 11.5: overlay-fed folds surface live work in the SUMMARY too (the mid-turn
+    // /tasks plan line) — running must never read as silently not-completed.
+    expect(foldGraphState(GRAPH, events, live).summary).toContain('running: t1');
     const wait = new Map([['c-live', 'awaiting-approval' as const]]);
     expect(foldGraphState(GRAPH, events, wait).byId.get('t1')!.state).toBe('awaiting-approval');
+    expect(foldGraphState(GRAPH, events, wait).summary).toContain('t1 (awaiting approval)');
 
     const resumed = foldGraphState(GRAPH, events).byId.get('t1')!;
     expect(resumed.state).toBe('interrupted');

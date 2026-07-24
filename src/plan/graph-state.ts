@@ -225,6 +225,10 @@ function summarize(tasks: readonly PlanTaskState[], ready: readonly string[]): s
   const total = tasks.length;
   const done = tasks.filter((t) => t.state === 'completed').length;
   const parts: string[] = [`${done}/${total} completed`];
+  // Live phases (overlay-fed folds only, e.g. the mid-turn /tasks plan line): running work
+  // must be visible in the summary, not silently "not completed".
+  const live = tasks.filter((t) => t.state === 'running' || t.state === 'awaiting-approval');
+  if (live.length > 0) parts.push(`running: ${live.map((t) => `${t.id}${t.state === 'awaiting-approval' ? ' (awaiting approval)' : ''}`).join(', ')}`);
   if (ready.length > 0) parts.push(`ready: ${ready.join(', ')}`);
   const blocked = tasks.filter((t) => t.state === 'blocked');
   if (blocked.length > 0) parts.push(`blocked: ${blocked.map((t) => `${t.id} (on ${t.blockedOn.join(', ')})`).join(', ')}`);
