@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findGitOnPath, runGit } from '../src/git/client.js';
-import { createCheckpoint, listCheckpoints, pruneCheckpoints, runRestoreFlow, EMPTY_TREE, type CheckpointContext, type RestoreDeps } from '../src/git/checkpoint.js';
+import { createCheckpoint, deleteCheckpointRefs, listCheckpoints, pruneCheckpoints, runRestoreFlow, EMPTY_TREE, type CheckpointContext, type RestoreDeps } from '../src/git/checkpoint.js';
 import { SnapshotStore } from '../src/store/snapshots.js';
 import { applyUndo } from '../src/runtime/undo.js';
 import type { EventBody, SessionEvent } from '../src/types.js';
@@ -365,5 +365,27 @@ describe.skipIf(!hasGit)('list + prune', () => {
     const all = await pruneCheckpoints(cctx());
     expect(all.deleted).toHaveLength(1);
     expect(await listCheckpoints(cctx())).toEqual([]);
+  });
+});
+
+describe.skipIf(!hasGit)('deleteCheckpointRefs (Session 11.5: already-missing refs converge)', () => {
+  it('an existing ref deletes; a missing ref counts DELETED, never failed (the retry-forever trap)', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    const r = await createCheckpoint(cctx(), 'session-a');
+    expect(r.ok).toBe(true);
+
+    // First pass: one real ref + one that never existed. Both must land in `deleted` —
+    // the event-seeded resume prune retries anything in `failed` at every later quit, so a
+    // ref the user already pruned by hand (or that a prior quit deleted) must converge.
+    const out = await deleteCheckpointRefs(REAL_GIT!, repo, [r.ref!, 'refs/agent-cli/checkpoints/session-a/999']);
+    expect(out.deleted).toEqual([r.ref!, 'refs/agent-cli/checkpoints/session-a/999']);
+    expect(out.failed).toEqual([]);
+    expect(await listCheckpoints(cctx())).toEqual([]);
+
+    // Second pass over the SAME refs (the resume-retry shape): still all deleted, none failed.
+    const again = await deleteCheckpointRefs(REAL_GIT!, repo, [r.ref!]);
+    expect(again.deleted).toEqual([r.ref!]);
+    expect(again.failed).toEqual([]);
   });
 });

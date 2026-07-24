@@ -1,6 +1,6 @@
 import { fmtTokens } from './format.js';
 import type { TaskStatus } from '../types.js';
-import type { ChildStatusUpdate } from '../runtime/subagent.js';
+import { SESSION_CHILD_OUTPUT_TOKEN_CAP, TASKS_PER_SESSION, type ChildStatusUpdate } from '../runtime/subagent.js';
 import type { DelegateCaps } from '../tools/delegate.js';
 import type { LivePhase } from '../plan/graph-state.js';
 
@@ -115,7 +115,9 @@ export function createTaskTable(now: () => number = Date.now): TaskTable {
       if (live.length === 0) return [];
       const head =
         `▸ ${live.length} agent(s) running` +
-        (caps !== undefined ? ` · tasks ${caps.tasksStarted}/12 · child-out ${fmtTokens(caps.childOutputTokens)}/150k` : '') +
+        (caps !== undefined
+          ? ` · tasks ${caps.tasksStarted}/${TASKS_PER_SESSION} · child-out ${fmtTokens(caps.childOutputTokens)}/${fmtTokens(SESSION_CHILD_OUTPUT_TOKEN_CAP)}`
+          : '') +
         ' · /tasks · /cancel <id>';
       const agentLines = live.map((r) => {
         const activity =

@@ -164,7 +164,10 @@ export async function listCheckpoints(cctx: CheckpointContext, sessionId?: strin
 
 /**
  * Delete SPECIFIC checkpoint refs by name (V0.7.1: session-end task-base pruning). Best-effort
- * per ref; the caller owns announcing and recording the outcome.
+ * per ref; the caller owns announcing and recording the outcome. An already-missing ref counts
+ * as DELETED, not failed (Session 11.5): the goal state is "ref gone", and the event-seeded
+ * resume prune retries anything in `failed` at every later quit — a ref the user already
+ * pruned by hand must converge, never re-fail forever.
  */
 export async function deleteCheckpointRefs(
   gitPath: string,
@@ -175,7 +178,15 @@ export async function deleteCheckpointRefs(
   const failed: string[] = [];
   for (const ref of refs) {
     const r = await runGit({ gitPath, argv: ['update-ref', '-d', ref], cwd: repoRoot });
-    (r.ok ? deleted : failed).push(ref);
+    if (r.ok) {
+      deleted.push(ref);
+      continue;
+    }
+    // update-ref -d failed: distinguish "already gone" (success) from a real failure.
+    // show-ref --verify --quiet exits 1 exactly when the ref does not exist; any other
+    // outcome (0 = still there, 128/killed = git trouble) stays a retryable failure.
+    const probe = await runGit({ gitPath, argv: ['show-ref', '--verify', '--quiet', ref], cwd: repoRoot });
+    (probe.exitCode === 1 ? deleted : failed).push(ref);
   }
   return { deleted, failed };
 }
