@@ -89,7 +89,7 @@ describe('computeAcceptance', () => {
     const done = [started('t1', 'c1'), endedAs('c1', 'completed'), changes('c1', [])];
     const acc = computeAcceptance(st, foldGraphState(GRAPH, done), done);
     expect(acc.complete).toBe(true);
-    expect(acc.summary).toContain('plan 1/2 completed'); // m1 is parent-owned, honestly not counted
+    expect(acc.summary).toContain('plan 1/1 completed'); // m1 counted apart as parent-owned
   });
 
   it('a diverged approval and an unreadable plan both land on the unfinished list', () => {

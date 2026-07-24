@@ -222,9 +222,19 @@ export function depSatisfied(dep: PlanTaskState | undefined): boolean {
 }
 
 function summarize(tasks: readonly PlanTaskState[], ready: readonly string[]): string {
-  const total = tasks.length;
+  // Parent-owned (role main) tasks are ASSERTED, never verified — counting them in the
+  // completed denominator made an all-main plan read "0/4 completed" beside an honest
+  // "complete" acceptance (observed live in the S11.5 demo). Count them separately.
+  const parentOwned = tasks.filter((t) => t.state === 'parent-owned').length;
+  const countable = tasks.length - parentOwned;
   const done = tasks.filter((t) => t.state === 'completed').length;
-  const parts: string[] = [`${done}/${total} completed`];
+  const parts: string[] = [];
+  if (countable > 0) {
+    parts.push(`${done}/${countable} completed`);
+    if (parentOwned > 0) parts.push(`${parentOwned} parent-owned (asserted)`);
+  } else {
+    parts.push(`all ${parentOwned} task(s) parent-owned (asserted)`);
+  }
   // Live phases (overlay-fed folds only, e.g. the mid-turn /tasks plan line): running work
   // must be visible in the summary, not silently "not completed".
   const live = tasks.filter((t) => t.state === 'running' || t.state === 'awaiting-approval');

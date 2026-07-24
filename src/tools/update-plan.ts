@@ -26,7 +26,10 @@ const UpdatePlanInput = z
       'The COMPLETE plan graph (replaces the previous plan). objective/approach/risks are prose; tasks form a ' +
         'dependency DAG. Each task: id (short slug, stable across revisions), title, intent (what+why — seeds the ' +
         'child brief), role (executor = delegated mutating work in an isolated worktree; explorer/reviewer = ' +
-        'delegated read-only work; main = work YOU will do directly), dependsOn (task ids that must be completed ' +
+        'delegated read-only work; main = work YOU will do directly). PREFER executor tasks for independent ' +
+        'file-mutating work — disjoint executor tasks run as parallel isolated worktrees with captured, reviewable ' +
+        'diffs, and the harness verifies their completion; reserve main for integration, verification, and work ' +
+        'that genuinely needs your own context (main tasks are asserted done, never harness-verified). dependsOn (task ids that must be completed ' +
         'AND integrated first), touches (workspace-relative path prefixes the task owns — the scheduler refuses ' +
         'overlapping tasks in one parallel group), verify (how completion will be checked — required for ' +
         'executor/main), risk, serial (must run alone). Do NOT encode execution status anywhere — the harness ' +

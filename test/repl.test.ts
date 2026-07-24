@@ -474,7 +474,8 @@ describe('REPL: plan mode (Session 11 — canonical structured plans)', () => {
     expect(text).toContain('status: APPROVED');
     expect(text).toContain('CONTEXT, NOT AUTHORITY');
     expect(text).toContain('plan content unchanged since last shown');
-    expect(text).toContain('execution: 0/2 completed');
+    expect(text).toContain('execution: 0/1 completed'); // t2 (role main) counted apart
+    expect(text).toContain('1 parent-owned (asserted)');
     expect(text).toContain('ready: t1');
     expect(text).toContain('the user APPROVED the plan');
   });

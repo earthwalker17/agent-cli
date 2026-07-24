@@ -60,8 +60,24 @@ describe('foldGraphState', () => {
     expect(gs.byId.get('m1')!.note).toContain('not verified by the harness');
     expect(gs.byId.get('t4')!.state).toBe('queued'); // parent-owned dep auto-satisfies
     expect(gs.ready).toEqual(['t1', 't3', 't4']);
-    expect(gs.summary).toContain('0/5 completed');
+    // Parent-owned tasks are counted apart (S11.5 demo finding: "0/4 completed" beside an
+    // honest complete-acceptance read as a contradiction).
+    expect(gs.summary).toContain('0/4 completed');
+    expect(gs.summary).toContain('1 parent-owned (asserted)');
     expect(gs.summary).toContain('blocked: t2 (on t1)');
+  });
+
+  it('an all-parent-owned plan summarizes honestly instead of "0/N completed"', () => {
+    const allMain: PlanGraph = PlanGraphSchema.parse({
+      objective: 'checklist',
+      tasks: [
+        { id: 'a', title: 'a', intent: 'x', role: 'main', verify: 'v' },
+        { id: 'b', title: 'b', intent: 'x', role: 'main', verify: 'v', dependsOn: ['a'] },
+      ],
+    });
+    const gs = foldGraphState(allMain, []);
+    expect(gs.summary).toContain('all 2 task(s) parent-owned (asserted)');
+    expect(gs.summary).not.toContain('0/');
   });
 
   it('read-only completion needs no integration; executor completion requires the applied union', () => {
