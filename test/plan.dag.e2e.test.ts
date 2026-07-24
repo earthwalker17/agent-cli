@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findGitOnPath, runGit } from '../src/git/client.js';
-import { checkDagRules, createDelegateTool, delegateCapsFromEvents, type ExecutorDeps, type PlanGateInfo } from '../src/tools/delegate.js';
+import { checkDagRules, createDelegateTool, delegateCapsFromEvents, MAX_TASK_ATTEMPTS, type ExecutorDeps, type PlanGateInfo } from '../src/tools/delegate.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../src/tools/apply-changes.js';
 import { registryFile } from '../src/runtime/worktrees.js';
 import { startSession, endSession, runTurn, type Session } from '../src/runtime/session.js';
@@ -13,7 +13,7 @@ import { autoDenyApprover } from '../src/runtime/approvals.js';
 import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
 import { fixedClock } from '../src/shared/clock.js';
 import { seededIdGen } from '../src/shared/ids.js';
-import { PlanGraphSchema, planContentSha, type PlanGraph } from '../src/plan/schema.js';
+import { PlanGraphSchema, planContentSha, planTaskDefinitionSha, type PlanGraph } from '../src/plan/schema.js';
 import { readPlanState, setCanonicalStatus, writeCanonicalPlan, type PlanState } from '../src/plan/canonical.js';
 import { foldGraphState } from '../src/plan/graph-state.js';
 import { SnapshotStore } from '../src/store/snapshots.js';
@@ -143,6 +143,39 @@ describe('checkDagRules — the scheduler gate matrix (pure)', () => {
       expect(checkDagRules([spec('executor', 't1')], activeGate(g, [started('t1', 'c1'), endedAs('c1', status)]))).toBeNull();
     }
     expect(checkDagRules([spec('executor', 't1')], activeGate(g, [started('t1', 'c1')]))).toBeNull(); // interrupted
+  });
+
+  it('R10: the retry ceiling — 3 ended non-completed attempts under the current definition refuse', () => {
+    const g = graphOf(T('t1'));
+    const sha = planTaskDefinitionSha(g.tasks[0]!);
+    const shaStarted = (child: string, s: string): SessionEvent =>
+      ev({ type: 'task.started', callId: 'c', role: 'executor', childSessionId: child, budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 }, planTaskId: 't1', planTaskSha: s });
+    const failures = (n: number, s: string): SessionEvent[] =>
+      Array.from({ length: n }, (_, i) => [shaStarted(`cf${i}`, s), endedAs(`cf${i}`, i % 2 === 0 ? 'error' : 'cancelled')]).flat();
+
+    // Below the ceiling: retries stay allowed.
+    expect(checkDagRules([spec('executor', 't1')], activeGate(g, failures(MAX_TASK_ATTEMPTS - 1, sha)))).toBeNull();
+
+    // At the ceiling: refuse with the statuses and every hatch named.
+    const r = checkDagRules([spec('executor', 't1')], activeGate(g, failures(MAX_TASK_ATTEMPTS, sha)));
+    expect(r).toContain(`has already failed ${MAX_TASK_ATTEMPTS} attempt(s)`);
+    expect(r).toContain('error, cancelled, error');
+    expect(r).toContain('update_plan');
+    expect(r).toContain('directly as the parent');
+    expect(r).toContain('ask the user');
+
+    // Crash-interrupted attempts never count: 2 failures + 1 interrupted stays allowed.
+    const withInterrupted = [...failures(MAX_TASK_ATTEMPTS - 1, sha), shaStarted('c-int', sha)];
+    expect(checkDagRules([spec('executor', 't1')], activeGate(g, withInterrupted))).toBeNull();
+
+    // Legacy sha-less bindings count conservatively toward the current definition.
+    const legacy = (child: string): SessionEvent[] => [started('t1', child), endedAs(child, 'error')];
+    const legacyEvents = [...legacy('l1'), ...legacy('l2'), ...legacy('l3')];
+    expect(checkDagRules([spec('executor', 't1')], activeGate(g, legacyEvents))).toContain('do not retry identically');
+
+    // A definition change RESETS the ceiling: the spent attempts belong to the old sha.
+    const gAmended = graphOf(T('t1', { intent: 'do t1 differently' }));
+    expect(checkDagRules([spec('executor', 't1')], activeGate(gAmended, failures(MAX_TASK_ATTEMPTS, sha)))).toBeNull();
   });
 
   it('R6 duplicate binding / R9 intra-group dependency / R8 serial and high-risk isolation', () => {

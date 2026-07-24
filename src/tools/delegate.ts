@@ -107,6 +107,13 @@ export interface DelegateCaps {
   childOutputTokens: number;
 }
 
+/**
+ * R10 (Session 11.5): the per-task retry ceiling — ended-and-not-completed attempts under the
+ * current task definition before the gate refuses identical retries. Interrupted (crash)
+ * attempts never count; a definition change resets the count.
+ */
+export const MAX_TASK_ATTEMPTS = 3;
+
 export function delegateCapsFromEvents(events: readonly SessionEvent[]): DelegateCaps {
   const caps: DelegateCaps = { tasksStarted: 0, childOutputTokens: 0 };
   for (const e of events) {
@@ -336,6 +343,26 @@ export function checkDagRules(
     }
     if (ts.state === 'integrating') {
       return `plan task '${t.plan_task}' has captured changes not yet fully applied — integrate them with apply_task_changes (or resolve the refusals) before re-running it`;
+    }
+    // R10 (Session 11.5) — the bounded-retry ceiling: ended-and-not-completed attempts under
+    // the CURRENT definition. 'interrupted' never counts (a crash is not the model retrying);
+    // legacy sha-less bindings count conservatively toward any definition; a definition change
+    // resets the ceiling (the attempts belong to the old sha).
+    const spent = ts.attemptHistory.filter(
+      (a) =>
+        a.outcome !== 'completed' &&
+        a.outcome !== 'interrupted' &&
+        a.outcome !== 'running' &&
+        a.outcome !== 'awaiting-approval' &&
+        (a.planTaskSha === undefined || a.planTaskSha === ts.definitionSha),
+    );
+    if (spent.length >= MAX_TASK_ATTEMPTS) {
+      return (
+        `plan task '${t.plan_task}' has already failed ${spent.length} attempt(s) under its current definition ` +
+        `(${spent.map((a) => a.outcome).join(', ')}) — do not retry identically: revise the task with update_plan `
+        + `(a materially different definition resets the ceiling; approval will be required again), do the work ` +
+        `directly as the parent, or ask the user how to proceed`
+      );
     }
     if (ts.state === 'blocked') {
       // R4 (parent-owned deps auto-satisfy in the fold and surface as a warning, never here)
