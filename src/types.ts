@@ -125,6 +125,8 @@ export type TaskEvidence =
       budget: TaskBudget;
       /** The approved-plan task this child is bound to (Session 11, additive) — the DAG join key. */
       planTaskId?: string;
+      /** The bound task's definition sha at spawn (Session 11.5, additive) — completed-state identity. */
+      planTaskSha?: string;
     }
   | {
       /**
@@ -669,6 +671,14 @@ export type EventBody =
       budget: TaskBudget;
       /** The approved-plan task this child executes (Session 11, additive) — the DAG join key. */
       planTaskId?: string;
+      /**
+       * The bound plan task's DEFINITION sha at spawn time (Session 11.5, additive):
+       * sha256(canonicalJson(task, dependsOn sorted)). Lets the fold attach 'completed' to
+       * the definition that actually ran — an amendment changing a completed task's
+       * definition re-opens it. Absent on pre-11.5 logs: completed then stays sticky to the
+       * id (the conservative legacy reading).
+       */
+      planTaskSha?: string;
     }
   | {
       /**

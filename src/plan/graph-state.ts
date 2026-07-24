@@ -1,5 +1,5 @@
 import type { SessionEvent, TaskChangeFile } from '../types.js';
-import { topoOrder, type PlanGraph, type PlanTaskRole } from './schema.js';
+import { planTaskDefinitionSha, topoOrder, type PlanGraph, type PlanTaskRole } from './schema.js';
 
 /**
  * Execution state of the approved plan's task graph — a PURE fold over (plan graph, events),
@@ -23,6 +23,15 @@ export type PlanTaskStateName =
   | 'parent-owned' // role 'main': the parent does it; the harness cannot verify completion
   | 'interrupted'; // started but never ended, and not live — crash/resume evidence
 
+/** One binding's recorded outcome (Session 11.5): what each attempt actually did. */
+export interface PlanTaskAttempt {
+  childSessionId: string;
+  /** The child's ended status, 'running'/'awaiting-approval' from the live overlay, or 'interrupted'. */
+  outcome: string;
+  /** The definition sha recorded at spawn; absent on pre-11.5 bindings. */
+  planTaskSha?: string;
+}
+
 export interface PlanTaskState {
   id: string;
   title: string;
@@ -34,6 +43,13 @@ export interface PlanTaskState {
   blockedOn: string[];
   /** Number of task.started bindings seen (>1 = retries happened). */
   attempts: number;
+  /**
+   * Every binding in start order with its outcome (Session 11.5) — the per-attempt history
+   * the retry ceiling and future recovery policy read; `attempts` is its length.
+   */
+  attemptHistory: PlanTaskAttempt[];
+  /** The task's CURRENT definition sha (Session 11.5) — what new bindings would record. */
+  definitionSha: string;
   /** Honest caveats: partial applies, omitted captures, parent-owned assertion, etc. */
   note?: string;
 }
@@ -56,7 +72,7 @@ export function foldGraphState(
   live?: ReadonlyMap<string, LivePhase>,
 ): GraphState {
   // Gather per-plan-task bindings and per-child outcomes from the event stream.
-  const bindings = new Map<string, string[]>(); // planTaskId -> childSessionIds in start order
+  const bindings = new Map<string, { childSessionId: string; planTaskSha?: string }[]>(); // in start order
   const ended = new Map<string, { status: string }>();
   const captured = new Map<string, { files: TaskChangeFile[]; omittedCount: number }>();
   const applied = new Map<string, Set<string>>(); // childSessionId -> union of applied relPaths
@@ -64,7 +80,7 @@ export function foldGraphState(
   for (const e of events) {
     if (e.type === 'task.started' && e.planTaskId !== undefined) {
       const list = bindings.get(e.planTaskId) ?? [];
-      list.push(e.childSessionId);
+      list.push({ childSessionId: e.childSessionId, ...(e.planTaskSha !== undefined ? { planTaskSha: e.planTaskSha } : {}) });
       bindings.set(e.planTaskId, list);
     } else if (e.type === 'task.ended') {
       ended.set(e.childSessionId, { status: e.status });
@@ -85,7 +101,13 @@ export function foldGraphState(
     const task = byDecl.get(id);
     if (task === undefined) continue;
     const bound = bindings.get(id) ?? [];
-    const childSessionId = bound.length > 0 ? bound[bound.length - 1]! : null;
+    const last = bound.length > 0 ? bound[bound.length - 1]! : null;
+    const childSessionId = last !== null ? last.childSessionId : null;
+    const attemptHistory: PlanTaskAttempt[] = bound.map((b) => ({
+      childSessionId: b.childSessionId,
+      outcome: ended.get(b.childSessionId)?.status ?? live?.get(b.childSessionId) ?? 'interrupted',
+      ...(b.planTaskSha !== undefined ? { planTaskSha: b.planTaskSha } : {}),
+    }));
     const base: Omit<PlanTaskState, 'state'> = {
       id,
       title: task.title,
@@ -93,6 +115,8 @@ export function foldGraphState(
       childSessionId,
       blockedOn: [],
       attempts: bound.length,
+      attemptHistory,
+      definitionSha: planTaskDefinitionSha(task),
     };
 
     if (task.role === 'main') {
@@ -121,7 +145,12 @@ export function foldGraphState(
           : {
               ...base,
               state: 'interrupted',
-              note: `started but never ended — child evidence log: ${childSessionId}`,
+              // Re-run safety is PROVABLE for file effects (task.ended always precedes capture,
+              // so an interrupted child captured nothing and its worktree work integrated
+              // nowhere) — but NOT for external side effects of user-approved shell commands.
+              note:
+                `started but never ended — safe to re-run: the isolated worktree captured nothing; ` +
+                `user-approved shell commands it ran may still have had external side effects (child log: ${childSessionId})`,
             },
       );
       continue;
@@ -149,6 +178,23 @@ export function foldGraphState(
       const skipped = (cap?.files ?? []).length - applicable.length;
       if (skipped > 0) notes.push(`${skipped} oversize file(s) can never be applied`);
       if (unapplied.length === 0) {
+        // Definition identity (Session 11.5): 'completed' belongs to the definition that RAN.
+        // An amendment that changed this task after completion re-opens it (conservative:
+        // re-run rather than silently skip changed work). Pre-11.5 bindings without a
+        // recorded sha keep the legacy id-sticky reading. Deliberately checked only at the
+        // terminal state: an 'integrating' task keeps integrating its captured old-definition
+        // work first (the gate refuses concurrent re-runs until applied).
+        const boundSha = last?.planTaskSha;
+        if (boundSha !== undefined && boundSha !== base.definitionSha) {
+          const unmet = task.dependsOn.filter((dep) => !depSatisfied(states.get(dep)));
+          states.set(
+            id,
+            unmet.length === 0
+              ? { ...base, state: 'queued', note: `definition changed after completion (completed as ${boundSha.slice(0, 8)}) — re-runnable` }
+              : { ...base, state: 'blocked', blockedOn: unmet, note: `definition changed after completion (completed as ${boundSha.slice(0, 8)})` },
+          );
+          continue;
+        }
         states.set(id, { ...base, state: 'completed', ...(notes.length > 0 ? { note: notes.join('; ') } : {}) });
       } else {
         notes.unshift(`${unapplied.length} of ${applicable.length} captured file(s) not yet applied`);

@@ -161,6 +161,11 @@ export interface SubagentSpec {
   parentSessionId: string;
   /** The approved-plan task this child executes (Session 11) — recorded on task.started. */
   planTaskId?: string;
+  /**
+   * The bound plan task's DEFINITION sha at spawn time (Session 11.5) — recorded on
+   * task.started so 'completed' attaches to the definition that ran, not the id alone.
+   */
+  planTaskSha?: string;
 }
 
 export interface SubagentResult {
@@ -311,6 +316,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     childSessionId: child.id,
     budget,
     ...(spec.planTaskId !== undefined ? { planTaskId: spec.planTaskId } : {}),
+    ...(spec.planTaskSha !== undefined ? { planTaskSha: spec.planTaskSha } : {}),
   });
   pushStatus({ phase: 'running', role: spec.role, ...(spec.planTaskId !== undefined ? { planTaskId: spec.planTaskId } : {}) });
 

@@ -632,6 +632,7 @@ function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): 
         childSessionId: e.childSessionId,
         budget: e.budget,
         ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
+        ...(e.planTaskSha !== undefined ? { planTaskSha: e.planTaskSha } : {}),
       });
       return;
     case 'supervision':

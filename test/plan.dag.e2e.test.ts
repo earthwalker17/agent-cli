@@ -376,6 +376,10 @@ describe.skipIf(!hasGit)('task-graph execution end to end (real git)', () => {
     expect(startedEvents).toHaveLength(2);
     // Parallel group: the two children's started events land in EITHER order.
     expect(startedEvents.map((e) => (e.type === 'task.started' ? e.planTaskId : '')).sort()).toEqual(['t1', 't2']);
+    // Session 11.5: every bound spawn records the definition sha it ran as.
+    for (const e of startedEvents) {
+      expect(e.type === 'task.started' ? e.planTaskSha : undefined).toMatch(/^[0-9a-f]{64}$/);
+    }
 
     // Early dependent: refused before anything spawns (R4 — t1 captured but not applied).
     expect((await runTurn(parent, 'try t3')).finalText).toBe('saw the dependency refusal');

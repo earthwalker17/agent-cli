@@ -80,6 +80,18 @@ export function planContentSha(graph: PlanGraph): string {
   return sha256(canonicalJson(graph));
 }
 
+/**
+ * The per-task DEFINITION identity (Session 11.5): sha256 of the task's canonical form with
+ * dependsOn sorted (reordering one task's dependency list is semantically neutral FOR THAT
+ * TASK, unlike the graph-level content sha where order is preserved as written). Recorded on
+ * task.started bindings so 'completed' attaches to the definition that actually ran: an
+ * amendment that changes a completed task's definition re-opens it, while untouched completed
+ * tasks stay completed across amendments.
+ */
+export function planTaskDefinitionSha(task: PlanTask): string {
+  return sha256(canonicalJson({ ...task, dependsOn: [...task.dependsOn].sort() }));
+}
+
 export interface PlanValidation {
   ok: boolean;
   /** Blocking problems, exact and complete — the model's revision loop depends on precision. */

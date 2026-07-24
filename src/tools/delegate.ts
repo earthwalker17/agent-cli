@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { SessionEvent, SubagentRoleName, TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
 import type { PlanState } from '../plan/canonical.js';
 import type { GraphState } from '../plan/graph-state.js';
-import type { PlanGraph, PlanTask } from '../plan/schema.js';
+import { planTaskDefinitionSha, type PlanGraph, type PlanTask } from '../plan/schema.js';
 import {
   neutralizeHarnessDelimiters,
   runSubagentTask,
@@ -544,6 +544,10 @@ export function createDelegateTool(
             ...(t.expected_output !== undefined ? { expectedOutput: t.expected_output } : {}),
             ...(composed.briefs[index]!.length > 0 ? { briefLines: composed.briefs[index]! } : {}),
             ...(t.plan_task !== undefined ? { planTaskId: t.plan_task } : {}),
+            // Definition identity at spawn (Session 11.5): completed-state binds to WHAT ran.
+            ...(t.plan_task !== undefined && planTaskById.has(t.plan_task)
+              ? { planTaskSha: planTaskDefinitionSha(planTaskById.get(t.plan_task)!) }
+              : {}),
           };
           const provider = deps.providerForTask?.(index, spec.role) ?? deps.provider;
           const taskDeps: SubagentDeps = {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { foldGraphState, depSatisfied } from '../src/plan/graph-state.js';
-import { PlanGraphSchema, type PlanGraph } from '../src/plan/schema.js';
+import { PlanGraphSchema, planTaskDefinitionSha, type PlanGraph } from '../src/plan/schema.js';
 import type { SessionEvent, TaskChangeFile } from '../src/types.js';
 
 /**
@@ -13,8 +13,16 @@ let seq = 0;
 const ev = (body: Record<string, unknown>): SessionEvent =>
   ({ v: 1, seq: ++seq, ts: '2026-07-23T00:00:00.000Z', ...body }) as unknown as SessionEvent;
 
-const started = (planTaskId: string, childSessionId: string): SessionEvent =>
-  ev({ type: 'task.started', callId: 'c1', role: 'executor', childSessionId, budget: { maxSteps: 30, timeoutMs: 1, maxOutputTokens: 1 }, planTaskId });
+const started = (planTaskId: string, childSessionId: string, planTaskSha?: string): SessionEvent =>
+  ev({
+    type: 'task.started',
+    callId: 'c1',
+    role: 'executor',
+    childSessionId,
+    budget: { maxSteps: 30, timeoutMs: 1, maxOutputTokens: 1 },
+    planTaskId,
+    ...(planTaskSha !== undefined ? { planTaskSha } : {}),
+  });
 const endedWith = (childSessionId: string, status: string): SessionEvent =>
   ev({ type: 'task.ended', callId: 'c1', childSessionId, status, steps: 1, usage: { inputTokens: 0, outputTokens: 10 }, resultSha256: 'x', durationMs: 5 });
 const changes = (childSessionId: string, files: TaskChangeFile[], omittedCount = 0): SessionEvent =>
@@ -145,5 +153,104 @@ describe('foldGraphState', () => {
     const gs = foldGraphState(GRAPH, [unbound]);
     expect(gs.byId.get('t1')!.state).toBe('queued');
     expect(gs.byId.get('t3')!.state).toBe('queued');
+  });
+});
+
+describe('definition identity + attempt history (Session 11.5)', () => {
+  /** GRAPH with t1's intent changed — a semantic amendment to a single task. */
+  const AMENDED: PlanGraph = PlanGraphSchema.parse({
+    objective: 'demo',
+    tasks: [
+      { id: 't1', title: 'core', intent: 'build DIFFERENTLY', role: 'executor', verify: 'tests' },
+      { id: 't2', title: 'wire', intent: 'integrate', role: 'executor', verify: 'e2e', dependsOn: ['t1'] },
+      { id: 't3', title: 'survey', intent: 'look', role: 'explorer' },
+      { id: 'm1', title: 'docs', intent: 'parent writes docs', role: 'main', verify: 'read them' },
+      { id: 't4', title: 'after docs', intent: 'x', role: 'executor', verify: 'y', dependsOn: ['m1'] },
+    ],
+  });
+  const t1Sha = planTaskDefinitionSha(GRAPH.tasks[0]!);
+  const t1AmendedSha = planTaskDefinitionSha(AMENDED.tasks[0]!);
+
+  const completedT1 = (sha?: string): SessionEvent[] => [
+    started('t1', 'c-done', sha),
+    endedWith('c-done', 'completed'),
+    changes('c-done', []),
+  ];
+
+  it('definition shas: dependsOn order is neutral; any semantic field change flips the sha', () => {
+    expect(t1Sha).not.toBe(t1AmendedSha);
+    const a = PlanGraphSchema.parse({ objective: 'x', tasks: [{ id: 'z', title: 't', intent: 'i', role: 'explorer', dependsOn: [] }] }).tasks[0]!;
+    const sorted = planTaskDefinitionSha({ ...a, dependsOn: ['p', 'q'] });
+    const reversed = planTaskDefinitionSha({ ...a, dependsOn: ['q', 'p'] });
+    expect(sorted).toBe(reversed);
+  });
+
+  it('a completed task whose definition changed re-opens (queued) with the honest note', () => {
+    const gs = foldGraphState(AMENDED, completedT1(t1Sha));
+    const st = gs.byId.get('t1')!;
+    expect(st.state).toBe('queued');
+    expect(st.note).toContain('definition changed after completion');
+    expect(st.note).toContain(t1Sha.slice(0, 8));
+    // The reopened task no longer satisfies its dependents (conservative direction).
+    expect(gs.byId.get('t2')).toMatchObject({ state: 'blocked', blockedOn: ['t1'] });
+  });
+
+  it('an unchanged completed task stays completed across amendments (sha matches)', () => {
+    const gs = foldGraphState(GRAPH, completedT1(t1Sha));
+    expect(gs.byId.get('t1')!.state).toBe('completed');
+    expect(gs.byId.get('t2')!.state).toBe('queued');
+  });
+
+  it('legacy sha-less bindings keep the id-sticky completed reading (pre-11.5 logs)', () => {
+    const gs = foldGraphState(AMENDED, completedT1(undefined));
+    expect(gs.byId.get('t1')!.state).toBe('completed');
+  });
+
+  it('A→B→A: completing under B then amending back to A re-opens (conservative, documented)', () => {
+    // The latest binding recorded B's sha; the current definition is A again. Re-running too
+    // much beats silently skipping — the note carries the sha the work actually ran as.
+    const gs = foldGraphState(GRAPH, completedT1(t1AmendedSha));
+    const st = gs.byId.get('t1')!;
+    expect(st.state).toBe('queued');
+    expect(st.note).toContain(t1AmendedSha.slice(0, 8));
+  });
+
+  it('integrating is NOT reopened by a definition change (captured work integrates first)', () => {
+    const events = [
+      started('t1', 'c-int', t1Sha),
+      endedWith('c-int', 'completed'),
+      changes('c-int', [file('src/a.ts')]),
+    ];
+    expect(foldGraphState(AMENDED, events).byId.get('t1')!.state).toBe('integrating');
+  });
+
+  it('attemptHistory records every binding with outcome and sha; attempts stays the count', () => {
+    const events = [
+      started('t1', 'c-1', t1Sha),
+      endedWith('c-1', 'error'),
+      started('t1', 'c-2', t1Sha),
+      // c-2 never ended (crash) — outcome 'interrupted'
+      started('t1', 'c-3', t1AmendedSha),
+      endedWith('c-3', 'completed'),
+      changes('c-3', []),
+    ];
+    const st = foldGraphState(AMENDED, events).byId.get('t1')!;
+    expect(st.attempts).toBe(3);
+    expect(st.attemptHistory).toEqual([
+      { childSessionId: 'c-1', outcome: 'error', planTaskSha: t1Sha },
+      { childSessionId: 'c-2', outcome: 'interrupted', planTaskSha: t1Sha },
+      { childSessionId: 'c-3', outcome: 'completed', planTaskSha: t1AmendedSha },
+    ]);
+    expect(st.definitionSha).toBe(t1AmendedSha);
+    expect(st.state).toBe('completed');
+  });
+
+  it('the interrupted note states re-run safety AND the shell-side-effect caveat', () => {
+    const st = foldGraphState(GRAPH, [started('t1', 'c-live')]).byId.get('t1')!;
+    expect(st.state).toBe('interrupted');
+    expect(st.note).toContain('safe to re-run');
+    expect(st.note).toContain('captured nothing');
+    expect(st.note).toContain('external side effects');
+    expect(st.note).toContain('c-live');
   });
 });

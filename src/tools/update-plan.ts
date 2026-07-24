@@ -30,9 +30,9 @@ const UpdatePlanInput = z
         'AND integrated first), touches (workspace-relative path prefixes the task owns — the scheduler refuses ' +
         'overlapping tasks in one parallel group), verify (how completion will be checked — required for ' +
         'executor/main), risk, serial (must run alone). Do NOT encode execution status anywhere — the harness ' +
-        'derives live task states from evidence. Task ids are stable across amendments and a COMPLETED id stays ' +
-        'completed: if an amendment materially changes what a completed task must do, give that work a NEW id so ' +
-        'it actually runs.',
+        'derives live task states from evidence. Task ids are stable across amendments; completed state belongs ' +
+        'to the task DEFINITION that ran: changing a completed task (title/intent/role/touches/verify/…) re-opens ' +
+        'it for execution, while untouched completed tasks stay completed across amendments.',
     ),
     reason: z.string().max(200).optional().describe('One line: why the plan changed (shown in evidence)'),
   })
