@@ -37,6 +37,17 @@ src/
     env.ts                 buildChildEnv — env hygiene (secret drops, core floor, proxy pass).
     kill.ts                killTree — verified best-effort tree kill + isAlive.
     run.ts                 runManaged — the managed-subprocess runner. Policy- and log-free.
+    shell.ts               shellInvocation — the ONE exit-code-fidelity shell wrapper.
+  checks/                  Session 12 — see "Typed verification".
+    types.ts               CheckRecipe / DetectedProject / CheckResult contracts.
+    detect.ts              Bounded never-throwing manifest detection + stat fingerprint.
+    recipes.ts             The declarative recipe table + toCommand (the single composer).
+    normalize.ts           Exit-code-is-the-verdict normalization + named signal extraction.
+  recovery/                Session 12 — see "Typed recovery". (FailureClass lives in types.ts.)
+    catalogue.ts           The nine-class recovery matrix, as DATA.
+    classify.ts            Deterministic classification from persisted evidence.
+    ledger.ts              Pure fold: repair attempts with DERIVED outcomes.
+    policy.ts              Bounded-repair eligibility + typed stop reasons.
   git/
     types.ts               GitFacts / GitResult / porcelain contracts (harness capability, NOT tools).
     client.ts              runGit over runManaged — hardened on every invocation (see "GitOps").
@@ -273,6 +284,71 @@ Large-repo understanding is selective and ranked, not a broad file dump. One in-
   read-only child roles (admission rules under "Tasks, roles"); `/map` (re-renders the session
   handle, no disk write); `workspace.mapped` additive fields; CODEBASE staleness. Executor
   children and pre-trust `agent map` deliberately stay on the flat map.
+
+## Typed verification (`checks/`, `tools/run-check.ts`) — Session 12
+
+Verification stopped being "whatever shell command the model chose" and became a typed
+capability whose results are durable evidence. **The model names KINDS; the harness names
+COMMANDS.** That inversion is the whole trust argument, and everything else follows from it.
+
+- **Kinds** (`types.ts`, shared vocabulary): `build | test | test-targeted | typecheck | lint |
+  format | static-analysis`. There is deliberately NO dependency-install kind — installing runs
+  third-party code with network access, which is not "verify what we just built"; a missing
+  toolchain is an honest `unsupported` precondition the user resolves.
+- **Detection** (`detect.ts`): bounded, never-throwing manifest reads over a FIXED candidate list
+  (so a newly ADDED manifest is noticed too), plus a stat-only fingerprint. Everything taken from
+  workspace bytes — script names, dependency names — is charset-filtered AT INGESTION, because it
+  is later composed into a command line.
+- **Recipes** (`recipes.ts`): declarative rows with `applies` / `unmetPrecondition` / `argv` /
+  `body` / timeout / effects. A project's OWN script always beats a guessed tool invocation, and
+  the first applicable row wins — resolution is deterministic, which is what consent can bind to.
+  `toCommand` is the single composer: bare-safe tokens pass through, everything else is
+  single-quoted, and an unrepresentable argument throws rather than being hand-escaped. Scope
+  prefixes reuse the plan's `touches` containment rule and are never disk-probed. Node/TS is
+  first-class, Python minimal, everything else `unsupported` **with the reason**. A script recipe
+  requires `node_modules` only when the project actually DECLARES dependencies — a project whose
+  scripts use Node built-ins is verifiable.
+- **Normalization** (`normalize.ts`): **THE EXIT CODE IS THE VERDICT.** `exited`+0 ⇒ pass,
+  `exited`+non-zero ⇒ fail, every non-exit termination ⇒ `error` — never `pass`. Parsers only
+  enrich `summary`/`findings`/`signals`. The named **signals** are the durable half: the full
+  output is truncated and only spilled to a blob, so failure classification later reads the
+  signal ids persisted on the event, not text that has left the context.
+- **`run_check`** (per-session factory, PARENT-ONLY): holds the detected project SNAPSHOT, because
+  the policy `check()` fact must be pure and because the command the human approved must be the
+  command that runs. Executors are deliberately excluded — a worktree materializes without
+  gitignored dependencies, so a check there would refuse on a precondition almost every time; the
+  parent verifies after `apply_task_changes`, where the workspace is real.
+- **Three refusals that spawn nothing:** the resolved command (or the script BODY it invokes)
+  changed since the gate — the snapshot advances so the next call re-asks; a malformed request
+  (`test-targeted` with no usable scope) — refused as a CALL, with no event, so a caller mistake
+  can never become gate evidence; and the session check budget (`CHECKS_PER_SESSION`,
+  events-rebuilt), whose refusal names its consequence and the only real exits.
+- **Evidence:** `check.started` is emitted from `onSpawn` ONLY, so it means exactly what
+  `command.started` means — a process really started. An `unsupported` kind records a completed
+  event alone, carrying `unsupportedReason` (`no-recipe` | `precondition` | `bad-request`), which
+  is what lets a gate distinguish "this project cannot" from "you asked wrong". Output spills
+  through the existing Session-11.5 choke point (the string hashed IS the string spilled).
+  `reconstruct` replays an interrupted check as "produced no verdict; effects unknown — re-run".
+
+### Consent for checks — replay, bound to what actually runs
+
+A check runs project code at full user privilege: it is `reversible` + `noUndo`, always
+`execBoundary: 'unsandboxed'` (the Low-IL boundary denies workspace writes, so a build could not
+run inside it — the mode is recorded, never implied), and it ASKS. Repeated checks would be
+unaffordable at one approval each, so a `session`-scope answer stores **replay consent**:
+
+- keyed by `sha256(recipeId + command + bodySha)` in a SEPARATE store with no `ActionClass`. The
+  **body** is load-bearing: `npm run test` is a stable string whose behavior lives in
+  package.json, which the agent can rewrite through the ordinary auto-allowed in-workspace write.
+  Binding the command alone turned one `[s]` into standing consent to execute whatever the script
+  was later changed to say — the exact authority `run_command` is denied by name.
+- `GRANTABLE` / `isGrantable` / `Grants.add` are UNTOUCHED. Widening the class table was the
+  cheap route and would have silently broken an unrelated consent: the executor-spawn ask is
+  classified `reversible` and is deliberately non-grantable, yet the prompt offers `[s]` whenever
+  `isGrantable(classification)` holds — a widened class would have rendered an `[s]` storing a
+  grant the delegates branch never reads. Consent that does nothing is worse than no consent.
+- the prompt shows every resolved command verbatim (`describeCall` has a `run_check` branch —
+  without it the prompt was literally blank) and counts what `[s]` grants.
 
 ## Managed execution (`exec/`)
 
@@ -679,6 +755,97 @@ task table owns the registry; a forwarded ask queued for a cancelled child resol
 members `cancelled`/`stalled` are additive and flow through every consumer (fold, renderer,
 report, childReason).
 
+## The verification gate (`plan/schema.ts`, `plan/graph-state.ts`) — Session 12
+
+A plan task declares the typed checks that gate it, and **dependents unblock only when that gate
+is green**. The mechanism is one predicate, not a new state.
+
+- **Schema:** `PlanTask.checks?: CheckKind[]` and `PlanGraph.gates? {integration, completion}` —
+  optional with NO zod default, so `canonicalJson` drops them and every pre-existing plan keeps
+  its exact `planContentSha`/`planTaskDefinitionSha` (a resumed approved plan stays
+  approved-and-current). An EMPTY list normalizes to absent: `[]` and "no gate" are the same gate
+  and the approval binding must not distinguish them. Both plan projections render checks and
+  gates — the user approves a content sha whose gating semantics must be visible.
+- **Validation:** `checks` on a `role: 'main'` task is an ERROR (a per-task gate is anchored on
+  that task's own integration evidence, which parent-owned work never produces; the message
+  points at `gates.completion`). A kind this project cannot run is a WARNING fed back through
+  `update_plan`'s revision loop, so an unsatisfiable gate is caught at the consent boundary.
+- **`PlanTaskState.verification`** is a FIELD on a `completed` task, deliberately not a state
+  name. A separate "unverified" state would have taken a fully-integrated task out of R5's
+  duplicated-mutation refusal while R10's ceiling (which ignores `completed` outcomes) could not
+  bound the resulting re-runs.
+- **`depSatisfied` = `(completed && verification.status !== 'pending') || parent-owned`.** That
+  single change propagates to queued/blocked resolution, R4's refusal, and acceptance. A task
+  with no declared checks has status `none` and behaves exactly as before — simple tasks stay
+  cheap.
+- **What a green gate PROVES, exactly:** the declared kinds passed on the workspace at a point
+  AFTER this task's own work was integrated. The anchor is the max over ALL of the task's
+  bindings (capture happens for failed children too, and an earlier attempt's files can be
+  applied later — anchoring on the last binding alone left a stale-green gate). Satisfaction is
+  harness-derived from event seq, not attested by the model's `plan_task` label. For
+  `test-targeted` the SCOPE is the check: the run's recorded `scopePaths` must overlap the task's
+  `touches`, or a green run of somebody else's tests would discharge the gate.
+- **Waivers, honestly:** an `unsupported` result waives the kind — but ONLY when the reason is a
+  project-capability one, never a `bad-request`. A waiver is recorded as a caveat in the fold
+  note, both plan views, `/tasks`, and — critically — in `AcceptanceState.caveats`, so a
+  recorded "complete" can never quietly mean "the declared check never ran".
+- **Boundaries:** `integrationGateState` refuses a NEW executor wave while `gates.integration` is
+  unsatisfied since the last apply (R12, group-atomic and pre-checkpoint like every other rule).
+  `completionGateState` blocks `/accept` until `gates.completion` passed after the LAST change —
+  and "change" includes `undo.applied` and `git.restore`, because `applyUndo` writes files back
+  to disk while recording only its own event. The asymmetry is deliberate and documented: a
+  per-task gate is NOT invalidated by unrelated later changes; the completion gate is what covers
+  the combined state.
+
+## Typed recovery (`recovery/`, `tools/recover.ts`) — Session 12
+
+Recovery is a POLICY, not "try again": **classification happens before any repair is planned**,
+and every automatic repair needs a supported class, sufficient evidence, a recovery point, a
+materially different hypothesis, and budget it has not spent.
+
+- **Nine classes** (`types.ts`): dependency-setup, compile-type, test-assertion, lint-format,
+  runtime-process, integration-conflict, policy-approval, timeout-resource, **unknown** — a real
+  answer with real consequences (stop and escalate), never a shrug that permits another attempt.
+- **`catalogue.ts` is DATA**, one entry per class: likely signals, required evidence, diagnostics,
+  eligible actions, regression checks, auto-eligibility, what always needs the user, and stop
+  conditions. It is rendered into failing `run_check` results and into gate refusals, so the
+  guidance arrives where it is needed instead of living in prompt prose. Changing recovery
+  behavior means editing this table.
+- **`classify.ts`** is deterministic and derivable FROM EVENTS ALONE (it reads the persisted
+  signal ids). Ordering is load-bearing: a missing toolchain outranks every downstream
+  diagnostic, and a killed check is a resource failure rather than a test failure. A delegated
+  task that merely ended `error` stays **unknown** and points at the child log — "a task failed"
+  is not a diagnosis. User interventions and crashes are not failure outcomes at all (the R10
+  rule).
+- **`ledger.ts` derives outcomes; it never records them.** There is no `repair.ended` to lose in a
+  crash: an attempt is `succeeded` only when every regression check it declared actually passed
+  after it, `superseded` by a newer attempt for the same signature, else `open`. The repair proof
+  must include the kind that actually failed, or an unrelated green check could "prove" a repair.
+  Scope expansion is measured from `file.mutated` plus this target's own applies — integrating a
+  DIFFERENT task's reviewed work is progress, not a repair spreading.
+- **`policy.ts` bounds it:** unknown classification, a class needing a human decision, spent
+  attempts, in-session wall time (idle gaps excluded, so resuming the next morning does not
+  exhaust a signature), session and token budgets, an expanded diff, and a repeated identical
+  hypothesis each STOP with a typed reason. What is enforced vs. merely detected vs. not verified
+  at all is stated in the module: scope is MEASURED, not prevented; whether a hypothesis is
+  genuinely a new idea is recorded for review, never claimed.
+- **`recover`** (parent-only, actions `attempt` / `escalate`) writes only events, so it classifies
+  as `observe` and confers no authority — an executor spawn still asks every time. It creates no
+  checkpoint because the recovery POINT already exists in both paths: parent edits are
+  snapshot-backed by construction, and an executor re-run creates a fresh group base checkpoint
+  under the Session-11.5 crash-covered prune lifecycle.
+- **R11 at the scheduler gate:** once a mutating task has failed under its current definition,
+  re-spawning it is a repair and needs a plan for THAT failure; the policy's stop conditions
+  refuse outright. One free re-spawn stands for stop reasons no model effort can clear (a
+  task-sourced `error` is `unknown`, a `timeout` is `timeout-resource`) so a transient blip does
+  not cost a plan amendment plus a human re-approval; R10's ceiling still bounds it. Read-only
+  retries are unaffected. R10's own refusal now names the class and its required evidence.
+- **Acceptance:** an open escalation or an unproven repair is honest unfinished work. An
+  escalation resolves BY EVIDENCE when its plan task completes with a satisfied gate — without
+  that it was an unclosable trap, since the policy refuses to record an attempt for exactly the
+  classes escalation exists for. A `session`-targeted escalation clears only via a proven attempt;
+  `/accept confirm` remains the user's override.
+
 ## The acceptance boundary (`runtime/acceptance.ts`, REPL `/accept`) — Session 11.5
 
 A session's completion is an EXPLICIT, recorded boundary — never a side effect of quitting.
@@ -686,8 +853,14 @@ A session's completion is an EXPLICIT, recorded boundary — never a side effect
 COMPLETE = the plan is fully executed (every task completed/parent-owned; a DRAFT plan is
 deliberately NOT silently complete — accepting work the user never approved a plan for is a
 consent mismatch) AND every applicable capture is applied, registry-wide including
-plan-unbound executor work (same applicability rule as the graph fold). One derivation feeds
-`/accept`, `/status`, the quit summary, the report, and the journal handoff.
+plan-unbound executor work (same applicability rule as the graph fold). Session 12 adds three
+axes: a completed task whose declared check gate is still pending is UNFINISHED (explicit, since
+keeping `completed` as the state means the loop no longer sees it for free); a declared
+`gates.completion` kind that has not passed since the last change is UNFINISHED; and an open
+escalation or an unproven repair is UNFINISHED. It also carries non-blocking **`caveats`** —
+above all, gates that were WAIVED because the project cannot run them — so a recorded "complete"
+can never quietly mean "nothing was actually verified". One derivation feeds `/accept`,
+`/status`, the quit summary, the report, and the journal handoff.
 
 - **`/accept`** (user-typed = consent, the `/plan approve` precedent; between-turns only,
   piped-deterministic — never in the mid-turn intercept set): on COMPLETE, appends
@@ -733,7 +906,11 @@ same open log; the model learns of it via a delimited `[[harness note: …]]` in
 `user.message`). Turn errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as
 `user-quit` — never `completed`. Session 11.5: `/accept` is the completion boundary (see "The
 acceptance boundary"); `/status` and the quit path print the derived completion line
-(staleness-marked); a resumed accepted session announces the boundary at startup.
+(staleness-marked); a resumed accepted session announces the boundary at startup. Session 12
+adds `/checks` (the detected project re-probed on demand, the recipes it can actually run, the
+latest result per kind, and the session check budget), per-task gate state plus both boundary
+gates in `/tasks`, and `check.*` / `repair.*` chrome — a check reuses the live command-output
+preview channel, because watching a build scroll is exactly as useful as watching a command.
 
 **The live task surface (Session 11).** `status.ts` is the sticky status area — the ONLY
 cursor-moving code in the codebase, strictly TTY- and stderr-confined: ALL chrome routes
@@ -778,6 +955,13 @@ protectedPath }`; the engine decides.
   allow/`reversible` (`plan.update` — the store archives prior bytes; the write cannot touch
   workspace files); planDoc+command → deny; a throwing fact → deny. Same trap-avoidance
   rationale, same pinning tests.
+- **Typed check** (`tool.check` present) → the explicit Session-12 branch, after planDoc and
+  BEFORE the command branch: a check SPAWNS a process, so reaching the observe fall-through would
+  be the S6 trap with real execution behind it. All four fact combinations refuse; a throwing
+  fact denies. Verdict `reversible` + `noUndo` + `execBoundary: 'unsandboxed'`, and `ask` unless
+  every resolved command already carries replay consent (see "Typed verification"). The fact must
+  be PURE — the tool resolves from a captured project snapshot, never the filesystem, because
+  `decide()` does no I/O and because the human must approve exactly what will run.
 - **Shell command** (`tool.command` present) → **automatic review** (the single default; not a
   selectable "mode"). A hardcoded circuit-breaker denies workspace/drive wipes and `format`
   (absolute). Otherwise `analyzeCommand` decides: a command it PROVES safe **and** an active OS
@@ -934,6 +1118,15 @@ additive surface, by area (full shapes in `src/types.ts`):
   `task.started.planTaskId` (the DAG join key); `task.supervision {kind, detail?}` (bounded
   ≤6/task); `TaskStatus` values `cancelled` (task-scoped /cancel) and `stalled` (the loop
   intervention).
+- **typed verification + recovery (Session 12):** `check.started {callId, check, recipeId,
+  command, cwd, timeoutMs, planTaskId?, scopePaths?}` (a REAL spawn, like `command.started` —
+  hence a member of `WORK_EVENT_TYPES`) and `check.completed {…, status, unsupportedReason?,
+  exitCode, termination?, summary, signals?, findings?}` (the verdict, plus the named signals that
+  keep classification derivable from the log alone); `repair.attempted {target, failureClass,
+  signature, hypothesis, hypothesisSha, scopePaths, regressionChecks, attempt}` and
+  `repair.escalated {target, failureClass, signature, reason}` — deliberately NO `repair.ended`,
+  because an outcome derived from later evidence cannot be lost in a crash;
+  `plan.updated.graph[].checks` (so the report never has to read the plan file).
 - **durable session (Session 11.5):** `task.base-checkpoint {callId, ref, oid}` (executor-group
   base creation — the resume-seeded prune list's source); `task.started.planTaskSha` (the
   definition identity completed-state binds to); `tool.completed.fullOutputSaved` (the
@@ -977,7 +1170,15 @@ resumed life instead of resetting.
 ## Verification (`report/report.ts`)
 
 `buildReport` is a pure function `Event[] → { json, md }` (golden-testable). A changed file is
-labeled **CHECKED** only if a `run_command` genuinely **exited** zero *after* its last mutation —
+labeled **CHECKED** only if a `run_command` — or, since Session 12, a typed **check** — genuinely
+**exited** zero *after* its last mutation. The widening is honest because a check's `pass` is
+derived from the identical `exited && exitCode === 0` rule, so the two are the same evidence; the
+two sources are merged and **sorted by seq** before the lookup, since `find` takes the first entry
+after the mutation and an unsorted concatenation would credit the wrong one. Session 12 also adds
+`## Verification (typed checks)` (pass / fail / error / unsupported / no-verdict, findings,
+signals, plan-task label, targeted scope, and the verbatim exit-code contract) and `## Recovery`
+(attempts with their DERIVED outcome, the model-authored hypothesis labeled as recorded-not-
+verified, declared scope, and any change that escaped it). The original rule stands unchanged —
 and the report prints *which command* — with the exact wording "check ran, exit 0" and **no
 correctness claim**. A `command.ended` recording a kill vetoes CHECKED even against a stray
 exit-0 completion; old logs without command events fall back to the exit-code rule. Everything

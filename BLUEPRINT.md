@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-This is the rolling near-term direction guide for Agent CLI after Session 11.5.
+This is the rolling near-term direction guide for Agent CLI after Session 12.
 
 It begins from the implemented and live-proven V0.9 state described in `ARCHITECTURE.md` and
 `ROADMAP.md`. It does not replace the enduring thesis in `PROJECT.md`, and it should not become a
@@ -20,11 +20,12 @@ This is not a reason to inflate `runTurn` into a workflow engine. The coding flo
 first optimized workflow layer built on the small kernel, and should establish reusable contracts
 for later document, PDF, image, and video packs.
 
-## 2. Current Starting Point (post-Session 11.5, V0.9)
+## 2. Current Starting Point (post-Session 12, V0.9)
 
-The foundation is already substantial and has four recorded live proofs (the V0.7 loop, the V0.8
-large-repo retrieval run, the V0.9 crash/resume planning run, and the Session 11.5 durable-session
-run through interrupt → resume → acceptance → cleanup):
+The foundation is already substantial and has five recorded live proofs (the V0.7 loop, the V0.8
+large-repo retrieval run, the V0.9 crash/resume planning run, the Session 11.5 durable-session run
+through interrupt → resume → acceptance → cleanup, and the Session 12 verification/recovery run
+through crash-mid-check → classified repair → green gate → acceptance → honest escalation):
 
 - one shared `runTurn` for one-shot, REPL, parent, and child sessions;
 - a central fail-closed policy choke point, recorded approvals, and narrowing-only configuration;
@@ -38,22 +39,29 @@ run through interrupt → resume → acceptance → cleanup):
 - a dependency-aware task DAG gate (R1–R10) over bounded parallel executor groups, plan bindings
   with per-definition identity, events-rebuilt budgets, bounded supervision, task-scoped
   cancellation, and the live TTY task surface;
+- Session 12 — typed verification and recovery: project-aware check recipes with normalized
+  exit-code verdicts and named signals, a `check` policy fact with body-bound replay consent, the
+  task-graph verification gate (dependents unblock only on green) with integration/completion
+  boundary gates and honest waivers, and the nine-class recovery catalogue with deterministic
+  classification, a derived-outcome repair ledger, and a bounded policy enforced at the scheduler;
 - Session 11.5 — the durable session: crash-covered task-base ref lifecycle (creation events +
   resume-seeded pruning), truncation spill blobs (command/delegate output survives as
   content-addressed evidence), per-attempt history with a bounded retry ceiling, completed-state
   bound to the task definition that ran, and the explicit acceptance boundary (`/accept` →
   recorded consent → plan retirement + cleanup → journal handoff with resume pointers).
 
-The largest remaining coding-flow gaps are now verification and delivery quality rather than
-coordination:
+Session 12 then made verification and recovery first-class (typed check recipes, the task-graph
+gate, the nine-class recovery catalogue with a bounded repair policy). The largest remaining
+coding-flow gaps are now the long-running/visual axis and delivery quality:
 
-- verification is still mainly command-oriented rather than a typed gate with project-aware checks;
-- failure handling lacks a structured classifier and bounded repair policy (the fold's
-  attemptHistory and the R10 ceiling are the ground it will build on);
-- no managed long-running preview process or browser/visual verification path exists;
+- no managed long-running preview process or browser/visual verification path exists — today a
+  check is a bounded process that ENDS, which is exactly what a preview server does not do;
 - the final review stage is still prompt-shaped rather than a structural completion gate;
 - Git recovery is strong, but automatic phase-level audit history needs a policy that does not
-  silently pollute the user's intentional branch history.
+  silently pollute the user's intentional branch history;
+- executors cannot self-verify (a worktree has no gitignored dependencies, so `run_check` is
+  parent-only) — acceptable today because the parent verifies after integration, but it is the
+  seam a preview/browser capability will press on.
 
 ## 3. Target Coding Workflow
 
@@ -94,34 +102,19 @@ spill blobs, definition-bound completed state with per-attempt history, the R10 
 and the explicit `/accept` completion boundary with cleanup and journal handoff — live-proven
 through a deliberate mid-wave SIGKILL, resume, completion, acceptance, and memory handoff.
 
-### Session 12 — Unified Verification Gate and Typed Recovery
+### Session 12 — Unified Verification Gate and Typed Recovery: COMPLETE
 
-Make verification a first-class runtime/workflow result rather than a collection of persuasive shell
-logs.
-
-Introduce typed check capabilities and project detection for common build, test, lint, typecheck,
-format, static-analysis, and targeted-test workflows. Avoid a giant hardcoded Bash/PowerShell snippet
-library. Prefer typed adapters or recipes with:
-
-- declared applicability and dependencies;
-- normalized inputs and outputs;
-- timeout, cancellation, and output caps;
-- structured pass/fail/error/unsupported results;
-- artifact and command evidence pointers;
-- explicit scope, such as targeted checks before broad checks.
-
-Large outputs should spill to evidence files rather than consume the model context or terminal.
-
-Build a typed recovery matrix over verification and execution failures. Classification should happen
-before repair planning and distinguish at least dependency/setup, compile/type, test/assertion,
-lint/format, runtime/process, integration/conflict, policy/approval, timeout/resource, and unknown
-failures. Each class should define whether automatic recovery is eligible, what evidence is required,
-and when human confirmation is mandatory.
-
-Automatic repair must be bounded by attempts, wall time, token budget, changed-file scope, and
-regression criteria. Repeated identical failures, expanding diffs, uncertain external effects, or an
-unknown classification should stop and escalate rather than loop. Every repair attempt should create
-a recovery point and preserve before/after verification evidence.
+Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md`. Typed
+project-aware check recipes (the model names KINDS, the harness names COMMANDS) with
+exit-code-is-the-verdict normalization and named signals that keep classification derivable from
+the log; a `check` policy fact with its own fail-closed branch and replay consent bound to the
+resolved command AND the script body it invokes; `PlanTask.checks` / `PlanGraph.gates` with one
+`depSatisfied` predicate blocking dependents until a gate is green, plus integration- and
+completion-boundary gates; and `src/recovery/` — nine failure classes as a DATA catalogue,
+deterministic classification before any repair planning, a ledger whose outcomes are DERIVED, and
+a bounded policy with typed stop reasons wired into the scheduler gate (R11/R12). Suite
+689→868+1; 4-lens hand-verified review (21 findings fixed, incl. one critical consent hole of my
+own making); live four-life E2E, 39/40 evidence checks with 0 failures.
 
 ### Session 13 — Managed Preview Processes and Browser / Visual Verification
 
@@ -141,9 +134,17 @@ hierarchy, consistency, and task-specific appearance; it must not turn a screens
 proof of functional correctness. Where stable baselines exist, deterministic screenshot comparison
 may add another signal.
 
-Browser failures should feed the same recovery matrix and bounded repair loop. The completion proof
-should include a real local application, multi-step interaction, captured trace/screenshot evidence,
-a deliberately introduced failure, targeted repair, and clean process teardown.
+Browser failures should feed the same recovery matrix and bounded repair loop — which now exists
+(`src/recovery/`), so this session ADDS classification rows and catalogue entries rather than
+inventing a mechanism. The first design question to settle is whether a preview server is a check
+KIND (it fits the recipe shape: declared applicability, preconditions, timeout, normalized result)
+or a distinct managed resource with its own lifecycle events — a check is a bounded process that
+ends, and a preview deliberately does not, which argues for the latter with the check contract
+reused for the assertions that run against it.
+
+The completion proof should include a real local application, multi-step interaction, captured
+trace/screenshot evidence, a deliberately introduced failure, targeted repair, and clean process
+teardown.
 
 ### Session 14 — Git Audit Trail, Structural Review Gate, and Coding-Flow Acceptance
 
@@ -304,14 +305,18 @@ Research current implementations again when each session begins.
 - conflict-aware integration and deterministic cleanup — LANDED (V0.7 drift-refusing apply +
   Session 11 R7/declared-vs-actual divergence in the digest).
 
-### Before automatic recovery
+### Before automatic recovery — ALL LANDED (Session 12)
 
-- normalized verification results;
-- typed failure classification;
-- bounded eligibility and stopping rules;
-- checkpoints before each repair;
-- regression checks after repair;
-- honest escalation for unknown or repeated failures.
+- normalized verification results — LANDED (`CheckResult`, exit-code-is-the-verdict);
+- typed failure classification — LANDED (nine classes, deterministic, event-derivable);
+- bounded eligibility and stopping rules — LANDED (`recovery/policy.ts`, typed stop reasons);
+- checkpoints before each repair — LANDED by REUSE, not by new machinery: parent edits are
+  snapshot-backed by construction and an executor re-run creates a fresh group base checkpoint,
+  so a second recovery mechanism would have added crash windows to buy nothing;
+- regression checks after repair — LANDED (an attempt is proven only by the checks it declared,
+  which must include the kind that actually failed);
+- honest escalation for unknown or repeated failures — LANDED (`recover escalate`, an acceptance
+  blocker; `unknown` is a first-class stop, never a shrug).
 
 ### Before browser / visual claims
 
@@ -332,6 +337,21 @@ Research current implementations again when each session begins.
 
 ## 10. Recently Completed
 
+- **Session 12 — unified verification gate and typed recovery: COMPLETE.** `src/checks/`
+  (bounded project detection, a declarative recipe table where a project's own script beats a
+  guessed tool, `toCommand` as the single composer, and normalization whose one rule is the exit
+  code is the verdict); the `check` policy fact + fail-closed branch + replay consent keyed on
+  `(recipeId, command, bodySha)` in a store separate from `Grants`; `run_check` (parent-only,
+  snapshot-held, three refusals that spawn nothing) with `check.started` emitted only on a real
+  spawn; `PlanTask.checks`/`PlanGraph.gates` (sha-neutral when absent) with the `verification`
+  field and the single `depSatisfied` predicate that blocks dependents, plus integration- and
+  completion-boundary gates and honest waivers surfaced as acceptance caveats; `src/recovery/`
+  (nine-class DATA catalogue, deterministic classification, derived-outcome ledger, bounded
+  policy, `recover` tool, R11/R12). Suite 689→868+1; 4-lens hand-verified review, 21 findings
+  fixed — including the critical one where replay consent bound the command string and not the
+  script body, so rewriting `package.json` turned one `[s]` into standing execution consent.
+  Live four-life E2E on a fresh dependency-free Node project with four real seeded defects:
+  39/40 evidence checks, 0 failures (see ROADMAP + `C:\Users\A\Desktop\agent-cli-s12-live\`).
 - **Session 11.5 — the durable session (consolidation): COMPLETE.** Crash-covered task-base ref
   lifecycle (`task.base-checkpoint` creation events, resume-seeded pruning, missing-ref-tolerant
   deletion); truncation spill blobs for command/delegate output (redaction-guarded, size-capped,

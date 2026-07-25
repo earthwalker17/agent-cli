@@ -7,6 +7,131 @@ attempted, verified, decided, and left open.
 
 ---
 
+## Session 12 (2026-07-25/26) — Unified verification gate and typed recovery
+
+### Objective
+
+Make testing, building, checking, and debugging an explicit part of the task-graph lifecycle
+rather than a collection of model-chosen shell commands: a task declares how it will be verified,
+targeted checks run after it completes, dependents unblock only when the required gate is green,
+broader checks run at the integration and completion boundaries — and every failure is CLASSIFIED
+before any repair is planned, with repair bounded by policy and stopping honestly instead of
+looping.
+
+### Planning provenance
+
+3 Explore recon lenses + 1 Plan-agent adversarial critique, load-bearing claims hand-verified;
+four user decisions asked up front (replay consent per exact command; no dependency-install check
+kind; Node/TS first-class + Python minimal; full recovery incl. the bounded ledger). The critique
+killed three of my own designs before code: widening `GRANTABLE` to make checks session-grantable
+would have silently rendered a no-op `[s]` on the executor-spawn ask (a consent the user gives
+that does nothing); a new `unverified` task STATE would have taken a fully-integrated task out of
+R5's duplicated-mutation refusal while R10's ceiling could not bound the re-runs (a field, not a
+state); and `decide()` resolving recipes would have put filesystem I/O in the pure policy gate.
+
+### What was implemented (commits `8938cfe`, `640e44b`, `7134639`, `5823a3f`, `05e55ef`, + docs)
+
+Full contracts in ARCHITECTURE (Typed verification / The verification gate / Typed recovery):
+
+1. **`feat(checks)`** — `src/checks/`: bounded never-throwing project detection with a stat
+   fingerprint over a FIXED candidate list; a declarative recipe table (a project's own script
+   beats a guessed tool; first applicable row wins, so resolution is deterministic and consent
+   can bind to it); `toCommand` as the single composer; and normalization whose one rule is
+   **the exit code is the verdict** — parsers only enrich, and the named signals they emit are
+   what keeps later classification derivable from the log alone.
+2. **`feat(types,policy,runtime)`** — the `check` policy FACT and its explicit fail-closed branch
+   before the command branch, all four fact-combination denials, and replay consent in a separate
+   store keyed by `(recipeId, command, bodySha)` — `GRANTABLE` untouched. `ApprovalRequest.kind:
+   'check'` with its own wording and a `describeCall` branch, without which the prompt was
+   literally blank.
+3. **`feat(tools,runtime,repl,report)`** — `run_check` (parent-only, snapshot-held, three
+   refusals that spawn nothing); `check.started` emitted from `onSpawn` ONLY so it means what
+   `command.started` means; `check.completed` with status, reason, signals and findings;
+   crash replay that says a killed check produced no verdict; `/checks`; and CHECKED extended to
+   typed checks (merged and **sorted by seq**, or `find` credits the wrong evidence).
+4. **`feat(plan,graph,recovery,runtime)`** — `PlanTask.checks?` / `PlanGraph.gates?` (optional,
+   no default, so every existing plan's approval sha is byte-identical); the `verification` field
+   and the ONE `depSatisfied` predicate that blocks dependents; the integration and completion
+   boundary gates; and `src/recovery/` — nine classes as a DATA catalogue, deterministic
+   classification, a ledger whose outcomes are DERIVED (no `repair.ended` to lose in a crash), a
+   bounded policy with typed stop reasons, the `recover` tool, and R11/R12 at the scheduler gate.
+5. **`fix`** — the adversarial-review batch (below).
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite 689 → **868 passed / 1 skipped
+across 66 files (+179)**: the recipe/detection matrices, the exit-code-is-the-verdict matrix, the
+four policy fact-combination denials, the replay-consent matrix (including the body-rewrite
+re-ask and the untouched executor-spawn `[s]`), TOCTOU and budget refusals, real `npm run`
+executions through `runTurn`, the sha-compat pins, the gate-satisfaction matrix (seq ordering,
+all-bindings anchor, waiver reasons, targeted scope), acceptance's three new axes and its
+caveats, R11/R12 with their hatches, the nine-class classification matrix, and the ledger's
+derived outcomes.
+
+Bounded adversarial review: **4 differentiated read-only lenses, 21 findings, every one
+hand-verified against the code before fixing** — 1 critical, 6 high, 9 medium, 2 low fixed, plus
+2 I had already found while building the E2E, each with a regression pin. The critical one was
+mine and was exactly the property this session set out to establish: replay consent bound the
+command STRING, so rewriting `package.json`'s `test` script — an ordinary auto-allowed write —
+left the key identical and turned one `[s]` into standing consent to execute anything. Consent
+now binds the script body.
+
+**Live proof** (`C:\Users\A\Desktop\agent-cli-s12-live\` — setup/driver/validate, VALIDATION.md,
+per-phase transcripts, report.md): four-life piped run against real claude-opus-4-8 on a fresh
+dependency-free Node project with four REAL checks, each seeded with one representative defect.
+**39/40 post-hoc checks over persisted evidence only, 0 failures.** Plan with a completion gate →
+sha-bound approval → execution → **SIGKILL landing inside a running check** → resume replayed it
+as *"produced no verdict"* → `test` failed → `recover(attempt)` classified `test-assertion`,
+recorded a hypothesis and its proof, fixed the expectation and **said plainly it had changed a
+test** (the catalogue's own instruction for that class) → all four green → `/accept` complete →
+clean quit + journal handoff. A fourth life then exercised the two paths the first three missed:
+`s` on a check ask produced a genuine `check.replay-consent` re-run with no prompt, and an
+induced `module-not-found` was classified `dependency-setup`, REFUSED an automatic repair, and
+escalated — after which `/accept` refused COMPLETE naming the open escalation, and only
+`/accept confirm` recorded a partial. All four checks re-verified exit 0 independently at
+validation time; the user repo carries zero `refs/agent-cli` refs.
+
+### Decisions (and why)
+
+- **The model names KINDS; the harness names COMMANDS.** This is the whole trust argument for
+  letting checks be consented to once rather than every time — and it is why the consent key had
+  to bind the script BODY, not just the stable `npm run test` string.
+- **A field, not a state.** Keeping `completed` preserves R5's duplicated-mutation refusal and
+  R10's ceiling; the cost is that acceptance needed an explicit verification axis rather than
+  getting one for free. Worth it.
+- **A gate may only be waived by a PROJECT-capability fact.** `unsupported` was doing double
+  duty for "this project cannot" and "you asked wrong"; the second must never discharge
+  verification the user approved.
+- **Repair outcomes are derived, never recorded.** There is no `repair.ended` to lose in a crash:
+  an attempt is proven only when the regression check it declared actually passed after it.
+- **Enforced / detected / recorded are three different words.** Attempts, wall time and budgets
+  are enforced; scope expansion is DETECTED (it stops the next attempt, it does not block a
+  write); whether a hypothesis is genuinely new is only recorded for review. The code and the
+  tool output now say which is which.
+
+### Open issues / boundaries (deliberate, documented)
+
+- A `session`-targeted escalation clears only via a proven repair attempt for the same failure —
+  fixing the problem by hand does not retract it, so full acceptance stays blocked and
+  `/accept confirm` is the exit. A plan-task-targeted escalation resolves by evidence. Observed
+  live; the asymmetry is the honest cost of not letting a model retract its own hand-to-the-user.
+- `run_check` is parent-only: an executor worktree has no gitignored dependencies, so the parent
+  verifies after integration. Executors therefore cannot self-verify.
+- Non-Node/Python projects are `unsupported` with the reason; there is no dependency-install kind.
+- The per-task gate is not invalidated by unrelated later changes (the completion gate covers
+  combined state) — deliberate, and documented where both live.
+- A plan whose tasks are all `role: main` cannot use per-task gates at all (validation refuses
+  them); this is what the live run did, so the per-task gate is covered by unit tests only.
+
+### Recommended next step
+
+Session 13 per BLUEPRINT: managed preview processes and browser/visual verification — now with a
+real precedent for what a typed check capability, its consent model, and its failure classes look
+like. The first question to settle is whether a preview server is a check kind or a distinct
+managed resource with its own lifecycle events.
+
+---
+
 ## Session 11.5 (2026-07-24) — The durable session: lifecycle completion, acceptance boundary, crash-proof continuation
 
 ### Objective
@@ -159,130 +284,34 @@ retired; refs pruned) → memory handoff → the built app played on camera.
 
 ---
 
-## Session 11 (2026-07-23/24) — V0.9: iterative planning, task graphs, parallel-first execution
 
-### Objective
-
-Complete the planning/orchestration lifecycle (the BLUEPRINT Session 11 direction): one
-canonical structured plan with sha-bound REapproval and user/agent projections, observable
-complexity routing, a dependency-aware task DAG with a bounded scheduler gate, live task/agent
-visibility with a sticky status area, harness supervision with model-side decisions, and
-task-scoped cancellation — all as system contracts, every kernel invariant preserved.
-
-### Planning provenance
-
-3 Explore recon lenses + 1 Plan-agent design pass, load-bearing claims hand-verified; three
-user decisions asked and answered up front (JSON canonical plan + generated views; TTY sticky
-status area; typed mid-turn commands). Load-bearing design choices: approval binds a CONTENT
-sha (`sha256(canonicalJson(plan))`) so status flips are sha-neutral BY CONSTRUCTION — the V0.7
-approve-rewrites-the-file quirk died structurally (the `repl.test.ts:439` pin deliberately
-INVERTED); no per-task status field in the plan (execution state is a pure event fold — one
-writable truth); the scheduler is a GATE in the delegate tool + the fold + guidance, not an
-in-tool wave engine (the parent integrates between waves, so dependents' base checkpoints
-naturally include applied deps); mid-turn interception is TTY-only (piped drivers pre-supply
-lines — determinism is a contract); the status area is safe because the parent is BLOCKED
-during delegate flight (stderr cursor movement can never interleave with stdout model text).
-
-### What was implemented (commits `d8f7587`, `c841fa9`, `ddab676`, `dffb745`, `aa1f8d8`, `8c3f922`, `5250aca`, + docs)
-
-Full contracts in ARCHITECTURE (Planning lifecycle / Task DAG / Supervision / Live surface):
-
-1. **`feat(plan)` canonical core** — `plan/schema.ts` (zod graph, semantic validation with
-   cycle paths, canonicalJson + planContentSha), `canonical.ts` (amendment contract,
-   approve-refuses-invalid, `readPlanState` with legacy fallback), `views.ts` (projections,
-   generated-view marker, legacy-md archiving), `graph-state.ts` (the pure fold).
-2. **`feat(plan,repl,prompt,report)` lifecycle** — structured `update_plan` (validation errors
-   verbatim, nothing written), `/plan` on the canonical store, `@direct` + `plan.route`
-   events, the agent-view injection note (pointer keeps the LIVE execution summary),
-   routing rules in the system prompt, report routing/graph lines.
-3. **`feat(tools,runtime,cli)` the DAG gate** — `plan_task` bindings → `task.started.planTaskId`;
-   `checkDagRules` R1–R9 before the base checkpoint (group-atomic); the strict status gate
-   (diverged/superseded/hand-edited-approved now BLOCK); plan-informed briefs; DelegateCaps
-   rebuilt from events (the resume-reset gap closed).
-4. **`feat(runtime,tools,repl)` supervision + cancellation** — loop detect (annotate 3 /
-   cancel 5 → `stalled`), single-shot budget-pressure (80% tokens/wall), stall observation;
-   ≤6 `task.supervision` events/task + `SubagentResult.supervision`; the HEAD-of-result group
-   digest (survives 70/30 truncation); the idempotent `registerCancel` seam → `cancelled`.
-5. **`feat(repl,runtime,cli)` the live surface** — `status.ts` (the ONLY cursor-moving code;
-   all chrome through one status-aware writer; zero escapes off-TTY), `live-tasks.ts` (table +
-   cancel registry), the structured `ChildStatusUpdate` channel, mid-turn `/tasks` +
-   `/cancel` via `io.setMidTurnHandler` (TTY-only; displayed approvals always win).
-6. **`fix` review batch** — capture-loss no longer folds to a false `completed` (R5 could
-   strand lost work); a VANISHED approved plan refuses executors; `/plan show` approval line
-   honest beside draft; double-`/cancel` deduped; the id-reuse amendment boundary stated to
-   the model; status-area clip/resize docs made honest.
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite 574→**645 passed / 1 skipped
-across 55 files (+71)** — schema/canonical/fold matrices, the R1–R9 gate matrix, caps-rebuild pins,
-supervision (loop annotate→cancel, pressure single-shot, stall, /cancel evidence + cleanup,
-digest-survives-truncation), exact escape-byte status-area assertions (zero ESC off-TTY), the
-mid-turn interception matrix (displayed-approval-wins, piped immunity), the real-git wave flow
-(parallel disjoint pair → early dependent refused → integrate → hand-edit DIVERGED → byte-
-restore re-enables → dependent builds on the integrated base → completed re-run refused), and
-the crash-mid-group replay/fold case. Bounded adversarial review: 3 read-only lenses over the
-session diff, findings hand-verified — kernel-invariant lens **zero findings across all 8
-invariants**; 1 MEDIUM + 5 LOW fixed (item 6); accepted limitations recorded below.
-
-**Live proof** (`C:\Users\A\Desktop\agent-cli-s11-live\` — driver-s11.mjs, VALIDATION.md,
-per-phase artifacts, validate.mjs): a two-phase piped run against real claude-opus-4-8,
-**18/18 post-hoc checks over the persisted evidence**. Phase A: a simple typo request stayed
-DIRECT (no plan events); the complex linkkit request auto-routed to planning
-(`plan.route {plan, model}`); `/plan show` → approve → a feedback amendment INVALIDATED the
-approval live (both shas surfaced) → re-approve bound the amended content sha; one parallel
-group of two executors spawned BOUND (`plan bindings: task 1 → 'url-module', task 2 →
-'slug-module'` displayed at the consent ask) — then a deliberate SIGKILL mid-wave. Phase B:
-`agent resume` → `/tasks` folded both tasks as `interrupted` with child-log pointers and the
-parent-owned check task labeled unverifiable → the model re-ran BOTH as one parallel group
-(same bindings, `attempt 2` visible), integrated with zero refusals, wrote and ran the check
-(real exit 0), `/report`, clean quit — 40 uncached parent input tokens (cache 216k read), the
-crash orphans swept, worktree registry empty.
-
-### Decisions (and why)
-
-- **Content-sha approval identity** — consent must survive harness bookkeeping and die on
-  semantic change; hashing a normalized projection of the graph gives exactly that boundary.
-- **Execution state is derived, never written** — a second writable status would be the
-  double-truth trap; the fold re-derives identically on resume.
-- **Group rules before per-task state in the gate** — otherwise R4 "blocked" shadows the
-  actionable "sequence them across calls" for the group-a-dependent-with-its-dep mistake.
-- **A completed executor without a capture event folds FAILED** — capture loss must reopen
-  the retry path, not read as done (review F1).
-- **No harness complexity classifier** — routing is model judgment + user sigils + recorded
-  evidence; the hard floor stays structural (gates), not linguistic.
-- **The status area is TTY-only and chrome-only** — piped byte-identity is a contract the
-  drivers depend on; zero escapes off-TTY is asserted, not assumed.
-
-### Open issues / boundaries (deliberate, documented)
-
-- Sibling-task chrome can print over a DISPLAYED forwarded-approval prompt (pre-existing
-  stderr behavior; the io-redesign pool item). `/cancel` typed at a displayed approval answers
-  it as a deny (fail-safe, documented).
-- The status-area clip counts code units, not display columns — safe while status lines stay
-  structurally ASCII (slug ids, enum roles); a width-aware clip is required before free-form
-  text lands there. A terminal SHRUNK after a draw can leave a cosmetic stale fragment above
-  the region.
-- A completed plan-task id stays completed across amendments (id-stability boundary) — the
-  model is told to give materially changed work a NEW id.
-- Deleting only the canonical JSON (generated view surviving) blocks executors via the legacy
-  `unknown` fallback, while deleting both files degrades to ask-only-with-refusal-on-approval
-  — asymmetric but both fail-safe.
-- The sticky area + mid-turn commands have no piped-driver proof (TTY-gated by design):
-  covered by exact escape-byte tests + the manual Windows Terminal smoke in VALIDATION.md.
-
-### Recommended next step
-
-Session 12 per BLUEPRINT: the unified verification gate and typed recovery — typed check
-adapters with normalized results feeding the plan tasks' `verify` criteria, a failure
-classifier, and the bounded repair policy over the now-complete task graph.
-
----
-
-## Earlier Milestones (Sessions 1–10 — compressed per the rolling-docs policy)
+## Earlier Milestones (Sessions 1–11 — compressed per the rolling-docs policy)
 
 Contract detail for everything below lives in `ARCHITECTURE.md`; entries here keep the
 objective, the lasting decisions (with why), the evidence, and what stayed open.
+
+### Session 11 (2026-07-23/24) — V0.9: iterative planning, task graphs, parallel-first execution
+
+The planning/orchestration lifecycle, landed as designed (commits `d8f7587`…`5250aca`; suite
+574→645+1). Landed: ONE canonical `<id>.plan.json` task graph with two deterministic projections;
+approval binding `planContentSha = sha256(canonicalJson(plan))` so status flips are sha-neutral
+BY CONSTRUCTION (the V0.7 approve-rewrites-the-file quirk died structurally, its pin deliberately
+inverted) and any semantic amendment invalidates; structured `update_plan` whose validation
+errors return complete with NOTHING written (the revision loop is the design); observable routing
+(`plan.route`, `@plan`/`@direct` — no harness classifier, the hard floor stays structural);
+the delegate DAG gate R1–R9 with plan bindings, plan-informed briefs, and events-rebuilt caps;
+bounded supervision (loop 3/5, budget-pressure 80%, stall) dual-surfaced as events AND the
+head-of-result group digest; task-scoped `/cancel` via an idempotent registry seam; and the
+TTY-only sticky status area (all chrome through one status-aware writer, ZERO escape bytes
+off-TTY) with the live task table. Lasting decisions: execution status is a PURE EVENT FOLD, never
+a field in the plan (two writable status sources would be the double-truth trap); the scheduler is
+a GATE plus guidance, not an in-tool wave engine — the parent integrates between waves, so a
+dependent's base checkpoint naturally includes its dependencies; mid-turn interception is TTY-only
+because piped drivers pre-supply lines and determinism is a contract. Review (3 hand-verified
+lenses) fixed a capture-loss false-completed, a vanished-plan gate hole, and display honesty.
+Live: two-phase run with a deliberate mid-wave SIGKILL and resume. Still relevant: the sticky area
+and mid-turn commands are TTY-gated and have no piped-driver proof (exact escape-byte tests plus a
+manual Windows Terminal smoke instead).
 
 ### Session 10 (2026-07-23) — V0.8: repository intelligence and focused exploration
 
@@ -467,6 +496,16 @@ the acceptance boundary; the report's `## Completion` deliberately renders the f
 acceptance event (staleness lives on /status, the quit line, and the journal handoff) — an
 annotation there if it ever misleads; the journal Handoff evaporates when its entry
 compresses (accepted-by-then, deliberate).
+**Verification/recovery follow-ups (post-S12):** a `session`-targeted escalation has no
+harness-derived resolution (only a proven attempt for the same failure, or `/accept confirm`) —
+a user-side dismissal recorded as an event is the likely shape; per-task gates are unit-tested
+only, since a plan of all-`main` tasks cannot declare them (live-proven path is the graph-level
+gate); executors cannot self-verify (parent-only `run_check`, because a worktree lacks
+gitignored deps) — a worktree-aware precondition or a post-apply auto-check would change that;
+more ecosystems as data-shaped recipe rows (go/rust/java) behind the existing `applies()` seam;
+an incremental check cache keyed by file hashes + tool versions (BLUEPRINT §6, still unbuilt);
+`test-targeted` scope defaults from the plan task's `touches` instead of requiring the model to
+restate them; and a check-result surface in `/diff` so a reviewer sees verdicts beside the diff.
 **Planning/orchestration follow-ups (post-S11):** a width-aware status-area clip before any
 free-form text may land in status lines (today: structurally ASCII + a 2-column margin);
 sibling-task chrome printing over a DISPLAYED forwarded-approval prompt (pre-existing, part
