@@ -64,9 +64,17 @@ export interface CheckCaps {
 export const CHECKS_PER_SESSION = 60;
 
 export function checkCapsFromEvents(events: readonly SessionEvent[]): CheckCaps {
-  const caps: CheckCaps = { checksRun: 0 };
-  for (const e of events) if (e.type === 'check.started') caps.checksRun++;
-  return caps;
+  // Counts every check that was ATTEMPTED, matching what the live counter increments. Neither
+  // event alone suffices: a spawn failure emits no `check.started` (so counting starts would let
+  // a non-spawning loop reset its whole budget on resume), and a crash mid-run emits no
+  // `check.completed` (so counting completions would forgive an interrupted run). Union, deduped
+  // by (callId, kind).
+  const seen = new Set<string>();
+  for (const e of events) {
+    if (e.type === 'check.started') seen.add(`${e.callId}::${e.check}`);
+    else if (e.type === 'check.completed' && e.status !== 'unsupported') seen.add(`${e.callId}::${e.check}`);
+  }
+  return { checksRun: seen.size };
 }
 
 export interface CheckToolDeps {
@@ -88,12 +96,20 @@ export interface RunCheckTool extends Tool<RunCheckInputT> {
 const FAIL_EXCERPT_CHARS = 3000;
 
 function toFact(r: ResolvedCheck): ResolvedCheckFact {
-  return { recipeId: r.recipeId, kind: r.kind, command: r.command, timeoutMs: r.timeoutMs, effects: r.effects };
+  return {
+    recipeId: r.recipeId,
+    kind: r.kind,
+    command: r.command,
+    ...(r.bodySha !== undefined ? { bodySha: r.bodySha } : {}),
+    timeoutMs: r.timeoutMs,
+    effects: r.effects,
+  };
 }
 
+/** Identity for the TOCTOU comparison: the command AND the script body it invokes. */
 function sameCommands(a: readonly ResolvedCheck[], b: readonly ResolvedCheck[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((x, i) => x.recipeId === b[i]!.recipeId && x.command === b[i]!.command);
+  return a.every((x, i) => x.recipeId === b[i]!.recipeId && x.command === b[i]!.command && x.bodySha === b[i]!.bodySha);
 }
 
 function renderResult(r: CheckResult): string {
@@ -142,13 +158,13 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
         project = detect(deps.workspaceRoot);
         const now = resolveFor(input).resolved;
         if (!sameCommands(gated, now)) {
-          const was = gated.map((r) => r.command).join(' ; ') || '(nothing)';
-          const is = now.map((r) => r.command).join(' ; ') || '(nothing)';
+          const describe = (rs: readonly ResolvedCheck[]): string =>
+            rs.map((r) => `${r.command}${r.bodySha !== undefined ? ` (script body ${r.bodySha.slice(0, 8)})` : ''}`).join(' ; ') || '(nothing)';
           return {
             ok: false,
             output:
               `refused: the project changed after this call was approved, so the resolved command(s) no longer match what was gated.\n` +
-              `  approved: ${was}\n  now:      ${is}\nNothing ran. Call run_check again to have the current command(s) approved.`,
+              `  approved: ${describe(gated)}\n  now:      ${describe(now)}\nNothing ran. Call run_check again to have the current command(s) approved.`,
             error: 'project changed after approval; nothing ran',
             durationMs: Date.now() - startedAt,
             truncated: false,
@@ -157,12 +173,30 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       }
 
       const resolution = resolveFor(input);
+      // A malformed request must never become gate evidence: refuse the CALL rather than record
+      // an `unsupported` result that a declared gate would then treat as a waiver.
+      const badRequest = resolution.unsupported.find((u) => u.why === 'bad-request');
+      if (badRequest !== undefined) {
+        return {
+          ok: false,
+          output:
+            `refused: ${badRequest.kind} — ${badRequest.reason}\n` +
+            'Nothing ran and nothing was recorded: a malformed request must never be mistaken for "this project cannot verify that".',
+          error: `invalid check request: ${badRequest.kind}`,
+          durationMs: Date.now() - startedAt,
+          truncated: false,
+        };
+      }
       if (deps.caps.checksRun + resolution.resolved.length > CHECKS_PER_SESSION) {
         return {
           ok: false,
           output:
             `refused: this session's check budget is exhausted (${deps.caps.checksRun}/${CHECKS_PER_SESSION} run). ` +
-            `Nothing ran. Repeated identical checks are not progress — decide what to change, or ask the user how to proceed.`,
+            `Nothing ran. Repeated identical checks are not progress.\n` +
+            `Consequence: any plan task gating on a check can no longer be satisfied, so its dependents stay blocked and the ` +
+            `session cannot be accepted as complete. The only exits are to amend the plan's checks/gates with update_plan ` +
+            `(this resets approval and requires the user to re-approve), or to tell the user, who can record a partial ` +
+            `acceptance with /accept confirm.`,
           error: 'check budget exhausted',
           durationMs: Date.now() - startedAt,
           truncated: false,
@@ -180,6 +214,7 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
           check: r.kind,
           recipeId: r.recipeId,
           status: 'unsupported',
+          unsupportedReason: u.why,
           exitCode: null,
           durationMs: 0,
           summary: r.summary,
@@ -262,18 +297,29 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
         return `${rendered}\n  --- output (tail) ---\n${tail}`;
       });
       const modelText = [head, ...blocks].join('\n\n');
-      const t = truncateForModel(modelText);
       const fullText = [head, ...fullParts].join('\n\n');
+      // Spill seam (Session 11.5 contract): the runtime verifies sha(fullOutput) === the recorded
+      // fullOutputSha256 before it stores the blob, so the string handed to truncateForModel MUST
+      // be the string spilled. Truncating the excerpt while spilling the raw text made the sha
+      // never match: the blob was written, rejected, and orphaned, and the recorded sha pointed at
+      // bytes nothing could resolve.
+      const t = truncateForModel(fullText);
+      const modelOut = modelText.length <= t.text.length ? modelText : truncateForModel(modelText).text;
+      const executed = results.filter((r) => r.status !== 'unsupported');
 
       return {
-        ok: failed.length === 0,
-        output: t.text,
+        // Honest `ok`: "nothing could be checked here" is not a successful verification. Only a
+        // call in which at least one check genuinely ran, and none failed, is ok.
+        ok: failed.length === 0 && executed.length > 0,
+        output: modelOut,
         durationMs: Date.now() - startedAt,
         truncated: t.truncated,
-        ...(failed.length > 0 ? { error: `check(s) not passing: ${failed.map((r) => `${r.kind}=${r.status}`).join(', ')}` } : {}),
+        ...(failed.length > 0
+          ? { error: `check(s) not passing: ${failed.map((r) => `${r.kind}=${r.status}`).join(', ')}` }
+          : executed.length === 0
+            ? { error: `no check ran: ${results.map((r) => `${r.kind}=unsupported`).join(', ')}` }
+            : {}),
         ...(t.fullSha256 ? { fullOutputSha256: t.fullSha256 } : {}),
-        // Spill seam (Session 11.5 contract): a check's output is unrecoverable once truncated,
-        // so hand the runtime the captured text to preserve as a content-addressed blob.
         ...(t.fullSha256 ? { fullOutput: fullText } : {}),
       };
     },

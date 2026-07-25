@@ -11,6 +11,7 @@ function project(over: Partial<DetectedProject> = {}): DetectedProject {
     nodeTools: [],
     pythonTools: [],
     hasNodeModules: true,
+    hasDependencies: true,
     hasTsconfig: false,
     hasEslintConfig: false,
     hasPrettierConfig: false,
@@ -93,8 +94,21 @@ describe('resolveChecks — Node/TS', () => {
     ]);
   });
 
-  it('refuses every Node recipe honestly when dependencies are not installed', () => {
+  it('refuses a Node recipe honestly when DECLARED dependencies are not installed', () => {
     const r = resolveChecks(project({ scripts: { test: 'y' }, hasNodeModules: false }), ['test']);
+    expect(r.resolved).toEqual([]);
+    expect(r.unsupported[0]!.reason).toContain('node_modules is absent');
+  });
+
+  it('still runs a workspace script when the project declares NO dependencies', () => {
+    // A script using only Node built-ins needs nothing installed; refusing it would have made
+    // typed verification unavailable to exactly the smallest projects.
+    const r = resolveChecks(project({ scripts: { test: 'node --test' }, hasNodeModules: false, hasDependencies: false }), ['test']);
+    expect(r.resolved[0]!.command).toBe('npm run test');
+  });
+
+  it('a guessed local tool still requires node_modules even with no declared deps', () => {
+    const r = resolveChecks(project({ nodeTools: ['vitest'], hasNodeModules: false, hasDependencies: false }), ['test']);
     expect(r.resolved).toEqual([]);
     expect(r.unsupported[0]!.reason).toContain('node_modules is absent');
   });
@@ -168,7 +182,7 @@ describe('resolveChecks — Python and unsupported projects', () => {
 describe('availableKinds', () => {
   it('lists only kinds that could run right now', () => {
     expect(availableKinds(project({ scripts: { build: 'x', test: 'y' } }))).toEqual(['build', 'test', 'test-targeted']);
-    expect(availableKinds(project({ scripts: { build: 'x' }, hasNodeModules: false }))).toEqual([]);
+    expect(availableKinds(project({ scripts: { build: 'x' }, hasNodeModules: false, hasDependencies: true }))).toEqual([]);
     expect(availableKinds(project({ kinds: [], packageManager: null }))).toEqual([]);
   });
 });

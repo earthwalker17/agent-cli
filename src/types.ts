@@ -112,6 +112,8 @@ export type CheckEvidence =
       check: CheckKind;
       recipeId: string;
       status: CheckStatus;
+      /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
       /** null unless the process genuinely exited (killed checks have no exit code). */
       exitCode: number | null;
       termination?: CommandTermination;
@@ -397,6 +399,8 @@ export interface ResolvedCheckFact {
   kind: string;
   /** The exact command string that will be executed — and that the approval prompt displays. */
   command: string;
+  /** sha of the workspace-authored script body this command invokes; consent binds it too. */
+  bodySha?: string;
   timeoutMs: number;
   effects: { writesOutputs: boolean; network: boolean; workspaceAuthored: boolean };
 }
@@ -502,6 +506,8 @@ export interface ApprovalRequest {
    * class-scoped session grant.
    */
   kind?: 'command' | 'check';
+  /** kind 'check': how many distinct commands a session-scope answer would consent to re-run. */
+  checkCount?: number;
   /** One-line summary (command string or "edit src/x.ts"). */
   summary: string;
   /** Multi-line detail (edit preview, full command). */
@@ -722,6 +728,8 @@ export type EventBody =
       check: CheckKind;
       recipeId: string;
       status: CheckStatus;
+      /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
       exitCode: number | null;
       termination?: CommandTermination;
       durationMs: number;

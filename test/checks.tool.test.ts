@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { CHECKS_PER_SESSION, checkCapsFromEvents, createRunCheckTool, type CheckCaps } from '../src/tools/run-check.js';
 import { CHECK_KINDS } from '../src/types.js';
+import { sha256 } from '../src/shared/hash.js';
 import { startSession, endSession, runTurn, reconstruct } from '../src/runtime/session.js';
 import { MockProvider, type ScriptTurn } from '../src/provider/mock.js';
 import { TOOLS } from '../src/tools/index.js';
@@ -142,7 +143,10 @@ describe('run_check — refusals that never spawn', () => {
     const tool = createRunCheckTool({ workspaceRoot: ws, caps: { checksRun: 0 } });
     const { ctx, evidence } = collectingCtx();
     const r = await tool.execute({ checks: ['test'] }, ctx);
-    expect(r.ok).toBe(true); // nothing FAILED; the honest answer is "cannot check that here"
+    // "Nothing could be checked here" is NOT a successful verification: ok stays false and the
+    // error says so, or a report reader would see a bare `ok` for an action that never ran.
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('no check ran');
     expect(r.output).toContain('UNSUPPORTED');
     expect(r.output).toContain('no supported project manifest');
     expect(evidence.length).toBe(1);
@@ -179,6 +183,35 @@ describe('run_check — real execution and evidence', () => {
     expect(ended).toMatchObject({ status: 'fail', termination: 'exited' });
     expect((ended as Extract<CheckEvidence, { kind: 'ended' }>).exitCode).not.toBe(0);
   }, 60_000);
+
+  it('spills the SAME string it hashed, so the runtime can actually store the blob', async () => {
+    // Review finding: truncateForModel ran over the excerpted model text while fullOutput carried
+    // the raw text, so sha(fullOutput) never equalled the recorded fullOutputSha256. The runtime
+    // verifies that equality before storing — the blob was written, rejected, and orphaned, and
+    // the recorded sha pointed at bytes nothing could resolve.
+    const noisy = 'x'.repeat(200);
+    nodeProject({ test: `node -e "for(let i=0;i<200;i++)console.log('${noisy}')"` });
+    const tool = createRunCheckTool({ workspaceRoot: ws, caps: { checksRun: 0 } });
+    const { ctx } = collectingCtx();
+    const r = await tool.execute({ checks: ['test'] }, ctx);
+    expect(r.truncated).toBe(true);
+    expect(r.fullOutputSha256).toBeDefined();
+    expect(r.fullOutput).toBeDefined();
+    expect(sha256(r.fullOutput!)).toBe(r.fullOutputSha256);
+  }, 60_000);
+
+  it('refuses a malformed request outright instead of recording it as "unsupported"', async () => {
+    // Review finding: `test-targeted` with no scope resolved to `unsupported`, which a declared
+    // gate then treated as a waiver — a routine caller mistake could retire real verification.
+    nodeProject({ test: 'node -e ""' });
+    const tool = createRunCheckTool({ workspaceRoot: ws, caps: { checksRun: 0 } });
+    const { ctx, evidence } = collectingCtx();
+    const r = await tool.execute({ checks: ['test-targeted'] }, ctx);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('invalid check request');
+    expect(r.output).toContain('never be mistaken');
+    expect(evidence).toEqual([]);
+  });
 
   it('mixes supported and unsupported kinds in one call honestly', async () => {
     nodeProject({ test: 'node -e ""' });
@@ -259,11 +292,17 @@ describe('run_check — caps and crash replay', () => {
   it('rebuilds the session check counter from events (a resumed session keeps counting)', () => {
     const ev = (body: Record<string, unknown>): SessionEvent => ({ v: 1, seq: 1, ts: 't', ...body }) as unknown as SessionEvent;
     const events = [
+      // A normal run: started + completed, counted once.
       ev({ type: 'check.started', callId: 'c1', check: 'test', recipeId: 'r', command: 'x', cwd: '.', timeoutMs: 1 }),
       ev({ type: 'check.completed', callId: 'c1', check: 'test', recipeId: 'r', status: 'pass', exitCode: 0, durationMs: 1, summary: 's' }),
+      // Interrupted mid-run (no completion) — it still consumed a run.
       ev({ type: 'check.started', callId: 'c2', check: 'lint', recipeId: 'r', command: 'x', cwd: '.', timeoutMs: 1 }),
+      // Spawn failure (no start event) — it also consumed a run.
+      ev({ type: 'check.completed', callId: 'c3', check: 'build', recipeId: 'r', status: 'error', exitCode: null, termination: 'spawn-error', durationMs: 1, summary: 's' }),
+      // Unsupported never ran and must not consume the budget.
+      ev({ type: 'check.completed', callId: 'c4', check: 'format', recipeId: '(none)', status: 'unsupported', exitCode: null, durationMs: 0, summary: 's' }),
     ];
-    expect(checkCapsFromEvents(events)).toEqual({ checksRun: 2 });
+    expect(checkCapsFromEvents(events)).toEqual({ checksRun: 3 });
   });
 
   it('replays an interrupted check as having produced NO verdict', () => {

@@ -45,6 +45,8 @@ export interface DetectedProject {
   /** Interesting tool names found in pyproject.toml / setup.cfg text. */
   pythonTools: string[];
   hasNodeModules: boolean;
+  /** package.json declares at least one dependency — only then does an absent node_modules matter. */
+  hasDependencies: boolean;
   hasTsconfig: boolean;
   hasEslintConfig: boolean;
   hasPrettierConfig: boolean;
@@ -80,6 +82,8 @@ export interface CheckRecipe {
   /** A precondition that is NOT satisfied right now, stated for the human; null when ready. */
   unmetPrecondition(p: DetectedProject): string | null;
   argv(p: DetectedProject, scope: readonly string[]): string[] | null;
+  /** The workspace-authored body this recipe invokes, when it invokes one — consent binds it. */
+  body?(p: DetectedProject): string | null;
   timeoutMs: number;
   effects: CheckEffects;
 }
@@ -89,16 +93,32 @@ export interface ResolvedCheck {
   recipeId: string;
   /** The exact command string that will be executed (and that the approval prompt shows). */
   command: string;
+  /**
+   * For a workspace-authored script recipe: sha256 of the SCRIPT BODY the command invokes.
+   * `npm run test` is a stable string whose behavior lives in package.json — consent bound to the
+   * command alone would survive a rewrite of what that command actually does, which is precisely
+   * the standing shell authority `run_command` is denied. Absent for harness-composed commands,
+   * where the command string IS the behavior.
+   */
+  bodySha?: string;
   timeoutMs: number;
   effects: CheckEffects;
   /** Workspace-relative scope prefixes folded into the command, when the kind takes them. */
   scopePaths: string[];
 }
 
-/** A kind that cannot run here, with the honest reason (no applicable row / precondition unmet). */
+/**
+ * Why a kind cannot run. The REASON is load-bearing, not decoration: a gate the user approved may
+ * only be waived when the PROJECT genuinely cannot run the kind ('no-recipe'/'precondition'). A
+ * 'bad-request' — the caller asked for something malformed — must never retire a declared gate,
+ * or a routine mistake would silently discharge verification the user asked for.
+ */
+export type UnsupportedReason = 'no-recipe' | 'precondition' | 'bad-request';
+
 export interface UnsupportedCheck {
   kind: CheckKind;
   reason: string;
+  why: UnsupportedReason;
 }
 
 export interface CheckResolution {

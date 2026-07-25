@@ -45,7 +45,8 @@ describe('detectProject', () => {
     expect(p.nodeTools).toEqual(['typescript', 'vitest']);
     expect(p.hasTsconfig).toBe(true);
     expect(p.hasNodeModules).toBe(false);
-    expect(p.evidence.join(' ')).toContain('node_modules ABSENT');
+    expect(p.hasDependencies).toBe(true);
+    expect(p.evidence.join(' ')).toContain('dependencies are declared but node_modules is ABSENT');
   });
 
   it('prefers the declared packageManager field over lockfiles', () => {

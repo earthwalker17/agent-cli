@@ -63,7 +63,9 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   const forwarded = req.taskContext !== undefined;
   const sPart =
     req.kind === 'check'
-      ? '   [s] allow re-runs of THIS EXACT command'
+      ? // Count what it actually grants: one keystroke stores replay consent for EVERY command in
+        // the batch, and a prompt that says "this command" while granting three is a lie.
+        `   [s] allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'}`
       : grantable
         ? forwarded
           ? '   [s] allow for the rest of THIS TASK'

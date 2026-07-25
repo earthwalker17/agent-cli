@@ -167,6 +167,37 @@ describe('recover: attempt', () => {
     expect(recorded).toEqual([]);
   });
 
+  it('requires the FAILING kind among the regression checks', async () => {
+    // Review finding: nothing tied the declared proof to the failure, so a green unrelated check
+    // could mark a repair "PROVEN" — and, worse, that bogus success cleared an escalation.
+    reset();
+    const { ctx, recorded } = ctxWith();
+    const r = await tool([typeFail()]).execute(
+      { action: 'attempt', target: 'api', hypothesis: 'the declared return type is wrong at its source', regression_checks: ['format'] },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("must include 'typecheck'");
+    expect(recorded).toEqual([]);
+  });
+
+  it('states honestly that scope is measured, not prevented — and says so when none was declared', async () => {
+    reset();
+    const { ctx } = ctxWith();
+    const withScope = await tool([typeFail()]).execute(
+      { action: 'attempt', target: 'api', hypothesis: 'the declared return type is wrong at its source', scope_paths: ['src/api'], regression_checks: ['typecheck'] },
+      ctx,
+    );
+    expect(withScope.output).toContain('MEASURED, not prevented');
+
+    reset();
+    const noScope = await tool([typeFail()]).execute(
+      { action: 'attempt', target: 'api', hypothesis: 'the declared return type is wrong at its source', regression_checks: ['typecheck'] },
+      ctx,
+    );
+    expect(noScope.output).toContain('CANNOT be detected');
+  });
+
   it('refuses scope paths that escape the workspace but keeps the contained ones', async () => {
     reset();
     const { ctx, recorded } = ctxWith();
@@ -216,9 +247,19 @@ describe('R11: classification before repair planning at the scheduler gate', () 
     expect(r).toContain('runtime-process');
   });
 
-  it('a class that needs a human decision is refused even on the first retry', () => {
+  it('ONE free re-spawn when the stop reason is one no model effort can clear', () => {
+    // A transient provider error classifies as `unknown`, a wall-clock overrun as
+    // `timeout-resource` — neither is auto-eligible, so refusing at the FIRST failure would make
+    // a blip cost a plan amendment plus a human re-approval. R10 still bounds the retries.
     reset();
-    const events = [started('ch1'), endedErr('ch1', 'timeout')];
+    expect(checkDagRules(spawn(), gate([started('ch1'), endedErr('ch1', 'timeout')]))).toBeNull();
+    reset();
+    expect(checkDagRules(spawn(), gate([started('ch1'), endedErr('ch1', 'error')]))).toBeNull();
+  });
+
+  it('the SECOND failure of a class that needs a human decision is refused, naming escalate', () => {
+    reset();
+    const events = [started('ch1'), endedErr('ch1', 'timeout'), started('ch2'), endedErr('ch2', 'timeout')];
     const r = checkDagRules(spawn(), gate(events));
     expect(r).toContain('automatic repair is REFUSED');
     expect(r).toContain('timeout-resource');
@@ -284,7 +325,7 @@ describe('R11: classification before repair planning at the scheduler gate', () 
         signals: ['module-not-found'],
         planTaskId: 'api',
       });
-    const events = [started('ch1'), endedErr('ch1', 'stalled'), depFail()];
+    const events = [started('ch1'), endedErr('ch1', 'stalled'), started('ch2'), endedErr('ch2', 'stalled'), depFail()];
     const r = checkDagRules(spawn(), gate(events));
     expect(r).toContain('automatic repair is REFUSED');
     expect(r).toContain('requires-user-decision');
@@ -339,12 +380,40 @@ describe('acceptance is blocked by unresolved recovery', () => {
       ev({ type: 'task.changes', callId: 'c-ch1', childSessionId: 'ch1', baseOid: 'o', files: [{ relPath: 'src/api/a.ts', kind: 'modify', blobSha256: 'b', baseSha256: null, bytes: 1 }] }),
       ev({ type: 'task.applied', callId: 'c-ch1', childSessionId: 'ch1', applied: ['src/api/a.ts'], refused: [] }),
       ev({ type: 'check.completed', callId: 'k', check: 'typecheck' as CheckKind, recipeId: 'r', status: 'pass', exitCode: 0, termination: 'exited', durationMs: 1, summary: 'ok' }),
-      ev({ type: 'repair.escalated', callId: 'c', target: 'api', failureClass: 'unknown', signature: 'sigX', reason: 'needs a decision' }),
+      ev({ type: 'repair.escalated', callId: 'c', target: 'session', failureClass: 'unknown', signature: 'sigX', reason: 'needs a decision' }),
       ev({ type: 'repair.attempted', callId: 'c', target: 'api', failureClass: 'compile-type', signature: 'sigY', hypothesis: 'h', hypothesisSha: 'h', scopePaths: [], regressionChecks: ['test'], attempt: 1 }),
     ];
     const acc = computeAcceptance(state, foldGraphState(g, events), events);
     expect(acc.complete).toBe(false);
     expect(acc.unfinished.join(' ')).toContain('repair escalated and unresolved');
     expect(acc.unfinished.join(' ')).toContain('is unproven');
+  });
+
+  it('an escalation on a task that is now completed with a green gate is resolved BY EVIDENCE', async () => {
+    const { computeAcceptance } = await import('../src/runtime/acceptance.js');
+    // Without this, an escalation on a non-auto-eligible class was an unclosable trap: only a
+    // successful repair attempt could close it, and the policy refuses to record an attempt for
+    // exactly those classes.
+    reset();
+    const g = graph();
+    const state = {
+      kind: 'canonical',
+      status: 'approved',
+      approvedAndCurrent: true,
+      approvedSha: 's',
+      diverged: false,
+      canonical: { graph: g },
+    } as unknown as PlanState;
+    const events = [
+      started('ch1'),
+      ev({ type: 'repair.escalated', callId: 'c', target: 'api', failureClass: 'dependency-setup', signature: 'sigZ', reason: 'a module is missing' }),
+      ev({ type: 'task.ended', callId: 'c-ch1', childSessionId: 'ch1', status: 'completed', steps: 1, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+      ev({ type: 'task.changes', callId: 'c-ch1', childSessionId: 'ch1', baseOid: 'o', files: [{ relPath: 'src/api/a.ts', kind: 'modify', blobSha256: 'b', baseSha256: null, bytes: 1 }] }),
+      ev({ type: 'task.applied', callId: 'c-ch1', childSessionId: 'ch1', applied: ['src/api/a.ts'], refused: [] }),
+      ev({ type: 'check.completed', callId: 'k', check: 'typecheck' as CheckKind, recipeId: 'r', status: 'pass', exitCode: 0, termination: 'exited', durationMs: 1, summary: 'ok' }),
+    ];
+    const acc = computeAcceptance(state, foldGraphState(g, events), events);
+    expect(acc.unfinished.join(' ')).not.toContain('repair escalated');
+    expect(acc.complete).toBe(true);
   });
 });

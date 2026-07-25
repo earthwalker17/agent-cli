@@ -1,5 +1,6 @@
 import type { CheckKind, CheckStatus, SessionEvent, TaskChangeFile } from '../types.js';
 import { planTaskDefinitionSha, topoOrder, type PlanGraph, type PlanTaskRole } from './schema.js';
+import { relPrefixesOverlap } from '../shared/pathutil.js';
 
 
 /**
@@ -102,7 +103,13 @@ export function foldGraphState(
   const captured = new Map<string, { files: TaskChangeFile[]; omittedCount: number }>();
   const applied = new Map<string, Set<string>>(); // childSessionId -> union of applied relPaths
   const appliedSeq = new Map<string, number>(); // childSessionId -> last apply seq (the gate anchor)
-  const checkRuns: { check: CheckKind; status: CheckStatus; seq: number }[] = [];
+  const checkRuns: {
+    check: CheckKind;
+    status: CheckStatus;
+    seq: number;
+    scopePaths: string[];
+    capabilityUnsupported: boolean;
+  }[] = [];
 
   for (const e of events) {
     if (e.type === 'task.started' && e.planTaskId !== undefined) {
@@ -119,7 +126,16 @@ export function foldGraphState(
       applied.set(e.childSessionId, set);
       appliedSeq.set(e.childSessionId, e.seq);
     } else if (e.type === 'check.completed') {
-      checkRuns.push({ check: e.check, status: e.status, seq: e.seq });
+      checkRuns.push({
+        check: e.check,
+        status: e.status,
+        seq: e.seq,
+        scopePaths: e.scopePaths ?? [],
+        // Only a PROJECT-capability reason may waive a gate the user approved. A malformed
+        // request ('bad-request') must never discharge verification; legacy events without a
+        // reason keep the old permissive reading, since they predate the distinction.
+        capabilityUnsupported: e.unsupportedReason === undefined || e.unsupportedReason !== 'bad-request',
+      });
     }
   }
 
@@ -129,15 +145,24 @@ export function foldGraphState(
    * have verified it. `unsupported` counts as satisfied-with-a-caveat — the `parent-owned`
    * precedent — because an unrunnable gate must never be able to strand a plan with no exit.
    */
-  const verificationFor = (required: readonly CheckKind[], anchorSeq: number): TaskVerification => {
+  const verificationFor = (required: readonly CheckKind[], anchorSeq: number, touches: readonly string[] = []): TaskVerification => {
     if (required.length === 0) return { required: [], satisfied: [], waived: [], missing: [], status: 'none' };
     const satisfied: CheckKind[] = [];
     const waived: CheckKind[] = [];
     const missing: CheckKind[] = [];
     for (const kind of required) {
-      const after = checkRuns.filter((r) => r.check === kind && r.seq > anchorSeq);
+      const after = checkRuns.filter((r) => {
+        if (r.check !== kind || r.seq <= anchorSeq) return false;
+        // For a TARGETED test the scope IS the check: a green run over somebody else's files
+        // proves nothing about this task. When the task declares no touches there is nothing to
+        // match against, so the permissive reading stands (and the plan validator warns about it).
+        if (kind === 'test-targeted' && r.status === 'pass' && touches.length > 0) {
+          return r.scopePaths.some((s) => touches.some((t) => relPrefixesOverlap(s, t)));
+        }
+        return true;
+      });
       if (after.some((r) => r.status === 'pass')) satisfied.push(kind);
-      else if (after.some((r) => r.status === 'unsupported')) waived.push(kind);
+      else if (after.some((r) => r.status === 'unsupported' && r.capabilityUnsupported)) waived.push(kind);
       else missing.push(kind);
     }
     return {
@@ -176,7 +201,7 @@ export function foldGraphState(
       // Placeholder: only a task that reached a terminal completed state has an integration
       // anchor to measure a gate against. Every earlier state keeps the required list visible
       // (so /tasks and the plan view can show what WILL gate it) with nothing satisfied yet.
-      verification: verificationFor(task.checks ?? [], Number.MAX_SAFE_INTEGER),
+      verification: verificationFor(task.checks ?? [], Number.MAX_SAFE_INTEGER, task.touches),
     };
 
     if (task.role === 'main') {
@@ -255,10 +280,15 @@ export function foldGraphState(
           );
           continue;
         }
-        // The gate anchor: the LATER of this task's end and its last apply — the moment its work
-        // was actually in the workspace. A check before that point verified a different tree.
-        const anchor = Math.max(end.seq, appliedSeq.get(childSessionId) ?? 0);
-        const verification = verificationFor(task.checks ?? [], anchor);
+        // The gate anchor: the latest moment ANY of this task's work reached the workspace.
+        // Every binding counts, not just the last: capture happens for failed children too, and
+        // apply_task_changes can integrate an earlier attempt's files at any later point — so
+        // anchoring on the last binding alone left a stale-green gate in the permissive direction.
+        const anchor = bound.reduce(
+          (acc, b) => Math.max(acc, ended.get(b.childSessionId)?.seq ?? 0, appliedSeq.get(b.childSessionId) ?? 0),
+          end.seq,
+        );
+        const verification = verificationFor(task.checks ?? [], anchor, task.touches);
         if (verification.status === 'pending') {
           notes.push(`required check(s) not passed since integration: ${verification.missing.join(', ')} — run run_check`);
         } else if (verification.status === 'waived') {
@@ -323,7 +353,7 @@ export function integrationGateState(
   for (const kind of required) {
     const after = events.filter((e) => e.type === 'check.completed' && e.check === kind && e.seq > lastApply);
     if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
-    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported')) waived.push(kind);
+    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && e.unsupportedReason !== 'bad-request')) waived.push(kind);
     else pending.push(kind);
   }
   return { required, pending, waived };
@@ -342,14 +372,21 @@ export function completionGateState(
 ): { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } {
   const required = [...(graph.gates?.completion ?? [])];
   if (required.length === 0) return { required, pending: [], waived: [] };
+  // "The last change" must include reverts, or the gate would stay green over a workspace that
+  // no longer exists: applyUndo writes files back to disk and records only `undo.applied`, and a
+  // checkpoint restore is likewise a change to what the passing check measured.
   let lastChange = 0;
-  for (const e of events) if (e.type === 'file.mutated') lastChange = Math.max(lastChange, e.seq);
+  for (const e of events) {
+    if (e.type === 'file.mutated') lastChange = Math.max(lastChange, e.seq);
+    else if (e.type === 'undo.applied' && e.restored.length > 0) lastChange = Math.max(lastChange, e.seq);
+    else if (e.type === 'git.restore' && e.restored.length > 0) lastChange = Math.max(lastChange, e.seq);
+  }
   const pending: CheckKind[] = [];
   const waived: CheckKind[] = [];
   for (const kind of required) {
     const after = events.filter((e) => e.type === 'check.completed' && e.check === kind && e.seq > lastChange);
     if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
-    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported')) waived.push(kind);
+    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && e.unsupportedReason !== 'bad-request')) waived.push(kind);
     else pending.push(kind);
   }
   return { required, pending, waived };

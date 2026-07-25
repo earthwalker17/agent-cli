@@ -125,6 +125,27 @@ describe('replay consent', () => {
     expect(decide(stubTool([fact({ recipeId: 'other.recipe' })]), {}, ctx(), grants)).toMatchObject({ decision: 'ask' });
   });
 
+  it('binds the SCRIPT BODY: rewriting what `npm run test` does re-asks', () => {
+    // Review finding (critical): `<pm> run <script>` is a stable command whose behavior lives in
+    // package.json, which the agent can rewrite through the auto-allowed in-workspace mutation
+    // branch. Keying consent on the command alone turned one [s] into standing consent to run
+    // whatever that script was later changed to say — the exact authority run_command is denied.
+    const grants = new Grants();
+    const before = fact({ command: 'npm run test', bodySha: 'sha-of-vitest-run' });
+    grants.addCheckReplay(checkReplayKey(before.recipeId, before.command, before.bodySha));
+    expect(decide(stubTool([before]), {}, ctx(), grants)).toMatchObject({ decision: 'allow', rule: 'check.replay-consent' });
+
+    const rewritten = fact({ command: 'npm run test', bodySha: 'sha-of-something-else' });
+    expect(decide(stubTool([rewritten]), {}, ctx(), grants)).toMatchObject({ decision: 'ask' });
+  });
+
+  it('a harness-composed command with no body still replays on its command alone', () => {
+    const grants = new Grants();
+    const tsc = fact({ recipeId: 'node.tsc', kind: 'typecheck', command: 'npx --no tsc --noEmit' });
+    grants.addCheckReplay(checkReplayKey(tsc.recipeId, tsc.command, undefined));
+    expect(decide(stubTool([tsc]), {}, ctx(), grants)).toMatchObject({ decision: 'allow', rule: 'check.replay-consent' });
+  });
+
   it('lives in its own store: it is not an ActionClass grant and cannot leak into one', () => {
     const grants = new Grants();
     grants.addCheckReplay(checkReplayKey('node.script.test', 'npm run test'));
@@ -153,13 +174,19 @@ describe('the approval prompt for a typed check', () => {
   }
 
   it('shows every resolved command and offers replay consent with distinct wording', () => {
-    const p = formatApprovalPrompt(req());
+    const p = formatApprovalPrompt(req({ checkCount: 1 }));
     expect(p).toContain('[typed check — harness-resolved command]');
     expect(p).toContain('npm run typecheck');
     expect(p).toContain('npm run test');
     expect(p).toContain('[s] allow re-runs of THIS EXACT command');
     expect(p).not.toContain('allow for the rest of this session');
     expect(p).toContain('NOT undoable');
+  });
+
+  it('counts what [s] actually grants — one keystroke consents to the whole batch', () => {
+    // Review finding: the prompt said "THIS EXACT command" while session.ts stored a replay key
+    // for every resolved command in the call.
+    expect(formatApprovalPrompt(req({ checkCount: 3 }))).toContain('[s] allow re-runs of THESE 3 EXACT commands');
   });
 
   it('leaves the executor-spawn prompt exactly as it was (no [s] on a reversible ask)', () => {

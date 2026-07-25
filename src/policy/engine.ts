@@ -62,12 +62,17 @@ export class Grants {
 }
 
 /**
- * The replay-consent identity of one resolved check: the recipe AND the exact command. Both,
- * because the recipe id names WHAT was consented to in human terms while the command is what
- * actually runs — a manifest edit that changes the command must invalidate the consent.
+ * The replay-consent identity of one resolved check: the recipe, the exact command, AND — for a
+ * workspace-authored script — the sha of the script BODY that command invokes.
+ *
+ * The body is the load-bearing part. `npm run test` is a stable string whose behavior lives in
+ * package.json, which the agent can rewrite through the ordinary auto-allowed in-workspace
+ * mutation branch. Keying on the command alone would let one `[s]` become standing consent to
+ * execute whatever that script is later changed to say — exactly the standing shell authority
+ * `run_command` is denied by design. Binding the body means a rewritten script re-asks.
  */
-export function checkReplayKey(recipeId: string, command: string): string {
-  return sha256(`${recipeId}\n${command}`);
+export function checkReplayKey(recipeId: string, command: string, bodySha?: string): string {
+  return sha256(`${recipeId}\n${command}\n${bodySha ?? ''}`);
 }
 
 export function isSecretName(p: string, extraPatterns?: readonly string[]): boolean {
@@ -280,7 +285,7 @@ export function decide<I>(
       // reports the honest `unsupported` results; it just must not present an empty approval.
       return decision('observe', 'allow', 'check.nothing-to-run', 'no check resolved to a runnable command in this project');
     }
-    const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command));
+    const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command, r.bodySha));
     const summary = fact.resolved.map((r) => `${r.kind} → ${r.recipeId}`).join('; ');
     if (keys.every((k) => grants.hasCheckReplay(k))) {
       return decision('reversible', 'allow', 'check.replay-consent', `re-running check command(s) already approved this session (${summary})`, {

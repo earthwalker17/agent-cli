@@ -187,6 +187,62 @@ describe('fold: the per-task gate blocks dependents', () => {
     expect(api.note).toContain('not proof');
   });
 
+  it('a BAD-REQUEST unsupported never waives a gate — only a project-capability one does', () => {
+    // Review finding: `unsupported` was treated as a project fact, but resolveChecks also returns
+    // it for caller mistakes. A routine malformed call could retire verification the user asked
+    // for, with no approval and a note falsely blaming the project.
+    reset();
+    const g = graphOf();
+    const done = [started('api', 'ch1'), endedOk('ch1'), changed('ch1', 'src/api/a.ts'), appliedAll('ch1', ['src/api/a.ts'])];
+    const bad = [...done, ev({ type: 'check.completed', callId: 'k', check: 'test', recipeId: '(none)', status: 'unsupported', unsupportedReason: 'bad-request', exitCode: null, durationMs: 0, summary: 'bad' })];
+    expect(foldGraphState(g, bad).byId.get('api')!.verification.status).toBe('pending');
+
+    reset();
+    const done2 = [started('api', 'ch1'), endedOk('ch1'), changed('ch1', 'src/api/a.ts'), appliedAll('ch1', ['src/api/a.ts'])];
+    const capability = [...done2, ev({ type: 'check.completed', callId: 'k', check: 'test', recipeId: '(none)', status: 'unsupported', unsupportedReason: 'no-recipe', exitCode: null, durationMs: 0, summary: 'none' })];
+    expect(foldGraphState(g, capability).byId.get('api')!.verification.status).toBe('waived');
+  });
+
+  it('anchors on ALL of a task’s bindings, so integrating an earlier attempt re-opens the gate', () => {
+    // Review finding: anchoring on the LAST binding alone left a stale-green gate when an earlier
+    // failed attempt's capture was applied afterwards — work landing after the passing check.
+    reset();
+    const g = graphOf();
+    const events = [
+      started('api', 'chA'),
+      ev({ type: 'task.ended', callId: 'c-chA', childSessionId: 'chA', status: 'error', steps: 1, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+      changed('chA', 'src/api/old.ts'),
+      started('api', 'chB'),
+      endedOk('chB'),
+      changed('chB', 'src/api/new.ts'),
+      appliedAll('chB', ['src/api/new.ts']),
+      checkDone('test', 'pass'),
+    ];
+    expect(foldGraphState(g, events).byId.get('api')!.verification.status).toBe('green');
+
+    // Now the earlier attempt's captured file is integrated — that is this task's work landing
+    // AFTER the passing check, so the gate must re-open.
+    const later = [...events, appliedAll('chA', ['src/api/old.ts'])];
+    expect(foldGraphState(g, later).byId.get('api')!.verification.status).toBe('pending');
+  });
+
+  it('a targeted-test gate is not satisfied by a run over unrelated files', () => {
+    // Review finding: for test-targeted the SCOPE is the check; matching on kind alone let a
+    // green run of somebody else's tests discharge this task's gate.
+    reset();
+    const g = graphOf({}, [
+      { id: 'api', title: 'API', intent: 'i', role: 'executor', verify: 'v', touches: ['src/api'], checks: ['test-targeted'] },
+    ]);
+    const done = [started('api', 'ch1'), endedOk('ch1'), changed('ch1', 'src/api/a.ts'), appliedAll('ch1', ['src/api/a.ts'])];
+    const elsewhere = [...done, ev({ type: 'check.completed', callId: 'k', check: 'test-targeted', recipeId: 'r', status: 'pass', exitCode: 0, termination: 'exited', durationMs: 1, summary: 'ok', scopePaths: ['test/smoke.test.ts'] })];
+    expect(foldGraphState(g, elsewhere).byId.get('api')!.verification.status).toBe('pending');
+
+    reset();
+    const done2 = [started('api', 'ch1'), endedOk('ch1'), changed('ch1', 'src/api/a.ts'), appliedAll('ch1', ['src/api/a.ts'])];
+    const onScope = [...done2, ev({ type: 'check.completed', callId: 'k', check: 'test-targeted', recipeId: 'r', status: 'pass', exitCode: 0, termination: 'exited', durationMs: 1, summary: 'ok', scopePaths: ['src/api/a.ts'] })];
+    expect(foldGraphState(g, onScope).byId.get('api')!.verification.status).toBe('green');
+  });
+
   it('a task with no declared checks is completely unaffected', () => {
     reset();
     const g = graphOf({}, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);
@@ -290,6 +346,39 @@ describe('acceptance: gates are completion blockers', () => {
     const acc = computeAcceptance(planState(g), foldGraphState(g, changedAgain), changedAgain);
     expect(acc.complete).toBe(false);
     expect(acc.unfinished.join(' ')).toContain('has not passed since the last change');
+  });
+
+  it('an /undo after a green completion gate re-opens it — the gate measures the CURRENT tree', () => {
+    // Review finding: applyUndo writes files back to disk but records only `undo.applied`, so a
+    // gate anchored on file.mutated alone stayed green over a workspace that no longer existed.
+    reset();
+    const g = graphOf({ gates: { completion: ['build'] } }, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);
+    const green = [started('a', 'ch1'), endedOk('ch1'), changed('ch1', 'x'), appliedAll('ch1', ['x']), mutated(), checkDone('build', 'pass')];
+    expect(completionGateState(g, green).pending).toEqual([]);
+
+    const undone = [...green, ev({ type: 'undo.applied', target: 'last', restored: [{ path: 'src/a.ts', toSha256: 'a' }], refused: [] })];
+    expect(completionGateState(g, undone).pending).toEqual(['build']);
+
+    const restored = [...green, ev({ type: 'git.restore', ref: 'r', oid: 'o', restored: ['src/a.ts'], refused: [] })];
+    expect(completionGateState(g, restored).pending).toEqual(['build']);
+  });
+
+  it('a WAIVED gate is surfaced as a caveat on the acceptance summary, never silently dropped', () => {
+    // Review finding: "complete" could be recorded while a gate the user approved never ran.
+    reset();
+    const g = graphOf({ gates: { completion: ['lint'] } }, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);
+    const events = [
+      started('a', 'ch1'),
+      endedOk('ch1'),
+      changed('ch1', 'x'),
+      appliedAll('ch1', ['x']),
+      mutated(),
+      ev({ type: 'check.completed', callId: 'k', check: 'lint', recipeId: '(none)', status: 'unsupported', unsupportedReason: 'no-recipe', exitCode: null, durationMs: 0, summary: 'no lint recipe' }),
+    ];
+    const acc = computeAcceptance(planState(g), foldGraphState(g, events), events);
+    expect(acc.complete).toBe(true);
+    expect(acc.caveats.join(' ')).toContain("completion gate 'lint' NEVER RAN");
+    expect(acc.summary).toContain('CAVEATS');
   });
 
   it('completionGateState waives an unsupported kind rather than stranding the session', () => {

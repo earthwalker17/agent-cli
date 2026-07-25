@@ -9,11 +9,12 @@ import type { FailureClass } from '../types.js';
  * different hypothesis, and a budget it has not yet spent.
  *
  * What the harness ENFORCES (and what it does not) is stated plainly, because the difference
- * matters: attempts, wall time, session budget, token budget, scope containment, and
- * non-identical hypothesis TEXT are enforced here. Whether a hypothesis is genuinely a different
- * idea is the model's responsibility — it is recorded verbatim for review, never claimed as
- * verified. Overstating that would be exactly the "narration as evidence" failure this system
- * exists to prevent.
+ * matters. Enforced: attempt count, in-session wall time, the session and token budgets, and
+ * non-identical hypothesis TEXT. DETECTED BUT NOT PREVENTED: scope expansion — a diff that
+ * escapes the declared scope stops the NEXT attempt; no write is ever blocked, and with no
+ * declared scope nothing is measured at all. NOT verified at all: whether a hypothesis is
+ * genuinely a different idea — it is recorded verbatim for review. Overstating any of these
+ * would be exactly the "narration as evidence" failure this system exists to prevent.
  *
  * The recovery POINT is not built here because it already exists: parent edits are snapshot-backed
  * by construction (a capture failure escalates to a no-undo ask), and an executor re-run creates a
@@ -69,7 +70,13 @@ export function evaluateRepair(input: RepairEvaluationInput): RepairVerdict {
   const prior = ledger.bySignature.get(c.signature) ?? [];
   const attemptsUsed = prior.length;
   const wallMsUsed = prior.length > 0 ? Math.max(...prior.map((a) => a.ageMs)) : 0;
-  const needsNewPlan = !prior.some((a) => a.seq > input.failureSeq);
+  // A fresh plan is needed when no attempt for this failure is still OPEN. Deliberately NOT
+  // "newer than the latest failure event": re-running the failing check is what the catalogue
+  // ITSELF prescribes as a diagnostic, and that re-run produces newer failure evidence — the
+  // old rule turned following the guidance into a forced re-plan that burned the attempt budget
+  // without a single repair edit. An attempt closes only when its regression checks pass, so a
+  // recurrence after a "successful" repair correctly demands a new hypothesis.
+  const needsNewPlan = !prior.some((a) => a.outcome === 'open');
   const base = {
     failureClass: c.class,
     signature: c.signature,

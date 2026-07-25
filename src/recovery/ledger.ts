@@ -66,6 +66,31 @@ function parseTs(ts: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * Inter-event gaps longer than this are treated as the session being idle (the user went away,
+ * quit and resumed the next day) rather than as repair effort. Without the clamp the wall-time
+ * budget measured CALENDAR time: resuming a session in the morning instantly exhausted every
+ * repair signature from the night before, permanently blocking retries for work that took
+ * minutes.
+ */
+const IDLE_GAP_MS = 10 * 60 * 1000;
+
+/** Elapsed IN-SESSION time from `fromSeq` to the end of the log: gaps beyond IDLE_GAP_MS ignored. */
+function activeMsSince(events: readonly SessionEvent[], fromSeq: number): number {
+  let total = 0;
+  let prev: number | null = null;
+  for (const e of events) {
+    if (e.seq < fromSeq) continue;
+    const t = parseTs(e.ts);
+    if (prev !== null) {
+      const gap = t - prev;
+      if (gap > 0 && gap <= IDLE_GAP_MS) total += gap;
+    }
+    prev = t;
+  }
+  return total;
+}
+
 function withinScope(relPath: string, allowed: readonly string[]): boolean {
   if (allowed.length === 0) return true; // no declared scope ⇒ nothing to expand beyond
   const p = relPath.replace(/\\/g, '/');
@@ -75,7 +100,12 @@ function withinScope(relPath: string, allowed: readonly string[]): boolean {
 export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOptions = {}): RepairLedger {
   const attempts: RepairAttemptState[] = [];
   const escalations: RepairEscalationState[] = [];
-  const lastTs = events.length > 0 ? parseTs(events[events.length - 1]!.ts) : 0;
+  // Which plan task each child belongs to — so integrating ANOTHER task's reviewed work is never
+  // mistaken for this repair's diff spreading.
+  const childTarget = new Map<string, string>();
+  for (const e of events) {
+    if (e.type === 'task.started' && e.planTaskId !== undefined) childTarget.set(e.childSessionId, e.planTaskId);
+  }
 
   for (const e of events) {
     if (e.type === 'repair.attempted') {
@@ -93,7 +123,7 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
         outcome: 'open',
         pendingChecks: [...e.regressionChecks],
         outOfScope: [],
-        ageMs: Math.max(0, lastTs - parseTs(e.ts)),
+        ageMs: activeMsSince(events, e.seq),
       });
     } else if (e.type === 'repair.escalated') {
       escalations.push({ seq: e.seq, target: e.target, failureClass: e.failureClass, signature: e.signature, reason: e.reason, open: true });
@@ -120,7 +150,13 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
         if (e.seq <= a.seq || e.seq >= windowEnd) continue;
         if (e.type === 'check.completed' && e.status === 'pass' && a.regressionChecks.includes(e.check)) passed.add(e.check);
         else if (e.type === 'file.mutated') changed.push(e.path);
-        else if (e.type === 'task.applied') changed.push(...e.applied);
+        else if (e.type === 'task.applied') {
+          // Only this target's own integrations count toward its scope. Integrating a DIFFERENT
+          // plan task's reviewed work is normal progress, not a repair spreading — counting it
+          // permanently tripped the scope-expanded stop for whichever repair happened to be open.
+          const owner = childTarget.get(e.childSessionId);
+          if (owner === undefined || owner === a.target) changed.push(...e.applied);
+        }
       }
       a.pendingChecks = a.regressionChecks.filter((k) => !passed.has(k));
       const allowed = [...a.scopePaths, ...(opts.extraScope?.(a.target) ?? [])];
@@ -155,11 +191,23 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
   return { attempts, escalations, bySignature, total: attempts.length, childOutputTokensSinceFirstAttempt };
 }
 
-/** Repair attempts and escalations that still need an answer — acceptance blockers. */
-export function openRepairBlockers(ledger: RepairLedger): string[] {
+/**
+ * Repair attempts and escalations that still need an answer — the acceptance blockers.
+ *
+ * `resolvedTargets` closes an escalation whose subject is demonstrably fine now (a plan task
+ * that is completed with its check gate satisfied). Without it, an escalation on a
+ * non-auto-eligible class was a DEADLOCK: the escalation could only be closed by a successful
+ * repair attempt, and the repair policy refuses to record an attempt for exactly those classes —
+ * so a session could never be accepted as complete even after the underlying problem was fixed
+ * by hand. Escalations on 'session' (no task to inspect) still close only via a successful
+ * attempt; the user's `/accept confirm` remains the documented override there.
+ */
+export function openRepairBlockers(ledger: RepairLedger, opts: { resolvedTargets?: ReadonlySet<string> } = {}): string[] {
   const out: string[] = [];
   for (const esc of ledger.escalations) {
-    if (esc.open) out.push(`repair escalated and unresolved: ${esc.target} (${esc.failureClass}) — ${esc.reason}`);
+    if (!esc.open) continue;
+    if (opts.resolvedTargets?.has(esc.target) === true) continue;
+    out.push(`repair escalated and unresolved: ${esc.target} (${esc.failureClass}) — ${esc.reason}`);
   }
   for (const a of ledger.attempts) {
     if (a.outcome === 'open' && a.pendingChecks.length > 0) {

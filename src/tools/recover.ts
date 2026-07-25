@@ -124,7 +124,10 @@ export function createRecoverTool(deps: RecoverDeps): Tool<RecoverInputT> {
           ok: true,
           output: [
             `escalated: ${target} — ${classification.class} (${classification.detail})`,
-            'Recorded as an unresolved blocker: it appears in /status, the report, and the session handoff, and it prevents accepting the session as complete until it is resolved.',
+            'Recorded as an unresolved blocker: it appears in /status, the report, and the session handoff, and it prevents accepting the session as complete.',
+            target === 'session'
+              ? 'It clears only if a later repair attempt for this same failure is recorded and proven. Otherwise it stands for the rest of the session, and the user can still record a partial acceptance with /accept confirm.'
+              : `It clears by EVIDENCE: once plan task '${target}' is completed with its declared check gate satisfied, the blocker resolves itself. The user can also record a partial acceptance with /accept confirm.`,
             'Tell the user plainly what is blocked and what you need from them. Do not keep retrying.',
           ].join('\n'),
           durationMs: Math.max(0, Date.now() - startedAt),
@@ -138,6 +141,18 @@ export function createRecoverTool(deps: RecoverDeps): Tool<RecoverInputT> {
           'attempt requires a hypothesis and regression_checks',
           'A repair attempt must state WHAT you think is wrong (hypothesis) and WHAT WILL PROVE the fix (regression_checks). ' +
             'Without a declared proof the repair can never close — that is the definition of a loop.',
+          startedAt,
+        );
+      }
+      // The proof must cover the thing that actually failed. Without this, a repair could be
+      // "proven" by a green check unrelated to the failure — and, worse, that bogus success is
+      // what clears an escalation.
+      if (evidence.source === 'check' && !input.regression_checks.includes(evidence.check)) {
+        return fail(
+          `regression_checks must include '${evidence.check}'`,
+          `The failure being repaired is a ${evidence.check} check. A repair is proven by re-running WHAT FAILED — ` +
+            `declaring only ${input.regression_checks.join(', ')} would let an unrelated green check close this repair. ` +
+            `Include '${evidence.check}'.`,
           startedAt,
         );
       }
@@ -193,8 +208,11 @@ export function createRecoverTool(deps: RecoverDeps): Tool<RecoverInputT> {
           '',
           renderRecoveryGuidance(classification.class),
           '',
-          'Bounds the harness enforces: attempts, wall time, session and token budgets, and scope containment. ' +
-            'Whether your next hypothesis is genuinely a different idea is YOUR judgement — it is recorded verbatim for review, not verified.',
+          'Bounds the harness ENFORCES: attempt count, in-session wall time, and the session/token budgets. ' +
+            (scope.length > 0
+              ? 'Scope is MEASURED, not prevented: a change outside the declared scope stops the NEXT attempt, it does not block the write.'
+              : 'You declared no scope, so an expanding diff CANNOT be detected for this attempt — declare scope_paths next time.') +
+            ' Whether your next hypothesis is genuinely a different idea is YOUR judgement — it is recorded verbatim for review, not verified.',
         ].join('\n'),
         durationMs: Math.max(0, Date.now() - startedAt),
         truncated: false,

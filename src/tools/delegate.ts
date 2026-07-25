@@ -412,7 +412,14 @@ export function checkDagRules(
     // nothing, so requiring a repair ledger entry there would be ceremony. Mutating retries are
     // where a blind "try again" actually costs something.
     if (t.role === 'executor' && spent.length >= 1 && verdict !== undefined) {
-      if (verdict.stop !== undefined) {
+      // One free re-spawn when the verdict STOPS for a reason that no amount of model effort can
+      // clear: a task-sourced 'error' classifies as `unknown` and a 'timeout' as
+      // `timeout-resource` (neither auto-eligible), so refusing at the first failure would have
+      // made a transient provider error cost a full plan amendment and a human re-approval —
+      // strictly worse than Session 11.5, and for a failure that is often not a loop at all.
+      // R10's ceiling still bounds it; from the SECOND failure the stop is real.
+      const stopIsUnclearable = verdict.stop?.reason === 'unknown-classification' || verdict.stop?.reason === 'requires-user-decision';
+      if (verdict.stop !== undefined && !(spent.length === 1 && stopIsUnclearable)) {
         return (
           `plan task '${t.plan_task}' failed again (${verdict.failureClass}) and automatic repair is REFUSED ` +
           `(${verdict.stop.reason}): ${verdict.stop.detail}\n` +
@@ -421,7 +428,7 @@ export function checkDagRules(
           `update_plan (re-approval required), do it directly as the parent, or ask the user.`
         );
       }
-      if (verdict.needsNewPlan) {
+      if (verdict.needsNewPlan && verdict.stop === undefined) {
         return (
           `plan task '${t.plan_task}' failed again and has no repair plan for THIS failure — classification comes before repair. ` +
           `Call recover(action="attempt", target="${t.plan_task}", hypothesis=…, scope_paths=…, regression_checks=…) first; ` +

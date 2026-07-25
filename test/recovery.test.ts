@@ -248,6 +248,18 @@ describe('the repair ledger derives outcomes; it never records them', () => {
     expect(foldRepairs(events).attempts[0]!.outOfScope).toEqual(['src/other/x.ts']);
   });
 
+  it('does NOT count another plan task’s integration as this repair spreading', () => {
+    // Review finding: integrating an unrelated task permanently tripped the scope-expanded stop
+    // for whichever repair happened to be open — bricking the repair path for a different task.
+    reset();
+    const events = [
+      ev({ type: 'task.started', callId: 'c2', role: 'executor', childSessionId: 'chB', budget: {}, planTaskId: 'ui' }),
+      attempt({ target: 'api', scopePaths: ['src/api'] }),
+      ev({ type: 'task.applied', callId: 'c2', childSessionId: 'chB', applied: ['src/ui/b.ts'], refused: [] }),
+    ];
+    expect(foldRepairs(events).attempts[0]!.outOfScope).toEqual([]);
+  });
+
   it('tracks wall time from the attempt to the newest event', () => {
     reset();
     const events = [attempt({}, 0), checkFail('typecheck', ['ts-error'])];
@@ -363,18 +375,37 @@ describe('the bounded repair policy', () => {
     expect(v.stop!.reason).toBe('token-budget-exhausted');
   });
 
-  it('stops when one failure has absorbed too much wall time', () => {
+  it('stops when one failure has absorbed too much IN-SESSION wall time', () => {
     reset();
-    const events = [attempt({}, 0), ev({ type: 'user.message', text: 'still going' }, REPAIR_WALL_MS + 60_000)];
+    // Many small steps, each within the idle window, summing past the budget.
+    const events: SessionEvent[] = [attempt({}, 0)];
+    const step = 60_000;
+    for (let t = 0; t <= REPAIR_WALL_MS + step; t += step) events.push(ev({ type: 'user.message', text: 'working' }, step));
     const v = evaluateRepair({ classification: classification(), failureSeq: 0, ledger: foldRepairs(events), hypothesisSha: 'h2' });
     expect(v.stop!.reason).toBe('wall-time-exhausted');
   });
 
-  it('needsNewPlan flips only for an attempt newer than the failure', () => {
+  it('does NOT count time the session was not running (a resume the next day must not exhaust it)', () => {
     reset();
-    const events = [attempt()];
-    const ledger = foldRepairs(events);
-    expect(evaluateRepair({ classification: classification(), failureSeq: 0, ledger }).needsNewPlan).toBe(false);
-    expect(evaluateRepair({ classification: classification(), failureSeq: 99, ledger }).needsNewPlan).toBe(true);
+    // One attempt, then a 16-hour gap: the budget measures effort, not the calendar.
+    const events = [attempt({}, 0), ev({ type: 'user.message', text: 'good morning' }, 16 * 60 * 60 * 1000)];
+    const v = evaluateRepair({ classification: classification(), failureSeq: 0, ledger: foldRepairs(events), hypothesisSha: 'h2' });
+    expect(v.stop).toBeUndefined();
+    expect(v.eligible).toBe(true);
+  });
+
+  it('needsNewPlan is false while an attempt is still OPEN, and true once it closed', () => {
+    // Re-running the failing check is the catalogue's own prescribed diagnostic; it must not
+    // invalidate the plan just recorded, or following the guidance would burn the budget.
+    reset();
+    const open = foldRepairs([attempt(), checkFail('typecheck', ['ts-error'])]);
+    expect(evaluateRepair({ classification: classification(), failureSeq: 99, ledger: open }).needsNewPlan).toBe(false);
+
+    reset();
+    const closed = foldRepairs([attempt(), checkPass('typecheck')]);
+    expect(evaluateRepair({ classification: classification(), failureSeq: 99, ledger: closed }).needsNewPlan).toBe(true);
+
+    reset();
+    expect(evaluateRepair({ classification: classification(), failureSeq: 0, ledger: foldRepairs([]) }).needsNewPlan).toBe(true);
   });
 });

@@ -135,6 +135,7 @@ export function detectProject(root: string): DetectedProject {
   const nodeTools: string[] = [];
   const pythonTools: string[] = [];
 
+  let hasDependencies = false;
   let pkg: Record<string, unknown> | null = null;
   const pkgText = readBounded(path.join(root, 'package.json'));
   if (pkgText !== null) {
@@ -170,6 +171,7 @@ export function detectProject(root: string): DetectedProject {
         }
       }
     }
+    hasDependencies = deps.size > 0;
     for (const t of NODE_TOOLS) if (deps.has(t)) nodeTools.push(t);
     const names = Object.keys(scripts);
     evidence.push(
@@ -199,7 +201,7 @@ export function detectProject(root: string): DetectedProject {
   const hasPrettierConfig = PRETTIER_CONFIGS.some((c) => exists(root, c)) || pkg?.['prettier'] !== undefined;
 
   if (hasTsconfig) evidence.push('tsconfig.json');
-  if (kinds.includes('node') && !hasNodeModules) evidence.push('node_modules ABSENT — local tool recipes cannot run');
+  if (hasDependencies && !hasNodeModules) evidence.push('dependencies are declared but node_modules is ABSENT');
 
   return {
     root,
@@ -209,6 +211,7 @@ export function detectProject(root: string): DetectedProject {
     nodeTools,
     pythonTools,
     hasNodeModules,
+    hasDependencies,
     hasTsconfig,
     hasEslintConfig,
     hasPrettierConfig,

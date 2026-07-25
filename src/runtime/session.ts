@@ -770,6 +770,7 @@ function recordCheckEvidence(session: Session, callId: string, e: CheckEvidence)
     check: e.check,
     recipeId: e.recipeId,
     status: e.status,
+    ...(e.unsupportedReason !== undefined ? { unsupportedReason: e.unsupportedReason } : {}),
     exitCode: e.exitCode,
     ...(e.termination !== undefined ? { termination: e.termination } : {}),
     durationMs: e.durationMs,
@@ -827,7 +828,7 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
     ...(tool.command !== undefined
       ? { kind: 'command' as const }
       : tool.check !== undefined
-        ? { kind: 'check' as const }
+        ? { kind: 'check' as const, checkCount: decision.checkReplayKeys?.length ?? 1 }
         : {}),
     summary,
     detail: fullDetail,

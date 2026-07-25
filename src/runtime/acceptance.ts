@@ -26,6 +26,12 @@ export interface AcceptanceState {
   summary: string;
   /** Honest blockers, empty when complete. */
   unfinished: string[];
+  /**
+   * Non-blocking caveats a reader of "complete" must still see (Session 12) — above all, gates
+   * the user approved that were WAIVED because the project cannot run them. They do not prevent
+   * acceptance; hiding them would let "complete" quietly mean "nothing was actually verified".
+   */
+  caveats: string[];
   /** The latest recorded /accept, when any. */
   accepted: RecordedAcceptance | null;
   /** True when work-shaped events landed AFTER the recorded acceptance — it covers only work
@@ -74,6 +80,8 @@ export function computeAcceptance(
   events: readonly SessionEvent[],
 ): AcceptanceState {
   const unfinished: string[] = [];
+  /** Non-blocking honesty: things a reader of "complete" must still be told (Session 12). */
+  const caveats: string[] = [];
 
   // Plan axis. A superseded (discarded/retired) plan never blocks; a draft is NOT silently
   // complete — accepting work the user never approved a plan for is a consent mismatch, so it
@@ -113,6 +121,15 @@ export function computeAcceptance(
         for (const kind of gate.pending) {
           unfinished.push(`completion gate '${kind}' has not passed since the last change — run_check it before accepting`);
         }
+        for (const kind of gate.waived) caveats.push(`completion gate '${kind}' NEVER RAN (unsupported in this project)`);
+      }
+      // A waived per-task gate is not a blocker, but it must not vanish either: a recorded
+      // acceptance that says "complete" while a gate the user approved never executed would be
+      // exactly the overclaim this boundary exists to prevent.
+      for (const t of graphState.tasks) {
+        if (t.verification.waived.length > 0) {
+          caveats.push(`task '${t.id}' check(s) ${t.verification.waived.join(', ')} NEVER RAN (unsupported in this project)`);
+        }
       }
     }
   } else if (planState.kind === 'legacy' && planState.status !== 'superseded') {
@@ -147,8 +164,15 @@ export function computeAcceptance(
 
   // Repair axis (Session 12): an escalation that nobody resolved, and a repair whose own declared
   // regression checks never passed, are honest unfinished work — a session must not be accepted
-  // as complete while the agent has an open "I stopped and need you" on the record.
-  for (const blocker of openRepairBlockers(foldRepairs(events))) unfinished.push(blocker);
+  // as complete while the agent has an open "I stopped and need you" on the record. An escalation
+  // on a plan task that is now completed with its gate satisfied is resolved BY EVIDENCE, which
+  // is what keeps a non-auto-eligible escalation from being an unclosable trap.
+  const resolvedTargets = new Set<string>(
+    (graphState?.tasks ?? [])
+      .filter((t) => (t.state === 'completed' && t.verification.status !== 'pending') || t.state === 'parent-owned')
+      .map((t) => t.id),
+  );
+  for (const blocker of openRepairBlockers(foldRepairs(events), { resolvedTargets })) unfinished.push(blocker);
 
   // The latest recorded acceptance, if any.
   let accepted: RecordedAcceptance | null = null;
@@ -168,15 +192,17 @@ export function computeAcceptance(
           ? 'plan retired (accepted)'
           : `plan ${planState.status}`;
   const capturesBit = capturesSeen > 0 ? (capturesOutstanding ? 'captures outstanding' : 'captures integrated') : null;
+  const caveatBit = caveats.length > 0 ? ` · CAVEATS: ${caveats.join('; ')}` : '';
   const summary =
     unfinished.length === 0
-      ? `complete — ${planBit}${capturesBit !== null ? ` · ${capturesBit}` : ''}`
-      : `${unfinished.length} unfinished — ${planBit}${capturesBit !== null ? ` · ${capturesBit}` : ''}`;
+      ? `complete — ${planBit}${capturesBit !== null ? ` · ${capturesBit}` : ''}${caveatBit}`
+      : `${unfinished.length} unfinished — ${planBit}${capturesBit !== null ? ` · ${capturesBit}` : ''}${caveatBit}`;
 
   return {
     complete: unfinished.length === 0,
     summary,
     unfinished,
+    caveats,
     accepted,
     acceptedStale: accepted !== null && workSince(events, accepted.seq),
   };

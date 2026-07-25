@@ -1,4 +1,5 @@
 import { normalizeRelPrefix } from '../shared/pathutil.js';
+import { sha256 } from '../shared/hash.js';
 import {
   CHECK_KINDS,
   type CheckEffects,
@@ -97,11 +98,22 @@ function nodeScriptRecipe(
     id,
     kind,
     applies: (p) => firstScript(p, names) !== null,
-    unmetPrecondition: (p) => (p.hasNodeModules ? null : NEEDS_NODE_MODULES),
+    // A workspace-authored script is only blocked by a missing node_modules when the project
+    // actually DECLARES dependencies. A script that shells out to Node built-ins (`node --test`,
+    // a local build script) needs nothing installed, and refusing it would have made typed
+    // verification unavailable to exactly the smallest, cheapest projects. When deps ARE declared
+    // and absent, the honest refusal still fires before anything spawns.
+    unmetPrecondition: (p) => (!p.hasDependencies || p.hasNodeModules ? null : NEEDS_NODE_MODULES),
     argv: (p, scope) => {
       const name = firstScript(p, names);
       if (name === null) return null;
       return runScript(p, name, opts.scoped === true ? forward(p, scope) : []);
+    },
+    // `<pm> run <name>` is a stable command whose BEHAVIOR lives in package.json. Consent and the
+    // execute-time re-resolve both bind this body, so rewriting the script re-asks the human.
+    body: (p) => {
+      const name = firstScript(p, names);
+      return name === null ? null : (p.scripts[name] ?? null);
     },
     timeoutMs,
     effects: SCRIPT_EFFECTS,
@@ -247,6 +259,7 @@ export function resolveChecks(
     if (applicable.length === 0) {
       unsupported.push({
         kind,
+        why: 'no-recipe',
         reason:
           project.kinds.length === 0
             ? 'no supported project manifest was detected in this workspace (Node/TS and Python are supported)'
@@ -255,8 +268,10 @@ export function resolveChecks(
       continue;
     }
     if (kind === 'test-targeted' && paths.length === 0) {
+      // A CALLER mistake, not a project fact — tagged so it can never waive a declared gate.
       unsupported.push({
         kind,
+        why: 'bad-request',
         reason:
           rejected.length > 0
             ? `test-targeted requires scope_paths naming what to test; every supplied path was refused: ${rejected.join(', ')}`
@@ -266,18 +281,20 @@ export function resolveChecks(
     }
     const ready = applicable.find((r) => r.unmetPrecondition(project) === null);
     if (ready === undefined) {
-      unsupported.push({ kind, reason: applicable[0]!.unmetPrecondition(project) ?? 'precondition not met' });
+      unsupported.push({ kind, why: 'precondition', reason: applicable[0]!.unmetPrecondition(project) ?? 'precondition not met' });
       continue;
     }
     const argv = argvWithBinary(ready, project, kindTakesScope(kind) ? paths : []);
     if (argv === null) {
-      unsupported.push({ kind, reason: `recipe ${ready.id} could not produce a command for this project` });
+      unsupported.push({ kind, why: 'no-recipe', reason: `recipe ${ready.id} could not produce a command for this project` });
       continue;
     }
+    const body = ready.body?.(project) ?? null;
     resolved.push({
       kind,
       recipeId: ready.id,
       command: toCommand(argv),
+      ...(body !== null ? { bodySha: sha256(body) } : {}),
       timeoutMs: ready.timeoutMs,
       effects: ready.effects,
       scopePaths: kindTakesScope(kind) ? paths : [],
