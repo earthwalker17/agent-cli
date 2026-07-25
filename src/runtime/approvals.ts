@@ -26,7 +26,12 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   // For a shell command the class is only a best-effort LABEL (string matching over untrusted
   // model output, bypassable by design) — the header must say so, not present it as a verdict
   // that visually contradicts the NOT-undoable warning ("[observe]" next to "NOT undoable").
-  const cls = req.kind === 'command' ? `[shell command — labeled ${req.classification}]` : `[${req.classification}]`;
+  const cls =
+    req.kind === 'command'
+      ? `[shell command — labeled ${req.classification}]`
+      : req.kind === 'check'
+        ? '[typed check — harness-resolved command]'
+        : `[${req.classification}]`;
   const lines = [
     '',
     `  ⚠ approval required  ${cls}  ${req.tool}`,
@@ -51,13 +56,19 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   // never a fact to key standing permission on). The live V0.7 E2E surfaced the old gap: an
   // 'external'-labeled forwarded command offered a no-op [s]. Forwarded asks always explain
   // that [q] stops THAT task only, and a forwarded [s] grant lives and dies with the child.
-  const grantable = isGrantable(req.classification) && req.kind !== 'command';
+  // A typed check offers a DIFFERENT [s] (Session 12): consent to re-run those exact
+  // harness-resolved commands, never a class-scoped session grant. Distinct wording matters —
+  // the two consents cover different things and must not read as the same promise.
+  const grantable = isGrantable(req.classification) && req.kind !== 'command' && req.kind !== 'check';
   const forwarded = req.taskContext !== undefined;
-  const sPart = grantable
-    ? forwarded
-      ? '   [s] allow for the rest of THIS TASK'
-      : '   [s] allow for the rest of this session'
-    : '';
+  const sPart =
+    req.kind === 'check'
+      ? '   [s] allow re-runs of THIS EXACT command'
+      : grantable
+        ? forwarded
+          ? '   [s] allow for the rest of THIS TASK'
+          : '   [s] allow for the rest of this session'
+        : '';
   lines.push(
     `  [y] allow once${sPart}   [n] deny   ` +
       (forwarded ? '[q] deny & stop THIS TASK (the rest of the turn continues)' : '[q] deny & stop'),

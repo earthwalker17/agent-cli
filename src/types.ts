@@ -256,6 +256,20 @@ export interface ToolResult {
   killDetail?: string;
 }
 
+/**
+ * The policy-visible shape of one resolved typed check (Session 12). Structural on purpose: this
+ * contracts file stays dependency-free, and the gate only needs what it must SHOW to the human
+ * and BIND consent to. The richer `ResolvedCheck` in `checks/types.ts` is assignable to it.
+ */
+export interface ResolvedCheckFact {
+  recipeId: string;
+  kind: string;
+  /** The exact command string that will be executed — and that the approval prompt displays. */
+  command: string;
+  timeoutMs: number;
+  effects: { writesOutputs: boolean; network: boolean; workspaceAuthored: boolean };
+}
+
 export interface Tool<I = unknown> {
   name: string;
   /** Sent to the model. */
@@ -289,6 +303,21 @@ export interface Tool<I = unknown> {
    */
   planDoc?(input: I): { action: 'update' };
   /**
+   * Declares that this tool runs HARNESS-RESOLVED project checks (Session 12). A policy FACT with
+   * its own explicit fail-closed branch, for the same S6-trap reason as `delegates`/`planDoc`, and
+   * for one more: a check spawns a real process, so it must never reach the observe fall-through.
+   *
+   * The distinction from `command` is the whole trust argument: a `command` string comes from
+   * untrusted model text, while every `resolved.command` here was composed by the harness's recipe
+   * table from the detected project. That is what makes per-command replay consent honest — the
+   * consent binds a byte-identical string the harness will regenerate, not a label over model
+   * output. Never combinable with `command`, `delegates`, or `planDoc`; a throw is a deny.
+   *
+   * MUST be pure: `decide()` is pure over (tool, input, ctx, grants), so the fact reads a project
+   * snapshot captured earlier — never the filesystem.
+   */
+  check?(input: I): { resolved: readonly ResolvedCheckFact[] };
+  /**
    * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
    * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the
    * prompt renderer's sanitization and line cap; NEVER consulted by policy (the decision is
@@ -320,6 +349,14 @@ export interface PolicyDecision {
    * command that runs with full privilege (the user accepted the risk). Absent for non-command tools.
    */
   execBoundary?: 'sandbox' | 'unsandboxed';
+  /**
+   * For a typed check (Session 12): the replay-consent key of every resolved command in the call
+   * — `sha256(recipeId + '\n' + command)`. A `session`-scope approval stores exactly these keys,
+   * and a later call whose keys are ALL already consented allows without asking. Deliberately not
+   * an `ActionClass` grant: consent binds the byte-identical harness-resolved command, so an
+   * edited manifest that changes the command produces a new key and asks again.
+   */
+  checkReplayKeys?: string[];
 }
 
 // ── Approval ───────────────────────────────────────────────────────────────────────────────
@@ -327,8 +364,13 @@ export interface ApprovalRequest {
   callId: string;
   tool: string;
   classification: ActionClass;
-  /** 'command' = a shell command: the classification is only a best-effort LABEL, and the prompt must say so. */
-  kind?: 'command';
+  /**
+   * 'command' = a shell command: the classification is only a best-effort LABEL, and the prompt
+   * must say so. 'check' = a harness-resolved typed check (Session 12): the prompt shows every
+   * resolved command verbatim and offers replay consent for those exact commands, NOT a
+   * class-scoped session grant.
+   */
+  kind?: 'command' | 'check';
   /** One-line summary (command string or "edit src/x.ts"). */
   summary: string;
   /** Multi-line detail (edit preview, full command). */

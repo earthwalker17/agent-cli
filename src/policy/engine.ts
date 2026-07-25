@@ -1,16 +1,19 @@
 import path from 'node:path';
 import { subagentRoleAccess } from '../types.js';
-import type { ActionClass, MutationPlan, PolicyDecision, Tool, ToolContext } from '../types.js';
+import type { ActionClass, MutationPlan, PolicyDecision, ResolvedCheckFact, Tool, ToolContext } from '../types.js';
 import { validatePath } from './paths.js';
 import { PathError } from '../shared/errors.js';
 import { caseFold } from '../shared/pathutil.js';
+import { sha256 } from '../shared/hash.js';
 import { analyzeCommand } from './command-review.js';
 
 /**
  * The single policy choke point. `decide()` classifies every tool call and returns
  * allow / ask / deny. It is pure over (tool, input, ctx, grants) — no I/O beyond the shared
- * path validator. Tools declare facts (mutates / readsPaths / command / delegates / planDoc);
- * policy alone decides.
+ * path validator. Tools declare facts (mutates / readsPaths / command / delegates / planDoc /
+ * check); policy alone decides. A fact needing project state (`check`) must read a snapshot
+ * captured elsewhere: filesystem I/O here would break both the purity contract and the guarantee
+ * that what the human approved is exactly what executes.
  *
  * Approval and sandbox are SEPARATE axes (V0.4+): this engine is the approval control, and it
  * additionally READS `ctx.sandbox.enforced` to gate command auto-run — a provably-safe command
@@ -30,6 +33,15 @@ export function isGrantable(cls: ActionClass): boolean {
 /** In-memory, session-scoped approval grants. Not persisted; not restored on resume. */
 export class Grants {
   private readonly set = new Set<string>();
+  /**
+   * Replay consent for typed checks (Session 12), kept in a SEPARATE set with no ActionClass in
+   * the key. Widening GRANTABLE to cover checks would have been the cheap route and would have
+   * silently broken an unrelated consent: the executor-spawn ask is classified `reversible` and
+   * is deliberately non-grantable, but the approval prompt offers `[s]` whenever
+   * `isGrantable(classification)` holds — so a widened class would render an `[s]` that stores a
+   * grant the delegates branch never reads. Consent that does nothing is worse than no consent.
+   */
+  private readonly checkReplays = new Set<string>();
   private key(tool: string, cls: ActionClass): string {
     return `${tool}::${cls}`;
   }
@@ -40,6 +52,22 @@ export class Grants {
   add(tool: string, cls: ActionClass): void {
     if (tool !== 'run_command' && GRANTABLE.includes(cls)) this.set.add(this.key(tool, cls));
   }
+  /** Record consent to re-run one byte-identical harness-resolved check command. */
+  addCheckReplay(key: string): void {
+    if (key.length > 0) this.checkReplays.add(key);
+  }
+  hasCheckReplay(key: string): boolean {
+    return this.checkReplays.has(key);
+  }
+}
+
+/**
+ * The replay-consent identity of one resolved check: the recipe AND the exact command. Both,
+ * because the recipe id names WHAT was consented to in human terms while the command is what
+ * actually runs — a manifest edit that changes the command must invalidate the consent.
+ */
+export function checkReplayKey(recipeId: string, command: string): string {
+  return sha256(`${recipeId}\n${command}`);
 }
 
 export function isSecretName(p: string, extraPatterns?: readonly string[]): boolean {
@@ -147,12 +175,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'task.invalid-contract', `delegates() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.planDoc !== undefined) {
+    if (tool.command !== undefined || tool.planDoc !== undefined || tool.check !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'task.conflicting-contract',
-        'a tool may declare delegation, a shell command, or a plan-document write — never a combination',
+        'a tool may declare delegation, a shell command, a plan-document write, or typed checks — never a combination',
       );
     }
     if (delegation.roles.length === 0) {
@@ -201,12 +229,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'plan.invalid-contract', `planDoc() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined) {
+    if (tool.command !== undefined || tool.check !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'plan.conflicting-contract',
-        'a tool may declare a plan-document write or a shell command, never both',
+        'a tool may declare a plan-document write, a shell command, or typed checks — never a combination',
       );
     }
     if (planDoc.action !== 'update') {
@@ -217,6 +245,59 @@ export function decide<I>(
       'allow',
       'plan.update',
       'writes the harness-owned plan document at the state root (prior bytes archived; user edits outrank; status only changes by user command) — never workspace files',
+    );
+  }
+
+  // 0c. Typed project checks → explicit fail-closed branch (Session 12), before the command
+  //     branch and before every fall-through. A check SPAWNS A PROCESS, so reaching the observe
+  //     fall-through would be the S6 trap with real execution behind it.
+  //
+  //     Consent model: `ask` by default, and `allow` only when EVERY resolved command in the call
+  //     already carries replay consent from an earlier `session`-scope approval in this session.
+  //     The key binds `(recipeId, exact command)`, so an edited manifest that changes what the
+  //     recipe resolves to asks again. The classification is `reversible` (checks build/test the
+  //     workspace and their outputs are ordinary files), but `noUndo` is true and honest: a check
+  //     runs project code at full user privilege and is not snapshotted. It never runs inside the
+  //     sandbox — the Low-IL boundary denies workspace writes, so a build could not even work
+  //     there; the boundary is recorded as 'unsandboxed' rather than implied.
+  if (tool.check !== undefined) {
+    let fact: { resolved: readonly ResolvedCheckFact[] };
+    try {
+      fact = tool.check(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'check.invalid-contract', `check() threw: ${(e as Error).message}`);
+    }
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'check.conflicting-contract',
+        'a tool may declare typed checks, a shell command, delegation, or a plan-document write — never a combination',
+      );
+    }
+    if (fact.resolved.length === 0) {
+      // Nothing resolved ⇒ nothing to run ⇒ nothing to consent to. The tool still executes and
+      // reports the honest `unsupported` results; it just must not present an empty approval.
+      return decision('observe', 'allow', 'check.nothing-to-run', 'no check resolved to a runnable command in this project');
+    }
+    const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command));
+    const summary = fact.resolved.map((r) => `${r.kind} → ${r.recipeId}`).join('; ');
+    if (keys.every((k) => grants.hasCheckReplay(k))) {
+      return decision('reversible', 'allow', 'check.replay-consent', `re-running check command(s) already approved this session (${summary})`, {
+        noUndo: true,
+        execBoundary: 'unsandboxed',
+        checkReplayKeys: keys,
+      });
+    }
+    const authored = fact.resolved.some((r) => r.effects.workspaceAuthored);
+    return decision(
+      'reversible',
+      'ask',
+      'check.approval-required',
+      `runs harness-resolved project check(s) (${summary})` +
+        `${authored ? ', including a script defined by this workspace whose real effects are whatever that script does' : ''}` +
+        '; checks run with full user privilege, are NOT sandboxed, and are NOT snapshotted or undoable',
+      { noUndo: true, execBoundary: 'unsandboxed', checkReplayKeys: keys },
     );
   }
 

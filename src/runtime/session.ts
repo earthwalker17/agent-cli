@@ -28,7 +28,7 @@ import { isInside } from '../shared/pathutil.js';
 import { systemClock, type Clock } from '../shared/clock.js';
 import { systemIdGen, type IdGen } from '../shared/ids.js';
 import type { ProjectLayout } from '../store/layout.js';
-import type { Approver, ExecSandbox } from '../types.js';
+import type { Approver, ExecSandbox, ResolvedCheckFact } from '../types.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
@@ -594,6 +594,13 @@ async function executeCall(
     if (outcome.scope === 'session' && tool.command === undefined) {
       session.grants.add(tool.name, decision.classification);
     }
+    // Typed-check replay consent (Session 12): a session-scope approval on a check stores the
+    // per-command keys the decision computed — consent to re-run those EXACT harness-resolved
+    // commands. Deliberately not a class grant (Grants.add refuses `reversible` anyway): a
+    // manifest edit that changes what a recipe resolves to produces a new key and asks again.
+    if (outcome.scope === 'session' && decision.checkReplayKeys !== undefined) {
+      for (const key of decision.checkReplayKeys) session.grants.addCheckReplay(key);
+    }
   }
 
   return await runExecution(session, ctx, tool, input, decision, callId, signal);
@@ -742,7 +749,11 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
     callId,
     tool: tool.name,
     classification: decision.classification,
-    ...(tool.command !== undefined ? { kind: 'command' as const } : {}),
+    ...(tool.command !== undefined
+      ? { kind: 'command' as const }
+      : tool.check !== undefined
+        ? { kind: 'check' as const }
+        : {}),
     summary,
     detail: fullDetail,
     reason: decision.reason,
@@ -753,6 +764,29 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
 function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: string } {
   const cmd = tool.command?.(input);
   if (cmd !== undefined) return { summary: `run: ${cmd.slice(0, 120)}`, detail: cmd };
+  // Typed checks (Session 12): the human MUST see every harness-resolved command verbatim —
+  // that display is the entire basis on which replay consent is honest. Without this branch the
+  // call would fall through to the bare `${tool.name}` form with an empty detail, and the user
+  // would be consenting to re-run a command they never saw.
+  if (tool.check !== undefined) {
+    let resolved: readonly ResolvedCheckFact[] = [];
+    try {
+      resolved = tool.check(input).resolved;
+    } catch {
+      resolved = [];
+    }
+    return {
+      summary: `${tool.name}: ${resolved.length > 0 ? resolved.map((r) => r.kind).join(', ') : '(nothing to run)'}`,
+      detail: resolved
+        .map(
+          (r) =>
+            `${r.kind} → ${r.command}` +
+            `   [${r.recipeId}; timeout ${Math.round(r.timeoutMs / 1000)}s` +
+            `${r.effects.workspaceAuthored ? '; runs a script defined by this workspace' : ''}]`,
+        )
+        .join('\n'),
+    };
+  }
   const i = input as Record<string, unknown>;
   // Delegation groups: the human must see WHO would be spawned to do WHAT — a bare tool name
   // is not an answerable approval prompt (the ask path arrives with mutating roles, V0.7).
