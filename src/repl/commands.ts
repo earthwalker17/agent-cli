@@ -8,7 +8,7 @@ import { renderRepoMap } from '../retrieval/render.js';
 import type { RetrievalHandle } from '../retrieval/rank.js';
 import { readPlan, setPlanStatus } from '../plan/store.js';
 import { readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
-import { foldGraphState } from '../plan/graph-state.js';
+import { completionGateState, foldGraphState, integrationGateState, type PlanTaskState } from '../plan/graph-state.js';
 import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
@@ -96,6 +96,15 @@ export function completionLine(ctx: Pick<CommandContext, 'session' | 'layout'>):
       ? ` · accepted (${acc.accepted.complete ? 'complete' : 'partial'})${acc.acceptedStale ? ' — work has happened since' : ''}`
       : ' · not accepted';
   return `completion: ${acc.summary}${acceptedBit}`;
+}
+
+/** The per-task check-gate label for /tasks (Session 12); empty when nothing is declared. */
+export function gateLabel(t: PlanTaskState): string {
+  const v = t.verification;
+  if (v.status === 'none') return '';
+  if (v.status === 'green') return ` · checks green (${v.satisfied.join(', ')})`;
+  if (v.status === 'waived') return ` · checks satisfied, WAIVED: ${v.waived.join(', ')} (unsupported — not proof)`;
+  return ` · checks PENDING: ${v.missing.join(', ')}`;
 }
 
 /** Parse `/commit` arguments: [-m "msg"] [--all] [--no-trailer]. Exported for tests. */
@@ -255,10 +264,26 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           graphLines.push(
             `  ${t.id} [${t.role}] ${sanitizeLine(t.title)} — ${t.state}` +
               (t.blockedOn.length > 0 ? ` (on ${t.blockedOn.join(', ')})` : '') +
+              gateLabel(t) +
               (t.childSessionId !== null ? ` · child ${sanitizeLine(t.childSessionId.slice(-4))}` : '') +
               (t.attempts > 1 ? ` · attempt ${t.attempts}` : '') +
               (t.note !== undefined ? ` · ${sanitizeLine(t.note)}` : ''),
           );
+        }
+        const cg = completionGateState(planGraph, events);
+        if (cg.required.length > 0) {
+          graphLines.push(
+            `  completion gate: ${cg.required.join(', ')} — ` +
+              (cg.pending.length > 0
+                ? `PENDING since the last change: ${cg.pending.join(', ')}`
+                : cg.waived.length > 0
+                  ? `satisfied, with ${cg.waived.join(', ')} waived (unsupported)`
+                  : 'green'),
+          );
+        }
+        const ig = integrationGateState(planGraph, events);
+        if (ig.required.length > 0 && ig.pending.length > 0) {
+          graphLines.push(`  integration gate: PENDING since the last apply: ${ig.pending.join(', ')} — a new executor wave is blocked`);
         }
       }
       if (started.length === 0 && graphLines.length === 0) {

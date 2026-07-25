@@ -3,6 +3,7 @@ import { writeDocAtomic } from '../memory/store.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { topoOrder, type PlanGraph } from './schema.js';
+import type { CheckKind } from '../types.js';
 import type { CanonicalPlanDoc } from './canonical.js';
 import type { GraphState } from './graph-state.js';
 
@@ -51,7 +52,9 @@ export function renderUserPlanView(doc: CanonicalPlanDoc): string {
   lines.push('', `**Objective:** ${g.objective}`);
   if (g.approach !== undefined && g.approach.trim() !== '') lines.push('', `**Approach:** ${g.approach}`);
 
-  lines.push('', '## Tasks', '', '| id | title | role | depends on | risk | touches |', '|---|---|---|---|---|---|');
+  // The `checks` column is not decoration: it is what blocks dependents and what /accept
+  // measures, so the user must see it in the document whose content sha they approve.
+  lines.push('', '## Tasks', '', '| id | title | role | depends on | risk | touches | checks |', '|---|---|---|---|---|---|---|');
   const order = topoOrder(g.tasks) ?? g.tasks.map((t) => t.id);
   const byId = new Map(g.tasks.map((t) => [t.id, t] as const));
   for (const id of order) {
@@ -61,7 +64,17 @@ export function renderUserPlanView(doc: CanonicalPlanDoc): string {
     const touches =
       t.touches.length === 0 ? '—' : t.touches.slice(0, 2).join(', ') + (t.touches.length > 2 ? ` (+${t.touches.length - 2})` : '');
     const flags = [t.risk !== 'low' ? t.risk : '', t.serial ? 'serial' : ''].filter((s) => s !== '').join(', ') || 'low';
-    lines.push(`| ${t.id} | ${cell(t.title)} | ${t.role} | ${cell(deps)} | ${flags} | ${cell(touches)} |`);
+    const checks = t.checks !== undefined && t.checks.length > 0 ? t.checks.join(', ') : '—';
+    lines.push(`| ${t.id} | ${cell(t.title)} | ${t.role} | ${cell(deps)} | ${flags} | ${cell(touches)} | ${cell(checks)} |`);
+  }
+  if (g.gates !== undefined && ((g.gates.integration?.length ?? 0) > 0 || (g.gates.completion?.length ?? 0) > 0)) {
+    lines.push('', '## Gates', '');
+    if ((g.gates.integration?.length ?? 0) > 0) {
+      lines.push(`- **integration** (after each apply, before the next executor wave): ${g.gates.integration!.join(', ')}`);
+    }
+    if ((g.gates.completion?.length ?? 0) > 0) {
+      lines.push(`- **completion** (after the last change, before the session can be accepted): ${g.gates.completion!.join(', ')}`);
+    }
   }
 
   const verified = g.tasks.filter((t) => t.verify.trim() !== '');
@@ -107,7 +120,23 @@ export function renderAgentPlanView(doc: CanonicalPlanDoc, graphState?: GraphSta
     if (t.dependsOn.length > 0) lines.push(`  dependsOn: ${t.dependsOn.join(', ')}`);
     if (t.touches.length > 0) lines.push(`  touches: ${t.touches.join(', ')}`);
     if (t.verify.trim() !== '') lines.push(`  verify: ${t.verify}`);
+    if (t.checks !== undefined && t.checks.length > 0) {
+      const v = state?.verification;
+      const live =
+        v === undefined || v.status === 'none'
+          ? ''
+          : v.status === 'green'
+            ? ' — GREEN'
+            : v.status === 'waived'
+              ? ` — waived (unsupported): ${v.waived.join(', ')}`
+              : ` — PENDING: ${v.missing.join(', ')}`;
+      lines.push(`  checks (gate dependents): ${t.checks.join(', ')}${live}`);
+    }
     if (state?.note !== undefined) lines.push(`  note: ${state.note}`);
+  }
+  if (g.gates !== undefined) {
+    if ((g.gates.integration?.length ?? 0) > 0) lines.push(`Gate (integration): ${g.gates.integration!.join(', ')}`);
+    if ((g.gates.completion?.length ?? 0) > 0) lines.push(`Gate (completion): ${g.gates.completion!.join(', ')}`);
   }
   if (g.risks !== undefined && g.risks.length > 0) lines.push(`Risks: ${g.risks.join(' | ')}`);
   if (g.notes !== undefined && g.notes.trim() !== '') lines.push(`Notes: ${g.notes}`);
@@ -146,6 +175,13 @@ export async function writeUserView(
 }
 
 /** Structural graph summary for the plan.updated event (report/resume render without the file). */
-export function graphSummary(graph: PlanGraph): { id: string; role: string; dependsOn: string[] }[] {
-  return graph.tasks.map((t) => ({ id: t.id, role: t.role, dependsOn: [...t.dependsOn] }));
+export function graphSummary(graph: PlanGraph): { id: string; role: string; dependsOn: string[]; checks?: CheckKind[] }[] {
+  // `checks` rides along (Session 12, additive) so the report — a PURE fold over events that must
+  // never read the plan file — can render declared gates beside the check runs that satisfied them.
+  return graph.tasks.map((t) => ({
+    id: t.id,
+    role: t.role,
+    dependsOn: [...t.dependsOn],
+    ...(t.checks !== undefined && t.checks.length > 0 ? { checks: [...t.checks] } : {}),
+  }));
 }

@@ -13,10 +13,16 @@ import { createRetrieveTool } from '../tools/retrieve.js';
 import { checkCapsFromEvents, createRunCheckTool, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
+import { createRecoverTool } from '../tools/recover.js';
+import { classifyFailure, latestFailureEvidence } from '../recovery/classify.js';
+import { foldRepairs } from '../recovery/ledger.js';
+import { evaluateRepair, type RepairVerdict } from '../recovery/policy.js';
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
 import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
 import { readPlanState } from '../plan/canonical.js';
-import { foldGraphState } from '../plan/graph-state.js';
+import type { PlanGraph } from '../plan/schema.js';
+import { foldGraphState, integrationGateState } from '../plan/graph-state.js';
+import { availableKinds } from '../checks/recipes.js';
 import { deleteCheckpointRefs } from '../git/checkpoint.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
@@ -208,7 +214,16 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const planContext = (): PlanGateInfo => {
     const state = readPlanState(layout, session.id, session.log.events);
     const graph = state.canonical?.graph ?? null;
-    return { state, graphState: graph !== null ? foldGraphState(graph, session.log.events) : null };
+    return {
+      state,
+      graphState: graph !== null ? foldGraphState(graph, session.log.events) : null,
+      // The integration-boundary gate (Session 12) is computed HERE, where the events are, so
+      // checkDagRules stays a pure function of its declared inputs.
+      integrationGate: graph !== null ? integrationGateState(graph, session.log.events) : null,
+      // Per-task repair verdicts (Session 12), same rationale: classification and the bounded
+      // repair policy need the whole event log, and the DAG gate must stay pure over its inputs.
+      repairVerdicts: graph !== null ? repairVerdictsFor(graph, session.log.events) : null,
+    };
   };
   // Delegation caps REBUILT FROM EVENTS (Session 11): a resumed session keeps counting where it
   // left off — the changes-registry pattern applied to the budget counters.
@@ -272,8 +287,22 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ),
     // update_plan and apply_task_changes are likewise parent-only (no role registry contains
     // them): the model's single gated write paths to the plan document and to integration.
-    createUpdatePlanTool({ layout, snapshots: session.snapshots, planId: session.id }),
+    createUpdatePlanTool({
+      layout,
+      snapshots: session.snapshots,
+      planId: session.id,
+      // Plan-time reality check (Session 12): a declared gate this project cannot run becomes a
+      // warning in the revision loop, long before the user approves an unsatisfiable graph.
+      availableChecks: () => availableKinds(checkTool.projectSnapshot()),
+    }),
     createApplyChangesTool(changesRegistry, session.snapshots),
+    // recover (Session 12): the bounded repair ledger. Parent-only like the other orchestration
+    // tools — a child cannot plan its own retry policy. It reads the live log and the approved
+    // graph fresh per call (bytes and events are truth) and writes only evidence.
+    createRecoverTool({
+      events: () => session.log.events,
+      planGraph: () => readPlanState(layout, session.id, session.log.events).canonical?.graph ?? null,
+    }),
   ];
 
   return {
@@ -290,6 +319,23 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),
   };
+}
+
+/**
+ * Per-plan-task repair verdicts (Session 12): for every task whose latest recorded failure is
+ * classifiable, the bounded-repair policy's answer. Computed here — where the events and the
+ * graph both are — so `checkDagRules` stays a pure function of its declared inputs.
+ */
+export function repairVerdictsFor(graph: PlanGraph, events: readonly SessionEvent[]): Map<string, RepairVerdict> {
+  const out = new Map<string, RepairVerdict>();
+  const ledger = foldRepairs(events, { extraScope: (target) => graph.tasks.find((t) => t.id === target)?.touches ?? [] });
+  for (const task of graph.tasks) {
+    const evidence = latestFailureEvidence(events, task.id);
+    if (evidence === null) continue;
+    const classification = classifyFailure(evidence);
+    out.set(task.id, evaluateRepair({ classification, failureSeq: evidence.seq, ledger }));
+  }
+  return out;
 }
 
 /**

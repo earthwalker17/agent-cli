@@ -1,5 +1,6 @@
-import type { SessionEvent, TaskChangeFile } from '../types.js';
+import type { CheckKind, CheckStatus, SessionEvent, TaskChangeFile } from '../types.js';
 import { planTaskDefinitionSha, topoOrder, type PlanGraph, type PlanTaskRole } from './schema.js';
+
 
 /**
  * Execution state of the approved plan's task graph — a PURE fold over (plan graph, events),
@@ -32,6 +33,28 @@ export interface PlanTaskAttempt {
   planTaskSha?: string;
 }
 
+/**
+ * The per-task verification gate (Session 12). Deliberately a FIELD on a `completed` task rather
+ * than a new state name: R5 refuses re-running a `completed` task precisely because its captured
+ * changes are already in the workspace, and a separate "unverified" state would have taken a
+ * fully-integrated task out of that protection while R10's ceiling (which ignores `completed`
+ * outcomes) could not bound the resulting re-runs.
+ *
+ * What a green gate PROVES, exactly: the declared check kinds passed on the workspace at a point
+ * AFTER this task's own work was integrated. It does not prove the checks exercised this task's
+ * code — later unrelated changes do not invalidate it either, which is why `gates.completion`
+ * exists for the combined state.
+ */
+export interface TaskVerification {
+  required: CheckKind[];
+  /** Kinds satisfied by a passing run after this task's integration. */
+  satisfied: CheckKind[];
+  /** Kinds satisfied only because the project cannot run them — recorded, never silent. */
+  waived: CheckKind[];
+  missing: CheckKind[];
+  status: 'none' | 'green' | 'waived' | 'pending';
+}
+
 export interface PlanTaskState {
   id: string;
   title: string;
@@ -50,6 +73,8 @@ export interface PlanTaskState {
   attemptHistory: PlanTaskAttempt[];
   /** The task's CURRENT definition sha (Session 11.5) — what new bindings would record. */
   definitionSha: string;
+  /** The declared check gate and its live state (Session 12); absent kinds ⇒ status 'none'. */
+  verification: TaskVerification;
   /** Honest caveats: partial applies, omitted captures, parent-owned assertion, etc. */
   note?: string;
 }
@@ -73,9 +98,11 @@ export function foldGraphState(
 ): GraphState {
   // Gather per-plan-task bindings and per-child outcomes from the event stream.
   const bindings = new Map<string, { childSessionId: string; planTaskSha?: string }[]>(); // in start order
-  const ended = new Map<string, { status: string }>();
+  const ended = new Map<string, { status: string; seq: number }>();
   const captured = new Map<string, { files: TaskChangeFile[]; omittedCount: number }>();
   const applied = new Map<string, Set<string>>(); // childSessionId -> union of applied relPaths
+  const appliedSeq = new Map<string, number>(); // childSessionId -> last apply seq (the gate anchor)
+  const checkRuns: { check: CheckKind; status: CheckStatus; seq: number }[] = [];
 
   for (const e of events) {
     if (e.type === 'task.started' && e.planTaskId !== undefined) {
@@ -83,15 +110,44 @@ export function foldGraphState(
       list.push({ childSessionId: e.childSessionId, ...(e.planTaskSha !== undefined ? { planTaskSha: e.planTaskSha } : {}) });
       bindings.set(e.planTaskId, list);
     } else if (e.type === 'task.ended') {
-      ended.set(e.childSessionId, { status: e.status });
+      ended.set(e.childSessionId, { status: e.status, seq: e.seq });
     } else if (e.type === 'task.changes') {
       captured.set(e.childSessionId, { files: e.files, omittedCount: e.omittedCount ?? 0 });
     } else if (e.type === 'task.applied') {
       const set = applied.get(e.childSessionId) ?? new Set<string>();
       for (const p of e.applied) set.add(p);
       applied.set(e.childSessionId, set);
+      appliedSeq.set(e.childSessionId, e.seq);
+    } else if (e.type === 'check.completed') {
+      checkRuns.push({ check: e.check, status: e.status, seq: e.seq });
     }
   }
+
+  /**
+   * The gate for one task. Anchored on THIS task's own integration evidence (its last apply, or
+   * its end when there was nothing to apply): a check that ran before the work landed cannot
+   * have verified it. `unsupported` counts as satisfied-with-a-caveat — the `parent-owned`
+   * precedent — because an unrunnable gate must never be able to strand a plan with no exit.
+   */
+  const verificationFor = (required: readonly CheckKind[], anchorSeq: number): TaskVerification => {
+    if (required.length === 0) return { required: [], satisfied: [], waived: [], missing: [], status: 'none' };
+    const satisfied: CheckKind[] = [];
+    const waived: CheckKind[] = [];
+    const missing: CheckKind[] = [];
+    for (const kind of required) {
+      const after = checkRuns.filter((r) => r.check === kind && r.seq > anchorSeq);
+      if (after.some((r) => r.status === 'pass')) satisfied.push(kind);
+      else if (after.some((r) => r.status === 'unsupported')) waived.push(kind);
+      else missing.push(kind);
+    }
+    return {
+      required: [...required],
+      satisfied,
+      waived,
+      missing,
+      status: missing.length > 0 ? 'pending' : waived.length > 0 ? 'waived' : 'green',
+    };
+  };
 
   const order = topoOrder(graph.tasks) ?? graph.tasks.map((t) => t.id);
   const byDecl = new Map(graph.tasks.map((t) => [t.id, t] as const));
@@ -117,6 +173,10 @@ export function foldGraphState(
       attempts: bound.length,
       attemptHistory,
       definitionSha: planTaskDefinitionSha(task),
+      // Placeholder: only a task that reached a terminal completed state has an integration
+      // anchor to measure a gate against. Every earlier state keeps the required list visible
+      // (so /tasks and the plan view can show what WILL gate it) with nothing satisfied yet.
+      verification: verificationFor(task.checks ?? [], Number.MAX_SAFE_INTEGER),
     };
 
     if (task.role === 'main') {
@@ -195,7 +255,16 @@ export function foldGraphState(
           );
           continue;
         }
-        states.set(id, { ...base, state: 'completed', ...(notes.length > 0 ? { note: notes.join('; ') } : {}) });
+        // The gate anchor: the LATER of this task's end and its last apply — the moment its work
+        // was actually in the workspace. A check before that point verified a different tree.
+        const anchor = Math.max(end.seq, appliedSeq.get(childSessionId) ?? 0);
+        const verification = verificationFor(task.checks ?? [], anchor);
+        if (verification.status === 'pending') {
+          notes.push(`required check(s) not passed since integration: ${verification.missing.join(', ')} — run run_check`);
+        } else if (verification.status === 'waived') {
+          notes.push(`check(s) ${verification.waived.join(', ')} WAIVED (unsupported in this project — not proof, recorded as a caveat)`);
+        }
+        states.set(id, { ...base, state: 'completed', verification, ...(notes.length > 0 ? { note: notes.join('; ') } : {}) });
       } else {
         notes.unshift(`${unapplied.length} of ${applicable.length} captured file(s) not yet applied`);
         states.set(id, { ...base, state: 'integrating', note: notes.join('; ') });
@@ -216,9 +285,74 @@ export function foldGraphState(
   return { tasks, byId: states, ready, summary: summarize(tasks, ready) };
 }
 
-/** A dependency is satisfied by completed work or by parent-owned work (asserted, warned at spawn). */
+/**
+ * A dependency is satisfied by completed work whose declared check gate is not still pending, or
+ * by parent-owned work (asserted, warned at spawn).
+ *
+ * This ONE predicate is the whole "dependents unblock only when the gate is green" mechanism
+ * (Session 12): it is consulted for queued/blocked resolution here and, transitively, by the DAG
+ * gate's R4 and by session acceptance. A task with no declared checks has status 'none' and is
+ * unaffected — small tasks stay exactly as cheap as they were.
+ */
 export function depSatisfied(dep: PlanTaskState | undefined): boolean {
-  return dep !== undefined && (dep.state === 'completed' || dep.state === 'parent-owned');
+  if (dep === undefined) return false;
+  if (dep.state === 'parent-owned') return true;
+  return dep.state === 'completed' && dep.verification.status !== 'pending';
+}
+
+/**
+ * The INTEGRATION boundary gate (Session 12): after captured work is applied, the declared
+ * `gates.integration` kinds must pass before another executor wave starts. This is the "broader
+ * checks at integration boundaries" rule as a structural refusal rather than a prompt reminder.
+ *
+ * Anchored on the last `task.applied`: before any integration there is nothing combined to
+ * verify, so the gate is vacuously satisfied and a first wave is never delayed. `unsupported`
+ * satisfies with a caveat, for the same never-strand-the-plan reason as a per-task gate.
+ */
+export function integrationGateState(
+  graph: PlanGraph,
+  events: readonly SessionEvent[],
+): { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } {
+  const required = [...(graph.gates?.integration ?? [])];
+  if (required.length === 0) return { required, pending: [], waived: [] };
+  let lastApply = 0;
+  for (const e of events) if (e.type === 'task.applied') lastApply = Math.max(lastApply, e.seq);
+  if (lastApply === 0) return { required, pending: [], waived: [] };
+  const pending: CheckKind[] = [];
+  const waived: CheckKind[] = [];
+  for (const kind of required) {
+    const after = events.filter((e) => e.type === 'check.completed' && e.check === kind && e.seq > lastApply);
+    if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
+    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported')) waived.push(kind);
+    else pending.push(kind);
+  }
+  return { required, pending, waived };
+}
+
+/**
+ * The COMPLETION boundary gate (Session 12): the declared `gates.completion` kinds must have
+ * passed after the LAST change in the session. Strict on purpose — this mirrors the report's
+ * CHECKED staleness rule, so an `/undo`, a checkpoint restore, or integrating a later task all
+ * correctly invalidate it. (A per-task gate deliberately is NOT invalidated by unrelated later
+ * changes; this gate is what covers the combined state.)
+ */
+export function completionGateState(
+  graph: PlanGraph,
+  events: readonly SessionEvent[],
+): { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } {
+  const required = [...(graph.gates?.completion ?? [])];
+  if (required.length === 0) return { required, pending: [], waived: [] };
+  let lastChange = 0;
+  for (const e of events) if (e.type === 'file.mutated') lastChange = Math.max(lastChange, e.seq);
+  const pending: CheckKind[] = [];
+  const waived: CheckKind[] = [];
+  for (const kind of required) {
+    const after = events.filter((e) => e.type === 'check.completed' && e.check === kind && e.seq > lastChange);
+    if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
+    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported')) waived.push(kind);
+    else pending.push(kind);
+  }
+  return { required, pending, waived };
 }
 
 function summarize(tasks: readonly PlanTaskState[], ready: readonly string[]): string {
@@ -227,7 +361,10 @@ function summarize(tasks: readonly PlanTaskState[], ready: readonly string[]): s
   // "complete" acceptance (observed live in the S11.5 demo). Count them separately.
   const parentOwned = tasks.filter((t) => t.state === 'parent-owned').length;
   const countable = tasks.length - parentOwned;
-  const done = tasks.filter((t) => t.state === 'completed').length;
+  // "completed" in the summary means DONE — integrated AND past its declared gate. Counting a
+  // gate-pending task as completed would put "3/3 completed" beside dependents the same fold is
+  // holding blocked, and beside an acceptance that refuses. One meaning, everywhere.
+  const done = tasks.filter((t) => t.state === 'completed' && t.verification.status !== 'pending').length;
   const parts: string[] = [];
   if (countable > 0) {
     parts.push(`${done}/${countable} completed`);
@@ -244,6 +381,10 @@ function summarize(tasks: readonly PlanTaskState[], ready: readonly string[]): s
   if (blocked.length > 0) parts.push(`blocked: ${blocked.map((t) => `${t.id} (on ${t.blockedOn.join(', ')})`).join(', ')}`);
   const integrating = tasks.filter((t) => t.state === 'integrating').map((t) => t.id);
   if (integrating.length > 0) parts.push(`integrating: ${integrating.join(', ')}`);
+  const awaiting = tasks.filter((t) => t.state === 'completed' && t.verification.status === 'pending');
+  if (awaiting.length > 0) {
+    parts.push(`awaiting checks: ${awaiting.map((t) => `${t.id} (${t.verification.missing.join(', ')})`).join(', ')}`);
+  }
   const failed = tasks.filter((t) => t.state === 'failed' || t.state === 'cancelled' || t.state === 'interrupted');
   if (failed.length > 0) parts.push(`needs attention: ${failed.map((t) => `${t.id} (${t.state})`).join(', ')}`);
   return parts.join(' · ');

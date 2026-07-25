@@ -1,4 +1,5 @@
 import type { CommandTermination, SessionEvent } from '../types.js';
+import { foldRepairs } from '../recovery/ledger.js';
 
 /**
  * The deterministic evidence report: a PURE function from the event log to a structured object
@@ -63,6 +64,24 @@ export interface ReportCheck {
   /** check.started with no completion: the session died while the check ran; NO verdict exists. */
   neverCompleted?: boolean;
 }
+export interface ReportRepair {
+  kind: 'attempt' | 'escalation';
+  target: string;
+  failureClass: string;
+  signature: string;
+  /** attempts only. */
+  attempt?: number;
+  hypothesis?: string;
+  scopePaths?: string[];
+  regressionChecks?: string[];
+  /** Derived, never recorded: proven by its regression checks, superseded, or still open. */
+  outcome?: 'succeeded' | 'superseded' | 'open';
+  pendingChecks?: string[];
+  outOfScope?: string[];
+  /** escalations only. */
+  reason?: string;
+  open?: boolean;
+}
 export interface ReportSandbox {
   mode: string;
   enforced: boolean;
@@ -115,6 +134,8 @@ export interface ReportJson {
   accepted?: { complete: boolean; summary: string; unfinished?: string[] };
   /** Typed check runs (Session 12, additive), in order. `neverCompleted` = spawned, no verdict. */
   checks?: ReportCheck[];
+  /** Bounded repair attempts and escalations (Session 12, additive); outcomes are DERIVED. */
+  repairs?: ReportRepair[];
   /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
    *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
   tasksDelegated: {
@@ -464,6 +485,33 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     });
   }
 
+  // The bounded repair ledger (Session 12). Outcomes come from the same pure fold the gate and
+  // acceptance read, so the report can never disagree with them about whether a repair was proven.
+  const ledger = foldRepairs(events);
+  const repairs: ReportRepair[] = [
+    ...ledger.attempts.map((a) => ({
+      kind: 'attempt' as const,
+      target: a.target,
+      failureClass: a.failureClass,
+      signature: a.signature.slice(0, 12),
+      attempt: a.attempt,
+      hypothesis: a.hypothesis,
+      scopePaths: a.scopePaths,
+      regressionChecks: a.regressionChecks,
+      outcome: a.outcome,
+      ...(a.pendingChecks.length > 0 ? { pendingChecks: a.pendingChecks } : {}),
+      ...(a.outOfScope.length > 0 ? { outOfScope: a.outOfScope } : {}),
+    })),
+    ...ledger.escalations.map((e) => ({
+      kind: 'escalation' as const,
+      target: e.target,
+      failureClass: e.failureClass,
+      signature: e.signature.slice(0, 12),
+      reason: e.reason,
+      open: e.open,
+    })),
+  ];
+
   const taskChanges = events
     .filter((e): e is Extract<SessionEvent, { type: 'task.changes' }> => e.type === 'task.changes')
     .map((e) => ({
@@ -526,6 +574,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     plan: planState,
     ...(accepted !== undefined ? { accepted } : {}),
     ...(checkRuns.length > 0 ? { checks: checkRuns } : {}),
+    ...(repairs.length > 0 ? { repairs } : {}),
     taskChanges,
     taskApplies,
     integrity: {
@@ -639,6 +688,29 @@ function renderMarkdown(r: ReportJson): string {
     }
     L.push('');
     L.push('A typed check PASSES only when its process genuinely exited with code 0. UNSUPPORTED means the check never ran.');
+    L.push('');
+  }
+
+  if (r.repairs !== undefined && r.repairs.length > 0) {
+    L.push(`## Recovery (classified failures and bounded repairs)`);
+    for (const p of r.repairs) {
+      if (p.kind === 'escalation') {
+        L.push(`- ESCALATED ${p.target} [${p.failureClass}] ${p.open === true ? '(UNRESOLVED)' : '(resolved by a later repair)'} — ${p.reason ?? ''}`);
+        continue;
+      }
+      const outcome =
+        p.outcome === 'succeeded'
+          ? 'PROVEN (every declared regression check passed after it)'
+          : p.outcome === 'superseded'
+            ? 'superseded by a later attempt for the same failure'
+            : `UNPROVEN (regression check(s) pending: ${(p.pendingChecks ?? []).join(', ') || 'none declared'})`;
+      L.push(`- attempt ${p.attempt ?? '?'} on ${p.target} [${p.failureClass}, sig ${p.signature}] → ${outcome}`);
+      if (p.hypothesis !== undefined) L.push(`  hypothesis (model-authored, recorded for review — not verified): ${p.hypothesis}`);
+      if (p.scopePaths !== undefined && p.scopePaths.length > 0) L.push(`  declared scope: ${p.scopePaths.join(', ')}`);
+      if (p.outOfScope !== undefined && p.outOfScope.length > 0) L.push(`  ⚠ changed OUTSIDE the declared scope: ${p.outOfScope.join(', ')}`);
+    }
+    L.push('');
+    L.push('A repair outcome is DERIVED from evidence, never asserted: an attempt counts as proven only when every regression check it declared actually passed after it.');
     L.push('');
   }
 

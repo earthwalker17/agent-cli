@@ -125,6 +125,61 @@ export type CheckEvidence =
     };
 
 /**
+ * Typed failure classes (Session 12) — the vocabulary the recovery catalogue, the repair ledger,
+ * the DAG gate, and the report all key on. Classification happens BEFORE any repair is planned;
+ * `unknown` is a first-class member and a stopping condition, never a shrug that lets a loop
+ * continue.
+ */
+export type FailureClass =
+  | 'dependency-setup'
+  | 'compile-type'
+  | 'test-assertion'
+  | 'lint-format'
+  | 'runtime-process'
+  | 'integration-conflict'
+  | 'policy-approval'
+  | 'timeout-resource'
+  | 'unknown';
+
+export const FAILURE_CLASSES: readonly FailureClass[] = [
+  'dependency-setup',
+  'compile-type',
+  'test-assertion',
+  'lint-format',
+  'runtime-process',
+  'integration-conflict',
+  'policy-approval',
+  'timeout-resource',
+  'unknown',
+] as const;
+
+/**
+ * Structured facts about a bounded repair, reported through `ToolContext.reportRepair`. There is
+ * deliberately no `repair.ended`: an attempt's outcome is DERIVED from what happened after it (a
+ * passing regression check, or a newer attempt for the same failure), so a crash between the work
+ * and its recording cannot leave the ledger claiming something that was never proven.
+ */
+export type RepairEvidence =
+  | {
+      kind: 'attempted';
+      target: string;
+      failureClass: FailureClass;
+      signature: string;
+      hypothesis: string;
+      hypothesisSha: string;
+      scopePaths: string[];
+      regressionChecks: CheckKind[];
+      attempt: number;
+    }
+  | {
+      kind: 'escalated';
+      target: string;
+      failureClass: FailureClass;
+      signature: string;
+      reason: string;
+    };
+
+/**
  * Subagent role names and their access class — the POLICY fact table (V0.7). Data only: the
  * runtime builds full role contracts (tool registry, prompt, budget, approval mode) on top of
  * this in `runtime/roles.ts`. `decide()` consults THIS table and fails closed on any role that
@@ -260,8 +315,9 @@ export interface PlanEvidence {
   prevSha256: string | null;
   status: 'draft' | 'approved' | 'superseded' | 'unknown';
   /** Structural summary of the written task graph (Session 11, additive) — lets the report and
-   *  resume render the DAG purely from events, without reading the plan file. */
-  graph?: { id: string; role: string; dependsOn: string[] }[];
+   *  resume render the DAG purely from events, without reading the plan file. Session 12 adds the
+   *  declared check gate per task, for the same reason: the report must not read the plan file. */
+  graph?: { id: string; role: string; dependsOn: string[]; checks?: CheckKind[] }[];
 }
 
 export interface ToolContext {
@@ -281,6 +337,8 @@ export interface ToolContext {
   reportPlan?: (e: PlanEvidence) => void;
   /** Evidence channel for typed-check lifecycle facts (Session 12); persisted under this call's id. */
   reportCheck?: (e: CheckEvidence) => void;
+  /** Evidence channel for bounded-repair ledger facts (Session 12); persisted under this call's id. */
+  reportRepair?: (e: RepairEvidence) => void;
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -674,6 +732,35 @@ export type EventBody =
       planTaskId?: string;
       scopePaths?: string[];
     }
+  /**
+   * The bounded-repair ledger (Session 12, additive). `repair.attempted` records a CLASSIFIED
+   * failure, the hypothesis being tried, and the scope it is allowed to touch — the evidence a
+   * later reader needs to judge whether the repair was disciplined. Its outcome is derived, not
+   * recorded: a passing regression check closes it, a newer attempt for the same signature
+   * supersedes it. `repair.escalated` is the honest stop.
+   */
+  | {
+      type: 'repair.attempted';
+      callId: string;
+      /** The plan task id being repaired, or 'session' for work outside the graph. */
+      target: string;
+      failureClass: FailureClass;
+      /** Stable identity of THIS failure (class + subject + signals) — "the same failure again". */
+      signature: string;
+      hypothesis: string;
+      hypothesisSha: string;
+      scopePaths: string[];
+      regressionChecks: CheckKind[];
+      attempt: number;
+    }
+  | {
+      type: 'repair.escalated';
+      callId: string;
+      target: string;
+      failureClass: FailureClass;
+      signature: string;
+      reason: string;
+    }
   | {
       type: 'undo.applied';
       target: 'last' | 'all';
@@ -922,8 +1009,9 @@ export type EventBody =
       bytes: number;
       prevSha256: string | null;
       status: 'draft' | 'approved' | 'superseded' | 'unknown';
-      /** Structural task-graph summary for canonical writes (Session 11, additive). */
-      graph?: { id: string; role: string; dependsOn: string[] }[];
+      /** Structural task-graph summary for canonical writes (Session 11, additive; Session 12
+       *  adds each task's declared check gate so the report never has to read the plan file). */
+      graph?: { id: string; role: string; dependsOn: string[]; checks?: CheckKind[] }[];
     }
   | {
       /**

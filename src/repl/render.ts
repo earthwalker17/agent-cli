@@ -229,6 +229,16 @@ export function createRenderer(opts: {
           }
           break;
         }
+        case 'repair.attempted': {
+          chromeLine(
+            style.dim(`  ${g.arrow} repair attempt ${e.attempt} on ${sanitizeLine(e.target)} [${e.failureClass}] — prove with ${e.regressionChecks.join(', ')}`),
+          );
+          break;
+        }
+        case 'repair.escalated': {
+          chromeLine(style.yellow(`  ${g.warn} repair ESCALATED on ${sanitizeLine(e.target)} [${e.failureClass}]: ${sanitizeLine(e.reason)}`));
+          break;
+        }
         case 'turn.aborted': {
           chromeLine(style.yellow(`  ${g.warn} turn interrupted`));
           break;

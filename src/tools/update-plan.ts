@@ -6,6 +6,7 @@ import { graphSummary, writeUserView } from '../plan/views.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Clock } from '../shared/clock.js';
+import type { CheckKind } from '../types.js';
 
 /**
  * update_plan — the model's ONLY write path to the plan document. Built PER SESSION at assembly
@@ -32,7 +33,12 @@ const UpdatePlanInput = z
         'that genuinely needs your own context (main tasks are asserted done, never harness-verified). dependsOn (task ids that must be completed ' +
         'AND integrated first), touches (workspace-relative path prefixes the task owns — the scheduler refuses ' +
         'overlapping tasks in one parallel group), verify (how completion will be checked — required for ' +
-        'executor/main), risk, serial (must run alone). Do NOT encode execution status anywhere — the harness ' +
+        'executor/main), checks (TYPED check kinds that GATE this task: dependents stay blocked and the session ' +
+        'cannot be accepted until each has passed after this task is integrated — build|test|test-targeted|' +
+        'typecheck|lint|format|static-analysis; declare them on mutating tasks, never on role main), risk, ' +
+        'serial (must run alone). Optional graph-level gates: {integration: [...]} must pass after each apply ' +
+        'before the next executor wave, {completion: [...]} must pass after the last change before /accept. ' +
+        'Do NOT encode execution status anywhere — the harness ' +
         'derives live task states from evidence. Task ids are stable across amendments; completed state belongs ' +
         'to the task DEFINITION that ran: changing a completed task (title/intent/role/touches/verify/…) re-opens ' +
         'it for execution, while untouched completed tasks stay completed across amendments.',
@@ -48,6 +54,12 @@ export interface UpdatePlanDeps {
   /** The plan id = the owning (parent) session id. */
   planId: string;
   clock?: Clock;
+  /**
+   * Check kinds this project can run right now (Session 12). Read fresh per call so a plan that
+   * gates on something unrunnable is warned about in the REVISION LOOP, before the user approves
+   * a graph whose gates cannot be satisfied. Absent ⇒ the warning is simply not produced.
+   */
+  availableChecks?: () => readonly CheckKind[];
 }
 
 export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInputT> {
@@ -76,7 +88,13 @@ export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInput
         truncated: false,
       });
       try {
-        const v = validatePlanGraph(input.plan);
+        let availableChecks: readonly CheckKind[] | undefined;
+        try {
+          availableChecks = deps.availableChecks?.();
+        } catch {
+          availableChecks = undefined; // a detection failure must never block writing a plan
+        }
+        const v = validatePlanGraph(input.plan, availableChecks !== undefined ? { availableChecks } : {});
         if (!v.ok || v.graph === undefined) {
           // The revision loop: every error, verbatim and complete — nothing was written. The
           // detail rides in `output` so the persisted outputPreview keeps it as evidence too.

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { sha256 } from '../shared/hash.js';
 import { normalizeRelPrefix, relPrefixesOverlap } from '../shared/pathutil.js';
+import type { CheckKind } from '../types.js';
 
 /**
  * The canonical structured plan (Session 11): one schema-validated task graph per session,
@@ -25,6 +26,11 @@ export const PLAN_GRAPH_MAX_CHARS = 32_000;
 
 export type PlanTaskRole = 'executor' | 'explorer' | 'reviewer' | 'main';
 
+/** The wire enum for check kinds; a compile-time guard keeps it equal to the shared vocabulary. */
+const CHECK_KIND_VALUES = ['build', 'test', 'test-targeted', 'typecheck', 'lint', 'format', 'static-analysis'] as const;
+const _checkKindsMatch: readonly CheckKind[] = CHECK_KIND_VALUES;
+void _checkKindsMatch;
+
 export const PlanTaskSchema = z
   .object({
     id: z.string().regex(TASK_ID_RE, 'task id must be a slug: [a-z0-9][a-z0-9-]{0,40}'),
@@ -42,8 +48,34 @@ export const PlanTaskSchema = z
       .max(500)
       .default('')
       .describe('How the parent will check this task succeeded. Required for executor/main tasks.'),
+    /**
+     * The MACHINE gate (Session 12): typed check kinds that must pass before dependents unblock.
+     * Optional with NO default on purpose — `canonicalJson` drops undefined keys, so plans written
+     * before this field keep their exact `planContentSha`/`planTaskDefinitionSha` and a resumed
+     * approved plan stays approved-and-current. `verify` remains the human criterion beside it.
+     */
+    checks: z
+      .array(z.enum(CHECK_KIND_VALUES))
+      .max(4)
+      .optional()
+      .describe('Typed checks that gate this task: dependents stay blocked until each has passed.'),
     risk: z.enum(['low', 'medium', 'high']).default('low'),
     serial: z.boolean().default(false).describe('Must run alone, never grouped with other tasks.'),
+  })
+  .strict();
+
+export const PlanGatesSchema = z
+  .object({
+    integration: z
+      .array(z.enum(CHECK_KIND_VALUES))
+      .max(4)
+      .optional()
+      .describe('Checks that must pass after each integration before a new executor wave may start.'),
+    completion: z
+      .array(z.enum(CHECK_KIND_VALUES))
+      .max(4)
+      .optional()
+      .describe('Checks that must pass after the last change before the session can be accepted as complete.'),
   })
   .strict();
 
@@ -54,6 +86,8 @@ export const PlanGraphSchema = z
     approach: z.string().max(4000).optional(),
     risks: z.array(z.string().max(300)).max(12).optional(),
     notes: z.string().max(4000).optional(),
+    /** Broader gates at the integration and completion boundaries (Session 12; sha-neutral when absent). */
+    gates: PlanGatesSchema.optional(),
     tasks: z.array(PlanTaskSchema).min(1).max(20),
   })
   .strict();
@@ -93,6 +127,11 @@ export function planTaskDefinitionSha(task: PlanTask): string {
   return sha256(canonicalJson({ ...task, dependsOn: [...task.dependsOn].sort() }));
 }
 
+export interface PlanValidationOptions {
+  /** Check kinds this project can actually run right now (Session 12); enables the gate warning. */
+  availableChecks?: readonly CheckKind[];
+}
+
 export interface PlanValidation {
   ok: boolean;
   /** Blocking problems, exact and complete — the model's revision loop depends on precision. */
@@ -116,9 +155,27 @@ export { normalizeRelPrefix as normalizeTouchPrefix, relPrefixesOverlap as touch
  * Blocking errors are returned verbatim and completely — update_plan feeds them straight back
  * to the model so the revision loop converges on precision, not summaries.
  */
-export function validatePlanGraph(input: PlanGraph): PlanValidation {
+export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions = {}): PlanValidation {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  // A gate this project cannot run would strand the plan mid-execution. Catch it at the CONSENT
+  // boundary instead: a warning here reaches the model through update_plan's revision loop, long
+  // before the user approves a graph whose gates are unsatisfiable. Deliberately non-blocking —
+  // detection is a heuristic, and a check may become runnable later (an install, a new config).
+  const available = opts.availableChecks;
+  if (available !== undefined) {
+    const declared = new Set<CheckKind>();
+    for (const t of input.tasks) for (const k of t.checks ?? []) declared.add(k);
+    for (const k of input.gates?.integration ?? []) declared.add(k);
+    for (const k of input.gates?.completion ?? []) declared.add(k);
+    const missing = [...declared].filter((k) => !available.includes(k));
+    if (missing.length > 0) {
+      warnings.push(
+        `declared check kind(s) ${missing.join(', ')} cannot run in this project right now (runnable: ${available.length > 0 ? available.join(', ') : 'none'}) — they will record as UNSUPPORTED and be waived with a caveat rather than proving anything`,
+      );
+    }
+  }
 
   const ids = new Set<string>();
   for (const t of input.tasks) {
@@ -137,6 +194,22 @@ export function validatePlanGraph(input: PlanGraph): PlanValidation {
     if ((t.role === 'executor' || t.role === 'main') && t.verify.trim() === '') {
       errors.push(`task '${t.id}' (role ${t.role}) requires non-empty 'verify' criteria`);
     }
+    // A per-task gate is anchored on that task's own integration evidence, which a parent-owned
+    // (role 'main') task never produces — the fold resolves it to 'parent-owned' before any
+    // verification logic runs. Silently ignoring a declared gate would be the dishonest option.
+    if (t.role === 'main' && t.checks !== undefined && t.checks.length > 0) {
+      errors.push(
+        `task '${t.id}' (role main) cannot declare 'checks': the harness gates a task on ITS OWN integration evidence, which parent-owned work does not produce — use the graph-level gates.completion instead, or make it an executor task`,
+      );
+    }
+    if (t.checks !== undefined && new Set(t.checks).size !== t.checks.length) {
+      errors.push(`task '${t.id}' lists a duplicate check kind`);
+    }
+    if (t.checks?.includes('test-targeted') === true && t.touches.length === 0) {
+      warnings.push(
+        `task '${t.id}' gates on 'test-targeted' but declares no touches — a targeted run needs scope_paths, so name what it owns`,
+      );
+    }
   }
 
   // Normalize touches; reject escapes.
@@ -150,8 +223,22 @@ export function validatePlanGraph(input: PlanGraph): PlanValidation {
         touches.push(norm);
       }
     }
-    return { ...t, touches };
+    // Drop an EMPTY checks array rather than storing it: `[]` and absent are semantically the
+    // same gate (none), but canonicalJson would hash them differently — and the content sha is
+    // the approval binding. Normalizing here keeps "no gate" one canonical form.
+    const { checks: rawChecks, ...rest } = t;
+    return { ...rest, touches, ...(rawChecks !== undefined && rawChecks.length > 0 ? { checks: rawChecks } : {}) };
   });
+
+  // Same normalization for the graph-level gates: empty lists are absent lists.
+  const gates =
+    input.gates === undefined
+      ? undefined
+      : {
+          ...((input.gates.integration?.length ?? 0) > 0 ? { integration: input.gates.integration } : {}),
+          ...((input.gates.completion?.length ?? 0) > 0 ? { completion: input.gates.completion } : {}),
+        };
+  const normalizedGates = gates !== undefined && Object.keys(gates).length > 0 ? gates : undefined;
 
   // Cycle detection (Kahn). Report one concrete cycle path so the model can fix it directly.
   const cycle = findCycle(tasks);
@@ -176,7 +263,8 @@ export function validatePlanGraph(input: PlanGraph): PlanValidation {
     }
   }
 
-  const graph: PlanGraph = { ...input, tasks };
+  const { gates: _dropped, ...withoutGates } = input;
+  const graph: PlanGraph = { ...withoutGates, tasks, ...(normalizedGates !== undefined ? { gates: normalizedGates } : {}) };
   const serialized = canonicalJson(graph);
   if (serialized.length > PLAN_GRAPH_MAX_CHARS) {
     errors.push(`plan graph too large: ${serialized.length} chars canonical (max ${PLAN_GRAPH_MAX_CHARS})`);

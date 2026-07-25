@@ -3,6 +3,9 @@ import { z } from 'zod';
 import type { SessionEvent, SubagentRoleName, TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
 import type { PlanState } from '../plan/canonical.js';
 import type { GraphState } from '../plan/graph-state.js';
+import type { CheckKind } from '../types.js';
+import { renderRecoveryGuidance } from '../recovery/catalogue.js';
+import type { RepairVerdict } from '../recovery/policy.js';
 import { planTaskDefinitionSha, type PlanGraph, type PlanTask } from '../plan/schema.js';
 import {
   neutralizeHarnessDelimiters,
@@ -95,6 +98,17 @@ export interface PlanGateInfo {
   state: PlanState;
   /** The execution fold of the canonical graph; null when no valid canonical graph exists. */
   graphState: GraphState | null;
+  /**
+   * The plan's integration-boundary check gate (Session 12), computed where the events are.
+   * Optional so every existing caller and pin stays valid; absent ⇒ the rule does not fire.
+   */
+  integrationGate?: { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } | null;
+  /**
+   * Per-plan-task bounded-repair verdicts (Session 12), computed where the events are. Optional
+   * so every existing caller and pin stays valid; absent ⇒ R11 does not fire and the retry path
+   * behaves exactly as it did in Session 11.5.
+   */
+  repairVerdicts?: ReadonlyMap<string, RepairVerdict> | null;
 }
 
 /**
@@ -299,6 +313,20 @@ export function checkDagRules(
     }
   }
 
+  // R12 (Session 12) — the INTEGRATION boundary. When the plan declares gates.integration, the
+  // combined state after the last apply must be verified before another mutating wave starts.
+  // Group-level and pre-checkpoint like every other rule here, so a refusal spawns nothing.
+  // Read-only groups are unaffected: exploring while a gate is red costs nothing and risks nothing.
+  if (gate.integrationGate !== undefined && gate.integrationGate !== null && gate.integrationGate.pending.length > 0) {
+    if (tasks.some((t) => t.role === 'executor')) {
+      return (
+        `the plan's integration gate has not passed since the last apply: ${gate.integrationGate.pending.join(', ')} — ` +
+        `run_check them before starting another executor wave (broader verification at the integration boundary is what the gate is for), ` +
+        `or amend the plan's gates with update_plan (this resets approval)`
+      );
+    }
+  }
+
   // Pass 2 — group composition, BEFORE per-task state: grouping a dependent with its dependency
   // gets the actionable "sequence them across calls" message rather than R4's "blocked" (which
   // would otherwise always shadow it — the dep can never be completed while spawning alongside).
@@ -358,18 +386,65 @@ export function checkDagRules(
     const spent = ts.attemptHistory.filter(
       (a) => !NON_FAILURE.has(a.outcome) && (a.planTaskSha === undefined || a.planTaskSha === ts.definitionSha),
     );
+    const verdict = gate.repairVerdicts?.get(t.plan_task);
     if (spent.length >= MAX_TASK_ATTEMPTS) {
+      // Session 12: the ceiling now says WHAT failed, not just how often — the catalogue's
+      // required evidence and diagnostics are the actionable part of a refusal.
+      const classBit =
+        verdict !== undefined
+          ? `\nclassified: ${verdict.failureClass} — ${verdict.guidance.label}. Required evidence: ${verdict.guidance.requiredEvidence.join('; ')}. Diagnose first: ${verdict.guidance.diagnostics.join('; ')}.`
+          : '';
       return (
         `plan task '${t.plan_task}' has already failed ${spent.length} attempt(s) under its current definition ` +
         `(${spent.map((a) => a.outcome).join(', ')}) — do not retry identically: revise the task with update_plan `
         + `(a materially different definition resets the ceiling; approval will be required again), do the work ` +
-        `directly as the parent, or ask the user how to proceed`
+        `directly as the parent, record an honest stop with recover(action="escalate"), or ask the user how to proceed` +
+        classBit
       );
     }
+    // R11 (Session 12) — CLASSIFICATION BEFORE REPAIR PLANNING. Once a mutating task has failed
+    // under its current definition, re-spawning it is a repair, and a repair needs a plan: the
+    // failure must classify, the class must be automatically repairable, the budgets must hold,
+    // and a hypothesis for THIS failure must be on the record (newer than the failure itself, so
+    // every new failure demands a fresh one). Otherwise the gate refuses and names the hatches.
+    //
+    // Scoped to executors on purpose: re-running a read-only explorer costs a budget and changes
+    // nothing, so requiring a repair ledger entry there would be ceremony. Mutating retries are
+    // where a blind "try again" actually costs something.
+    if (t.role === 'executor' && spent.length >= 1 && verdict !== undefined) {
+      if (verdict.stop !== undefined) {
+        return (
+          `plan task '${t.plan_task}' failed again (${verdict.failureClass}) and automatic repair is REFUSED ` +
+          `(${verdict.stop.reason}): ${verdict.stop.detail}\n` +
+          `${renderRecoveryGuidance(verdict.failureClass, { includeStops: true })}\n` +
+          `Record the honest stop with recover(action="escalate", target="${t.plan_task}", reason=…), revise the task with ` +
+          `update_plan (re-approval required), do it directly as the parent, or ask the user.`
+        );
+      }
+      if (verdict.needsNewPlan) {
+        return (
+          `plan task '${t.plan_task}' failed again and has no repair plan for THIS failure — classification comes before repair. ` +
+          `Call recover(action="attempt", target="${t.plan_task}", hypothesis=…, scope_paths=…, regression_checks=…) first; ` +
+          `it is ${verdict.failureClass} (attempt ${verdict.attemptsUsed + 1} of ${MAX_TASK_ATTEMPTS} for this failure).\n` +
+          renderRecoveryGuidance(verdict.failureClass)
+        );
+      }
+    }
     if (ts.state === 'blocked') {
-      // R4 (parent-owned deps auto-satisfy in the fold and surface as a warning, never here)
-      const depsLine = ts.blockedOn.map((d) => `'${d}' is ${gs.byId.get(d)?.state ?? 'unknown'}`).join('; ');
-      return `plan task '${t.plan_task}' is blocked: dependency ${depsLine} — dependencies must be completed AND integrated (apply_task_changes with no refusals) before dependents run`;
+      // R4 (parent-owned deps auto-satisfy in the fold and surface as a warning, never here).
+      // Session 12: a dependency can also be blocking because its own check gate is still
+      // pending — name the missing kinds, or the message points at nothing actionable.
+      const depsLine = ts.blockedOn
+        .map((d) => {
+          const dep = gs.byId.get(d);
+          const gateBit =
+            dep?.state === 'completed' && dep.verification.status === 'pending'
+              ? ` (integrated, but its required check(s) have not passed: ${dep.verification.missing.join(', ')})`
+              : '';
+          return `'${d}' is ${dep?.state ?? 'unknown'}${gateBit}`;
+        })
+        .join('; ');
+      return `plan task '${t.plan_task}' is blocked: dependency ${depsLine} — dependencies must be completed, integrated (apply_task_changes with no refusals), and past their declared check gate before dependents run`;
     }
   }
   return null;

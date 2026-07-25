@@ -1,6 +1,7 @@
 import type { SessionEvent, TaskChangeFile } from '../types.js';
 import type { PlanState } from '../plan/canonical.js';
-import type { GraphState } from '../plan/graph-state.js';
+import { completionGateState, type GraphState } from '../plan/graph-state.js';
+import { foldRepairs, openRepairBlockers } from '../recovery/ledger.js';
 
 /**
  * The session completion boundary (Session 11.5) — a PURE fold (the house pattern) that answers
@@ -49,6 +50,10 @@ const WORK_EVENT_TYPES = new Set([
   // `command.started` is here (Session 12). Deliberately not `check.completed`: it would
   // double-count one unit of work and make staleness noisier without adding information.
   'check.started',
+  // Repair ledger writes are state changes a user would want to re-accept over: an attempt
+  // declares work about to happen, and an escalation changes what is outstanding.
+  'repair.attempted',
+  'repair.escalated',
 ]);
 
 /**
@@ -86,8 +91,28 @@ export function computeAcceptance(
       );
     } else if (planState.status === 'approved' && graphState !== null) {
       for (const t of graphState.tasks) {
-        if (t.state === 'completed' || t.state === 'parent-owned') continue;
+        if (t.state === 'parent-owned') continue;
+        if (t.state === 'completed') {
+          // Session 12: a completed task whose declared gate has not passed is NOT finished.
+          // This axis is explicit rather than free: keeping `completed` as the state (so R5 still
+          // refuses duplicate re-runs) means the completeness loop no longer sees it for free.
+          if (t.verification.status === 'pending') {
+            unfinished.push(
+              `plan task '${t.id}' is completed but its required check(s) have not passed since integration: ${t.verification.missing.join(', ')} — run_check them`,
+            );
+          }
+          continue;
+        }
         unfinished.push(`plan task '${t.id}' is ${t.state}${t.state === 'blocked' ? ` (on ${t.blockedOn.join(', ')})` : ''}`);
+      }
+      // The COMPLETION boundary gate: broader checks measured against the LAST change in the
+      // session, so integrating more work or undoing something correctly re-opens it.
+      const graph = planState.canonical?.graph ?? null;
+      if (graph !== null) {
+        const gate = completionGateState(graph, events);
+        for (const kind of gate.pending) {
+          unfinished.push(`completion gate '${kind}' has not passed since the last change — run_check it before accepting`);
+        }
       }
     }
   } else if (planState.kind === 'legacy' && planState.status !== 'superseded') {
@@ -119,6 +144,11 @@ export function computeAcceptance(
       unfinished.push(`${unapplied.length} captured file(s) from task ${child.slice(-4)} not applied — apply_task_changes (child ${child})`);
     }
   }
+
+  // Repair axis (Session 12): an escalation that nobody resolved, and a repair whose own declared
+  // regression checks never passed, are honest unfinished work — a session must not be accepted
+  // as complete while the agent has an open "I stopped and need you" on the record.
+  for (const blocker of openRepairBlockers(foldRepairs(events))) unfinished.push(blocker);
 
   // The latest recorded acceptance, if any.
   let accepted: RecordedAcceptance | null = null;

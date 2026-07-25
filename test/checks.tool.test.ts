@@ -5,7 +5,7 @@ import path from 'node:path';
 import { CHECKS_PER_SESSION, checkCapsFromEvents, createRunCheckTool, type CheckCaps } from '../src/tools/run-check.js';
 import { CHECK_KINDS } from '../src/types.js';
 import { startSession, endSession, runTurn, reconstruct } from '../src/runtime/session.js';
-import { MockProvider } from '../src/provider/mock.js';
+import { MockProvider, type ScriptTurn } from '../src/provider/mock.js';
 import { TOOLS } from '../src/tools/index.js';
 import { EventLog } from '../src/store/event-log.js';
 import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
@@ -52,7 +52,7 @@ function scriptedApprover(outcomes: ApprovalOutcome[]): { approver: Approver; ca
   return { approver, calls };
 }
 
-function makeSession(script: Parameters<typeof MockProvider.prototype.constructor>[0] extends never ? never : ConstructorParameters<typeof MockProvider>[0], approver: Approver, caps: CheckCaps) {
+function makeSession(script: ScriptTurn[], approver: Approver, caps: CheckCaps) {
   const checkTool = createRunCheckTool({ workspaceRoot: ws, caps });
   const session = startSession({
     workspaceRoot: ws,

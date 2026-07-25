@@ -11,6 +11,7 @@ import type {
   PolicyRules,
   Provider,
   ProviderRequest,
+  RepairEvidence,
   SessionEvent,
   SessionMode,
   StopReason,
@@ -780,6 +781,33 @@ function recordCheckEvidence(session: Session, callId: string, e: CheckEvidence)
   });
 }
 
+/** Persist a tool-reported repair-ledger fact under the runtime-bound callId (Session 12). */
+function recordRepairEvidence(session: Session, callId: string, e: RepairEvidence): void {
+  if (e.kind === 'attempted') {
+    session.log.append({
+      type: 'repair.attempted',
+      callId,
+      target: e.target,
+      failureClass: e.failureClass,
+      signature: e.signature,
+      hypothesis: e.hypothesis,
+      hypothesisSha: e.hypothesisSha,
+      scopePaths: e.scopePaths,
+      regressionChecks: e.regressionChecks,
+      attempt: e.attempt,
+    });
+    return;
+  }
+  session.log.append({
+    type: 'repair.escalated',
+    callId,
+    target: e.target,
+    failureClass: e.failureClass,
+    signature: e.signature,
+    reason: e.reason,
+  });
+}
+
 function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecision, callId: string): ApprovalRequest {
   const { summary, detail } = describeCall(tool, input);
   // Display-only tool context (V0.7.1, e.g. plan state at an executor spawn) folds into detail
@@ -938,6 +966,7 @@ async function runExecution<I>(
     reportTask: (e) => recordTaskEvidence(session, callId, e),
     reportPlan: (e) => recordPlanEvidence(session, callId, e),
     reportCheck: (e) => recordCheckEvidence(session, callId, e),
+    reportRepair: (e) => recordRepairEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),
