@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { sha256 } from '../shared/hash.js';
+import { normalizeRelPrefix, relPrefixesOverlap } from '../shared/pathutil.js';
 
 /**
  * The canonical structured plan (Session 11): one schema-validated task graph per session,
@@ -103,25 +104,11 @@ export interface PlanValidation {
 }
 
 /**
- * Normalize a declared touch prefix: forward slashes, no leading `./`, no trailing `/`.
- * Returns null for prefixes that must be rejected (absolute, drive-letter, or `..`-escaping —
- * these are never disk-probed, mirroring the focus-prefix containment rule).
+ * Touch-prefix normalization/overlap live in `shared/pathutil` (Session 12): typed-check scopes
+ * need the identical containment rule, and one implementation is the only way both stay identical.
+ * Re-exported under the original names so every existing caller and pin is untouched.
  */
-export function normalizeTouchPrefix(prefix: string): string | null {
-  let p = prefix.replace(/\\/g, '/').trim();
-  while (p.startsWith('./')) p = p.slice(2);
-  while (p.endsWith('/')) p = p.slice(0, -1);
-  if (p === '' || p === '.') return null;
-  if (p.startsWith('/') || /^[a-zA-Z]:/.test(p)) return null;
-  if (p.split('/').some((seg) => seg === '..')) return null;
-  return p;
-}
-
-/** Two prefixes overlap when equal or one path-nests the other (the focus-brief rule). */
-export function touchPrefixesOverlap(a: string, b: string): boolean {
-  if (a === b) return true;
-  return a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-}
+export { normalizeRelPrefix as normalizeTouchPrefix, relPrefixesOverlap as touchPrefixesOverlap };
 
 /**
  * Semantic validation on top of the zod shape: unique ids, resolvable acyclic dependencies,
@@ -156,7 +143,7 @@ export function validatePlanGraph(input: PlanGraph): PlanValidation {
   const tasks: PlanTask[] = input.tasks.map((t) => {
     const touches: string[] = [];
     for (const raw of t.touches) {
-      const norm = normalizeTouchPrefix(raw);
+      const norm = normalizeRelPrefix(raw);
       if (norm === null) {
         errors.push(`task '${t.id}' touch prefix '${raw}' is not a contained workspace-relative prefix`);
       } else if (!touches.includes(norm)) {
@@ -179,7 +166,7 @@ export function validatePlanGraph(input: PlanGraph): PlanValidation {
         const a = tasks[i]!;
         const b = tasks[j]!;
         if (ordered.get(a.id)?.has(b.id) === true || ordered.get(b.id)?.has(a.id) === true) continue;
-        const hits = a.touches.filter((ta) => b.touches.some((tb) => touchPrefixesOverlap(ta, tb)));
+        const hits = a.touches.filter((ta) => b.touches.some((tb) => relPrefixesOverlap(ta, tb)));
         if (hits.length > 0) {
           warnings.push(
             `tasks '${a.id}' and '${b.id}' declare overlapping touches (${hits.join(', ')}) but are not dependency-ordered — they can never run in the same parallel group`,
