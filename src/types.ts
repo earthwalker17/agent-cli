@@ -54,6 +54,77 @@ export type CommandEvidence =
     };
 
 /**
+ * Typed verification kinds (Session 12) — the shared vocabulary the plan schema, the event log,
+ * the report, and the recovery catalogue all key on, so it lives with the contracts rather than
+ * inside the checks module. There is deliberately NO dependency-install kind: installing runs
+ * third-party code with network access, which is not "verify what we just built"; a missing
+ * toolchain is an honest `unsupported` precondition the user resolves.
+ */
+export type CheckKind = 'build' | 'test' | 'test-targeted' | 'typecheck' | 'lint' | 'format' | 'static-analysis';
+
+/** Declaration order is the canonical order everywhere (schemas, views, reports, prompts). */
+export const CHECK_KINDS: readonly CheckKind[] = [
+  'build',
+  'test',
+  'test-targeted',
+  'typecheck',
+  'lint',
+  'format',
+  'static-analysis',
+] as const;
+
+export function isCheckKind(v: string): v is CheckKind {
+  return (CHECK_KINDS as readonly string[]).includes(v);
+}
+
+/**
+ * `pass`/`fail` come from the EXIT CODE of a process that genuinely exited; `error` covers every
+ * non-exit termination (timeout, abort, spawn failure) and can never read as a passing check;
+ * `unsupported` never ran at all. Output parsing may only enrich the summary/findings/signals.
+ */
+export type CheckStatus = 'pass' | 'fail' | 'error' | 'unsupported';
+
+export interface CheckFinding {
+  file?: string;
+  line?: number;
+  message: string;
+}
+
+/**
+ * Structured facts about a typed check, reported through `ToolContext.reportCheck`. Same contract
+ * as `CommandEvidence`: the runtime binds the callId, so a tool can only ever produce evidence
+ * for its own call. `started` is emitted ONLY for a real spawn — an `unsupported` kind reports an
+ * `ended` alone, because nothing ran.
+ */
+export type CheckEvidence =
+  | {
+      kind: 'started';
+      check: CheckKind;
+      recipeId: string;
+      command: string;
+      cwd: string;
+      timeoutMs: number;
+      planTaskId?: string;
+      scopePaths?: string[];
+    }
+  | {
+      kind: 'ended';
+      check: CheckKind;
+      recipeId: string;
+      status: CheckStatus;
+      /** null unless the process genuinely exited (killed checks have no exit code). */
+      exitCode: number | null;
+      termination?: CommandTermination;
+      durationMs: number;
+      summary: string;
+      /** Named signal ids — what keeps failure classification derivable from the log alone. */
+      signals?: string[];
+      findings?: CheckFinding[];
+      planTaskId?: string;
+      scopePaths?: string[];
+    };
+
+/**
  * Subagent role names and their access class — the POLICY fact table (V0.7). Data only: the
  * runtime builds full role contracts (tool registry, prompt, budget, approval mode) on top of
  * this in `runtime/roles.ts`. `decide()` consults THIS table and fails closed on any role that
@@ -208,6 +279,8 @@ export interface ToolContext {
   reportTask?: (e: TaskEvidence) => void;
   /** Evidence channel for plan-document writes; persisted by the runtime under this call's id (V0.7). */
   reportPlan?: (e: PlanEvidence) => void;
+  /** Evidence channel for typed-check lifecycle facts (Session 12); persisted under this call's id. */
+  reportCheck?: (e: CheckEvidence) => void;
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -565,6 +638,41 @@ export type EventBody =
       durationMs: number;
       killDetail?: string;
       drainTimedOut?: boolean;
+    }
+  /**
+   * Typed check lifecycle (Session 12, additive). `check.started` marks a REAL spawn — the same
+   * meaning `command.started` carries, so crash replay and the acceptance work-boundary treat
+   * them alike. A kind that could not run records only `check.completed` with status
+   * 'unsupported': nothing was spawned, so claiming a start would be false evidence.
+   */
+  | {
+      type: 'check.started';
+      callId: string;
+      check: CheckKind;
+      recipeId: string;
+      /** The exact harness-resolved command string — what the human approved and what ran. */
+      command: string;
+      cwd: string;
+      timeoutMs: number;
+      /** The plan task this run was declared against; a reporting LABEL, never the gate itself. */
+      planTaskId?: string;
+      scopePaths?: string[];
+    }
+  | {
+      type: 'check.completed';
+      callId: string;
+      check: CheckKind;
+      recipeId: string;
+      status: CheckStatus;
+      exitCode: number | null;
+      termination?: CommandTermination;
+      durationMs: number;
+      summary: string;
+      /** Named signals — classification stays derivable from the log after the output is gone. */
+      signals?: string[];
+      findings?: CheckFinding[];
+      planTaskId?: string;
+      scopePaths?: string[];
     }
   | {
       type: 'undo.applied';

@@ -4,8 +4,9 @@ import type { CommandTermination, SessionEvent } from '../types.js';
  * The deterministic evidence report: a PURE function from the event log to a structured object
  * and a Markdown rendering. No filesystem I/O, no model — identical events produce byte-identical
  * output (golden-testable). This is constitution principles 1 and 8 made executable: only recorded
- * tool events count as evidence, and "CHECKED" means a command exited zero AFTER a change, nothing
- * more.
+ * tool events count as evidence, and "CHECKED" means a command OR a typed check exited zero AFTER
+ * a change, nothing more. (Session 12 widened the source, never the claim: a typed check's `pass`
+ * is derived from the same `exited && exitCode === 0` rule, so the two are the same evidence.)
  */
 
 export interface ReportAction {
@@ -43,6 +44,24 @@ export interface ReportCommand {
   outputBlobSha256?: string;
   /** The execution boundary this command actually ran under (V0.4+ logs). */
   sandbox?: 'none' | 'windows-lowil';
+}
+export interface ReportCheck {
+  check: string;
+  recipeId: string;
+  /** Empty for an unsupported kind — nothing was resolved and nothing ran. */
+  command: string;
+  status: string;
+  exitCode: number | null;
+  termination?: CommandTermination;
+  durationMs: number;
+  summary: string;
+  signals?: string[];
+  findings?: { file?: string; line?: number; message: string }[];
+  /** The plan task this run was declared against — a label recorded with the evidence. */
+  planTaskId?: string;
+  scopePaths?: string[];
+  /** check.started with no completion: the session died while the check ran; NO verdict exists. */
+  neverCompleted?: boolean;
 }
 export interface ReportSandbox {
   mode: string;
@@ -94,6 +113,8 @@ export interface ReportJson {
   gitRestores: { ref: string; oid: string; restored: number; refused: { path: string; reason: string }[] }[];
   /** The latest user /accept (Session 11.5, additive) — the explicit completion boundary. */
   accepted?: { complete: boolean; summary: string; unfinished?: string[] };
+  /** Typed check runs (Session 12, additive), in order. `neverCompleted` = spawned, no verdict. */
+  checks?: ReportCheck[];
   /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
    *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
   tasksDelegated: {
@@ -261,10 +282,29 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       churn.set(e.path, c);
     }
   }
+  // Typed checks (Session 12) are evidence of exactly the same KIND as a passing command, so
+  // they join the CHECKED correlation rather than living in a parallel universe. `status: 'pass'`
+  // is derived from `termination === 'exited' && exitCode === 0`, which is the identical rule the
+  // command path applies — that equivalence is what makes extending the verdict honest. The two
+  // sources are MERGED AND SORTED BY SEQ: `find` takes the first entry after the mutation, so an
+  // unsorted concatenation would attribute a file to a check that ran BEFORE the command.
+  const checkCompletions: { command: string; seq: number; exitCode?: number; ok: boolean; termination?: CommandTermination }[] = [];
+  for (const e of events) {
+    if (e.type !== 'check.completed' || e.status !== 'pass') continue;
+    checkCompletions.push({
+      command: `${e.check} check (${e.recipeId})`,
+      seq: e.seq,
+      ok: true,
+      ...(e.exitCode !== null ? { exitCode: e.exitCode } : {}),
+      ...(e.termination !== undefined ? { termination: e.termination } : {}),
+    });
+  }
+  const passingEvidence = [...commandCompletions, ...checkCompletions].sort((a, b) => a.seq - b.seq);
+
   const filesChanged: ReportFile[] = [...lastMutation.values()].map((m) => {
     // A check must have genuinely EXITED with 0. A killed command has no exit code by contract;
     // for V0.3+ logs the termination evidence enforces this even against a stray exitCode.
-    const check = commandCompletions.find(
+    const check = passingEvidence.find(
       (cc) => cc.seq > m.seq && cc.exitCode === 0 && (cc.termination === undefined || cc.termination === 'exited'),
     );
     const file: ReportFile = {
@@ -382,6 +422,48 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     }
   }
 
+  // Typed check runs (Session 12), in event order. A `check.started` with no matching completion
+  // is rendered as a run with NO verdict rather than being silently absent — a build killed
+  // mid-flight can have left partial artifacts, and it certainly did not pass.
+  const checkRuns: ReportCheck[] = [];
+  const startedChecks: Extract<SessionEvent, { type: 'check.started' }>[] = [];
+  const completedKeys = new Set<string>();
+  for (const e of events) {
+    if (e.type === 'check.started') startedChecks.push(e);
+    else if (e.type === 'check.completed') {
+      completedKeys.add(`${e.callId}::${e.check}`);
+      const started = startedChecks.find((s) => s.callId === e.callId && s.check === e.check);
+      checkRuns.push({
+        check: e.check,
+        recipeId: e.recipeId,
+        command: started?.command ?? '',
+        status: e.status,
+        exitCode: e.exitCode,
+        ...(e.termination !== undefined ? { termination: e.termination } : {}),
+        durationMs: e.durationMs,
+        summary: e.summary,
+        ...(e.signals !== undefined ? { signals: e.signals } : {}),
+        ...(e.findings !== undefined ? { findings: e.findings } : {}),
+        ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
+        ...(e.scopePaths !== undefined ? { scopePaths: e.scopePaths } : {}),
+      });
+    }
+  }
+  for (const s of startedChecks) {
+    if (completedKeys.has(`${s.callId}::${s.check}`)) continue;
+    checkRuns.push({
+      check: s.check,
+      recipeId: s.recipeId,
+      command: s.command,
+      status: 'no-verdict',
+      exitCode: null,
+      durationMs: 0,
+      summary: `${s.check} STARTED but never completed — no verdict; effects unknown`,
+      ...(s.planTaskId !== undefined ? { planTaskId: s.planTaskId } : {}),
+      neverCompleted: true,
+    });
+  }
+
   const taskChanges = events
     .filter((e): e is Extract<SessionEvent, { type: 'task.changes' }> => e.type === 'task.changes')
     .map((e) => ({
@@ -443,6 +525,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     tasksDelegated,
     plan: planState,
     ...(accepted !== undefined ? { accepted } : {}),
+    ...(checkRuns.length > 0 ? { checks: checkRuns } : {}),
     taskChanges,
     taskApplies,
     integrity: {
@@ -530,6 +613,34 @@ function renderMarkdown(r: ReportJson): string {
     }
   }
   L.push('');
+
+  if (r.checks !== undefined && r.checks.length > 0) {
+    L.push(`## Verification (typed checks)`);
+    for (const c of r.checks) {
+      const where = c.planTaskId !== undefined ? ` [plan task ${c.planTaskId}]` : '';
+      const scope = c.scopePaths !== undefined && c.scopePaths.length > 0 ? ` [scope: ${c.scopePaths.join(', ')}]` : '';
+      if (c.neverCompleted) {
+        L.push(`- ${c.check} (${c.recipeId})${where} → STARTED but never completed; NO verdict, effects unknown`);
+      } else if (c.status === 'unsupported') {
+        L.push(`- ${c.check} → UNSUPPORTED (never ran): ${c.summary}${where}`);
+      } else {
+        const verdict =
+          c.status === 'pass'
+            ? `PASS (exit 0)`
+            : c.status === 'fail'
+              ? `FAIL (exit ${c.exitCode ?? '—'})`
+              : `ERROR (${c.termination ?? 'no exit'}; no exit code)`;
+        L.push(`- ${c.check} (${c.recipeId})${where}${scope} → ${verdict} in ${c.durationMs} ms — \`${c.command}\``);
+      }
+      for (const f of c.findings ?? []) {
+        L.push(`  - ${f.file !== undefined ? `${f.file}${f.line !== undefined ? `:${String(f.line)}` : ''} — ` : ''}${f.message}`);
+      }
+      if (c.signals !== undefined && c.signals.length > 0) L.push(`  signals: ${c.signals.join(', ')}`);
+    }
+    L.push('');
+    L.push('A typed check PASSES only when its process genuinely exited with code 0. UNSUPPORTED means the check never ran.');
+    L.push('');
+  }
 
   L.push(`## Actions`);
   for (const a of r.actions) {

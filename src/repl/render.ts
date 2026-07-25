@@ -204,6 +204,31 @@ export function createRenderer(opts: {
           }
           break;
         }
+        case 'check.started': {
+          // A typed check reuses the live command-output preview channel: it is a real process,
+          // and watching a build/test scroll is exactly as useful as watching a command.
+          cmdBuf = '';
+          cmdShown = 0;
+          cmdSuppressed = false;
+          lastCmdFlush = Date.now();
+          chromeLine(style.dim(`  ${g.arrow} check ${e.check} — ${sanitizeLine(e.command)}`));
+          break;
+        }
+        case 'check.completed': {
+          flushCmdOutput(true);
+          const mark =
+            e.status === 'pass'
+              ? style.green(g.ok)
+              : e.status === 'unsupported'
+                ? style.yellow(g.warn)
+                : style.red(g.fail);
+          chromeLine(`  ${mark} ${sanitizeLine(e.summary)}`);
+          for (const f of e.findings ?? []) {
+            const where = f.file !== undefined ? `${sanitizeLine(f.file)}${f.line !== undefined ? `:${String(f.line)}` : ''} — ` : '';
+            chromeLine(style.dim(`      ${where}${sanitizeLine(f.message)}`));
+          }
+          break;
+        }
         case 'turn.aborted': {
           chromeLine(style.yellow(`  ${g.warn} turn interrupted`));
           break;

@@ -3,6 +3,7 @@ import path from 'node:path';
 import type {
   ApprovalRequest,
   ChatMessage,
+  CheckEvidence,
   CommandEvidence,
   ContentBlock,
   PlanEvidence,
@@ -227,6 +228,7 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   const mutatedBy = new Map<string, Extract<SessionEvent, { type: 'file.mutated' }>[]>();
   const snapBy = new Set<string>();
   const commandStartedBy = new Set<string>();
+  const checkStartedBy = new Map<string, string[]>();
   // One delegate call may start a PARALLEL GROUP (V0.7) — keep every task.started per callId,
   // or a crash replay would name only the last child and orphan the other survivors' evidence.
   const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>[]>();
@@ -236,6 +238,7 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
     else if (e.type === 'file.mutated') (mutatedBy.get(e.callId) ?? mutatedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
     else if (e.type === 'command.started') commandStartedBy.add(e.callId);
+    else if (e.type === 'check.started') (checkStartedBy.get(e.callId) ?? checkStartedBy.set(e.callId, []).get(e.callId)!).push(e.check);
     else if (e.type === 'task.started') (taskStartedBy.get(e.callId) ?? taskStartedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'task.changes') taskChangesBy.add(e.callId);
   }
@@ -282,6 +285,17 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
       // The command had SPAWNED (command.started recorded) — its side effects are unknown and
       // the process may even have kept running past the crash.
       return toolResultBlock(id, 'interrupted: the command was executing when the session crashed; its effects are unknown', true);
+    }
+    const checks = checkStartedBy.get(id);
+    if (checks !== undefined && checks.length > 0) {
+      // A typed check had SPAWNED (Session 12). Same honesty as a command: a build killed
+      // mid-flight can leave partial artifacts, and the check produced NO verdict — it must never
+      // read as having passed. Re-run it.
+      return toolResultBlock(
+        id,
+        `interrupted: typed check(s) (${checks.join(', ')}) were executing when the session crashed; they produced no verdict and their effects are unknown — re-run them`,
+        true,
+      );
     }
     return toolResultBlock(id, 'interrupted by session crash', true);
   };
@@ -733,6 +747,39 @@ function recordCommandEvidence(session: Session, callId: string, e: CommandEvide
   });
 }
 
+/** Persist a tool-reported typed-check lifecycle fact under the runtime-bound callId (Session 12). */
+function recordCheckEvidence(session: Session, callId: string, e: CheckEvidence): void {
+  if (e.kind === 'started') {
+    session.log.append({
+      type: 'check.started',
+      callId,
+      check: e.check,
+      recipeId: e.recipeId,
+      command: e.command,
+      cwd: e.cwd,
+      timeoutMs: e.timeoutMs,
+      ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
+      ...(e.scopePaths !== undefined ? { scopePaths: e.scopePaths } : {}),
+    });
+    return;
+  }
+  session.log.append({
+    type: 'check.completed',
+    callId,
+    check: e.check,
+    recipeId: e.recipeId,
+    status: e.status,
+    exitCode: e.exitCode,
+    ...(e.termination !== undefined ? { termination: e.termination } : {}),
+    durationMs: e.durationMs,
+    summary: e.summary,
+    ...(e.signals !== undefined ? { signals: e.signals } : {}),
+    ...(e.findings !== undefined ? { findings: e.findings } : {}),
+    ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
+    ...(e.scopePaths !== undefined ? { scopePaths: e.scopePaths } : {}),
+  });
+}
+
 function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecision, callId: string): ApprovalRequest {
   const { summary, detail } = describeCall(tool, input);
   // Display-only tool context (V0.7.1, e.g. plan state at an executor spawn) folds into detail
@@ -890,6 +937,7 @@ async function runExecution<I>(
     reportCommand: (e) => recordCommandEvidence(session, callId, e),
     reportTask: (e) => recordTaskEvidence(session, callId, e),
     reportPlan: (e) => recordPlanEvidence(session, callId, e),
+    reportCheck: (e) => recordCheckEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),

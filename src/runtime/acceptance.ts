@@ -45,6 +45,10 @@ const WORK_EVENT_TYPES = new Set([
   'git.restore',
   'git.commit',
   'command.started',
+  // A typed check SPAWNS a process that can write build outputs — the same reason
+  // `command.started` is here (Session 12). Deliberately not `check.completed`: it would
+  // double-count one unit of work and make staleness noisier without adding information.
+  'check.started',
 ]);
 
 /**

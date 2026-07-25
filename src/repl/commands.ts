@@ -12,6 +12,7 @@ import { foldGraphState } from '../plan/graph-state.js';
 import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
+import { CHECKS_PER_SESSION, describeProject, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
@@ -35,6 +36,10 @@ export interface CommandContext {
   retrieval?: RetrievalHandle | null;
   /** Session 11.5: /accept runs the task-base ref prune immediately (the assembled closure). */
   pruneTaskBaseRefs?: () => Promise<string | null>;
+  /** Session 12: the typed-check tool instance; /checks renders its (refreshed) project snapshot. */
+  checkTool?: RunCheckTool;
+  /** Session 12: the events-rebuilt check counters, for the /checks budget line. */
+  checkCaps?: CheckCaps;
 }
 
 export const HELP = [
@@ -60,6 +65,7 @@ export const HELP = [
   '                  fully executed and every capture integrated, records the acceptance, prunes',
   '                  task-base refs, and retires a completed plan. With unfinished work, /accept',
   '                  lists it and "/accept confirm" records a partial acceptance instead.',
+  '  /checks         what this project can be verified with, and the latest result per kind',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -553,6 +559,28 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         map.text.split('\n').map(sanitizeLine).join('\n') +
           `\n\n(${map.fileCount} files${map.truncated ? ', truncated' : ''})\n`,
       );
+      return 'continue';
+    }
+
+    case 'checks': {
+      // What this workspace can actually be verified with, plus what has been verified so far.
+      // Re-detected on demand so the surface never shows a stale project (an install or a new
+      // tsconfig changes the answer, and the user asking is exactly when freshness matters).
+      ctx.renderer.flush();
+      const lines: string[] = [];
+      if (ctx.checkTool !== undefined) {
+        lines.push(...describeProject(ctx.checkTool.refresh()));
+      } else {
+        lines.push('typed checks are unavailable in this session');
+      }
+      const latest = new Map<string, Extract<(typeof ctx.session.log.events)[number], { type: 'check.completed' }>>();
+      for (const e of ctx.session.log.events) if (e.type === 'check.completed') latest.set(e.check, e);
+      lines.push('', latest.size > 0 ? 'latest result per kind:' : 'no checks have run in this session yet');
+      for (const [kind, e] of latest) {
+        lines.push(`  ${kind}: ${e.status} — ${sanitizeLine(e.summary)}`);
+      }
+      lines.push('', `checks run this session: ${ctx.checkCaps?.checksRun ?? 0}/${CHECKS_PER_SESSION}`);
+      ctx.modelOut.write(lines.join('\n') + '\n');
       return 'continue';
     }
 

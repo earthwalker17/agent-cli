@@ -149,6 +149,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     pendingNotes,
     question: (q) => question(q),
     retrieval: assembled.retrieval,
+    checkTool: assembled.checkTool,
+    checkCaps: assembled.checkCaps,
     ...(assembled.pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs: assembled.pruneTaskBaseRefs } : {}),
   };
   // Resume-after-accept honesty (Session 11.5): a resumed session that was already accepted

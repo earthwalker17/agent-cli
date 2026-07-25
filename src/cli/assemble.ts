@@ -10,6 +10,7 @@ import { loadMemory, type LoadedMemory } from '../memory/load.js';
 import { createDelegateTool, delegateCapsFromEvents, type DelegateCaps, type ExecutorDeps, type PlanGateInfo } from '../tools/delegate.js';
 import type { ChildStatusUpdate } from '../runtime/subagent.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
+import { checkCapsFromEvents, createRunCheckTool, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
@@ -80,6 +81,10 @@ export interface Assembled {
   pruneTaskBaseRefs?: () => Promise<string | null>;
   /** The live delegation counters (Session 11, events-rebuilt) — read-only for the status area. */
   delegateCaps: DelegateCaps;
+  /** The typed-check tool instance (Session 12) — /checks reads its project snapshot. */
+  checkTool: RunCheckTool;
+  /** The live check counters (Session 12, events-rebuilt). */
+  checkCaps: CheckCaps;
 }
 
 export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
@@ -223,6 +228,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // SubagentDeps.retrieveTool seam (executors deliberately not — wrong tree).
   const retrieveTool = ranked.handle !== null ? createRetrieveTool(ranked.handle) : undefined;
 
+  // run_check (Session 12): a per-session instance holding the DETECTED PROJECT SNAPSHOT. The
+  // snapshot exists because the policy `check()` fact must be pure — decide() does no I/O — and
+  // because the command the human approves must be the command that runs. Parent-only: an
+  // executor worktree materializes without gitignored dependencies, so a check there would refuse
+  // on a precondition almost every time; the parent verifies after apply_task_changes, where the
+  // workspace is real.
+  const checkCaps = checkCapsFromEvents(session.log.events);
+  const checkTool = createRunCheckTool({ workspaceRoot: ctx.ws, caps: checkCaps });
+
   // The delegate tool is a PER-SESSION instance appended to a fresh array (never TOOLS.push):
   // parents get it; child sessions have fixed role registries without it, so delegation depth
   // is 1 by construction. Children inherit the PROBED sandbox instance (no re-probe), the
@@ -230,6 +244,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   session.tools = [
     ...session.tools,
     ...(retrieveTool !== undefined ? [retrieveTool] : []),
+    checkTool,
     createDelegateTool(
       {
         layout,
@@ -269,6 +284,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     memory,
     retrieval: ranked.handle,
     delegateCaps,
+    checkTool,
+    checkCaps,
     ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),

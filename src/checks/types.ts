@@ -1,4 +1,7 @@
-import type { CommandTermination } from '../types.js';
+import type { CheckFinding, CheckKind, CheckStatus, CommandTermination } from '../types.js';
+
+export { CHECK_KINDS, isCheckKind } from '../types.js';
+export type { CheckFinding, CheckKind, CheckStatus } from '../types.js';
 
 /**
  * Typed project checks (Session 12) — the contracts. A check is NOT "a command the model chose":
@@ -11,30 +14,6 @@ import type { CommandTermination } from '../types.js';
  * "verify what we just built" — a missing toolchain is an honest `unsupported` precondition the
  * user resolves, never something the agent quietly performs.
  */
-
-export type CheckKind =
-  | 'build'
-  | 'test'
-  | 'test-targeted'
-  | 'typecheck'
-  | 'lint'
-  | 'format'
-  | 'static-analysis';
-
-/** Declaration order is the canonical order everywhere (schemas, views, reports, prompts). */
-export const CHECK_KINDS: readonly CheckKind[] = [
-  'build',
-  'test',
-  'test-targeted',
-  'typecheck',
-  'lint',
-  'format',
-  'static-analysis',
-] as const;
-
-export function isCheckKind(v: string): v is CheckKind {
-  return (CHECK_KINDS as readonly string[]).includes(v);
-}
 
 /** Ecosystems with recipe rows. Everything else detects as no kinds and refuses honestly. */
 export type ProjectKind = 'node' | 'python';
@@ -125,20 +104,6 @@ export interface UnsupportedCheck {
 export interface CheckResolution {
   resolved: ResolvedCheck[];
   unsupported: UnsupportedCheck[];
-}
-
-/**
- * `pass`/`fail` come from the EXIT CODE of a process that genuinely exited; `error` covers every
- * non-exit termination (timeout, abort, spawn failure) and can never read as a passing check;
- * `unsupported` never ran at all. Output parsing may only enrich `summary`/`findings`/`signals` —
- * it must never move the verdict, or a check would become a narration.
- */
-export type CheckStatus = 'pass' | 'fail' | 'error' | 'unsupported';
-
-export interface CheckFinding {
-  file?: string;
-  line?: number;
-  message: string;
 }
 
 export interface CheckResult {
