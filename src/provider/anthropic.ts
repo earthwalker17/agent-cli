@@ -90,10 +90,25 @@ export function toApiMessage(m: ChatMessage): { role: 'user' | 'assistant'; cont
         return { type: 'text', text: b.text };
       case 'tool_use':
         return { type: 'tool_use', id: b.id, name: b.name, input: b.input };
-      case 'tool_result':
+      case 'tool_result': {
+        // Structured content (Session 13): text + image parts map to the SDK's block params.
+        // The harness-internal sha256/label enrichment on image parts is deliberately NOT sent —
+        // the wire carries pixels, the evidence log carries pointers.
+        const c: string | Anthropic.ToolResultBlockParam['content'] =
+          typeof b.content === 'string'
+            ? b.content
+            : b.content.map((p) =>
+                p.type === 'text'
+                  ? ({ type: 'text', text: p.text } as const)
+                  : ({
+                      type: 'image',
+                      source: { type: 'base64', media_type: p.mediaType as 'image/png', data: p.dataBase64 },
+                    } as const),
+              );
         return b.isError
-          ? { type: 'tool_result', tool_use_id: b.toolUseId, content: b.content, is_error: true }
-          : { type: 'tool_result', tool_use_id: b.toolUseId, content: b.content };
+          ? { type: 'tool_result', tool_use_id: b.toolUseId, content: c, is_error: true }
+          : { type: 'tool_result', tool_use_id: b.toolUseId, content: c };
+      }
     }
   });
   return { role: m.role, content };

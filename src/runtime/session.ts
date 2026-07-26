@@ -20,6 +20,7 @@ import type {
   Tool,
   ToolContext,
   ToolResult,
+  ToolResultPart,
 } from '../types.js';
 import { EventLog } from '../store/event-log.js';
 import { FreshLogCollisionError } from '../shared/errors.js';
@@ -69,6 +70,8 @@ export interface Session {
   contextBudget?: ElisionOptions;
   /** callIds elided from the wire in this process (in-memory; drives context.compacted events). */
   elidedCallIds?: Set<string>;
+  /** callIds whose IMAGE parts were replaced with markers (Session 13; same lifecycle as above). */
+  imageElidedCallIds?: Set<string>;
   clock: Clock;
 }
 
@@ -419,9 +422,12 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
     // The event records exactly which outputs the model can no longer see (only when the set grows).
     const elision = elideHistory(session.messages, session.contextBudget);
     const prevElided = session.elidedCallIds ?? new Set<string>();
-    if (elision.elidedCallIds.length > prevElided.size) {
+    const prevImageElided = session.imageElidedCallIds ?? new Set<string>();
+    const newlyImages = elision.imageElidedCallIds.filter((id) => !prevImageElided.has(id));
+    if (elision.elidedCallIds.length > prevElided.size || newlyImages.length > 0) {
       const newly = elision.elidedCallIds.filter((id) => !prevElided.has(id));
       session.elidedCallIds = new Set(elision.elidedCallIds);
+      session.imageElidedCallIds = new Set(elision.imageElidedCallIds);
       session.log.append({
         type: 'context.compacted',
         elidedCount: elision.elidedCallIds.length,
@@ -429,6 +435,7 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
         rawChars: elision.rawChars,
         sentChars: elision.sentChars,
         exhausted: elision.exhausted,
+        ...(newlyImages.length > 0 ? { newlyImageElidedCallIds: newlyImages } : {}),
       });
     }
     const req: ProviderRequest = {
@@ -1043,10 +1050,31 @@ async function runExecution<I>(
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
     ...(result.fullOutputSha256 ? { fullOutputSha256: result.fullOutputSha256 } : {}),
     ...(spillFullOutput(session, tool, result, decision) ? { fullOutputSaved: true as const } : {}),
+    // Image METADATA only (Session 13): the pixels are content-addressed blobs the tool already
+    // stored; a log line must never carry base64. Resume rebuilds from outputPreview, whose text
+    // carries the objects/<sha> pointer per image (the ToolResult.images contract).
+    ...(result.images !== undefined && result.images.length > 0
+      ? { images: result.images.map((im) => ({ sha256: im.sha256, mediaType: im.mediaType, bytes: Math.floor((im.dataBase64.length * 3) / 4), label: im.label })) }
+      : {}),
   });
 
-  // The model sees the REAL output; only the persisted log is redacted.
+  // The model sees the REAL output; only the persisted log is redacted. With images attached,
+  // the wire block becomes structured content: the text part first, then the pixels the model
+  // is being asked to actually look at (Session 13).
   const content = result.ok ? result.output : `${result.error ?? 'error'}${result.output ? `\n${result.output}` : ''}`;
+  if (result.images !== undefined && result.images.length > 0) {
+    const parts: ToolResultPart[] = [
+      { type: 'text', text: content },
+      ...result.images.map(
+        (im): ToolResultPart => ({ type: 'image', mediaType: im.mediaType, dataBase64: im.dataBase64, sha256: im.sha256, label: im.label }),
+      ),
+    ];
+    return {
+      toolResult: { type: 'tool_result', toolUseId: callId, content: parts, ...(result.ok ? {} : { isError: true }) },
+      denied: false,
+      stop: false,
+    };
+  }
   return { toolResult: toolResultBlock(callId, content, !result.ok), denied: false, stop: false };
 }
 

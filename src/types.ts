@@ -422,6 +422,14 @@ export interface ToolResult {
    * and it is never persisted verbatim, never sent to the model.
    */
   fullOutput?: string;
+  /**
+   * TRANSIENT (Session 13): images the model should SEE in this result, already stored as
+   * content-addressed blobs by the tool (the sha256 is the blob key). The runtime builds
+   * image-bearing wire content from these and records METADATA on tool.completed — pixel bytes
+   * never enter the log, and `output` must include a text pointer per image so a resumed
+   * conversation (rebuilt from outputPreview alone) still references the evidence.
+   */
+  images?: { mediaType: string; dataBase64: string; sha256: string; label: string }[];
   /** How a command actually ended (run_command only). Absent exitCode + 'timeout'/'aborted' = killed. */
   termination?: CommandTermination;
   /** Honest kill mechanics when a kill was attempted (best-effort tree kill + verification probe). */
@@ -571,10 +579,19 @@ export interface ApprovalOutcome {
 export type Approver = (req: ApprovalRequest) => Promise<ApprovalOutcome>;
 
 // ── Provider wire types (mirror the Anthropic shape; MockProvider needs no SDK) ─────────────
+/**
+ * Parts of a structured tool_result (Session 13). `sha256`/`label` on an image part are
+ * HARNESS-INTERNAL enrichment — elision uses them to build an honest replacement marker
+ * (`objects/<sha>`); the provider mapping sends only mediaType + data to the wire.
+ */
+export type ToolResultPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mediaType: string; dataBase64: string; sha256?: string; label?: string };
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; content: string; isError?: boolean };
+  | { type: 'tool_result'; toolUseId: string; content: string | ToolResultPart[]; isError?: boolean };
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -722,6 +739,14 @@ export type EventBody =
        * stream, not everything the process printed.
        */
       fullOutputSaved?: true;
+      /**
+       * Image parts the model saw LIVE in this result (Session 13, additive) — METADATA ONLY.
+       * The pixel bytes live as content-addressed blobs (objects/<sha256>); a session log line
+       * never contains base64, and resume rebuilds from outputPreview, so a resumed model gets
+       * the text pointer instead of the pixels (it saw them live; replaying them would resend
+       * what the original turn already consumed).
+       */
+      images?: { sha256: string; mediaType: string; bytes: number; label: string }[];
     }
   | {
       /** A shell command actually spawned (post-approval). Distinct from tool.requested: this is execution. */
@@ -903,6 +928,13 @@ export type EventBody =
       rawChars: number;
       sentChars: number;
       exhausted: boolean;
+      /**
+       * Results whose IMAGE parts were replaced with text markers this step (Session 13,
+       * additive) — a distinct partial state from full elision: the text stays verbatim while
+       * the pixels age out of the window. Recorded for the same honesty reason as
+       * newlyElidedCallIds: exactly what the model can no longer see.
+       */
+      newlyImageElidedCallIds?: string[];
     }
   | {
       /**

@@ -1,4 +1,4 @@
-import type { ChatMessage, ContentBlock } from '../types.js';
+import type { ChatMessage, ContentBlock, ToolResultPart } from '../types.js';
 import { sha256 } from '../shared/hash.js';
 
 /**
@@ -19,6 +19,20 @@ import { sha256 } from '../shared/hash.js';
  *   validity — is preserved; assistant text and user messages are never touched.
  * - The last `keepLastSteps` assistant steps are always protected: the model keeps verbatim
  *   sight of its recent working set.
+ *
+ * IMAGE parts (Session 13) have their own, EARLIER pass that runs even below the char trigger:
+ * pixels are the most token-expensive, least re-usable payload in a history, so any image part
+ * older than the last `IMAGE_KEEP_LAST_STEPS` assistant steps is replaced with a text marker
+ * pointing at its blob (`objects/<sha>`). Deliberately a SEPARATE window from `keepLastSteps`
+ * (2 vs 4): the model needs pixels NOW, while judging — two steps later the marker is enough.
+ * Monotone for the same reason the char walk is: history is append-only, so a block outside
+ * the window stays outside. Across resume the question dissolves: reconstruct rebuilds results
+ * from outputPreview (text only), so a resumed history has no image parts at all — the model
+ * saw the pixels live, and the marker/pointer is what remains, by construction.
+ *
+ * Cache note: each image→marker flip invalidates the prompt cache from that block onward, but
+ * flips happen ~IMAGE_KEEP_LAST_STEPS from the tail, so the invalidation cost is bounded to
+ * the recent suffix. Do not "optimize" the flip away — pixels resent every step cost more.
  */
 
 export interface ElisionOptions {
@@ -28,12 +42,16 @@ export interface ElisionOptions {
   targetChars?: number;
   /** Trailing assistant steps whose tool results are never elided. Default 4. */
   keepLastSteps?: number;
+  /** Trailing assistant steps whose IMAGE parts stay pixels. Default 2 (see module doc). */
+  imageKeepLastSteps?: number;
 }
 
 export interface ElisionOutcome {
   messages: ChatMessage[];
   /** callIds (tool_use ids) whose results are elided in this view, oldest first. */
   elidedCallIds: string[];
+  /** callIds whose IMAGE parts are markers in this view (text intact), oldest first (Session 13). */
+  imageElidedCallIds: string[];
   rawChars: number;
   sentChars: number;
   /** True when every candidate is elided and the history STILL exceeds the target. */
@@ -43,6 +61,27 @@ export interface ElisionOutcome {
 export const DEFAULT_TRIGGER_CHARS = 400_000;
 export const DEFAULT_TARGET_CHARS = 200_000;
 export const DEFAULT_KEEP_LAST_STEPS = 4;
+export const IMAGE_KEEP_LAST_STEPS = 2;
+
+/**
+ * Char-equivalent weight of an image part: base64 length / 4 ≈ the raw byte count. This
+ * deliberately OVERWEIGHTS relative to real image token cost — the safe direction: elision
+ * arms sooner, never later, and the weight only feeds the budget, not any user-visible count.
+ */
+function imageCharWeight(dataBase64Length: number): number {
+  return Math.ceil(dataBase64Length / 4);
+}
+
+function partChars(p: ToolResultPart): number {
+  return p.type === 'text' ? p.text.length : imageCharWeight(p.dataBase64.length);
+}
+
+function contentChars(content: string | ToolResultPart[]): number {
+  if (typeof content === 'string') return content.length;
+  let n = 0;
+  for (const p of content) n += partChars(p);
+  return n;
+}
 
 function blockChars(b: ContentBlock): number {
   switch (b.type) {
@@ -51,45 +90,80 @@ function blockChars(b: ContentBlock): number {
     case 'tool_use':
       return b.name.length + JSON.stringify(b.input ?? null).length;
     case 'tool_result':
-      return b.content.length;
+      return contentChars(b.content);
   }
 }
 
-function marker(content: string): string {
-  return `[elided to save context: tool output of ${content.length} chars, sha256=${sha256(Buffer.from(content, 'utf8')).slice(0, 12)}…; the full output remains in the session evidence log]`;
+function marker(content: string | ToolResultPart[]): string {
+  if (typeof content === 'string') {
+    return `[elided to save context: tool output of ${content.length} chars, sha256=${sha256(Buffer.from(content, 'utf8')).slice(0, 12)}…; the full output remains in the session evidence log]`;
+  }
+  const text = content
+    .filter((p): p is Extract<ToolResultPart, { type: 'text' }> => p.type === 'text')
+    .map((p) => p.text)
+    .join('\n');
+  const images = content.filter((p) => p.type === 'image').length;
+  return `[elided to save context: tool output of ${text.length} chars${images > 0 ? ` + ${images} image(s)` : ''}, sha256=${sha256(Buffer.from(text, 'utf8')).slice(0, 12)}…; the full output remains in the session evidence log]`;
+}
+
+function imageMarker(p: Extract<ToolResultPart, { type: 'image' }>): ToolResultPart {
+  const where = p.sha256 !== undefined ? `preserved at objects/${p.sha256}` : 'preserved in the session evidence store';
+  return { type: 'text', text: `[screenshot${p.label !== undefined ? ` ${p.label}` : ''}: viewed live earlier this session; ${where} — view_image can re-fetch it if genuinely needed]` };
+}
+
+/** Index of the message from which the last `keep` assistant steps begin (0 = protect all). */
+function protectionBoundary(messages: readonly ChatMessage[], keep: number): number {
+  if (keep <= 0) return messages.length;
+  let assistantSeen = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === 'assistant') {
+      assistantSeen++;
+      if (assistantSeen === keep) return i;
+    }
+  }
+  return 0;
 }
 
 export function elideHistory(messages: readonly ChatMessage[], opts: ElisionOptions = {}): ElisionOutcome {
   const trigger = opts.triggerChars ?? DEFAULT_TRIGGER_CHARS;
   const target = opts.targetChars ?? DEFAULT_TARGET_CHARS;
   const keep = opts.keepLastSteps ?? DEFAULT_KEEP_LAST_STEPS;
+  const imageKeep = opts.imageKeepLastSteps ?? IMAGE_KEEP_LAST_STEPS;
 
   let rawChars = 0;
   for (const m of messages) for (const b of m.content) rawChars += blockChars(b);
-  if (rawChars <= trigger) {
-    return { messages: [...messages], elidedCallIds: [], rawChars, sentChars: rawChars, exhausted: false };
-  }
 
-  // Protection boundary: everything from the keep-th-from-last assistant message onward.
-  // keep=0 protects nothing; fewer than `keep` assistant steps protects everything.
-  let protectFrom = messages.length;
-  if (keep > 0) {
-    protectFrom = 0;
-    let assistantSeen = 0;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]!.role === 'assistant') {
-        assistantSeen++;
-        if (assistantSeen === keep) {
-          protectFrom = i;
-          break;
-        }
-      }
+  // ── Pass 1 (Session 13): image parts age out of the recent window UNCONDITIONALLY — even
+  // below the char trigger — replaced part-by-part so the text of the result stays verbatim.
+  const imgProtectFrom = protectionBoundary(messages, imageKeep);
+  const out: ChatMessage[] = messages.map((m) => ({ role: m.role, content: [...m.content] }));
+  const imageElidedCallIds: string[] = [];
+  let sentChars = rawChars;
+  for (let i = 0; i < imgProtectFrom; i++) {
+    const m = out[i]!;
+    if (m.role !== 'user') continue;
+    for (let j = 0; j < m.content.length; j++) {
+      const b = m.content[j]!;
+      if (b.type !== 'tool_result' || typeof b.content === 'string') continue;
+      if (!b.content.some((p) => p.type === 'image')) continue;
+      const replaced = b.content.map((p) => {
+        if (p.type !== 'image') return p;
+        const mk = imageMarker(p);
+        sentChars -= partChars(p) - partChars(mk);
+        return mk;
+      });
+      m.content[j] = { type: 'tool_result', toolUseId: b.toolUseId, content: replaced, ...(b.isError ? { isError: true } : {}) };
+      imageElidedCallIds.push(b.toolUseId);
     }
   }
 
-  const out = messages.map((m) => ({ role: m.role, content: [...m.content] }));
+  if (rawChars <= trigger) {
+    return { messages: out, elidedCallIds: [], imageElidedCallIds, rawChars, sentChars, exhausted: false };
+  }
+
+  // ── Pass 2: the V0.5 char-budget walk, over the image-elided view.
+  const protectFrom = protectionBoundary(messages, keep);
   const elidedCallIds: string[] = [];
-  let sentChars = rawChars;
   outer: for (let i = 0; i < protectFrom; i++) {
     const m = out[i]!;
     if (m.role !== 'user') continue;
@@ -98,11 +172,11 @@ export function elideHistory(messages: readonly ChatMessage[], opts: ElisionOpti
       if (b.type !== 'tool_result') continue;
       if (sentChars <= target) break outer;
       const replacement = marker(b.content);
-      if (replacement.length >= b.content.length) continue; // eliding tiny outputs would grow the prompt
-      sentChars -= b.content.length - replacement.length;
+      if (replacement.length >= contentChars(b.content)) continue; // eliding tiny outputs would grow the prompt
+      sentChars -= contentChars(b.content) - replacement.length;
       m.content[j] = { type: 'tool_result', toolUseId: b.toolUseId, content: replacement, ...(b.isError ? { isError: true } : {}) };
       elidedCallIds.push(b.toolUseId);
     }
   }
-  return { messages: out, elidedCallIds, rawChars, sentChars, exhausted: sentChars > target };
+  return { messages: out, elidedCallIds, imageElidedCallIds, rawChars, sentChars, exhausted: sentChars > target };
 }

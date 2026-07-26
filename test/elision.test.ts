@@ -69,7 +69,9 @@ describe('elideHistory', () => {
     for (const m of r.messages) {
       for (const b of m.content) {
         if (b.type === 'tool_use') uses.add(b.id);
-        if (b.type === 'tool_result') results.set(b.toolUseId, b);
+        if (b.type === 'tool_result') {
+          results.set(b.toolUseId, { content: typeof b.content === 'string' ? b.content : '', ...(b.isError ? { isError: true } : {}) });
+        }
       }
     }
     for (const id of uses) expect(results.has(id), `result for ${id}`).toBe(true);
@@ -162,10 +164,10 @@ describe('runTurn integration', () => {
     // Later requests carry the marker instead of the 3000-char output…
     const lastReq = captured[captured.length - 1]!;
     const wireResults = lastReq.messages.flatMap((m) => m.content).filter((b) => b.type === 'tool_result');
-    expect(wireResults.some((b) => b.type === 'tool_result' && b.content.includes('[elided to save context'))).toBe(true);
+    expect(wireResults.some((b) => b.type === 'tool_result' && typeof b.content === 'string' && b.content.includes('[elided to save context'))).toBe(true);
     // …the harness's own history keeps the real bytes…
     const ownResults = session.messages.flatMap((m) => m.content).filter((b) => b.type === 'tool_result');
-    expect(ownResults.some((b) => b.type === 'tool_result' && b.content.includes('[elided'))).toBe(false);
+    expect(ownResults.some((b) => b.type === 'tool_result' && typeof b.content === 'string' && b.content.includes('[elided'))).toBe(false);
     // …and the evidence log recorded the compaction.
     const compactions = session.log.events.filter((e) => e.type === 'context.compacted');
     expect(compactions.length).toBeGreaterThan(0);
