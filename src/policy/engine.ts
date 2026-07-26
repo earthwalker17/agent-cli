@@ -282,17 +282,45 @@ export function decide<I>(
     }
     if (fact.resolved.length === 0) {
       // Nothing resolved ⇒ nothing to run ⇒ nothing to consent to. The tool still executes and
-      // reports the honest `unsupported` results; it just must not present an empty approval.
-      return decision('observe', 'allow', 'check.nothing-to-run', 'no check resolved to a runnable command in this project');
+      // reports honestly (unsupported results, or an observe/manage action such as a preview
+      // stop/status); it just must not present an empty approval.
+      return decision('observe', 'allow', 'check.nothing-to-run', 'the call resolves no command to run (nothing to consent to)');
     }
     const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command, r.bodySha));
     const summary = fact.resolved.map((r) => `${r.kind} → ${r.recipeId}`).join('; ');
+    // A PREVIEW row (kind 'preview', Session 13) is the same trust shape — a harness-resolved
+    // command with body-bound replay consent — but a materially different CONSEQUENCE: the
+    // process deliberately keeps running and binds a port. The persisted decision must say so
+    // (an honest screen over a dishonest event would be the double-truth this project refuses),
+    // hence distinct rule ids and reasons. Mixed rows take the preview wording: the strictest
+    // consequence governs the whole call.
+    const isPreview = fact.resolved.some((r) => r.kind === 'preview');
     if (keys.every((k) => grants.hasCheckReplay(k))) {
-      return decision('reversible', 'allow', 'check.replay-consent', `re-running check command(s) already approved this session (${summary})`, {
-        noUndo: true,
-        execBoundary: 'unsandboxed',
-        checkReplayKeys: keys,
-      });
+      return decision(
+        'reversible',
+        'allow',
+        isPreview ? 'preview.replay-consent' : 'check.replay-consent',
+        isPreview
+          ? `re-starting preview server command(s) already approved this session (${summary})`
+          : `re-running check command(s) already approved this session (${summary})`,
+        {
+          noUndo: true,
+          execBoundary: 'unsandboxed',
+          checkReplayKeys: keys,
+        },
+      );
+    }
+    if (isPreview) {
+      return decision(
+        'reversible',
+        'ask',
+        'preview.approval-required',
+        `starts a harness-resolved preview server (${summary}) that KEEPS RUNNING after this call — until stopped, ` +
+          'the session ends, or its bounded lifetime expires — binds a local port, and executes a script defined by ' +
+          'this workspace at full user privilege; browser verification may drive it once running; ' +
+          'NOT sandboxed, NOT snapshotted or undoable',
+        { noUndo: true, execBoundary: 'unsandboxed', checkReplayKeys: keys },
+      );
     }
     const authored = fact.resolved.some((r) => r.effects.workspaceAuthored);
     return decision(

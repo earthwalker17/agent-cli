@@ -60,6 +60,9 @@ const WORK_EVENT_TYPES = new Set([
   // declares work about to happen, and an escalation changes what is outstanding.
   'repair.attempted',
   'repair.escalated',
+  // A preview server is a spawned process that can write outputs — the `command.started` /
+  // `check.started` class (Session 13). ready/ended are lifecycle echoes of the same unit.
+  'preview.started',
 ]);
 
 /**

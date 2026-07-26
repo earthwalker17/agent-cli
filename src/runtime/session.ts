@@ -9,6 +9,7 @@ import type {
   PlanEvidence,
   PolicyDecision,
   PolicyRules,
+  PreviewEvidence,
   Provider,
   ProviderRequest,
   RepairEvidence,
@@ -782,6 +783,31 @@ function recordCheckEvidence(session: Session, callId: string, e: CheckEvidence)
   });
 }
 
+/** Persist a tool-reported preview lifecycle fact under the runtime-bound callId (Session 13). */
+function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvidence): void {
+  if (e.kind === 'started') {
+    session.log.append({
+      type: 'preview.started',
+      callId,
+      previewId: e.previewId,
+      recipeId: e.recipeId,
+      command: e.command,
+      cwd: e.cwd,
+      pid: e.pid,
+      ...(e.expectedPort !== undefined ? { expectedPort: e.expectedPort } : {}),
+    });
+    return;
+  }
+  session.log.append({
+    type: 'preview.ready',
+    previewId: e.previewId,
+    url: e.url,
+    port: e.port,
+    waitedMs: e.waitedMs,
+    probeDetail: e.probeDetail,
+  });
+}
+
 /** Persist a tool-reported repair-ledger fact under the runtime-bound callId (Session 12). */
 function recordRepairEvidence(session: Session, callId: string, e: RepairEvidence): void {
   if (e.kind === 'attempted') {
@@ -828,7 +854,12 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
     ...(tool.command !== undefined
       ? { kind: 'command' as const }
       : tool.check !== undefined
-        ? { kind: 'check' as const, checkCount: decision.checkReplayKeys?.length ?? 1 }
+        ? // The KIND derives from the policy VERDICT, not by re-deriving the fact: the engine
+          // already decided whether these resolved rows are a preview (Session 13) or a check.
+          {
+            kind: decision.rule.startsWith('preview.') ? ('preview' as const) : ('check' as const),
+            checkCount: decision.checkReplayKeys?.length ?? 1,
+          }
         : {}),
     summary,
     detail: fullDetail,
@@ -850,6 +881,20 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
       resolved = tool.check(input).resolved;
     } catch {
       resolved = [];
+    }
+    // Preview rows (Session 13): the consequence line is different in kind, not just degree —
+    // the human is consenting to a process that KEEPS RUNNING and binds a port.
+    if (resolved.some((r) => r.kind === 'preview')) {
+      return {
+        summary: `${tool.name}: start ${resolved.map((r) => r.recipeId).join(', ')}`,
+        detail: resolved
+          .map(
+            (r) =>
+              `${r.command}   [${r.recipeId}; KEEPS RUNNING up to ${String(Math.round(r.timeoutMs / 60_000))}min ` +
+              `(or until stopped / session end); binds a local port; runs a script defined by this workspace]`,
+          )
+          .join('\n'),
+      };
     }
     return {
       summary: `${tool.name}: ${resolved.length > 0 ? resolved.map((r) => r.kind).join(', ') : '(nothing to run)'}`,
@@ -968,6 +1013,7 @@ async function runExecution<I>(
     reportPlan: (e) => recordPlanEvidence(session, callId, e),
     reportCheck: (e) => recordCheckEvidence(session, callId, e),
     reportRepair: (e) => recordRepairEvidence(session, callId, e),
+    reportPreview: (e) => recordPreviewEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),

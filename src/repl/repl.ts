@@ -154,8 +154,15 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     retrieval: assembled.retrieval,
     checkTool: assembled.checkTool,
     checkCaps: assembled.checkCaps,
+    previewTool: assembled.previewTool,
     ...(assembled.pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs: assembled.pruneTaskBaseRefs } : {}),
   };
+  // Resume honesty (Session 13): previews from a previous life are dead or swept — never
+  // silently "still ready". The model learns via the first turn's harness note.
+  if (assembled.previewResumeNote !== undefined) {
+    renderer.chromeLine(style.dim(`  note: ${assembled.previewResumeNote}`));
+    pendingNotes.push(assembled.previewResumeNote);
+  }
   // Resume-after-accept honesty (Session 11.5): a resumed session that was already accepted
   // says so up front — further work is allowed, but the boundary crossing is visible.
   if (opts.resumeId !== undefined) {
@@ -297,6 +304,14 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       }
     }
   } catch (err) {
+    // Even the fatal path stops this session's previews (best-effort, bounded): a crashed REPL
+    // must not leave servers running when it can still reach them — before the log closes, so
+    // the preview.ended evidence lands.
+    try {
+      await assembled.stopAllPreviews();
+    } catch {
+      /* the sweep is the backstop */
+    }
     endSessionSafely(session, 'error', (err as Error).message);
     io.close();
     streams.chromeOut.write(`fatal: ${(err as Error).message}\n`);
@@ -313,6 +328,12 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
 
   // Session-end hygiene BEFORE the memory update and endSession: the provenance event must
   // land in the open log, and a failing prune must never block the quit.
+  try {
+    const stopLine = await assembled.stopAllPreviews();
+    if (stopLine !== null) renderer.chromeLine(style.dim(`  previews: ${stopLine}`));
+  } catch {
+    /* best-effort hygiene; the next session's sweep is the backstop */
+  }
   if (assembled.pruneTaskBaseRefs !== undefined) {
     try {
       const pruneLine = await assembled.pruneTaskBaseRefs();

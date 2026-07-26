@@ -11,6 +11,7 @@ import { createDelegateTool, delegateCapsFromEvents, type DelegateCaps, type Exe
 import type { ChildStatusUpdate } from '../runtime/subagent.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
 import { checkCapsFromEvents, createRunCheckTool, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
+import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createRecoverTool } from '../tools/recover.js';
@@ -94,6 +95,18 @@ export interface Assembled {
   checkTool: RunCheckTool;
   /** The live check counters (Session 12, events-rebuilt). */
   checkCaps: CheckCaps;
+  /** The managed-preview tool instance (Session 13) — /preview reads its live handles. */
+  previewTool: PreviewTool;
+  /** The live preview-start counter (Session 13, events-rebuilt). */
+  previewCaps: PreviewCaps;
+  /**
+   * Stop every preview this session owns (Session 13) — call at session end BEFORE
+   * runMemoryUpdate/endSession so the preview.ended events land in the open log. Bounded and
+   * best-effort; returns a one-line chrome summary or null when nothing was running.
+   */
+  stopAllPreviews: () => Promise<string | null>;
+  /** Resume honesty (Session 13): what happened to previews a previous life left running. */
+  previewResumeNote?: string;
 }
 
 export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
@@ -296,6 +309,61 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const checkCaps = checkCapsFromEvents(session.log.events);
   const checkTool = createRunCheckTool({ workspaceRoot: ctx.ws, caps: checkCaps });
 
+  // preview (Session 13): the managed preview-server tool — per-session for the same snapshot
+  // reason as run_check, plus it owns this session's live process handles. `appendEnded` is the
+  // session-bound single writer of `preview.ended`; a process death can arrive after the session
+  // ends, so it must tolerate a closed log and never throw (the first harness-async log writer).
+  const previewCaps = previewCapsFromEvents(session.log.events);
+  const previewTool = createPreviewTool({
+    workspaceRoot: ctx.ws,
+    projectDir: layout.projectDir,
+    sessionId: session.id,
+    caps: previewCaps,
+    envExcludePatterns: deps.config.rules.envExcludePatterns,
+    appendEnded: (e) => {
+      try {
+        session.log.append({ type: 'preview.ended', ...e });
+      } catch {
+        /* closed log (session already ended) — the registry entry + sweep carry the truth */
+      }
+    },
+  });
+  const stopAllPreviews = async (): Promise<string | null> => {
+    try {
+      const n = await previewTool.stopAll('session-end');
+      return n > 0 ? `stopped ${n} preview server(s)` : null;
+    } catch {
+      return 'preview stop-all failed; the next session\'s sweep will verify and stop leftovers';
+    }
+  };
+
+  // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the
+  // handle died with the process's owner); the sweep above already dealt with the process, so
+  // tell the model what happened rather than let a stale "ready" claim stand.
+  let previewResumeNote: string | undefined;
+  if (deps.resumeId !== undefined) {
+    const started = new Map<string, { pid: number; command: string }>();
+    const endedIds = new Set<string>();
+    for (const e of session.log.events) {
+      if (e.type === 'preview.started') started.set(e.previewId, { pid: e.pid, command: e.command });
+      else if (e.type === 'preview.ended') endedIds.add(e.previewId);
+    }
+    const unended = [...started.entries()].filter(([id]) => !endedIds.has(id));
+    if (unended.length > 0) {
+      const outcome = (id: string, pid: number): string => {
+        if (previewSweepResult?.killed.some((k) => k.previewId === id) === true) return 'stopped by the startup sweep';
+        if (previewSweepResult?.killFailed.some((k) => k.previewId === id) === true) return 'sweep could not stop it';
+        if (previewSweepResult?.skippedUnverified.some((k) => k.previewId === id) === true)
+          return 'left running (identity unverified — possibly not our process anymore)';
+        if (previewSweepResult?.droppedDead.includes(id) === true) return 'already dead';
+        return `no longer tracked (pid ${String(pid)} — if it was recorded, the sweep handled it)`;
+      };
+      previewResumeNote = unended
+        .map(([id, v]) => `preview ${id} (${v.command}) was running when the previous life ended; ${outcome(id, v.pid)}. It is NOT attached to this session — start a new preview if needed.`)
+        .join(' ');
+    }
+  }
+
   // The delegate tool is a PER-SESSION instance appended to a fresh array (never TOOLS.push):
   // parents get it; child sessions have fixed role registries without it, so delegation depth
   // is 1 by construction. Children inherit the PROBED sandbox instance (no re-probe), the
@@ -304,6 +372,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...session.tools,
     ...(retrieveTool !== undefined ? [retrieveTool] : []),
     checkTool,
+    previewTool,
     createDelegateTool(
       {
         layout,
@@ -359,6 +428,10 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     delegateCaps,
     checkTool,
     checkCaps,
+    previewTool,
+    previewCaps,
+    stopAllPreviews,
+    ...(previewResumeNote !== undefined ? { previewResumeNote } : {}),
     ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(previewSweep !== undefined ? { previewSweep } : {}),

@@ -136,6 +136,34 @@ export type CheckEvidence =
     };
 
 /**
+ * Structured facts about a managed preview process, reported through `ToolContext.reportPreview`
+ * (Session 13). Same callId-binding contract as the other evidence channels. `started` is
+ * emitted only after a REAL spawn (and after the crash-registry entry is written — the ordering
+ * that keeps the resume note honest); `ready` only when the server actually answered an HTTP
+ * probe. There is deliberately NO 'ended' arm here: `preview.ended` has exactly one writer, the
+ * exit listener, which appends through a session-bound closure because a process death can
+ * arrive outside any tool call.
+ */
+export type PreviewEvidence =
+  | {
+      kind: 'started';
+      previewId: string;
+      recipeId: string;
+      command: string;
+      cwd: string;
+      pid: number;
+      expectedPort?: number;
+    }
+  | {
+      kind: 'ready';
+      previewId: string;
+      url: string;
+      port: number;
+      waitedMs: number;
+      probeDetail: string;
+    };
+
+/**
  * Typed failure classes (Session 12) — the vocabulary the recovery catalogue, the repair ledger,
  * the DAG gate, and the report all key on. Classification happens BEFORE any repair is planned;
  * `unknown` is a first-class member and a stopping condition, never a shrug that lets a loop
@@ -350,6 +378,8 @@ export interface ToolContext {
   reportCheck?: (e: CheckEvidence) => void;
   /** Evidence channel for bounded-repair ledger facts (Session 12); persisted under this call's id. */
   reportRepair?: (e: RepairEvidence) => void;
+  /** Evidence channel for managed-preview lifecycle facts (Session 13); persisted under this call's id. */
+  reportPreview?: (e: PreviewEvidence) => void;
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -512,10 +542,12 @@ export interface ApprovalRequest {
    * 'command' = a shell command: the classification is only a best-effort LABEL, and the prompt
    * must say so. 'check' = a harness-resolved typed check (Session 12): the prompt shows every
    * resolved command verbatim and offers replay consent for those exact commands, NOT a
-   * class-scoped session grant.
+   * class-scoped session grant. 'preview' = a harness-resolved preview server (Session 13):
+   * same replay-consent shape as 'check', but the prompt must state the different CONSEQUENCE —
+   * the process keeps running and binds a local port.
    */
-  kind?: 'command' | 'check';
-  /** kind 'check': how many distinct commands a session-scope answer would consent to re-run. */
+  kind?: 'command' | 'check' | 'preview';
+  /** kind 'check'/'preview': how many distinct commands a session-scope answer would consent to re-run. */
   checkCount?: number;
   /** One-line summary (command string or "edit src/x.ts"). */
   summary: string;

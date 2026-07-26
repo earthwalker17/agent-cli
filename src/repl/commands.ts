@@ -13,6 +13,8 @@ import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/a
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import { CHECKS_PER_SESSION, describeProject, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
+import type { PreviewTool } from '../tools/preview.js';
+import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
 import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
@@ -40,6 +42,8 @@ export interface CommandContext {
   checkTool?: RunCheckTool;
   /** Session 12: the events-rebuilt check counters, for the /checks budget line. */
   checkCaps?: CheckCaps;
+  /** Session 13: the managed-preview tool instance; /preview lists and stops its live handles. */
+  previewTool?: PreviewTool;
 }
 
 export const HELP = [
@@ -66,6 +70,9 @@ export const HELP = [
   '                  task-base refs, and retires a completed plan. With unfinished work, /accept',
   '                  lists it and "/accept confirm" records a partial acceptance instead.',
   '  /checks         what this project can be verified with, and the latest result per kind',
+  '  /preview [stop <id>]',
+  '                  list this session\'s managed preview servers (pid, url, uptime, log tail);',
+  '                  "stop <id>" stops one — a preview otherwise runs until session end or its TTL',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -605,6 +612,52 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         lines.push(`  ${kind}: ${e.status} — ${sanitizeLine(e.summary)}`);
       }
       lines.push('', `checks run this session: ${ctx.checkCaps?.checksRun ?? 0}/${CHECKS_PER_SESSION}`);
+      ctx.modelOut.write(lines.join('\n') + '\n');
+      return 'continue';
+    }
+
+    case 'preview': {
+      // The session's managed preview servers: live handles re-probed at render time, other
+      // sessions' registry entries labeled and untouchable. `stop <id>` is user-typed consent.
+      ctx.renderer.flush();
+      if (ctx.previewTool === undefined) {
+        ctx.renderer.chromeLine('managed previews are unavailable in this session');
+        return 'continue';
+      }
+      const sub = arg.trim().split(/\s+/).filter((s) => s !== '');
+      if (sub[0]?.toLowerCase() === 'stop') {
+        const alive = ctx.previewTool.active().filter((a) => a.handle.isAlive());
+        const id = sub[1] ?? (alive.length === 1 ? alive[0]!.previewId : undefined);
+        if (id === undefined) {
+          ctx.renderer.chromeLine(
+            alive.length === 0 ? 'nothing to stop: no preview is running' : `usage: /preview stop <id>   (running: ${alive.map((a) => a.previewId).join(', ')})`,
+          );
+          return 'continue';
+        }
+        const r = await ctx.previewTool.stopById(id, 'stopped');
+        ctx.renderer.chromeLine(r.ok ? `stopped ${id}` : `stop ${id}: ${sanitizeLine(r.detail)}`);
+        if (r.ok) ctx.pendingNotes.push(`the user stopped preview ${id} via /preview stop`);
+        return 'continue';
+      }
+      const lines: string[] = [];
+      const active = ctx.previewTool.active();
+      const alive = active.filter((a) => a.handle.isAlive());
+      if (alive.length === 0) lines.push('no preview is running in this session');
+      for (const a of alive) {
+        const up = Date.now() - a.startedAtMs;
+        lines.push(
+          `${a.previewId}: ${a.readyObserved ? `ready at ${a.url ?? '?'}` : 'readiness never observed'} ` +
+            `(pid ${a.handle.pid}, up ${up < 60_000 ? `${Math.round(up / 1000)}s` : `${Math.round(up / 60_000)}m`}) — ${sanitizeLine(a.command)}`,
+        );
+        for (const l of a.handle.tail(1024).split(/\r?\n/).filter((s) => s.trim() !== '').slice(-8)) {
+          lines.push(`    | ${sanitizeLine(l)}`);
+        }
+        lines.push(`    log: ${a.handle.logFile}`);
+      }
+      const others = loadPreviewRegistry(previewsFile(ctx.layout.projectDir)).filter(
+        (e) => e.ownerSessionId !== ctx.session.id,
+      );
+      for (const o of others) lines.push(`${o.previewId}: recorded by another session (pid ${o.pid}) — not managed here`);
       ctx.modelOut.write(lines.join('\n') + '\n');
       return 'continue';
     }

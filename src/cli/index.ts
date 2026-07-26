@@ -154,7 +154,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
-  const { session, sandboxFacts, gitFacts, memory, pruneTaskBaseRefs } = await assembleSession({
+  const { session, sandboxFacts, gitFacts, memory, pruneTaskBaseRefs, stopAllPreviews, previewResumeNote } = await assembleSession({
     trust,
     config,
     ctx,
@@ -179,6 +179,20 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   if (gitFacts.isRepo || gitFacts.probeFailed) process.stderr.write(`git: ${gitFacts.detail}\n`);
   process.stderr.write(`memory: ${memory.bannerLine}\n`);
   if (memory.crashNote !== null) process.stderr.write(`note: ${memory.crashNote}\n`);
+  if (previewResumeNote !== undefined) process.stderr.write(`note: ${previewResumeNote}\n`);
+
+  // Best-effort, bounded, closed-log-tolerant: previews are stopped on EVERY exit path — a
+  // one-shot run has nobody left to manage a server after it returns (Session 13). Called
+  // before endSession on the normal paths so the preview.ended events land in the open log;
+  // the finally call is an idempotent backstop for paths that threw before reaching it.
+  const stopPreviews = async (): Promise<void> => {
+    try {
+      const line = await stopAllPreviews();
+      if (line !== null) process.stderr.write(`previews: ${line}\n`);
+    } catch {
+      /* the next session's sweep is the backstop */
+    }
+  };
 
   const offSigint = installSigintAbort(controller);
   try {
@@ -201,16 +215,23 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
         announce: (l) => process.stderr.write(`${l}\n`),
       });
     }
+    // Previews are stopped even on the 'aborted' path — the user asked everything to stop,
+    // which argues FOR killing the server, not against (Session 13).
+    await stopPreviews();
     endSession(session, reason);
     process.stdout.write('\n');
     printVerdict(layout, session.id);
     return result.denials > 0 || result.stopped ? 2 : 0;
   } catch (err) {
+    await stopPreviews();
     endSession(session, 'error', (err as Error).message);
     process.stderr.write(`\nerror: ${(err as Error).message}\n`);
     return 1;
   } finally {
     offSigint();
+    // Idempotent backstop: on any path that somehow skipped the in-log stop, the processes are
+    // still stopped (their events are then swallowed by the closed-log tolerance — honest cost).
+    void stopPreviews();
   }
 }
 

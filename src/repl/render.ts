@@ -229,6 +229,32 @@ export function createRenderer(opts: {
           }
           break;
         }
+        case 'preview.started': {
+          // No live output channel: a preview logs to a FILE (see preview/process.ts), so the
+          // chrome shows lifecycle boundaries and /preview shows the tail.
+          chromeLine(style.dim(`  ${g.arrow} preview ${e.previewId} — ${sanitizeLine(e.command)} (pid ${String(e.pid)})`));
+          break;
+        }
+        case 'preview.ready': {
+          chromeLine(`  ${style.green(g.ok)} preview ${e.previewId} ready at ${sanitizeLine(e.url)} (${sanitizeLine(e.probeDetail)}, waited ${String(e.waitedMs)}ms)`);
+          break;
+        }
+        case 'preview.ended': {
+          const benign = e.reason === 'stopped' || e.reason === 'session-end';
+          const line = `preview ${e.previewId} ended: ${e.reason}${e.exitCode !== null ? ` (exit ${String(e.exitCode)})` : ''}`;
+          chromeLine(benign ? style.dim(`  ${g.bullet} ${line}`) : style.yellow(`  ${g.warn} ${line}`));
+          break;
+        }
+        case 'preview.swept': {
+          const bits = [
+            e.killed.length > 0 ? `stopped ${String(e.killed.length)} orphan(s)` : '',
+            e.killFailed.length > 0 ? `${String(e.killFailed.length)} kill(s) failed` : '',
+            e.skippedUnverified.length > 0 ? `${String(e.skippedUnverified.length)} left (unverified identity)` : '',
+            e.droppedDead.length > 0 ? `${String(e.droppedDead.length)} stale record(s) cleared` : '',
+          ].filter((s) => s !== '');
+          if (bits.length > 0) chromeLine(style.dim(`  ${g.bullet} preview sweep: ${bits.join('; ')}`));
+          break;
+        }
         case 'repair.attempted': {
           chromeLine(
             style.dim(`  ${g.arrow} repair attempt ${e.attempt} on ${sanitizeLine(e.target)} [${e.failureClass}] — prove with ${e.regressionChecks.join(', ')}`),

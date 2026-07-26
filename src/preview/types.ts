@@ -29,8 +29,12 @@ export interface SupervisedSpec {
   logPollMs?: number;
 }
 
-/** The subset of end reasons a caller (or the harness's own bounds) can REQUEST. */
-export type PreviewStopReason = Extract<PreviewEndReason, 'stopped' | 'ttl-timeout' | 'log-overflow' | 'session-end'>;
+/**
+ * The subset of end reasons a caller (or the harness's own bounds) can REQUEST. 'start-failed'
+ * is requestable by the START call only — a readiness timeout stops the process with the honest
+ * reason (it never became a preview) rather than the user-shaped 'stopped'.
+ */
+export type PreviewStopReason = Extract<PreviewEndReason, 'stopped' | 'ttl-timeout' | 'log-overflow' | 'session-end' | 'start-failed'>;
 
 export interface SupervisedExit {
   /** The first stop reason requested before death, or null when the process died on its own. */

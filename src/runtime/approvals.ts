@@ -31,7 +31,9 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
       ? `[shell command — labeled ${req.classification}]`
       : req.kind === 'check'
         ? '[typed check — harness-resolved command]'
-        : `[${req.classification}]`;
+        : req.kind === 'preview'
+          ? '[preview server — harness-resolved command; KEEPS RUNNING]'
+          : `[${req.classification}]`;
   const lines = [
     '',
     `  ⚠ approval required  ${cls}  ${req.tool}`,
@@ -59,18 +61,22 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   // A typed check offers a DIFFERENT [s] (Session 12): consent to re-run those exact
   // harness-resolved commands, never a class-scoped session grant. Distinct wording matters —
   // the two consents cover different things and must not read as the same promise.
-  const grantable = isGrantable(req.classification) && req.kind !== 'command' && req.kind !== 'check';
+  const grantable = isGrantable(req.classification) && req.kind !== 'command' && req.kind !== 'check' && req.kind !== 'preview';
   const forwarded = req.taskContext !== undefined;
   const sPart =
     req.kind === 'check'
       ? // Count what it actually grants: one keystroke stores replay consent for EVERY command in
         // the batch, and a prompt that says "this command" while granting three is a lie.
         `   [s] allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'}`
-      : grantable
-        ? forwarded
-          ? '   [s] allow for the rest of THIS TASK'
-          : '   [s] allow for the rest of this session'
-        : '';
+      : req.kind === 'preview'
+        ? // A preview [s] consents to RE-STARTS of the exact command (body-bound, this session
+          // only) — not to any other script, and not across sessions (grants are never restored).
+          '   [s] allow re-starts of THIS EXACT command this session'
+        : grantable
+          ? forwarded
+            ? '   [s] allow for the rest of THIS TASK'
+            : '   [s] allow for the rest of this session'
+          : '';
   lines.push(
     `  [y] allow once${sPart}   [n] deny   ` +
       (forwarded ? '[q] deny & stop THIS TASK (the rest of the turn continues)' : '[q] deny & stop'),
