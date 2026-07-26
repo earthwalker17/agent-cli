@@ -46,6 +46,34 @@ export interface ReportCommand {
   /** The execution boundary this command actually ran under (V0.4+ logs). */
   sandbox?: 'none' | 'windows-lowil';
 }
+export interface ReportPreview {
+  previewId: string;
+  recipeId: string;
+  command: string;
+  pid: number;
+  ready: boolean;
+  url?: string;
+  probeDetail?: string;
+  end?: { reason: string; exitCode: number | null };
+  logFile?: string;
+  /** Started, never ended, and the log holds no session end either — the crash-orphan shape. */
+  neverEnded: boolean;
+}
+export interface ReportBrowserFlow {
+  flowName: string;
+  previewId: string;
+  status: string;
+  stepsOk: number;
+  stepsTotal: number;
+  failures: { n: number; kind: string; target?: string; failureClass: string; detail: string }[];
+  artifacts: { kind: string; sha256: string; bytes: number; label: string }[];
+  consoleErrors: number;
+  pageErrors: number;
+  failedRequests: number;
+  offOriginRequests: number;
+  finalUrl: string | null;
+  traceOmittedBytes?: number;
+}
 export interface ReportCheck {
   check: string;
   recipeId: string;
@@ -136,6 +164,10 @@ export interface ReportJson {
   checks?: ReportCheck[];
   /** Bounded repair attempts and escalations (Session 12, additive); outcomes are DERIVED. */
   repairs?: ReportRepair[];
+  /** Managed preview processes (Session 13, additive), in start order. */
+  previews?: ReportPreview[];
+  /** Browser verification flows (Session 13, additive), in run order. */
+  browserFlows?: ReportBrowserFlow[];
   /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
    *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
   tasksDelegated: {
@@ -512,6 +544,68 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     })),
   ];
 
+  // Managed previews (Session 13): join started/ready/ended by previewId. A started with no
+  // ended is the crash-orphan shape — rendered as such, never silently absent.
+  const previews: ReportPreview[] = [];
+  {
+    const byId = new Map<string, ReportPreview>();
+    for (const e of events) {
+      if (e.type === 'preview.started') {
+        const p: ReportPreview = {
+          previewId: e.previewId,
+          recipeId: e.recipeId,
+          command: e.command,
+          pid: e.pid,
+          ready: false,
+          neverEnded: true,
+        };
+        byId.set(e.previewId, p);
+        previews.push(p);
+      } else if (e.type === 'preview.ready') {
+        const p = byId.get(e.previewId);
+        if (p !== undefined) {
+          p.ready = true;
+          p.url = e.url;
+          p.probeDetail = e.probeDetail;
+        }
+      } else if (e.type === 'preview.ended') {
+        const p = byId.get(e.previewId);
+        if (p !== undefined) {
+          p.end = { reason: e.reason, exitCode: e.exitCode };
+          p.logFile = e.logFile;
+          p.neverEnded = false;
+        }
+      }
+    }
+  }
+
+  // Browser flows (Session 13): the detail events; the paired check evidence is in `checks`.
+  const browserFlows: ReportBrowserFlow[] = events
+    .filter((e): e is Extract<SessionEvent, { type: 'browser.flow' }> => e.type === 'browser.flow')
+    .map((e) => ({
+      flowName: e.flowName,
+      previewId: e.previewId,
+      status: e.status,
+      stepsOk: e.steps.filter((s) => s.ok).length,
+      stepsTotal: e.steps.length,
+      failures: e.steps
+        .filter((s) => !s.ok)
+        .map((s) => ({
+          n: s.n,
+          kind: s.kind,
+          ...(s.target !== undefined ? { target: s.target } : {}),
+          failureClass: s.failure?.class ?? '?',
+          detail: s.failure?.detail ?? '',
+        })),
+      artifacts: e.artifacts.map((a) => ({ kind: a.kind, sha256: a.sha256, bytes: a.bytes, label: a.label })),
+      consoleErrors: e.consoleErrors.length,
+      pageErrors: e.pageErrors.length,
+      failedRequests: e.failedRequests.length,
+      offOriginRequests: e.offOriginRequests.length,
+      finalUrl: e.finalUrl,
+      ...(e.traceOmittedBytes !== undefined ? { traceOmittedBytes: e.traceOmittedBytes } : {}),
+    }));
+
   const taskChanges = events
     .filter((e): e is Extract<SessionEvent, { type: 'task.changes' }> => e.type === 'task.changes')
     .map((e) => ({
@@ -575,6 +669,8 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     ...(accepted !== undefined ? { accepted } : {}),
     ...(checkRuns.length > 0 ? { checks: checkRuns } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
+    ...(previews.length > 0 ? { previews } : {}),
+    ...(browserFlows.length > 0 ? { browserFlows } : {}),
     taskChanges,
     taskApplies,
     integrity: {
@@ -663,6 +759,20 @@ function renderMarkdown(r: ReportJson): string {
   }
   L.push('');
 
+  if (r.previews !== undefined && r.previews.length > 0) {
+    L.push(`## Preview processes (managed)`);
+    for (const p of r.previews) {
+      const readyBit = p.ready ? `ready at ${p.url ?? '?'} (${p.probeDetail ?? ''})` : 'readiness never observed';
+      const endBit = p.neverEnded
+        ? 'NEVER ENDED in this log — the session died with it running; the next session\'s identity-verified sweep handles it'
+        : `ended: ${p.end?.reason ?? '?'}${p.end?.exitCode !== null && p.end?.exitCode !== undefined ? ` (exit ${p.end.exitCode})` : ''}`;
+      L.push(`- ${p.previewId} — \`${p.command}\` [${p.recipeId}; pid ${p.pid}]`);
+      L.push(`    ${readyBit}; ${endBit}`);
+      if (p.logFile !== undefined) L.push(`    log: ${p.logFile}`);
+    }
+    L.push('');
+  }
+
   if (r.checks !== undefined && r.checks.length > 0) {
     L.push(`## Verification (typed checks)`);
     for (const c of r.checks) {
@@ -688,6 +798,29 @@ function renderMarkdown(r: ReportJson): string {
     }
     L.push('');
     L.push('A typed check PASSES only when its process genuinely exited with code 0. UNSUPPORTED means the check never ran.');
+    L.push('');
+  }
+
+  if (r.browserFlows !== undefined && r.browserFlows.length > 0) {
+    L.push(`## Browser verification (flows against the managed preview)`);
+    for (const f of r.browserFlows) {
+      L.push(`- flow '${f.flowName}' vs ${f.previewId} → ${f.status.toUpperCase()} (${f.stepsOk}/${f.stepsTotal} steps)${f.finalUrl !== null ? ` — final url ${f.finalUrl}` : ''}`);
+      for (const x of f.failures) {
+        L.push(`    step ${x.n} (${x.kind}${x.target !== undefined ? ` ${x.target}` : ''}) FAILED [${x.failureClass}]: ${x.detail}`);
+      }
+      for (const a of f.artifacts) {
+        L.push(`    ${a.kind} '${a.label}': objects/${a.sha256} (${Math.round(a.bytes / 1024)} KiB)`);
+      }
+      const counts = [
+        f.consoleErrors > 0 ? `${f.consoleErrors} console error(s)` : '',
+        f.pageErrors > 0 ? `${f.pageErrors} page error(s)` : '',
+        f.failedRequests > 0 ? `${f.failedRequests} failed request(s)` : '',
+        f.offOriginRequests > 0 ? `${f.offOriginRequests} off-origin request(s) (recorded, not confined)` : '',
+      ].filter((s) => s !== '');
+      if (counts.length > 0) L.push(`    ${counts.join('; ')}`);
+      if (f.traceOmittedBytes !== undefined) L.push(`    trace NOT stored (${Math.round(f.traceOmittedBytes / 1024)} KiB over the artifact budget)`);
+    }
+    L.push(`  (screenshots prove the captured pixels at a declared-ready moment; the typed step outcomes above are the functional evidence)`);
     L.push('');
   }
 

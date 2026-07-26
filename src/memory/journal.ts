@@ -126,6 +126,15 @@ function evidenceLines(report: ReportJson, endedReason: string, logPath: string)
     const subjects = report.gitCommits.map((c) => `${c.oid.slice(0, 8)} "${truncate(c.subject, 50)}"`).join(', ');
     lines.push(`- commits: ${subjects}`);
   }
+  if (report.previews !== undefined || report.browserFlows !== undefined) {
+    const pv = report.previews ?? [];
+    const fl = report.browserFlows ?? [];
+    const shots = fl.reduce((n, f) => n + f.artifacts.filter((a) => a.kind === 'screenshot').length, 0);
+    const passed = fl.filter((f) => f.status === 'pass').length;
+    lines.push(
+      `- preview/browser: ${pv.length} preview(s), ${fl.length} flow(s) (${passed} pass)${shots > 0 ? `, ${shots} screenshot(s)` : ''}`,
+    );
+  }
   const u = report.session.usage;
   lines.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out (cache: ${u.cacheReadInputTokens ?? 0} read / ${u.cacheCreationInputTokens ?? 0} written)`);
   lines.push(`- ended: ${endedReason}`);

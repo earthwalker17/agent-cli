@@ -170,6 +170,12 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           `  model: ${s.model} · provider: ${s.provider.name}`,
           `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out${cache}`,
           `  ${completionLine(ctx)}`,
+          ...((): string[] => {
+            const alive = ctx.previewTool?.active().filter((a) => a.handle.isAlive()) ?? [];
+            return alive.length > 0
+              ? [`  previews: ${alive.map((a) => `${a.previewId}${a.url !== null ? ` (${a.url})` : ''}`).join(', ')} — stopped at session end`]
+              : [];
+          })(),
           ...(s.gitFacts?.isRepo ? [`  git (at session start): ${sanitizeLine(s.gitFacts.detail)}`] : []),
           `  state: ${sanitizeLine(s.stateDir)}`,
         ].join('\n'),
