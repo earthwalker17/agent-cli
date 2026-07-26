@@ -211,6 +211,52 @@ export const RECOVERY_CATALOGUE: Record<FailureClass, RecoveryEntry> = {
     stopConditions: [...COMMON_STOPS, 'a second timeout at the same scope — the scope is wrong, not the timeout'],
   },
 
+  'preview-startup': {
+    class: 'preview-startup',
+    label: 'preview startup',
+    signals: ['preview.ended reason start-failed (exited during startup or never answered HTTP)', 'EADDRINUSE in the preview log'],
+    requiredEvidence: [
+      'the preview log tail (recorded on preview.ended and kept at the logFile path) and the exit code',
+      'whether the process died or merely never answered an HTTP probe — different bugs',
+    ],
+    diagnostics: [
+      'read the log tail first: a boot crash names its own cause far more often than a guess does',
+      'EADDRINUSE means the port is owned by another process — check /preview and previews.json before blaming the app',
+    ],
+    actions: [
+      'fix the boot-time error the log names (a bad import, a missing file, a wrong PORT assumption)',
+      'start with an explicit free port when the default is taken',
+    ],
+    // A passing flow transitively proves a ready preview — the honest proof for a startup fix.
+    regressionChecks: ['browser'],
+    autoEligible: true,
+    requiresConfirmation: ['killing a port-holding process the harness does not own'],
+    stopConditions: [...COMMON_STOPS, 'the port conflict is with a process the user owns — their call, not a repair'],
+  },
+
+  'browser-verification': {
+    class: 'browser-verification',
+    label: 'browser verification',
+    signals: ['browser-assertion-failed', 'browser-timeout (declared readiness or an action never completed)', 'browser-navigation', 'page-error'],
+    requiredEvidence: [
+      'the failing step, its typed failure class, and the last observed state from the flow result',
+      'the failure screenshot and console/page errors recorded on the browser.flow event',
+    ],
+    diagnostics: [
+      'view_image the failure screenshot before hypothesizing — the visible state usually names the bug',
+      'distinguish "the element never appeared" (app logic/render bug) from "the assertion expected the wrong thing"',
+    ],
+    actions: [
+      'fix the application defect the flow surfaced (handler not wired, state not updated, wrong route)',
+      'fix the flow declaration ONLY when the app is verifiably right and the expectation was wrong — and say so',
+    ],
+    // The flow must pass again, and the deterministic layer must still hold underneath it.
+    regressionChecks: ['browser', 'test'],
+    autoEligible: true,
+    requiresConfirmation: ['weakening an assertion instead of fixing the behavior it asserts'],
+    stopConditions: [...COMMON_STOPS, 'the same flow fails a second time for a DIFFERENT typed reason — the app state model needs the user'],
+  },
+
   unknown: {
     class: 'unknown',
     label: 'unknown',
@@ -245,7 +291,16 @@ export function renderRecoveryGuidance(cls: FailureClass, opts: { includeStops?:
     `diagnose first: ${e.diagnostics.join('; ')}`,
     `eligible actions: ${e.actions.join('; ')}`,
   ];
-  if (e.regressionChecks.length > 0) lines.push(`prove the repair with: run_check ${e.regressionChecks.join(', ')}`);
+  if (e.regressionChecks.length > 0) {
+    // 'browser' runs through browser_flow, never run_check (its enum excludes it) — guidance
+    // that names an impossible call at the exact moment of failure would be worse than none.
+    const shell = e.regressionChecks.filter((k) => k !== 'browser');
+    const parts = [
+      ...(shell.length > 0 ? [`run_check ${shell.join(', ')}`] : []),
+      ...(e.regressionChecks.includes('browser') ? ['a passing browser_flow'] : []),
+    ];
+    lines.push(`prove the repair with: ${parts.join(' + ')}`);
+  }
   if (e.requiresConfirmation.length > 0) lines.push(`ask the user first for: ${e.requiresConfirmation.join('; ')}`);
   if (opts.includeStops === true) lines.push(`stop and escalate when: ${e.stopConditions.join('; ')}`);
   return lines.join('\n');

@@ -225,6 +225,8 @@ export type FailureClass =
   | 'integration-conflict'
   | 'policy-approval'
   | 'timeout-resource'
+  | 'preview-startup'
+  | 'browser-verification'
   | 'unknown';
 
 export const FAILURE_CLASSES: readonly FailureClass[] = [
@@ -236,6 +238,8 @@ export const FAILURE_CLASSES: readonly FailureClass[] = [
   'integration-conflict',
   'policy-approval',
   'timeout-resource',
+  'preview-startup',
+  'browser-verification',
   'unknown',
 ] as const;
 

@@ -38,7 +38,16 @@ export type FailureEvidence =
       childSessionId: string;
       refused: { relPath: string; reason: string }[];
     }
-  | { source: 'policy'; seq: number; callId: string; tool: string; rule: string; decision: 'deny' | 'deny-stop' };
+  | { source: 'policy'; seq: number; callId: string; tool: string; rule: string; decision: 'deny' | 'deny-stop' }
+  | {
+      /** A managed preview that FAILED (Session 13) — stopped/TTL/session-end are not failures. */
+      source: 'preview';
+      seq: number;
+      previewId: string;
+      reason: 'crashed' | 'start-failed';
+      exitCode: number | null;
+      logTail?: string;
+    };
 
 export interface FailureClassification {
   class: FailureClass;
@@ -80,6 +89,28 @@ function classifyCheck(e: Extract<FailureEvidence, { source: 'check' }>): Failur
     cls = 'timeout-resource';
     confidence = 'high';
     fired.push('termination:timeout');
+  } else if (e.check === 'browser') {
+    // Browser evidence routes ONLY by its own disjoint signal namespace (Session 13) and never
+    // falls through to the shell-output branches: a page error whose text happens to say
+    // "SyntaxError" must not classify as compile-type.
+    if (s.has('browser-unavailable')) {
+      cls = 'dependency-setup'; // a missing browser is a toolchain the user installs
+      confidence = 'high';
+      fired.push('browser-unavailable');
+    } else if (s.has('preview-died')) {
+      cls = 'runtime-process'; // the server died at runtime; the flow was only the witness
+      confidence = 'high';
+      fired.push('preview-died');
+    } else if (s.has('browser-assertion-failed') || s.has('page-error') || s.has('browser-timeout') || s.has('browser-navigation')) {
+      cls = 'browser-verification';
+      confidence = 'high';
+      for (const k of ['browser-assertion-failed', 'page-error', 'browser-timeout', 'browser-navigation']) if (s.has(k)) fired.push(k);
+    } else if (e.status === 'fail') {
+      cls = 'browser-verification'; // e.g. a console-error-only failure under fail_on_console_error
+      confidence = 'medium';
+      fired.push('kind:browser');
+    }
+    // an 'error' with no recognized signal stays unknown — read the flow evidence
   } else if (e.termination === 'spawn-error' || s.has('command-not-found') || s.has('module-not-found') || s.has('missing-dependency')) {
     cls = 'dependency-setup';
     confidence = 'high';
@@ -179,6 +210,25 @@ export function classifyFailure(e: FailureEvidence): FailureClassification {
         detail: `${e.tool} was refused (${e.rule})`,
       };
     }
+    case 'preview': {
+      // start-failed = the server never became a preview (boot bug, port conflict); crashed =
+      // it was serving and died at runtime. EADDRINUSE is read from the log tail because a
+      // preview has no output parser — the tail IS the recorded diagnostic surface.
+      const portConflict = e.logTail !== undefined && e.logTail.includes('EADDRINUSE');
+      const fired = [`preview:${e.reason}`, ...(portConflict ? ['port-in-use'] : [])];
+      const cls: FailureClass = e.reason === 'start-failed' ? 'preview-startup' : 'runtime-process';
+      return {
+        class: cls,
+        confidence: 'high',
+        signals: fired,
+        signature: signatureOf(cls, e.previewId, fired),
+        subject: e.previewId,
+        detail:
+          e.reason === 'start-failed'
+            ? `preview ${e.previewId} failed to start${e.exitCode !== null ? ` (exit ${e.exitCode})` : ''}${portConflict ? ' — port in use' : ''}; read the log tail`
+            : `preview ${e.previewId} crashed while serving${e.exitCode !== null ? ` (exit ${e.exitCode})` : ''}`,
+      };
+    }
   }
 }
 
@@ -237,6 +287,19 @@ export function latestFailureEvidence(events: readonly SessionEvent[], target?: 
       const planTaskId = childPlanTask.get(e.childSessionId);
       if (target !== undefined && planTaskId !== target) continue;
       take({ source: 'integration', seq: e.seq, childSessionId: e.childSessionId, refused: e.refused });
+    } else if (e.type === 'preview.ended' && (e.reason === 'crashed' || e.reason === 'start-failed')) {
+      // Preview failures are SESSION-scoped evidence (a preview is not bound to a plan task);
+      // stopped/ttl-timeout/log-overflow/session-end are lifecycle ends, not failures — the
+      // same rule that excludes user interventions from task outcomes.
+      if (target !== undefined) continue;
+      take({
+        source: 'preview',
+        seq: e.seq,
+        previewId: e.previewId,
+        reason: e.reason,
+        exitCode: e.exitCode,
+        ...(e.logTail !== undefined ? { logTail: e.logTail } : {}),
+      });
     }
   }
   return latest;
