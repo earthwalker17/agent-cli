@@ -69,9 +69,14 @@ export type CommandEvidence =
  * third-party code with network access, which is not "verify what we just built"; a missing
  * toolchain is an honest `unsupported` precondition the user resolves.
  */
-export type CheckKind = 'build' | 'test' | 'test-targeted' | 'typecheck' | 'lint' | 'format' | 'static-analysis';
+export type CheckKind = 'build' | 'test' | 'test-targeted' | 'typecheck' | 'lint' | 'format' | 'static-analysis' | 'browser';
 
-/** Declaration order is the canonical order everywhere (schemas, views, reports, prompts). */
+/**
+ * Declaration order is the canonical order everywhere (schemas, views, reports, prompts) —
+ * APPEND-ONLY: a mid-list insert would churn every ordered surface. 'browser' (Session 13) runs
+ * through browser_flow, never run_check (its enum deliberately excludes it): a flow is an
+ * in-process browser drive against a managed preview, not a shell command.
+ */
 export const CHECK_KINDS: readonly CheckKind[] = [
   'build',
   'test',
@@ -80,6 +85,7 @@ export const CHECK_KINDS: readonly CheckKind[] = [
   'lint',
   'format',
   'static-analysis',
+  'browser',
 ] as const;
 
 export function isCheckKind(v: string): v is CheckKind {
@@ -162,6 +168,47 @@ export type PreviewEvidence =
       waitedMs: number;
       probeDetail: string;
     };
+
+/** One executed (or refused) step of a browser flow, as recorded evidence (Session 13). */
+export interface BrowserStepRecord {
+  n: number;
+  kind: string;
+  /** The step's target in display form (path, selector, text, label) — sanitized at render. */
+  target?: string;
+  ok: boolean;
+  /** Typed failure taxonomy — timeout | navigation | assertion | runtime | protocol. */
+  failure?: { class: string; detail: string };
+}
+
+/** A stored browser artifact: the sha IS the blob key under objects/. */
+export interface BrowserArtifact {
+  kind: 'screenshot' | 'trace';
+  sha256: string;
+  bytes: number;
+  label: string;
+  mediaType: string;
+}
+
+/**
+ * Structured facts about one browser flow, reported through `ToolContext.reportBrowser`
+ * (Session 13). One event per flow — the detail the paired check.completed (kind 'browser')
+ * deliberately does not carry. Same callId-binding contract as every evidence channel.
+ */
+export interface BrowserFlowEvidence {
+  flowName: string;
+  previewId: string;
+  status: CheckStatus;
+  steps: BrowserStepRecord[];
+  artifacts: BrowserArtifact[];
+  consoleErrors: string[];
+  pageErrors: string[];
+  failedRequests: string[];
+  /** Off-origin subresource requests the app made — RECORDED, not confined (documented). */
+  offOriginRequests: string[];
+  finalUrl: string | null;
+  /** A trace too large for the artifact budget was dropped; its size is the honest record. */
+  traceOmittedBytes?: number;
+}
 
 /**
  * Typed failure classes (Session 12) — the vocabulary the recovery catalogue, the repair ledger,
@@ -380,6 +427,8 @@ export interface ToolContext {
   reportRepair?: (e: RepairEvidence) => void;
   /** Evidence channel for managed-preview lifecycle facts (Session 13); persisted under this call's id. */
   reportPreview?: (e: PreviewEvidence) => void;
+  /** Evidence channel for browser-flow detail (Session 13); persisted under this call's id. */
+  reportBrowser?: (e: BrowserFlowEvidence) => void;
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -499,6 +548,24 @@ export interface Tool<I = unknown> {
    * snapshot captured earlier — never the filesystem.
    */
   check?(input: I): { resolved: readonly ResolvedCheckFact[] };
+  /**
+   * Declares that this tool DRIVES A BROWSER against a harness-managed preview (Session 13). A
+   * policy FACT with its own fail-closed branch: a flow executes application JavaScript and
+   * clicks real UI, so it must never reach the observe fall-through (the S6 trap). MUST be pure
+   * over tool-held state (the live preview handles — memory flags, never I/O). `previewBound`
+   * is the whole decision: a flow bound to a RUNNING consented preview inherits that consent
+   * (the approval prompt said browser verification was included); anything else is denied —
+   * there is deliberately no ask path for arbitrary-origin browsing this session.
+   */
+  browser?(input: I): { flowName: string; stepCount: number; previewBound: boolean };
+  /**
+   * Declares that this tool re-reads EVIDENCE THIS SESSION RECORDED (Session 13: view_image).
+   * A policy FACT so the decision log stays honest — the observe fall-through's "read-only
+   * workspace access" reason would be false for state-dir evidence bytes. The sha-bound
+   * admission (only shas recorded by this session's browser artifacts) is enforced by the tool
+   * and pinned by tests; the fact carries the sha for the decision record.
+   */
+  evidenceRead?(input: I): { sha256: string };
   /**
    * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
    * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the
@@ -881,6 +948,25 @@ export type EventBody =
       skippedUnverified: { previewId: string; pid: number; detail: string }[];
       droppedDead: string[];
     }
+  /**
+   * One browser flow's detailed evidence (Session 13, additive). Pairs with check.started /
+   * check.completed {check:'browser'} under the same callId: the check events feed gates and
+   * classification; this event carries what they deliberately do not — per-step outcomes,
+   * artifact pointers, console/page/network records, and the final URL.
+   */
+  | ({ type: 'browser.flow'; callId: string } & {
+      flowName: string;
+      previewId: string;
+      status: CheckStatus;
+      steps: BrowserStepRecord[];
+      artifacts: BrowserArtifact[];
+      consoleErrors: string[];
+      pageErrors: string[];
+      failedRequests: string[];
+      offOriginRequests: string[];
+      finalUrl: string | null;
+      traceOmittedBytes?: number;
+    })
   | {
       type: 'undo.applied';
       target: 'last' | 'all';

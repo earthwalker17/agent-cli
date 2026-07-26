@@ -25,7 +25,7 @@ import type { CheckKind, SessionEvent, Tool, ToolResult } from '../types.js';
  * That is honest precisely because recording a repair plan confers no new permission.
  */
 
-const KIND_VALUES = ['build', 'test', 'test-targeted', 'typecheck', 'lint', 'format', 'static-analysis'] as const;
+const KIND_VALUES = ['build', 'test', 'test-targeted', 'typecheck', 'lint', 'format', 'static-analysis', 'browser'] as const;
 const _kindsAreCheckKinds: readonly CheckKind[] = KIND_VALUES;
 void _kindsAreCheckKinds;
 

@@ -76,10 +76,10 @@ function readLog(id: string): SessionEvent[] {
 }
 
 describe('run_check — the wire contract', () => {
-  it('accepts exactly the shared CheckKind vocabulary', () => {
+  it("accepts the shared CheckKind vocabulary MINUS 'browser' (deliberate subset — flows run via browser_flow)", () => {
     const tool = createRunCheckTool({ workspaceRoot: ws, caps: { checksRun: 0 } });
     for (const kind of CHECK_KINDS) {
-      expect(tool.schema.safeParse({ checks: [kind] }).success, kind).toBe(true);
+      expect(tool.schema.safeParse({ checks: [kind] }).success, kind).toBe(kind !== 'browser');
     }
     expect(tool.schema.safeParse({ checks: ['deps'] }).success).toBe(false);
     expect(tool.schema.safeParse({ checks: [] }).success).toBe(false);

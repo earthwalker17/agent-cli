@@ -245,6 +245,18 @@ export function createRenderer(opts: {
           chromeLine(benign ? style.dim(`  ${g.bullet} ${line}`) : style.yellow(`  ${g.warn} ${line}`));
           break;
         }
+        case 'browser.flow': {
+          const mark = e.status === 'pass' ? style.green(g.ok) : e.status === 'unsupported' ? style.yellow(g.warn) : style.red(g.fail);
+          const shots = e.artifacts.filter((a) => a.kind === 'screenshot').length;
+          chromeLine(
+            `  ${mark} flow ${sanitizeLine(e.flowName)}: ${e.status} — ${e.steps.filter((s) => s.ok).length}/${e.steps.length} step(s)` +
+              `${shots > 0 ? `, ${shots} screenshot(s)` : ''}${e.pageErrors.length > 0 ? `, ${e.pageErrors.length} page error(s)` : ''}`,
+          );
+          for (const s of e.steps.filter((x) => !x.ok)) {
+            chromeLine(style.dim(`      step ${s.n} (${s.kind} ${sanitizeLine(s.target ?? '')}): [${s.failure?.class ?? '?'}] ${sanitizeLine(s.failure?.detail ?? '')}`));
+          }
+          break;
+        }
         case 'preview.swept': {
           const bits = [
             e.killed.length > 0 ? `stopped ${String(e.killed.length)} orphan(s)` : '',

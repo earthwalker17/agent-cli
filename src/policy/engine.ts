@@ -180,12 +180,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'task.invalid-contract', `delegates() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.planDoc !== undefined || tool.check !== undefined) {
+    if (tool.command !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'task.conflicting-contract',
-        'a tool may declare delegation, a shell command, a plan-document write, or typed checks — never a combination',
+        'a tool may declare delegation, a shell command, a plan-document write, typed checks, a browser flow, or an evidence read — never a combination',
       );
     }
     if (delegation.roles.length === 0) {
@@ -234,12 +234,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'plan.invalid-contract', `planDoc() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.check !== undefined) {
+    if (tool.command !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'plan.conflicting-contract',
-        'a tool may declare a plan-document write, a shell command, or typed checks — never a combination',
+        'a tool may declare a plan-document write, a shell command, typed checks, a browser flow, or an evidence read — never a combination',
       );
     }
     if (planDoc.action !== 'update') {
@@ -272,12 +272,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'check.invalid-contract', `check() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined) {
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'check.conflicting-contract',
-        'a tool may declare typed checks, a shell command, delegation, or a plan-document write — never a combination',
+        'a tool may declare typed checks, a shell command, delegation, a plan-document write, a browser flow, or an evidence read — never a combination',
       );
     }
     if (fact.resolved.length === 0) {
@@ -331,6 +331,74 @@ export function decide<I>(
         `${authored ? ', including a script defined by this workspace whose real effects are whatever that script does' : ''}` +
         '; checks run with full user privilege, are NOT sandboxed, and are NOT snapshotted or undoable',
       { noUndo: true, execBoundary: 'unsandboxed', checkReplayKeys: keys },
+    );
+  }
+
+  // 0d. Browser flow → explicit fail-closed branch (Session 13), before the command branch and
+  //     every fall-through: a flow executes application JavaScript and drives real UI, so
+  //     reaching the observe fall-through would be the S6 trap with a browser behind it.
+  //     Consent model (user decision, Session 13): a flow bound to a RUNNING harness-managed
+  //     preview INHERITS the preview's consent — the preview approval prompt states that
+  //     browser verification is included — and is origin-locked by the executor (an off-origin
+  //     top-level navigation aborts the flow as a typed failure). Anything not bound to a
+  //     managed preview is DENIED, not asked: arbitrary-origin browsing is out of scope.
+  if (tool.browser !== undefined) {
+    let fact: { flowName: string; stepCount: number; previewBound: boolean };
+    try {
+      fact = tool.browser(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'browser.invalid-contract', `browser() threw: ${(e as Error).message}`);
+    }
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.evidenceRead !== undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'browser.conflicting-contract',
+        'a tool may declare a browser flow, typed checks, a shell command, delegation, a plan-document write, or an evidence read — never a combination',
+      );
+    }
+    if (!fact.previewBound) {
+      return decision(
+        'sensitive',
+        'deny',
+        'browser.no-preview',
+        'browser flows run only against a RUNNING harness-managed preview (whose approval included browser verification); start one with the preview tool first',
+      );
+    }
+    return decision(
+      'reversible',
+      'allow',
+      'browser.preview-bound',
+      `drives the running managed preview in a headless browser (flow '${fact.flowName}', ${fact.stepCount} step(s)); ` +
+        'origin-locked to the preview; app-side effects are the consented server code acting on its own state; not undoable',
+      { noUndo: true },
+    );
+  }
+
+  // 0e. Session-evidence read (Session 13: view_image) → its own branch purely for HONEST
+  //     evidence: the observe fall-through's "read-only workspace access" reason would be false
+  //     for state-dir blob bytes. The sha-bound admission (only shas this session's browser
+  //     artifacts recorded) is enforced structurally by the tool and pinned by tests.
+  if (tool.evidenceRead !== undefined) {
+    let fact: { sha256: string };
+    try {
+      fact = tool.evidenceRead(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'evidence.invalid-contract', `evidenceRead() threw: ${(e as Error).message}`);
+    }
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'evidence.conflicting-contract',
+        'a tool may declare an evidence read, typed checks, a shell command, delegation, or a plan-document write — never a combination',
+      );
+    }
+    return decision(
+      'observe',
+      'allow',
+      'observe.session-evidence',
+      `re-reads image evidence this session recorded (objects/${fact.sha256.slice(0, 12)}…); no workspace or process access`,
     );
   }
 

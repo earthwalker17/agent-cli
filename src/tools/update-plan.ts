@@ -35,7 +35,9 @@ const UpdatePlanInput = z
         'overlapping tasks in one parallel group), verify (how completion will be checked — required for ' +
         'executor/main), checks (TYPED check kinds that GATE this task: dependents stay blocked and the session ' +
         'cannot be accepted until each has passed after this task is integrated — build|test|test-targeted|' +
-        'typecheck|lint|format|static-analysis; declare them on mutating tasks, never on role main), risk, ' +
+        'typecheck|lint|format|static-analysis|browser (browser = a browser_flow against a managed preview must ' +
+        'pass; declare it for web-app tasks whose success is user-visible behavior); declare checks on mutating ' +
+        'tasks, never on role main), risk, ' +
         'serial (must run alone). Optional graph-level gates: {integration: [...]} must pass after each apply ' +
         'before the next executor wave, {completion: [...]} must pass after the last change before /accept. ' +
         'Do NOT encode execution status anywhere — the harness ' +

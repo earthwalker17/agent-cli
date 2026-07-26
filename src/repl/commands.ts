@@ -15,6 +15,7 @@ import { sanitizeLine } from '../shared/text.js';
 import { CHECKS_PER_SESSION, describeProject, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import type { PreviewTool } from '../tools/preview.js';
 import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
+import { likelyBrowserAvailable } from '../browser/probe.js';
 import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
@@ -611,6 +612,9 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       for (const [kind, e] of latest) {
         lines.push(`  ${kind}: ${e.status} — ${sanitizeLine(e.summary)}`);
       }
+      lines.push(
+        `browser checks: ${likelyBrowserAvailable() ? 'likely available (a system browser or Playwright cache is present; proven at the first flow)' : 'unavailable (no system Edge/Chrome or Playwright cache found)'}`,
+      );
       lines.push('', `checks run this session: ${ctx.checkCaps?.checksRun ?? 0}/${CHECKS_PER_SESSION}`);
       ctx.modelOut.write(lines.join('\n') + '\n');
       return 'continue';

@@ -45,8 +45,8 @@ export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 150_000;
 /**
  * A child's tool registry (Session 10): the static TOOLS filtered by the role contract, plus —
  * for roles that NAME it — the parent's per-session retrieve instance, admitted only when it is
- * structurally free of command/delegates/planDoc facts. Fail closed by dropping: a
- * wrongly-shaped instance simply never reaches a child.
+ * structurally free of command/delegates/planDoc/check/browser/evidenceRead facts. Fail closed
+ * by dropping: a wrongly-shaped instance simply never reaches a child.
  */
 export function childTools(toolNames: readonly string[], retrieveTool?: Tool): Tool[] {
   const tools: Tool[] = TOOLS.filter((t) => toolNames.includes(t.name));
@@ -55,7 +55,10 @@ export function childTools(toolNames: readonly string[], retrieveTool?: Tool): T
     toolNames.includes(retrieveTool.name) &&
     retrieveTool.command === undefined &&
     retrieveTool.delegates === undefined &&
-    retrieveTool.planDoc === undefined
+    retrieveTool.planDoc === undefined &&
+    retrieveTool.check === undefined &&
+    retrieveTool.browser === undefined &&
+    retrieveTool.evidenceRead === undefined
   ) {
     tools.push(retrieveTool);
   }

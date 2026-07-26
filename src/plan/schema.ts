@@ -27,7 +27,7 @@ export const PLAN_GRAPH_MAX_CHARS = 32_000;
 export type PlanTaskRole = 'executor' | 'explorer' | 'reviewer' | 'main';
 
 /** The wire enum for check kinds; a compile-time guard keeps it equal to the shared vocabulary. */
-const CHECK_KIND_VALUES = ['build', 'test', 'test-targeted', 'typecheck', 'lint', 'format', 'static-analysis'] as const;
+const CHECK_KIND_VALUES = ['build', 'test', 'test-targeted', 'typecheck', 'lint', 'format', 'static-analysis', 'browser'] as const;
 const _checkKindsMatch: readonly CheckKind[] = CHECK_KIND_VALUES;
 void _checkKindsMatch;
 

@@ -27,8 +27,10 @@ import type { CheckKind, ResolvedCheckFact, SessionEvent, Tool, ToolContext, Too
  *   NOTHING runs: the call refuses and the next call re-asks with the new command.
  */
 
+// DELIBERATE SUBSET (Session 13): 'browser' is a CheckKind but is EXCLUDED here — a browser
+// flow is an in-process drive of a managed preview, run only through browser_flow. The drift
+// guard below is one-directional (subset), so this exclusion is pinned by a test, not the compiler.
 const KIND_VALUES = ['build', 'test', 'test-targeted', 'typecheck', 'lint', 'format', 'static-analysis'] as const;
-// Compile-time guard: the wire enum can never drift from the shared vocabulary.
 const _kindsAreCheckKinds: readonly CheckKind[] = KIND_VALUES;
 void _kindsAreCheckKinds;
 

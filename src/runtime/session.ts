@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type {
   ApprovalRequest,
+  BrowserFlowEvidence,
   ChatMessage,
   CheckEvidence,
   CommandEvidence,
@@ -815,6 +816,25 @@ function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvide
   });
 }
 
+/** Persist a browser flow's detail evidence under the runtime-bound callId (Session 13). */
+function recordBrowserEvidence(session: Session, callId: string, e: BrowserFlowEvidence): void {
+  session.log.append({
+    type: 'browser.flow',
+    callId,
+    flowName: e.flowName,
+    previewId: e.previewId,
+    status: e.status,
+    steps: e.steps,
+    artifacts: e.artifacts,
+    consoleErrors: e.consoleErrors,
+    pageErrors: e.pageErrors,
+    failedRequests: e.failedRequests,
+    offOriginRequests: e.offOriginRequests,
+    finalUrl: e.finalUrl,
+    ...(e.traceOmittedBytes !== undefined ? { traceOmittedBytes: e.traceOmittedBytes } : {}),
+  });
+}
+
 /** Persist a tool-reported repair-ledger fact under the runtime-bound callId (Session 12). */
 function recordRepairEvidence(session: Session, callId: string, e: RepairEvidence): void {
   if (e.kind === 'attempted') {
@@ -1021,6 +1041,7 @@ async function runExecution<I>(
     reportCheck: (e) => recordCheckEvidence(session, callId, e),
     reportRepair: (e) => recordRepairEvidence(session, callId, e),
     reportPreview: (e) => recordPreviewEvidence(session, callId, e),
+    reportBrowser: (e) => recordBrowserEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),

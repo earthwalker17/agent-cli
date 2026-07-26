@@ -12,6 +12,9 @@ import type { ChildStatusUpdate } from '../runtime/subagent.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
 import { checkCapsFromEvents, createRunCheckTool, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
+import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
+import { createViewImageTool } from '../tools/view-image.js';
+import { likelyBrowserAvailable, probeBrowser, type BrowserAvailability } from '../browser/probe.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createRecoverTool } from '../tools/recover.js';
@@ -337,6 +340,28 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     }
   };
 
+  // browser_flow + view_image (Session 13): the browser probe is a real headless launch, so it
+  // is cached per session and only runs when a flow actually needs it. Flows share the SESSION
+  // CHECK BUDGET (the same live CheckCaps instance run_check refuses on) plus an artifact byte
+  // budget rebuilt from browser.flow events.
+  let browserProbePromise: Promise<BrowserAvailability> | null = null;
+  const cachedProbe = (): Promise<BrowserAvailability> => {
+    browserProbePromise ??= probeBrowser();
+    return browserProbePromise;
+  };
+  const artifactBudget = { usedBytes: artifactBytesFromEvents(session.log.events) };
+  const browserTool = createBrowserFlowTool({
+    preview: previewTool,
+    putBlob: (bytes) => session.snapshots.putBlob(bytes),
+    caps: checkCaps,
+    artifactBudget,
+    probe: cachedProbe,
+  });
+  const viewImageTool = createViewImageTool({
+    getBlob: (sha) => session.snapshots.getBlob(sha),
+    events: () => session.log.events,
+  });
+
   // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the
   // handle died with the process's owner); the sweep above already dealt with the process, so
   // tell the model what happened rather than let a stale "ready" claim stand.
@@ -373,6 +398,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...(retrieveTool !== undefined ? [retrieveTool] : []),
     checkTool,
     previewTool,
+    browserTool,
+    viewImageTool,
     createDelegateTool(
       {
         layout,
@@ -406,7 +433,9 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       planId: session.id,
       // Plan-time reality check (Session 12): a declared gate this project cannot run becomes a
       // warning in the revision loop, long before the user approves an unsatisfiable graph.
-      availableChecks: () => availableKinds(checkTool.projectSnapshot()),
+      // 'browser' merges from the CHEAP existence guess (Session 13) — plan validation is a
+      // non-blocking warning surface; the real launch probe is the runtime truth.
+      availableChecks: () => [...availableKinds(checkTool.projectSnapshot()), ...(likelyBrowserAvailable() ? (['browser'] as const) : [])],
     }),
     createApplyChangesTool(changesRegistry, session.snapshots),
     // recover (Session 12): the bounded repair ledger. Parent-only like the other orchestration
