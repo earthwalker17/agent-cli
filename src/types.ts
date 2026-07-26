@@ -20,6 +20,15 @@ export type SessionMode = 'interactive' | 'non-interactive';
  */
 export type CommandTermination = 'exited' | 'timeout' | 'aborted' | 'spawn-error';
 
+/**
+ * Why a managed preview process ended (Session 13). 'crashed' = the process died without any
+ * stop request (the exit listener is the single writer; a requested stop's reason always wins
+ * over 'crashed' — the runManaged first-cause rule). 'start-failed' = it died before readiness
+ * was ever observed. 'log-overflow' = the harness stopped it because its log file exceeded the
+ * cap (a typed reason, never a silent truncation).
+ */
+export type PreviewEndReason = 'stopped' | 'crashed' | 'ttl-timeout' | 'log-overflow' | 'session-end' | 'start-failed';
+
 // ── Tools ──────────────────────────────────────────────────────────────────────────────────
 /** Absolute paths a tool will change. Declarable ⇒ snapshottable ⇒ reversible. */
 export interface MutationPlan {
@@ -768,6 +777,52 @@ export type EventBody =
       failureClass: FailureClass;
       signature: string;
       reason: string;
+    }
+  /**
+   * Managed preview processes (Session 13, additive). A preview is a SESSION resource that
+   * deliberately keeps running between turns — the first process class whose lifetime is not
+   * bounded by a tool call. `preview.started` marks a REAL spawn (the `command.started`
+   * meaning); `preview.ready` is separate evidence that the server actually answered;
+   * `preview.ended` is appended by exactly ONE writer (the exit listener, stop-reason
+   * first-cause) and tolerates a closed log, because a process death is the one event that can
+   * legitimately arrive after the session ends.
+   */
+  | {
+      type: 'preview.started';
+      callId: string;
+      previewId: string;
+      recipeId: string;
+      /** The exact harness-resolved command string — what the human approved and what ran. */
+      command: string;
+      cwd: string;
+      pid: number;
+      expectedPort?: number;
+    }
+  | {
+      type: 'preview.ready';
+      previewId: string;
+      url: string;
+      port: number;
+      waitedMs: number;
+      /** How readiness was established (declared port vs parsed, HTTP status observed). */
+      probeDetail: string;
+    }
+  | {
+      type: 'preview.ended';
+      previewId: string;
+      reason: PreviewEndReason;
+      exitCode: number | null;
+      signal?: string;
+      logFile: string;
+      logTail?: string;
+    }
+  | {
+      /** Assembly-time orphan sweep evidence (identity-verified kills; unverified are skipped). */
+      type: 'preview.swept';
+      killed: { previewId: string; pid: number }[];
+      killFailed: { previewId: string; pid: number; detail: string }[];
+      skippedUnverified: { previewId: string; pid: number; detail: string }[];
+      droppedDead: string[];
     }
   | {
       type: 'undo.applied';

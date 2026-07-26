@@ -19,6 +19,7 @@ import { foldRepairs } from '../recovery/ledger.js';
 import { evaluateRepair, type RepairVerdict } from '../recovery/policy.js';
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
 import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
+import { sweepOrphanedPreviews, type PreviewSweepResult } from '../preview/registry.js';
 import { readPlanState } from '../plan/canonical.js';
 import type { PlanGraph } from '../plan/schema.js';
 import { foldGraphState, integrationGateState } from '../plan/graph-state.js';
@@ -79,6 +80,8 @@ export interface Assembled {
   mapNote?: string;
   /** One-line summary when crash-orphaned task worktrees were swept at startup (V0.7). */
   worktreeSweep?: string;
+  /** One-line summary when crash-orphaned preview processes were swept at startup (Session 13). */
+  previewSweep?: string;
   /**
    * Delete this session's task-base checkpoint refs (V0.7.1) — call at clean session end,
    * BEFORE endSession (the provenance event must land in the open log). Returns a one-line
@@ -125,6 +128,38 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     } catch {
       /* the sweep must never block a session; leftovers are retried next time */
     }
+  }
+
+  // Sweep crash-orphaned preview PROCESSES (Session 13): registry-driven, identity-verified
+  // kills, unverified orphans reported and left alone. Runs pre-session (an orphan must not
+  // collide with this session's own previews); the evidence event is appended after the log
+  // opens. Unconditional — previews do not require a git repo.
+  let previewSweep: string | undefined;
+  let previewSweepResult: PreviewSweepResult | undefined;
+  try {
+    const swept = await sweepOrphanedPreviews(layout.projectDir);
+    if (swept.lockUnavailable === true) {
+      previewSweep = 'preview sweep skipped (registry busy); orphans are retried next session';
+    } else if (
+      swept.killed.length > 0 ||
+      swept.killFailed.length > 0 ||
+      swept.skippedUnverified.length > 0 ||
+      swept.droppedDead.length > 0
+    ) {
+      previewSweepResult = swept;
+      previewSweep = [
+        swept.killed.length > 0 ? `stopped ${swept.killed.length} orphaned preview process(es) from a previous run` : '',
+        swept.killFailed.length > 0 ? `${swept.killFailed.length} could not be stopped (retried next session)` : '',
+        swept.skippedUnverified.length > 0
+          ? `${swept.skippedUnverified.length} left running (identity could not be verified — see previews.json)`
+          : '',
+        swept.droppedDead.length > 0 ? `${swept.droppedDead.length} stale record(s) cleared` : '',
+      ]
+        .filter((s) => s !== '')
+        .join('; ');
+    }
+  } catch {
+    /* the sweep must never block a session; leftovers are retried next time */
   }
 
   // Project memory: loaded post-trust (the gate is a structural parameter of this function),
@@ -175,6 +210,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       status: d.status,
     })),
   });
+  if (previewSweepResult !== undefined) {
+    session.log.append({
+      type: 'preview.swept',
+      killed: previewSweepResult.killed,
+      killFailed: previewSweepResult.killFailed,
+      skippedUnverified: previewSweepResult.skippedUnverified,
+      droppedDead: previewSweepResult.droppedDead,
+    });
+  }
 
   // Child→parent approval forwarding (V0.7): the queue wraps the SESSION approver — never io
   // directly — so non-interactive parents fail closed structurally and EOF cascades deny-stop.
@@ -317,6 +361,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     checkCaps,
     ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
+    ...(previewSweep !== undefined ? { previewSweep } : {}),
     ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),
   };
 }

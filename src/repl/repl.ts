@@ -139,6 +139,9 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   if (assembled.worktreeSweep !== undefined) {
     renderer.chromeLine(style.dim(`  worktrees: ${assembled.worktreeSweep}`));
   }
+  if (assembled.previewSweep !== undefined) {
+    renderer.chromeLine(style.dim(`  previews: ${assembled.previewSweep}`));
+  }
 
   const pendingNotes: string[] = [];
   const commandCtx: CommandContext = {
