@@ -2,6 +2,7 @@ import type { SessionEvent, TaskChangeFile } from '../types.js';
 import type { PlanState } from '../plan/canonical.js';
 import { completionGateState, type GraphState } from '../plan/graph-state.js';
 import { foldRepairs, openRepairBlockers } from '../recovery/ledger.js';
+import { proveWith } from '../recovery/catalogue.js';
 
 /**
  * The session completion boundary (Session 11.5) — a PURE fold (the house pattern) that answers
@@ -109,7 +110,7 @@ export function computeAcceptance(
           // refuses duplicate re-runs) means the completeness loop no longer sees it for free.
           if (t.verification.status === 'pending') {
             unfinished.push(
-              `plan task '${t.id}' is completed but its required check(s) have not passed since integration: ${t.verification.missing.join(', ')} — run_check them`,
+              `plan task '${t.id}' is completed but its required check(s) have not passed since integration: ${t.verification.missing.join(', ')} — prove with ${proveWith(t.verification.missing)}`,
             );
           }
           continue;
@@ -122,7 +123,7 @@ export function computeAcceptance(
       if (graph !== null) {
         const gate = completionGateState(graph, events);
         for (const kind of gate.pending) {
-          unfinished.push(`completion gate '${kind}' has not passed since the last change — run_check it before accepting`);
+          unfinished.push(`completion gate '${kind}' has not passed since the last change — prove with ${proveWith([kind])} before accepting`);
         }
         for (const kind of gate.waived) caveats.push(`completion gate '${kind}' NEVER RAN (unsupported in this project)`);
       }

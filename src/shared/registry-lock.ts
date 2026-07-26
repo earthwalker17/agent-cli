@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { isPidAlive } from '../store/event-log.js';
+import { isAlive as isPidAlive } from '../exec/kill.js';
 
 /**
  * Shared file-registry locking (extracted from the worktree registry in Session 13, verbatim

@@ -84,10 +84,15 @@ export function resolvePreview(p: DetectedProject, requestedScript?: string): Pr
   };
 }
 
-/** The policy-fact form of a resolved preview (kind 'preview'; the engine words consent from it). */
-export function previewFact(r: ResolvedPreview, ttlMs: number): ResolvedCheckFact {
+/**
+ * The policy-fact form of a resolved preview (kind 'preview'; the engine words consent from it).
+ * A DECLARED port is folded into the recipeId: it changes what the harness will probe (and
+ * export as PORT), so it is part of the consent identity — a different port re-asks — and the
+ * prompt's recipeId display shows it to the human.
+ */
+export function previewFact(r: ResolvedPreview, ttlMs: number, port?: number): ResolvedCheckFact {
   return {
-    recipeId: r.recipeId,
+    recipeId: port !== undefined ? `${r.recipeId}:port${String(port)}` : r.recipeId,
     kind: 'preview',
     command: r.command,
     bodySha: r.bodySha,

@@ -119,6 +119,7 @@ export function installSigintAbort(
   controller: AbortController,
   out: NodeJS.WritableStream = process.stderr,
   exit: (code: number) => void = process.exit,
+  onForceQuit?: () => void,
 ): () => void {
   let presses = 0;
   const onSigint = (): void => {
@@ -127,6 +128,14 @@ export function installSigintAbort(
       out.write('\ninterrupt: stopping the turn (press Ctrl+C again to force-quit)\n');
       controller.abort();
     } else {
+      // The force-quit path is the LIKELIEST one to be taken while a preview server runs (the
+      // user quits because the turn is stuck) — the hook issues its kills synchronously before
+      // the exit call lands, so the servers do not survive as untracked orphans.
+      try {
+        onForceQuit?.();
+      } catch {
+        /* force-quit must force-quit */
+      }
       exit(130);
     }
   };
@@ -194,7 +203,13 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     }
   };
 
-  const offSigint = installSigintAbort(controller);
+  const offSigint = installSigintAbort(controller, undefined, undefined, () => {
+    // Fire-and-forget: killTree issues its spawn/kill synchronously before the first await, so
+    // even without awaiting, the kills land before process.exit. The events are lost (the exit
+    // is immediate); the next session's sweep + this line are the honest record.
+    process.stderr.write('force-quit: stopping preview server(s); the next session\'s sweep verifies\n');
+    void stopAllPreviews();
+  });
   try {
     const result = await runTurn(session, task, { signal: controller.signal });
     const reason = endReasonForTurn(result, ctx.maxSteps);

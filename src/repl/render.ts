@@ -263,6 +263,8 @@ export function createRenderer(opts: {
             e.killFailed.length > 0 ? `${String(e.killFailed.length)} kill(s) failed` : '',
             e.skippedUnverified.length > 0 ? `${String(e.skippedUnverified.length)} left (unverified identity)` : '',
             e.droppedDead.length > 0 ? `${String(e.droppedDead.length)} stale record(s) cleared` : '',
+            (e.retiredStale?.length ?? 0) > 0 ? `${String(e.retiredStale!.length)} deregistered as stale (nothing killed)` : '',
+            (e.unaccountedLogs?.length ?? 0) > 0 ? `${String(e.unaccountedLogs!.length)} unaccounted preview log(s) — a start may have been lost` : '',
           ].filter((s) => s !== '');
           if (bits.length > 0) chromeLine(style.dim(`  ${g.bullet} preview sweep: ${bits.join('; ')}`));
           break;

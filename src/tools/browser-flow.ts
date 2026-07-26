@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { FlowSpecSchema } from '../browser/types.js';
+import { FLOW_WALL_MS, FlowSpecSchema } from '../browser/types.js';
 import { runFlow, type FlowRunDeps } from '../browser/flow.js';
 import { probeBrowser, type BrowserAvailability } from '../browser/probe.js';
 import { CHECKS_PER_SESSION, type CheckCaps } from './run-check.js';
@@ -128,10 +128,18 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         );
       }
 
+      // A turn aborted before anything ran: refuse the CALL, no events, nothing spawned.
+      if (ctx.signal?.aborted === true) {
+        return refuse('the turn was aborted before the flow ran; nothing launched and nothing was recorded', 'turn aborted');
+      }
+
       // TOCTOU: the gate held when decide() saw a ready preview; it may have died since. A dead
       // preview is a typed ERROR with evidence — never a silent pass, never a caller mistake.
       const preview = deps.preview.readyPreview(flow.preview_id);
       if (preview === null || preview.url === null) {
+        // Budget symmetry with checkCapsFromEvents: this completed row counts on resume, so the
+        // live counter must count it too.
+        deps.caps.checksRun++;
         completed({
           status: 'error',
           summary: `flow '${flow.name}': the bound preview is no longer running (it died between approval and execution)`,
@@ -166,6 +174,7 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         ...(availability.channel !== undefined ? { channel: availability.channel } : {}),
         originUrl: preview.url,
         isPreviewAlive: () => preview.handle.isAlive(),
+        ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
         onBrowserLaunched: () =>
           // check.started means a REAL process started — here, the headless browser.
           ctx.reportCheck?.({
@@ -174,7 +183,7 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
             recipeId: `browser.flow/${flow.name}`,
             command: NO_SHELL_COMMAND,
             cwd: ctx.workspaceRoot,
-            timeoutMs: 60_000,
+            timeoutMs: FLOW_WALL_MS,
             ...(planTaskId !== undefined ? { planTaskId } : {}),
           }),
       });

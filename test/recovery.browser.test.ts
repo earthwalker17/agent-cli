@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyFailure, latestFailureEvidence, type FailureEvidence } from '../src/recovery/classify.js';
-import { recoveryEntry, renderRecoveryGuidance } from '../src/recovery/catalogue.js';
+import { proveWith, recoveryEntry, renderRecoveryGuidance } from '../src/recovery/catalogue.js';
 import { foldRepairs } from '../src/recovery/ledger.js';
 import { evaluateRepair } from '../src/recovery/policy.js';
 import { FAILURE_CLASSES, type SessionEvent } from '../src/types.js';
@@ -114,6 +114,12 @@ describe('catalogue — the two new rows', () => {
   it('preview-startup and browser-verification are auto-eligible with browser regression proofs', () => {
     expect(recoveryEntry('preview-startup')).toMatchObject({ autoEligible: true, regressionChecks: ['browser'] });
     expect(recoveryEntry('browser-verification')).toMatchObject({ autoEligible: true, regressionChecks: ['browser', 'test'] });
+  });
+
+  it('proveWith is the one composer every kind-list instruction goes through', () => {
+    expect(proveWith(['test', 'lint'])).toBe('run_check test, lint');
+    expect(proveWith(['browser'])).toBe('a passing browser_flow');
+    expect(proveWith(['test', 'browser'])).toBe('run_check test + a passing browser_flow');
   });
 
   it("guidance NEVER instructs the impossible 'run_check browser'", () => {

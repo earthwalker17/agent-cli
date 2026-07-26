@@ -43,11 +43,25 @@ export interface FlowRunDeps {
   isPreviewAlive: () => boolean;
   /** Fires once, right after the headless browser genuinely launched — the check.started hook. */
   onBrowserLaunched?: () => void;
+  /** The turn's abort signal: a cancelled turn must not keep driving a browser. */
+  signal?: AbortSignal;
   stepTimeoutMs?: number;
   wallMs?: number;
 }
 
 const POLL_MS = 100;
+
+/**
+ * REAL origin comparison — `String.startsWith` is not one ('http://127.0.0.1:3000' is a prefix
+ * of 'http://127.0.0.1:30001/...'). Unparsable URLs count as off-origin (fail closed).
+ */
+export function isSameOrigin(url: string, originUrl: string): boolean {
+  try {
+    return new URL(url).origin === new URL(originUrl).origin;
+  } catch {
+    return false;
+  }
+}
 
 export async function runFlow(spec: FlowSpec, deps: FlowRunDeps): Promise<FlowRunResult> {
   const startedAt = Date.now();
@@ -103,19 +117,28 @@ export async function runFlow(spec: FlowSpec, deps: FlowRunDeps): Promise<FlowRu
     page.on('pageerror', (err) => push(pageErrors, err.message, MAX_RECORDED_ERRORS));
     page.on('requestfailed', (req) => push(failedRequests, `${req.method()} ${req.url()} — ${req.failure()?.errorText ?? 'failed'}`, MAX_RECORDED_REQUESTS));
     page.on('request', (req) => {
-      if (!req.url().startsWith(origin)) push(offOriginRequests, req.url(), MAX_RECORDED_REQUESTS);
+      if (!isSameOrigin(req.url(), origin)) push(offOriginRequests, req.url(), MAX_RECORDED_REQUESTS);
     });
     page.on('framenavigated', (frame) => {
-      if (frame === page.mainFrame() && !frame.url().startsWith(origin) && frame.url() !== 'about:blank') {
+      if (frame === page.mainFrame() && frame.url() !== 'about:blank' && !isSameOrigin(frame.url(), origin)) {
         offOriginNav = frame.url();
       }
     });
 
-    const stepTimeout = (declared?: number): number => declared ?? deps.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+    // Each step's own timeout is clamped to the remaining wall so the declared flow bound is a
+    // real bound, not "wall + one more step + screenshots".
+    const stepTimeout = (declared?: number): number => {
+      const want = declared ?? deps.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+      return Math.max(250, Math.min(want, wallDeadline - Date.now()));
+    };
 
     for (let i = 0; i < spec.steps.length; i++) {
       const step = spec.steps[i]!;
       const n = i + 1;
+      if (deps.signal?.aborted === true) {
+        steps.push({ n, kind: step.do, target: describeStep(step), ok: false, failure: { class: 'protocol', detail: 'the turn was aborted by the user before this step ran' } });
+        break;
+      }
       if (!deps.isPreviewAlive()) {
         previewDied = true;
         break;

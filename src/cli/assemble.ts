@@ -23,7 +23,8 @@ import { foldRepairs } from '../recovery/ledger.js';
 import { evaluateRepair, type RepairVerdict } from '../recovery/policy.js';
 import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
 import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
-import { sweepOrphanedPreviews, type PreviewSweepResult } from '../preview/registry.js';
+import { loadPreviewRegistry, previewsFile, sweepOrphanedPreviews, type PreviewSweepResult } from '../preview/registry.js';
+import { isPidAlive } from '../store/event-log.js';
 import { readPlanState } from '../plan/canonical.js';
 import type { PlanGraph } from '../plan/schema.js';
 import { foldGraphState, integrationGateState } from '../plan/graph-state.js';
@@ -155,12 +156,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   try {
     const swept = await sweepOrphanedPreviews(layout.projectDir);
     if (swept.lockUnavailable === true) {
-      previewSweep = 'preview sweep skipped (registry busy); orphans are retried next session';
+      previewSweep = `preview sweep skipped (${swept.lockDetail ?? 'registry unavailable'}); orphans are retried next session`;
     } else if (
       swept.killed.length > 0 ||
       swept.killFailed.length > 0 ||
       swept.skippedUnverified.length > 0 ||
-      swept.droppedDead.length > 0
+      swept.skippedLiveOwner.length > 0 ||
+      swept.droppedDead.length > 0 ||
+      swept.retiredStale.length > 0 ||
+      swept.unaccountedLogs.length > 0
     ) {
       previewSweepResult = swept;
       previewSweep = [
@@ -169,7 +173,12 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         swept.skippedUnverified.length > 0
           ? `${swept.skippedUnverified.length} left running (identity could not be verified — see previews.json)`
           : '',
+        swept.skippedLiveOwner.length > 0 ? `${swept.skippedLiveOwner.length} owned by a live sibling session (untouched)` : '',
         swept.droppedDead.length > 0 ? `${swept.droppedDead.length} stale record(s) cleared` : '',
+        swept.retiredStale.length > 0 ? `${swept.retiredStale.length} unverifiable record(s) >24h old deregistered (nothing killed)` : '',
+        swept.unaccountedLogs.length > 0
+          ? `${swept.unaccountedLogs.length} preview log(s) with no registry record — a start may have been lost before registration (check the file)`
+          : '',
       ]
         .filter((s) => s !== '')
         .join('; ');
@@ -233,6 +242,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       killFailed: previewSweepResult.killFailed,
       skippedUnverified: previewSweepResult.skippedUnverified,
       droppedDead: previewSweepResult.droppedDead,
+      ...(previewSweepResult.retiredStale.length > 0 ? { retiredStale: previewSweepResult.retiredStale } : {}),
+      ...(previewSweepResult.unaccountedLogs.length > 0 ? { unaccountedLogs: previewSweepResult.unaccountedLogs } : {}),
     });
   }
 
@@ -333,8 +344,13 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   });
   const stopAllPreviews = async (): Promise<string | null> => {
     try {
-      const n = await previewTool.stopAll('session-end');
-      return n > 0 ? `stopped ${n} preview server(s)` : null;
+      const r = await previewTool.stopAll('session-end');
+      if (r.stopped === 0 && r.unverified === 0) return null;
+      // Honest split: "stopped" is a VERIFIED death; a kill-resistant process is named, never
+      // silently counted as stopped.
+      return r.unverified > 0
+        ? `stopped ${r.stopped} preview server(s); ${r.unverified} could NOT be verified dead (the next session's sweep retries)`
+        : `stopped ${r.stopped} preview server(s)`;
     } catch {
       return 'preview stop-all failed; the next session\'s sweep will verify and stop leftovers';
     }
@@ -377,11 +393,23 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     if (unended.length > 0) {
       const outcome = (id: string, pid: number): string => {
         if (previewSweepResult?.killed.some((k) => k.previewId === id) === true) return 'stopped by the startup sweep';
-        if (previewSweepResult?.killFailed.some((k) => k.previewId === id) === true) return 'sweep could not stop it';
+        if (previewSweepResult?.killFailed.some((k) => k.previewId === id) === true) return 'the sweep could NOT stop it';
         if (previewSweepResult?.skippedUnverified.some((k) => k.previewId === id) === true)
           return 'left running (identity unverified — possibly not our process anymore)';
+        if (previewSweepResult?.skippedLiveOwner.includes(id) === true)
+          return 'still recorded and possibly running (the recorded owner pid looks alive — a sibling session, or a recycled pid)';
+        if (previewSweepResult?.retiredStale.includes(id) === true) return 'deregistered as stale (>24h, unverifiable; nothing was killed)';
         if (previewSweepResult?.droppedDead.includes(id) === true) return 'already dead';
-        return `no longer tracked (pid ${String(pid)} — if it was recorded, the sweep handled it)`;
+        // No sweep bucket names it: answer from the registry itself instead of guessing.
+        try {
+          const entry = loadPreviewRegistry(previewsFile(layout.projectDir)).find((e) => e.previewId === id);
+          if (entry === undefined) return `no longer recorded (pid ${String(pid)})`;
+          return isPidAlive(entry.pid)
+            ? `STILL RECORDED with a live pid ${String(entry.pid)} — the sweep did not resolve it this time`
+            : 'recorded but its pid is dead (cleared at the next sweep)';
+        } catch {
+          return `state unknown (pid ${String(pid)})`;
+        }
       };
       previewResumeNote = unended
         .map(([id, v]) => `preview ${id} (${v.command}) was running when the previous life ended; ${outcome(id, v.pid)}. It is NOT attached to this session — start a new preview if needed.`)

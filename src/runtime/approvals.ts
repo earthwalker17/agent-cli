@@ -69,9 +69,9 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
         // the batch, and a prompt that says "this command" while granting three is a lie.
         `   [s] allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'}`
       : req.kind === 'preview'
-        ? // A preview [s] consents to RE-STARTS of the exact command (body-bound, this session
+        ? // A preview [s] consents to RE-STARTS of the exact command(s) (body-bound, this session
           // only) — not to any other script, and not across sessions (grants are never restored).
-          '   [s] allow re-starts of THIS EXACT command this session'
+          `   [s] allow re-starts of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'} this session`
         : grantable
           ? forwarded
             ? '   [s] allow for the rest of THIS TASK'

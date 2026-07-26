@@ -1,7 +1,9 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { loadRegistryArray, saveRegistryArray, withRegistryLock } from '../shared/registry-lock.js';
 import { isPidAlive } from '../store/event-log.js';
 import { killTree } from '../exec/kill.js';
+import { readTail } from './process.js';
 import { expectedCommandLineToken, identityMatches, queryProcessIdentity, type IdentityQuery } from './identity.js';
 import type { PreviewRegistryEntry } from './types.js';
 
@@ -21,7 +23,17 @@ import type { PreviewRegistryEntry } from './types.js';
  * `preview.started` is appended, so a crash between the two leaves a sweepable entry with no
  * event — never an event whose promised sweep cannot find the process. The stop path is the
  * mirror: `preview.ended` first, THEN unregister (a crash between self-heals as a dead-pid drop).
+ *
+ * HONEST RESIDUAL WINDOW: a crash between the OS spawn and the registry write (which may wait
+ * on the registry lock) leaves a running server with no entry and no event. The only trace is
+ * its log file, created before the spawn — so the sweep additionally scans the previews log
+ * directory and REPORTS (never touches) any log with no registry record and no harness ended
+ * marker. The exit listener writes that marker on every observed death, which is what keeps the
+ * scan's noise near zero.
  */
+
+/** The last line the exit listener appends to a preview's log file when the death was observed. */
+export const LOG_ENDED_MARKER = '[agent-cli] preview ended';
 
 export function previewsFile(projectDir: string): string {
   return path.join(projectDir, 'previews.json');
@@ -58,11 +70,14 @@ export async function registerPreview(file: string, entry: PreviewRegistryEntry)
   });
 }
 
-export async function unregisterPreview(file: string, previewId: string): Promise<void> {
+export async function unregisterPreview(file: string, previewId: string, ownerSessionId?: string): Promise<void> {
   await withRegistryLock(file, () => {
     saveRegistryArray(
       file,
-      loadPreviewRegistry(file).filter((e) => e.previewId !== previewId),
+      // Scoped to the owner when known: preview ids are short random slugs in a SHARED
+      // per-project file, and a cross-session collision must never delete a sibling's
+      // crash coverage.
+      loadPreviewRegistry(file).filter((e) => !(e.previewId === previewId && (ownerSessionId === undefined || e.ownerSessionId === ownerSessionId))),
     );
   });
 }
@@ -76,8 +91,14 @@ export interface PreviewSweepResult {
   skippedLiveOwner: string[];
   /** Entries whose preview pid is already dead — dropped, nothing to do. */
   droppedDead: string[];
-  /** The registry lock was contended past its retry budget; nothing was read or touched. */
+  /** Unverifiable entries past the retirement age — DEREGISTERED, never killed (see below). */
+  retiredStale: string[];
+  /** Log files with no registry record and no ended marker — the spawn→register crash window. */
+  unaccountedLogs: string[];
+  /** The registry lock could not be acquired; nothing was read or touched. */
   lockUnavailable?: boolean;
+  /** Why (held live vs a filesystem error) — "busy" must not mask a read-only state dir. */
+  lockDetail?: string;
 }
 
 export interface PreviewSweepOptions {
@@ -85,7 +106,19 @@ export interface PreviewSweepOptions {
   nowMs?: () => number;
   queryIdentity?: IdentityQuery;
   kill?: (pid: number) => Promise<{ verified: boolean; detail: string }>;
+  /** Total identity-query wall budget; entries past it are reported, not queried. */
+  wallMs?: number;
 }
+
+/** Total identity-query budget per sweep — startup must not block on N × 15s queries. */
+export const SWEEP_WALL_MS = 20_000;
+/**
+ * An unverifiable entry older than this is DEREGISTERED without a kill: a preview's TTL is
+ * minutes, so nothing this old can still be ours — but a kill still needs positive identity,
+ * and deregistration is the only action that is safe without it. The process (if any) is
+ * simply no longer tracked; EADDRINUSE at the next start is the honest surface.
+ */
+export const RETIRE_UNVERIFIED_AFTER_MS = 24 * 60 * 60 * 1000;
 
 const emptyResult = (): PreviewSweepResult => ({
   killed: [],
@@ -93,6 +126,8 @@ const emptyResult = (): PreviewSweepResult => ({
   skippedUnverified: [],
   skippedLiveOwner: [],
   droppedDead: [],
+  retiredStale: [],
+  unaccountedLogs: [],
 });
 
 /** Sweep crash-orphaned preview processes. Kills run UNLOCKED, like worktree removals. */
@@ -101,18 +136,19 @@ export async function sweepOrphanedPreviews(projectDir: string, opts: PreviewSwe
   const nowMs = opts.nowMs ?? Date.now;
   const queryIdentity = opts.queryIdentity ?? queryProcessIdentity;
   const kill = opts.kill ?? killTree;
+  const wallMs = opts.wallMs ?? SWEEP_WALL_MS;
   const file = previewsFile(projectDir);
 
   let entries: PreviewRegistryEntry[];
   try {
     entries = await withRegistryLock(file, () => loadPreviewRegistry(file), { isAlive, nowMs });
-  } catch {
-    return { ...emptyResult(), lockUnavailable: true };
+  } catch (err) {
+    return { ...emptyResult(), lockUnavailable: true, lockDetail: (err as Error).message };
   }
-  if (entries.length === 0) return emptyResult();
 
   const result = emptyResult();
-  const dispose = new Set<string>(); // previewIds this sweep disposed of (dead or verified-killed)
+  const dispose = new Set<string>(); // previewIds this sweep disposed of (dead, killed, or retired)
+  const startedAt = nowMs();
 
   for (const e of entries) {
     if (!isAlive(e.pid)) {
@@ -120,22 +156,34 @@ export async function sweepOrphanedPreviews(projectDir: string, opts: PreviewSwe
       dispose.add(e.previewId);
       continue;
     }
-    if (e.ownerPid !== undefined && Number.isInteger(e.ownerPid) && isAlive(e.ownerPid)) {
+    // A live owner means a sibling session manages it — EXCEPT our own pid: the sweep runs
+    // before this process registers anything, so an entry "owned" by our pid is a crashed
+    // predecessor whose pid was recycled onto us; it falls through to identity verification.
+    if (e.ownerPid !== undefined && Number.isInteger(e.ownerPid) && e.ownerPid !== process.pid && isAlive(e.ownerPid)) {
       result.skippedLiveOwner.push(e.previewId);
       continue;
     }
-    // Live orphan: verify identity, then kill — or report why not.
-    const identity = await queryIdentity(e.pid);
+    const age = nowMs() - Date.parse(e.createdAt);
+    const overBudget = nowMs() - startedAt >= wallMs;
+    const identity = overBudget ? null : await queryIdentity(e.pid);
     const token = expectedCommandLineToken(e.command);
-    if (identity === null) {
-      result.skippedUnverified.push({ previewId: e.previewId, pid: e.pid, detail: 'identity query failed or pid vanished' });
-      continue;
-    }
-    if (!identityMatches(identity, token, e.createdAt)) {
+    const verified = identity !== null && identityMatches(identity, token, e.createdAt);
+    if (!verified) {
+      // Retirement is NOT a kill: deregistering a >24h-old unverifiable record is safe (nothing
+      // that old is ours — the TTL is minutes), while killing without identity never is.
+      if (Number.isFinite(age) && age > RETIRE_UNVERIFIED_AFTER_MS) {
+        result.retiredStale.push(e.previewId);
+        dispose.add(e.previewId);
+        continue;
+      }
       result.skippedUnverified.push({
         previewId: e.previewId,
         pid: e.pid,
-        detail: 'command line or creation time does not match the recorded start (possible pid reuse)',
+        detail: overBudget
+          ? 'sweep identity budget exhausted; retried next session'
+          : identity === null
+            ? 'identity query failed or pid vanished'
+            : 'command line or creation time does not match the recorded start (possible pid reuse)',
       });
       continue;
     }
@@ -147,6 +195,26 @@ export async function sweepOrphanedPreviews(projectDir: string, opts: PreviewSwe
       result.killFailed.push({ previewId: e.previewId, pid: e.pid, detail: r.detail });
     }
   }
+
+  // The spawn→register crash window: a log file with no registry record and no harness ended
+  // marker is the only trace of a start that died before registration. Report, never touch.
+  try {
+    const dir = previewLogsDir(projectDir);
+    const known = new Set(entries.map((e) => path.basename(e.logFile)));
+    const logs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.log')).slice(0, 50) : [];
+    for (const f of logs) {
+      if (known.has(f)) continue;
+      const full = path.join(dir, f);
+      // Recency-bounded: a lost spawn matters near in time; aged logs are ordinary evidence.
+      if (nowMs() - fs.statSync(full).mtimeMs > 48 * 60 * 60 * 1000) continue;
+      if (readTail(full, 512).includes(LOG_ENDED_MARKER)) continue;
+      result.unaccountedLogs.push(full);
+    }
+  } catch {
+    /* the scan is best-effort reporting; it must never block a session */
+  }
+
+  if (entries.length === 0 && result.unaccountedLogs.length === 0) return result;
 
   // Merge-on-save: drop only what this sweep disposed of; concurrent registrations survive;
   // kill-failed and unverified entries stay registered so the next session retries/reports.

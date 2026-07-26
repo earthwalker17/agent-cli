@@ -98,20 +98,31 @@ function marker(content: string | ToolResultPart[]): string {
   if (typeof content === 'string') {
     return `[elided to save context: tool output of ${content.length} chars, sha256=${sha256(Buffer.from(content, 'utf8')).slice(0, 12)}…; the full output remains in the session evidence log]`;
   }
-  const text = content
-    .filter((p): p is Extract<ToolResultPart, { type: 'text' }> => p.type === 'text')
-    .map((p) => p.text)
-    .join('\n');
-  const images = content.filter((p) => p.type === 'image').length;
+  // The digest and char count must describe what the TOOL said — i.e. what outputPreview holds
+  // in the evidence log — so harness-authored image-replacement markers (and image parts, which
+  // are never logged verbatim) are counted as images, not as tool text.
+  const originals = content.filter(
+    (p): p is Extract<ToolResultPart, { type: 'text' }> => p.type === 'text' && p.elisionMarker !== true,
+  );
+  const text = originals.map((p) => p.text).join('\n');
+  const images = content.filter((p) => p.type === 'image' || (p.type === 'text' && p.elisionMarker === true)).length;
   return `[elided to save context: tool output of ${text.length} chars${images > 0 ? ` + ${images} image(s)` : ''}, sha256=${sha256(Buffer.from(text, 'utf8')).slice(0, 12)}…; the full output remains in the session evidence log]`;
 }
 
 function imageMarker(p: Extract<ToolResultPart, { type: 'image' }>): ToolResultPart {
   const where = p.sha256 !== undefined ? `preserved at objects/${p.sha256}` : 'preserved in the session evidence store';
-  return { type: 'text', text: `[screenshot${p.label !== undefined ? ` ${p.label}` : ''}: viewed live earlier this session; ${where} — view_image can re-fetch it if genuinely needed]` };
+  return {
+    type: 'text',
+    text: `[screenshot${p.label !== undefined ? ` ${p.label}` : ''}: viewed live earlier this session; ${where} — view_image can re-fetch it if genuinely needed]`,
+    elisionMarker: true,
+  };
 }
 
-/** Index of the message from which the last `keep` assistant steps begin (0 = protect all). */
+/**
+ * Index of the message from which the last `keep` assistant steps begin. keep<=0 protects
+ * NOTHING (the boundary is the end of the list, so every message is elidable); fewer than
+ * `keep` assistant steps protects everything (boundary 0).
+ */
 function protectionBoundary(messages: readonly ChatMessage[], keep: number): number {
   if (keep <= 0) return messages.length;
   let assistantSeen = 0;
@@ -146,12 +157,18 @@ export function elideHistory(messages: readonly ChatMessage[], opts: ElisionOpti
       const b = m.content[j]!;
       if (b.type !== 'tool_result' || typeof b.content === 'string') continue;
       if (!b.content.some((p) => p.type === 'image')) continue;
+      let replacedAny = false;
       const replaced = b.content.map((p) => {
         if (p.type !== 'image') return p;
         const mk = imageMarker(p);
+        // Never let a "compaction" grow the prompt: a tiny image stays pixels (the char walk's
+        // own too-small guard, mirrored here).
+        if (partChars(mk) >= partChars(p)) return p;
         sentChars -= partChars(p) - partChars(mk);
+        replacedAny = true;
         return mk;
       });
+      if (!replacedAny) continue;
       m.content[j] = { type: 'tool_result', toolUseId: b.toolUseId, content: replaced, ...(b.isError ? { isError: true } : {}) };
       imageElidedCallIds.push(b.toolUseId);
     }

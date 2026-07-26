@@ -1,6 +1,7 @@
 import type { CheckKind, CheckStatus, SessionEvent, TaskChangeFile } from '../types.js';
 import { planTaskDefinitionSha, topoOrder, type PlanGraph, type PlanTaskRole } from './schema.js';
 import { relPrefixesOverlap } from '../shared/pathutil.js';
+import { proveWith } from '../recovery/catalogue.js';
 
 
 /**
@@ -290,7 +291,7 @@ export function foldGraphState(
         );
         const verification = verificationFor(task.checks ?? [], anchor, task.touches);
         if (verification.status === 'pending') {
-          notes.push(`required check(s) not passed since integration: ${verification.missing.join(', ')} — run run_check`);
+          notes.push(`required check(s) not passed since integration: ${verification.missing.join(', ')} — prove with ${proveWith(verification.missing)}`);
         } else if (verification.status === 'waived') {
           notes.push(`check(s) ${verification.waived.join(', ')} WAIVED (unsupported in this project — not proof, recorded as a caveat)`);
         }

@@ -1,10 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { killTree } from '../exec/kill.js';
+import { isAlive, killTree } from '../exec/kill.js';
 import type { PreviewStopReason, StopResult, SupervisedExit, SupervisedHandle, SupervisedSpec } from './types.js';
-
-const isWin = process.platform === 'win32';
 
 /** A session resource must not outlive the user's attention span by much; restart is cheap. */
 export const DEFAULT_PREVIEW_TTL_MS = 30 * 60 * 1000;
@@ -14,6 +12,8 @@ export const DEFAULT_TAIL_BYTES = 8 * 1024;
 const LOG_POLL_MS = 2000;
 /** After a kill, how long death may take before stop() reports the process still alive. */
 const EXIT_AFTER_KILL_BOUND_MS = 5000;
+/** The kill HELPER itself is bounded too: a wedged taskkill must never hang session end. */
+const KILL_HELPER_BOUND_MS = 10_000;
 
 /**
  * Spawn a supervised long-running process. Resolves once the OS has actually spawned it (pid
@@ -41,7 +41,14 @@ export async function startSupervised(spec: SupervisedSpec): Promise<SupervisedH
       env: spec.env,
       stdio: ['ignore', fd, fd],
       windowsHide: true,
-      detached: !isWin, // POSIX: own process group, so killTree can signal the group
+      // POSIX: own process group so killTree can signal the group AND a terminal SIGINT never
+      // reaches the preview. Windows: detaching is NOT viable (DETACHED_PROCESS makes the
+      // PowerShell wrapper exit immediately with no output — verified empirically), so the
+      // preview shares the console group; the REPL is safe (raw-mode consumes Ctrl+C as a
+      // keypress), but a ONE-SHOT console Ctrl+C also reaches the preview, whose death is then
+      // honestly recorded as 'crashed' moments before session-end stop-all would have stopped
+      // it. A documented Windows limitation, not a silent one.
+      detached: process.platform !== 'win32',
     });
   } catch (err) {
     fs.closeSync(fd);
@@ -102,10 +109,23 @@ export async function startSupervised(spec: SupervisedSpec): Promise<SupervisedH
       return Promise.resolve({ ok: true, detail: 'already exited' });
     }
     if (stopResult !== null) return stopResult; // first cause wins; later stops observe it
+    // The death→'exit'-event window: if the OS already reaped the process, this stop did not
+    // cause anything — recording its reason would relabel a genuine crash as a lifecycle end
+    // (and downgrade its recovery classification). Leave requestedStop null; the imminent exit
+    // event reports the truth.
+    if (!isAlive(pid)) {
+      return Promise.resolve({ ok: true, detail: 'already exited (exit event pending)' });
+    }
     requestedStop = reason;
     stopResult = (async (): Promise<StopResult> => {
-      const kill = await killTree(pid);
-      // Bound the wait for the exit event so a kill-resistant process cannot hang the caller.
+      // BOTH bounds matter: the kill helper itself (a wedged taskkill must never hang the quit
+      // path) and the wait for the exit event afterwards.
+      const kill = await Promise.race([
+        killTree(pid),
+        new Promise<{ verified: boolean; detail: string }>((r) =>
+          setTimeout(r, KILL_HELPER_BOUND_MS, { verified: false, detail: `kill helper did not return within ${String(KILL_HELPER_BOUND_MS)}ms` }).unref(),
+        ),
+      ]);
       const dead = await Promise.race([
         exited.then(() => true),
         new Promise<boolean>((r) => setTimeout(r, EXIT_AFTER_KILL_BOUND_MS, false).unref()),

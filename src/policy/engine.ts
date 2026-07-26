@@ -266,7 +266,7 @@ export function decide<I>(
   //     sandbox — the Low-IL boundary denies workspace writes, so a build could not even work
   //     there; the boundary is recorded as 'unsandboxed' rather than implied.
   if (tool.check !== undefined) {
-    let fact: { resolved: readonly ResolvedCheckFact[] };
+    let fact: { resolved: readonly ResolvedCheckFact[]; manage?: boolean };
     try {
       fact = tool.check(input);
     } catch (e) {
@@ -281,9 +281,18 @@ export function decide<I>(
       );
     }
     if (fact.resolved.length === 0) {
-      // Nothing resolved ⇒ nothing to run ⇒ nothing to consent to. The tool still executes and
-      // reports honestly (unsupported results, or an observe/manage action such as a preview
-      // stop/status); it just must not present an empty approval.
+      // Nothing resolved ⇒ nothing to run ⇒ nothing to consent to — but the RECORD must not
+      // misclassify: stopping/inspecting a session-owned preview process is a manage action
+      // (reversible in the session sense: the resource is the session's own and re-startable),
+      // not an observation, while run_check's all-unsupported case genuinely observes nothing.
+      if (fact.manage === true) {
+        return decision(
+          'reversible',
+          'allow',
+          'preview.manage',
+          'manages a preview process this session itself started (stop or inspect); reaches no other process',
+        );
+      }
       return decision('observe', 'allow', 'check.nothing-to-run', 'the call resolves no command to run (nothing to consent to)');
     }
     const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command, r.bodySha));
@@ -318,7 +327,8 @@ export function decide<I>(
         `starts a harness-resolved preview server (${summary}) that KEEPS RUNNING after this call — until stopped, ` +
           'the session ends, or its bounded lifetime expires — binds a local port, and executes a script defined by ' +
           'this workspace at full user privilege; browser verification may drive it once running; ' +
-          'NOT sandboxed, NOT snapshotted or undoable',
+          'a session-scope answer also covers re-starts after ordinary workspace edits (only rewriting the script ' +
+          'itself, or changing the declared port, re-asks); NOT sandboxed, NOT snapshotted or undoable',
         { noUndo: true, execBoundary: 'unsandboxed', checkReplayKeys: keys },
       );
     }
@@ -370,7 +380,9 @@ export function decide<I>(
       'allow',
       'browser.preview-bound',
       `drives the running managed preview in a headless browser (flow '${fact.flowName}', ${fact.stepCount} step(s)); ` +
-        'origin-locked to the preview; app-side effects are the consented server code acting on its own state; not undoable',
+        'TOP-LEVEL navigation is locked to the preview origin (the page\'s own subresource/XHR requests to other ' +
+        'origins are RECORDED, not blocked, and the lock binds the port, not the socket owner); app-side effects are ' +
+        'the consented server code acting on its own state; not undoable',
       { noUndo: true },
     );
   }
@@ -380,18 +392,40 @@ export function decide<I>(
   //     for state-dir blob bytes. The sha-bound admission (only shas this session's browser
   //     artifacts recorded) is enforced structurally by the tool and pinned by tests.
   if (tool.evidenceRead !== undefined) {
-    let fact: { sha256: string };
+    let fact: { sha256: string; admitted?: boolean };
     try {
       fact = tool.evidenceRead(input);
     } catch (e) {
       return decision('sensitive', 'deny', 'evidence.invalid-contract', `evidenceRead() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined) {
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'evidence.conflicting-contract',
-        'a tool may declare an evidence read, typed checks, a shell command, delegation, or a plan-document write — never a combination',
+        'a tool may declare an evidence read, typed checks, a shell command, delegation, a plan-document write, or a browser flow — never a combination',
+      );
+    }
+    // An evidence READER must not write: a declared mutation plan (or an undeclarable one)
+    // through this branch would bypass path validation and snapshots entirely.
+    let plan: MutationPlan | null;
+    try {
+      plan = tool.mutates(input, ctx);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'evidence.invalid-contract', `mutates() threw: ${(e as Error).message}`);
+    }
+    if (plan === null || plan.paths.length > 0) {
+      return decision('sensitive', 'deny', 'evidence.mutating-contract', 'an evidence-read tool must declare an empty mutation plan');
+    }
+    if (fact.admitted === false) {
+      // The record must never claim an allowed re-read of bytes that were refused: the shared
+      // blob store also holds spilled output and snapshot pre-images deliberately withheld
+      // from the model.
+      return decision(
+        'sensitive',
+        'deny',
+        'evidence.not-session-artifact',
+        `objects/${fact.sha256.slice(0, 12)}… is not a screenshot this session's browser flows recorded; other evidence blobs are deliberately not model-readable`,
       );
     }
     return decision(

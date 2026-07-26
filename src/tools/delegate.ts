@@ -4,7 +4,7 @@ import type { SessionEvent, SubagentRoleName, TaskChangeFile, Tool, ToolContext,
 import type { PlanState } from '../plan/canonical.js';
 import type { GraphState } from '../plan/graph-state.js';
 import type { CheckKind } from '../types.js';
-import { renderRecoveryGuidance } from '../recovery/catalogue.js';
+import { proveWith, renderRecoveryGuidance } from '../recovery/catalogue.js';
 import type { RepairVerdict } from '../recovery/policy.js';
 import { planTaskDefinitionSha, type PlanGraph, type PlanTask } from '../plan/schema.js';
 import {
@@ -321,7 +321,7 @@ export function checkDagRules(
     if (tasks.some((t) => t.role === 'executor')) {
       return (
         `the plan's integration gate has not passed since the last apply: ${gate.integrationGate.pending.join(', ')} — ` +
-        `run_check them before starting another executor wave (broader verification at the integration boundary is what the gate is for), ` +
+        `prove with ${proveWith(gate.integrationGate.pending)} before starting another executor wave (broader verification at the integration boundary is what the gate is for), ` +
         `or amend the plan's gates with update_plan (this resets approval)`
       );
     }

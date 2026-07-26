@@ -764,7 +764,9 @@ function renderMarkdown(r: ReportJson): string {
     for (const p of r.previews) {
       const readyBit = p.ready ? `ready at ${p.url ?? '?'} (${p.probeDetail ?? ''})` : 'readiness never observed';
       const endBit = p.neverEnded
-        ? 'NEVER ENDED in this log — the session died with it running; the next session\'s identity-verified sweep handles it'
+        ? r.session.endedReason === null
+          ? 'NEVER ENDED in this log — the session died with it running; the next session\'s identity-verified sweep handles it'
+          : 'no ended event recorded (its stop may have raced the session end); the next session\'s sweep verifies'
         : `ended: ${p.end?.reason ?? '?'}${p.end?.exitCode !== null && p.end?.exitCode !== undefined ? ` (exit ${p.end.exitCode})` : ''}`;
       L.push(`- ${p.previewId} — \`${p.command}\` [${p.recipeId}; pid ${p.pid}]`);
       L.push(`    ${readyBit}; ${endBit}`);

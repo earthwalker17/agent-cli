@@ -62,25 +62,55 @@ async function defaultProbeHttp(url: string): Promise<number | null> {
   }
 }
 
+/** At most this many parsed candidates are probed per cycle (a chatty proxy table must not
+ *  turn one iteration into minutes of serial 2s probes). */
+const MAX_PORT_CANDIDATES = 4;
+
 export async function waitForReady(handle: SupervisedHandle, opts: ReadyOptions = {}): Promise<ReadyOutcome> {
   const waitMs = opts.waitMs ?? DEFAULT_READY_WAIT_MS;
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
   const probeHttp = opts.probeHttp ?? defaultProbeHttp;
   const startedAt = Date.now();
 
+  const aborted = (): ReadyOutcome => ({
+    ready: false,
+    cause: 'aborted',
+    waitedMs: Date.now() - startedAt,
+    probeDetail: 'readiness wait aborted by the user; the process was not stopped',
+  });
+  const timedOut = (candidates: readonly number[]): ReadyOutcome => ({
+    ready: false,
+    cause: 'timeout',
+    waitedMs: Date.now() - startedAt,
+    probeDetail:
+      candidates.length > 0
+        ? `no HTTP answer on candidate port(s) ${candidates.join(', ')} within ${String(waitMs)}ms`
+        : `no listening port appeared in the server output within ${String(waitMs)}ms`,
+  });
+
   for (;;) {
-    const waitedMs = Date.now() - startedAt;
-    if (opts.signal?.aborted) {
-      return { ready: false, cause: 'aborted', waitedMs, probeDetail: 'readiness wait aborted by the user; the process was not stopped' };
-    }
+    if (opts.signal?.aborted) return aborted();
     if (!handle.isAlive()) {
-      return { ready: false, cause: 'died', waitedMs, probeDetail: 'the process exited before answering any HTTP probe' };
+      return { ready: false, cause: 'died', waitedMs: Date.now() - startedAt, probeDetail: 'the process exited before answering any HTTP probe' };
     }
-    const candidates = opts.expectedPort !== undefined ? [opts.expectedPort] : parsePortCandidates(handle.tail());
+    // A DECLARED port is probed only once the server's own output mentions it: an HTTP answer
+    // alone proves only that SOMETHING answers on 127.0.0.1:<port> — without the announcement,
+    // a foreign local service could be adopted as the consented, browser-drivable preview.
+    const announced = parsePortCandidates(handle.tail());
+    const candidates =
+      opts.expectedPort !== undefined ? (announced.includes(opts.expectedPort) ? [opts.expectedPort] : []) : announced.slice(0, MAX_PORT_CANDIDATES);
     for (const port of candidates) {
+      // The deadline and the abort are honored INSIDE the candidate walk: each probe can cost
+      // up to its request timeout, and a long candidate list must not outlive either bound.
+      if (opts.signal?.aborted) return aborted();
+      if (Date.now() - startedAt >= waitMs) return timedOut(candidates);
       const url = `http://127.0.0.1:${String(port)}/`;
       const status = await probeHttp(url);
       if (status !== null) {
+        // A probe answer from a process that has DIED is somebody else's socket, never readiness.
+        if (!handle.isAlive()) {
+          return { ready: false, cause: 'died', waitedMs: Date.now() - startedAt, probeDetail: 'the process exited while the port was being probed' };
+        }
         const source = opts.expectedPort !== undefined ? 'declared port' : 'port parsed from server output';
         return {
           ready: true,
@@ -89,20 +119,19 @@ export async function waitForReady(handle: SupervisedHandle, opts: ReadyOptions 
           url,
           httpStatus: status,
           waitedMs: Date.now() - startedAt,
-          probeDetail: `HTTP ${String(status)} on ${source} ${String(port)}`,
+          probeDetail: `HTTP ${String(status)} on ${source} ${String(port)}, announced in server output (socket ownership not verified)`,
         };
       }
     }
     if (Date.now() - startedAt >= waitMs) {
-      return {
-        ready: false,
-        cause: 'timeout',
-        waitedMs: Date.now() - startedAt,
-        probeDetail:
-          candidates.length > 0
-            ? `no HTTP answer on candidate port(s) ${candidates.join(', ')} within ${String(waitMs)}ms`
-            : `no listening port appeared in the server output within ${String(waitMs)}ms`,
-      };
+      return opts.expectedPort !== undefined && !announced.includes(opts.expectedPort)
+        ? {
+            ready: false,
+            cause: 'timeout',
+            waitedMs: Date.now() - startedAt,
+            probeDetail: `the server output never announced the declared port ${String(opts.expectedPort)} within ${String(waitMs)}ms (announcement is required before the harness will probe it)`,
+          }
+        : timedOut(candidates);
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }

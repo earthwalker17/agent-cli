@@ -550,8 +550,12 @@ export interface Tool<I = unknown> {
    *
    * MUST be pure: `decide()` is pure over (tool, input, ctx, grants), so the fact reads a project
    * snapshot captured earlier — never the filesystem.
+   *
+   * `manage` (Session 13): an empty resolution that is a MANAGE action on a session-owned
+   * resource (a preview stop/status), not a "nothing could run" outcome — the decision record
+   * must not classify killing a process as observe.
    */
-  check?(input: I): { resolved: readonly ResolvedCheckFact[] };
+  check?(input: I): { resolved: readonly ResolvedCheckFact[]; manage?: boolean };
   /**
    * Declares that this tool DRIVES A BROWSER against a harness-managed preview (Session 13). A
    * policy FACT with its own fail-closed branch: a flow executes application JavaScript and
@@ -565,11 +569,13 @@ export interface Tool<I = unknown> {
   /**
    * Declares that this tool re-reads EVIDENCE THIS SESSION RECORDED (Session 13: view_image).
    * A policy FACT so the decision log stays honest — the observe fall-through's "read-only
-   * workspace access" reason would be false for state-dir evidence bytes. The sha-bound
-   * admission (only shas recorded by this session's browser artifacts) is enforced by the tool
-   * and pinned by tests; the fact carries the sha for the decision record.
+   * workspace access" reason would be false for state-dir evidence bytes. `admitted` is the
+   * fact-level answer to "did this session's browser artifacts record that sha" (pure over the
+   * session's in-memory events): the engine DENIES an un-admitted sha, so the decision record
+   * never claims an allowed re-read of evidence that was refused. The tool re-checks at
+   * execute as defense in depth.
    */
-  evidenceRead?(input: I): { sha256: string };
+  evidenceRead?(input: I): { sha256: string; admitted?: boolean };
   /**
    * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
    * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the
@@ -653,10 +659,12 @@ export type Approver = (req: ApprovalRequest) => Promise<ApprovalOutcome>;
 /**
  * Parts of a structured tool_result (Session 13). `sha256`/`label` on an image part are
  * HARNESS-INTERNAL enrichment — elision uses them to build an honest replacement marker
- * (`objects/<sha>`); the provider mapping sends only mediaType + data to the wire.
+ * (`objects/<sha>`); the provider mapping sends only mediaType + data to the wire. A text part
+ * with `elisionMarker` is a harness-authored image replacement, never original tool output —
+ * the whole-result marker must not digest or size it as if the tool had said it.
  */
 export type ToolResultPart =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; elisionMarker?: true }
   | { type: 'image'; mediaType: string; dataBase64: string; sha256?: string; label?: string };
 
 export type ContentBlock =
@@ -928,6 +936,7 @@ export type EventBody =
     }
   | {
       type: 'preview.ready';
+      callId: string;
       previewId: string;
       url: string;
       port: number;
@@ -951,6 +960,11 @@ export type EventBody =
       killFailed: { previewId: string; pid: number; detail: string }[];
       skippedUnverified: { previewId: string; pid: number; detail: string }[];
       droppedDead: string[];
+      /** Unverifiable entries old enough that deregistration (never a kill) is the honest exit. */
+      retiredStale?: string[];
+      /** Preview log files with no registry record and no ended marker — a start may have been
+       *  lost in the spawn→register window; reported, never touched. */
+      unaccountedLogs?: string[];
     }
   /**
    * One browser flow's detailed evidence (Session 13, additive). Pairs with check.started /

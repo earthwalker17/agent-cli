@@ -45,7 +45,23 @@ export function createViewImageTool(deps: ViewImageDeps): Tool<ViewImageInputT> 
       'anything works. Only screenshots from this session are viewable; traces are files for humans.',
     schema: ViewImageInput,
     mutates: () => ({ paths: [] }),
-    evidenceRead: (input) => ({ sha256: input.sha256 }),
+    // `admitted` is computed from the same event scan execute() uses (pure over the session's
+    // in-memory events), so the DECISION RECORD never claims an allowed re-read of bytes the
+    // tool would refuse — the engine denies un-admitted shas outright.
+    evidenceRead: (input) => {
+      let admitted = false;
+      try {
+        for (const e of deps.events()) {
+          if (e.type === 'browser.flow' && e.artifacts.some((a) => a.kind === 'screenshot' && a.sha256 === input.sha256)) {
+            admitted = true;
+            break;
+          }
+        }
+      } catch {
+        admitted = false;
+      }
+      return { sha256: input.sha256, admitted };
+    },
 
     execute(input, _ctx): Promise<ToolResult> {
       const startedAt = Date.now();

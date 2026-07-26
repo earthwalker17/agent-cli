@@ -192,13 +192,26 @@ describe('preview policy (pure decide over the check fact)', () => {
     expect(decide(t, { action: 'start' }, ctx(), grants)).toMatchObject({ decision: 'ask', rule: 'preview.approval-required' });
   });
 
-  it('stop/status resolve nothing and allow as observe with the honest reason', () => {
+  it('stop/status are MANAGE actions: allowed, but never recorded as observation', () => {
     const t = tool();
     for (const action of ['stop', 'status'] as const) {
       const d = decide(t, { action }, ctx(), new Grants());
-      expect(d).toMatchObject({ decision: 'allow', classification: 'observe', rule: 'check.nothing-to-run' });
+      expect(d).toMatchObject({ decision: 'allow', classification: 'reversible', rule: 'preview.manage' });
+      expect(d.reason).toContain('session itself started');
       expect(d.reason).not.toContain('no check resolved');
     }
+  });
+
+  it('a DECLARED port is part of the consent identity: a different port is a different replay key', () => {
+    const t = tool();
+    const grants = new Grants();
+    const withPort = decide(t, { action: 'start', port: 5199 }, ctx(), grants);
+    expect(withPort.decision).toBe('ask');
+    for (const k of withPort.checkReplayKeys ?? []) grants.addCheckReplay(k);
+    // Same port rides the consent; a different port (or none) re-asks.
+    expect(decide(t, { action: 'start', port: 5199 }, ctx(), grants).decision).toBe('allow');
+    expect(decide(t, { action: 'start', port: 4444 }, ctx(), grants).decision).toBe('ask');
+    expect(decide(t, { action: 'start' }, ctx(), grants).decision).toBe('ask');
   });
 
   it('the approval prompt renders the preview header and the re-start [s] wording', () => {
@@ -395,23 +408,51 @@ describe('readiness probe', () => {
     expect(parsePortCandidates('no ports here')).toEqual([]);
   });
 
-  it('declared port wins; parsed ports are probed; died/timeout/abort are typed', async () => {
-    const h = fakeHandle('x.log');
+  it('a declared port is probed only once the server ANNOUNCES it; parsed ports are probed; died/timeout/abort typed', async () => {
+    const h = fakeHandle('x.log'); // tail announces 5199
     const probed: string[] = [];
     const ok = await waitForReady(h, {
-      expectedPort: 4444,
+      expectedPort: 5199,
       probeHttp: (url) => {
         probed.push(url);
         return Promise.resolve(200);
       },
     });
-    expect(ok).toMatchObject({ ready: true, port: 4444, httpStatus: 200 });
+    expect(ok).toMatchObject({ ready: true, port: 5199, httpStatus: 200 });
     expect(ok.probeDetail).toContain('declared port');
-    expect(probed).toEqual(['http://127.0.0.1:4444/']);
+    expect(ok.probeDetail).toContain('socket ownership not verified');
+    expect(probed).toEqual(['http://127.0.0.1:5199/']);
+
+    // A declared port the server never announced is NEVER probed — a foreign local service
+    // answering there must not be adopted as the consented preview.
+    const neverProbed: string[] = [];
+    const unannounced = await waitForReady(h, {
+      expectedPort: 4444,
+      waitMs: 80,
+      pollMs: 10,
+      probeHttp: (url) => {
+        neverProbed.push(url);
+        return Promise.resolve(200);
+      },
+    });
+    expect(unannounced.cause).toBe('timeout');
+    expect(unannounced.probeDetail).toContain('never announced the declared port 4444');
+    expect(neverProbed).toEqual([]);
 
     const parsed = await waitForReady(h, { probeHttp: (u) => Promise.resolve(u.includes('5199') ? 204 : null) });
     expect(parsed).toMatchObject({ ready: true, port: 5199 });
     expect(parsed.probeDetail).toContain('parsed from server output');
+
+    // An answer arriving from a process that already DIED is somebody else's socket.
+    const dying = fakeHandle('z.log');
+    const raced = await waitForReady(dying, {
+      probeHttp: () => {
+        dying.die();
+        return Promise.resolve(200);
+      },
+    });
+    expect(raced.cause).toBe('died');
+    expect(raced.probeDetail).toContain('exited while the port was being probed');
 
     h.die();
     const died = await waitForReady(h, { probeHttp: () => Promise.resolve(null) });
@@ -488,7 +529,7 @@ describe('preview consent through the session (replay, TOCTOU re-ask, resume re-
     const decisions = s1.session.log.events.filter((e) => e.type === 'policy.decision');
     expect(decisions.map((d) => (d as { rule?: string }).rule)).toEqual([
       'preview.approval-required',
-      'check.nothing-to-run',
+      'preview.manage', // the stop — a manage action, never recorded as observation
       'preview.replay-consent',
     ]);
     const id = s1.session.id;

@@ -181,6 +181,21 @@ describe('browser_flow evidence', () => {
     expect(r.error).toContain('preview died');
     expect(h.checks.filter((e) => e.kind === 'started')).toHaveLength(0);
     expect(h.checks[0]).toMatchObject({ kind: 'ended', status: 'error', signals: ['preview-died'] });
+    // Budget symmetry: this completed row counts in checkCapsFromEvents on resume, so the live
+    // counter must count it too — otherwise resuming silently shrinks the budget.
+    expect(h.deps.caps.checksRun).toBe(1);
+  });
+
+  it('an already-aborted turn refuses the call: nothing launched, nothing recorded', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const h = harness();
+    const t = createBrowserFlowTool(h.deps);
+    const r = await t.execute(FLOW_INPUT, { ...h.ctx, signal: ac.signal });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('turn aborted');
+    expect(h.checks).toHaveLength(0);
+    expect(h.deps.caps.checksRun).toBe(0);
   });
 
   it('no launchable browser yields unsupported/precondition (the gate-waiving form) and no budget burn', async () => {
@@ -264,11 +279,31 @@ describe('view_image — the sha bound is a security boundary', () => {
     expect(trace.output).toContain('trace zip');
   });
 
-  it('classifies as observe with the honest session-evidence rule', () => {
-    const t = createViewImageTool({ getBlob: () => SHOT, events: () => [] });
-    const d = decide(t, { sha256: SHOT_SHA }, { workspaceRoot: ws, stateDir: tmp }, new Grants());
+  it('the DECISION RECORD is honest: an admitted sha allows; an un-admitted sha DENIES at the gate', () => {
+    const admittedTool = createViewImageTool({
+      getBlob: () => SHOT,
+      events: () => [flowEvent([{ kind: 'screenshot', sha256: SHOT_SHA, bytes: SHOT.length, label: 'shot', mediaType: 'image/png' }])],
+    });
+    const d = decide(admittedTool, { sha256: SHOT_SHA }, { workspaceRoot: ws, stateDir: tmp }, new Grants());
     expect(d).toMatchObject({ decision: 'allow', classification: 'observe', rule: 'observe.session-evidence' });
     expect(d.reason).toContain('image evidence this session recorded');
+
+    // No such artifact: the gate itself refuses, so the log never carries an "allowed re-read"
+    // record for bytes the tool would have refused (the honest-record rule).
+    const bareTool = createViewImageTool({ getBlob: () => SHOT, events: () => [] });
+    const deny = decide(bareTool, { sha256: SHOT_SHA }, { workspaceRoot: ws, stateDir: tmp }, new Grants());
+    expect(deny).toMatchObject({ decision: 'deny', rule: 'evidence.not-session-artifact' });
+    expect(deny.reason).toContain('deliberately not model-readable');
+  });
+});
+
+describe('origin lock is a REAL origin comparison', () => {
+  it('a port-prefix is not the same origin; unparsable URLs fail closed', async () => {
+    const { isSameOrigin } = await import('../src/browser/flow.js');
+    expect(isSameOrigin('http://127.0.0.1:3000/app', 'http://127.0.0.1:3000')).toBe(true);
+    expect(isSameOrigin('http://127.0.0.1:30001/admin', 'http://127.0.0.1:3000')).toBe(false); // the startsWith trap
+    expect(isSameOrigin('https://127.0.0.1:3000/', 'http://127.0.0.1:3000')).toBe(false);
+    expect(isSameOrigin('not a url', 'http://127.0.0.1:3000')).toBe(false);
   });
 });
 

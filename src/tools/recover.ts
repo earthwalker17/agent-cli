@@ -4,7 +4,7 @@ import { normalizeRelPrefix } from '../shared/pathutil.js';
 import { classifyFailure, latestFailureEvidence } from '../recovery/classify.js';
 import { foldRepairs } from '../recovery/ledger.js';
 import { evaluateRepair, MAX_REPAIR_ATTEMPTS } from '../recovery/policy.js';
-import { renderRecoveryGuidance } from '../recovery/catalogue.js';
+import { proveWith, renderRecoveryGuidance } from '../recovery/catalogue.js';
 import type { PlanGraph } from '../plan/schema.js';
 import type { CheckKind, SessionEvent, Tool, ToolResult } from '../types.js';
 
@@ -204,7 +204,7 @@ export function createRecoverTool(deps: RecoverDeps): Tool<RecoverInputT> {
           `signals: ${classification.signals.join(', ') || '(none)'}`,
           `scope: ${scope.length > 0 ? scope.join(', ') : '(none declared — declare one; an expanding diff is a stopping condition)'}`,
           ...(rejected.length > 0 ? [`scope path(s) refused as not contained workspace-relative prefixes: ${rejected.join(', ')}`] : []),
-          `prove it with: run_check ${input.regression_checks.join(', ')} — until every one passes, this repair stays UNPROVEN and blocks acceptance`,
+          `prove it with: ${proveWith(input.regression_checks)} — until every one passes, this repair stays UNPROVEN and blocks acceptance`,
           '',
           renderRecoveryGuidance(classification.class),
           '',

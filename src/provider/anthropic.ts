@@ -102,7 +102,7 @@ export function toApiMessage(m: ChatMessage): { role: 'user' | 'assistant'; cont
                   ? ({ type: 'text', text: p.text } as const)
                   : ({
                       type: 'image',
-                      source: { type: 'base64', media_type: p.mediaType as 'image/png', data: p.dataBase64 },
+                      source: { type: 'base64', media_type: p.mediaType as Anthropic.Base64ImageSource['media_type'], data: p.dataBase64 },
                     } as const),
               );
         return b.isError

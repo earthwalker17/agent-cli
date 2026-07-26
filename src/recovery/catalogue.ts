@@ -279,6 +279,22 @@ export function recoveryEntry(cls: FailureClass): RecoveryEntry {
 }
 
 /**
+ * The ONE composer of "how do I run these kinds" instructions the model reads. 'browser' runs
+ * through browser_flow, never run_check (its enum excludes it) — harness-authored guidance
+ * naming an impossible call at the exact moment of failure would be worse than none, and this
+ * helper is shared by every surface that renders a kind list as an instruction (recover,
+ * gate refusals, acceptance, graph-state summaries).
+ */
+export function proveWith(kinds: readonly CheckKind[]): string {
+  const shell = kinds.filter((k) => k !== 'browser');
+  const parts = [
+    ...(shell.length > 0 ? [`run_check ${shell.join(', ')}`] : []),
+    ...(kinds.includes('browser') ? ['a passing browser_flow'] : []),
+  ];
+  return parts.join(' + ');
+}
+
+/**
  * Render one entry as compact guidance for a tool result or a gate refusal. Bounded on purpose:
  * this text lands in the model's context at the exact moment of failure, so it must be short
  * enough to read and specific enough to act on.
@@ -291,16 +307,7 @@ export function renderRecoveryGuidance(cls: FailureClass, opts: { includeStops?:
     `diagnose first: ${e.diagnostics.join('; ')}`,
     `eligible actions: ${e.actions.join('; ')}`,
   ];
-  if (e.regressionChecks.length > 0) {
-    // 'browser' runs through browser_flow, never run_check (its enum excludes it) — guidance
-    // that names an impossible call at the exact moment of failure would be worse than none.
-    const shell = e.regressionChecks.filter((k) => k !== 'browser');
-    const parts = [
-      ...(shell.length > 0 ? [`run_check ${shell.join(', ')}`] : []),
-      ...(e.regressionChecks.includes('browser') ? ['a passing browser_flow'] : []),
-    ];
-    lines.push(`prove the repair with: ${parts.join(' + ')}`);
-  }
+  if (e.regressionChecks.length > 0) lines.push(`prove the repair with: ${proveWith(e.regressionChecks)}`);
   if (e.requiresConfirmation.length > 0) lines.push(`ask the user first for: ${e.requiresConfirmation.join('; ')}`);
   if (opts.includeStops === true) lines.push(`stop and escalate when: ${e.stopConditions.join('; ')}`);
   return lines.join('\n');

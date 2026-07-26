@@ -126,14 +126,19 @@ function evidenceLines(report: ReportJson, endedReason: string, logPath: string)
     const subjects = report.gitCommits.map((c) => `${c.oid.slice(0, 8)} "${truncate(c.subject, 50)}"`).join(', ');
     lines.push(`- commits: ${subjects}`);
   }
-  if (report.previews !== undefined || report.browserFlows !== undefined) {
+  {
+    // Flow ATTEMPTS come from the browser check rows (a refused/unsupported flow emits check
+    // evidence but no browser.flow detail event — it still happened and the summary must say so).
     const pv = report.previews ?? [];
     const fl = report.browserFlows ?? [];
-    const shots = fl.reduce((n, f) => n + f.artifacts.filter((a) => a.kind === 'screenshot').length, 0);
-    const passed = fl.filter((f) => f.status === 'pass').length;
-    lines.push(
-      `- preview/browser: ${pv.length} preview(s), ${fl.length} flow(s) (${passed} pass)${shots > 0 ? `, ${shots} screenshot(s)` : ''}`,
-    );
+    const attempts = (report.checks ?? []).filter((c) => c.check === 'browser');
+    if (pv.length > 0 || fl.length > 0 || attempts.length > 0) {
+      const shots = fl.reduce((n, f) => n + f.artifacts.filter((a) => a.kind === 'screenshot').length, 0);
+      const passed = attempts.filter((c) => c.status === 'pass').length;
+      lines.push(
+        `- preview/browser: ${pv.length} preview(s), ${attempts.length} flow attempt(s) (${passed} pass)${shots > 0 ? `, ${shots} screenshot(s)` : ''}`,
+      );
+    }
   }
   const u = report.session.usage;
   lines.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out (cache: ${u.cacheReadInputTokens ?? 0} read / ${u.cacheCreationInputTokens ?? 0} written)`);

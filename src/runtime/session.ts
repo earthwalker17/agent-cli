@@ -808,6 +808,7 @@ function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvide
   }
   session.log.append({
     type: 'preview.ready',
+    callId,
     previewId: e.previewId,
     url: e.url,
     port: e.port,
@@ -1075,7 +1076,7 @@ async function runExecution<I>(
     // stored; a log line must never carry base64. Resume rebuilds from outputPreview, whose text
     // carries the objects/<sha> pointer per image (the ToolResult.images contract).
     ...(result.images !== undefined && result.images.length > 0
-      ? { images: result.images.map((im) => ({ sha256: im.sha256, mediaType: im.mediaType, bytes: Math.floor((im.dataBase64.length * 3) / 4), label: im.label })) }
+      ? { images: result.images.map((im) => ({ sha256: im.sha256, mediaType: im.mediaType, bytes: Buffer.byteLength(im.dataBase64, 'base64'), label: im.label })) }
       : {}),
   });
 

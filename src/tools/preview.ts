@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { z } from 'zod';
 import { randomBytes } from 'node:crypto';
 import { buildChildEnv } from '../exec/env.js';
@@ -6,7 +7,7 @@ import { detectProject, probeStamps, stampsEqual } from '../checks/detect.js';
 import { previewFact, resolvePreview, type ResolvedPreview } from '../preview/recipes.js';
 import { DEFAULT_PREVIEW_TTL_MS, readTail, startSupervised } from '../preview/process.js';
 import { waitForReady, DEFAULT_READY_WAIT_MS, type ReadyOptions, type ReadyOutcome } from '../preview/ready.js';
-import { previewLogFile, previewsFile, registerPreview, unregisterPreview, loadPreviewRegistry } from '../preview/registry.js';
+import { LOG_ENDED_MARKER, previewLogFile, previewsFile, registerPreview, unregisterPreview, loadPreviewRegistry } from '../preview/registry.js';
 import type { DetectedProject, ManifestStamp } from '../checks/types.js';
 import type { PreviewRegistryEntry, SupervisedHandle, SupervisedSpec } from '../preview/types.js';
 import type { PreviewEndReason, SessionEvent, Tool, ToolContext, ToolResult } from '../types.js';
@@ -110,8 +111,8 @@ export interface PreviewTool extends Tool<PreviewInputT> {
   /** The one the browser layer binds to: a ready, still-alive preview by id (or the only one). */
   readyPreview(previewId?: string): ActivePreview | null;
   stopById(previewId: string, reason: 'stopped' | 'session-end'): Promise<{ ok: boolean; detail: string }>;
-  /** Stop everything this session owns (bounded); returns how many were told to stop. */
-  stopAll(reason: 'session-end'): Promise<number>;
+  /** Stop everything this session owns (bounded); honest split of verified vs resistant. */
+  stopAll(reason: 'session-end'): Promise<{ stopped: number; unverified: number }>;
 }
 
 const fmtUptime = (ms: number): string => (ms < 60_000 ? `${String(Math.round(ms / 1000))}s` : `${String(Math.round(ms / 60_000))}m`);
@@ -155,9 +156,11 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
     // Policy never reads this (the check branch precedes mutation), but it must not lie.
     mutates: () => null,
     check: (input) => {
-      if (input.action !== 'start') return { resolved: [] };
+      // stop/status are MANAGE actions on session-owned resources — the flag keeps the policy
+      // record from classifying a process kill as observation.
+      if (input.action !== 'start') return { resolved: [], manage: true };
       const r = resolveFor(input).resolved;
-      return { resolved: r === null ? [] : [previewFact(r, ttlMs)] };
+      return { resolved: r === null ? [] : [previewFact(r, ttlMs, input.port)] };
     },
 
     async execute(input, ctx): Promise<ToolResult> {
@@ -280,18 +283,50 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       };
       active.set(previewId, ap);
 
+      // The single preview.ended writer: the exit listener, installed IMMEDIATELY after spawn so
+      // every path on which a pid existed records its death — including a start whose
+      // registration fails below. It also stamps the log file's ended marker, which is what
+      // lets the sweep's unaccounted-log scan tell "lost before registration" apart from
+      // "ended normally". Ordering note (load-bearing): this .then is registered BEFORE any
+      // stop()'s own exited.then, so on the awaited stop paths the ended event lands before
+      // stop() resolves — i.e. before session end closes the log.
+      void handle.exited.then((info) => {
+        const reason: PreviewEndReason = info.requestedStop ?? (ap.readyObserved ? 'crashed' : 'start-failed');
+        try {
+          fs.appendFileSync(logFile, `\n${LOG_ENDED_MARKER} (${reason})\n`);
+        } catch {
+          /* marker is best-effort; the event is the evidence */
+        }
+        deps.appendEnded({
+          previewId,
+          reason,
+          exitCode: info.exitCode,
+          ...(info.signal !== null ? { signal: info.signal } : {}),
+          logFile,
+          logTail: readTail(logFile, TAIL_EXCERPT_BYTES),
+        });
+        active.delete(previewId);
+        void unregisterPreview(registry, previewId, deps.sessionId).catch(() => undefined);
+      });
+
       // Registry BEFORE the started event: a crash between the two leaves a sweepable entry with
-      // no event — never an event whose promised sweep cannot find the process.
+      // no event — never an event whose promised sweep cannot find the process. (The window
+      // between the spawn above and this write is covered only by the log-file scan — see
+      // preview/registry.ts.)
       try {
         await registerPreview(registry, entry);
       } catch {
-        // Registration failing is a real gap in crash coverage; say so rather than proceed silently.
-        await handle.stop('start-failed');
-        active.delete(previewId);
+        // Registration failing is a real gap in crash coverage; stop the process and say
+        // EXACTLY what was verified. An unkillable process stays in `active` so session-end
+        // stop-all retries it.
+        const r = await handle.stop('start-failed');
+        if (r.ok) active.delete(previewId);
         return refuse(
-          'the preview crash-registry could not be written (lock contention?); the process was stopped again — ' +
-            'a preview the next session cannot sweep must not keep running',
-          'registry write failed; preview stopped',
+          `the preview crash-registry could not be written (lock contention?); ` +
+            (r.ok
+              ? 'the process was stopped again — a preview the next session cannot sweep must not keep running'
+              : `stopping it FAILED (${r.detail}); it remains managed for a session-end stop (pid ${String(handle.pid)})`),
+          'registry write failed; preview not started',
           startedAt,
         );
       }
@@ -303,22 +338,6 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
         cwd: deps.workspaceRoot,
         pid: handle.pid,
         ...(input.port !== undefined ? { expectedPort: input.port } : {}),
-      });
-
-      // The single preview.ended writer: the exit listener. Stop-requested reason first-cause;
-      // an unrequested death is 'crashed' after readiness, 'start-failed' before it.
-      void handle.exited.then((info) => {
-        const reason: PreviewEndReason = info.requestedStop ?? (ap.readyObserved ? 'crashed' : 'start-failed');
-        deps.appendEnded({
-          previewId,
-          reason,
-          exitCode: info.exitCode,
-          ...(info.signal !== null ? { signal: info.signal } : {}),
-          logFile,
-          logTail: readTail(logFile, TAIL_EXCERPT_BYTES),
-        });
-        active.delete(previewId);
-        void unregisterPreview(registry, previewId).catch(() => undefined);
       });
 
       deps.caps.previewsStarted++;
@@ -347,7 +366,8 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
             `preview ${previewId} ready: ${ready.url ?? ''} (${ready.probeDetail}; waited ${String(ready.waitedMs)}ms)\n` +
             `  command: ${rc.command}   [${rc.recipeId}; pid ${String(handle.pid)}]\n` +
             `  lifetime: until stopped, session end, or ${String(Math.round(ttlMs / 60_000))}min TTL; log: ${logFile}\n` +
-            `  note: an HTTP answer proves the SERVER is up — application state is verified by browser flows, not this.`,
+            `  note: an HTTP answer on the announced port proves A server is up (socket ownership is not verified) — ` +
+            `application state is verified by browser flows, not this.`,
           durationMs: Date.now() - startedAt,
           truncated: false,
         };
@@ -409,8 +429,9 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
     },
     stopAll: async (reason) => {
       const alive = aliveActive();
-      await Promise.all(alive.map((a) => doStop(a, reason)));
-      return alive.length;
+      const results = await Promise.all(alive.map((a) => doStop(a, reason)));
+      const stopped = results.filter((r) => r.ok).length;
+      return { stopped, unverified: results.length - stopped };
     },
   };
 }

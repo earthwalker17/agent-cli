@@ -102,16 +102,88 @@ describe('sweepOrphanedPreviews', () => {
     expect(loadPreviewRegistry(file)).toEqual([]);
   });
 
-  it('skips a live preview owned by a live harness process (a sibling session)', async () => {
+  it('skips a live preview owned by a live SIBLING harness process', async () => {
     const c = spawnLongLived();
+    const owner = spawnLongLived(); // a live pid that is NOT this process
     const file = previewsFile(projectDir);
-    await registerPreview(file, entry({ previewId: 'pv-sib', pid: c.pid!, ownerPid: process.pid }));
+    await registerPreview(file, entry({ previewId: 'pv-sib', pid: c.pid!, ownerPid: owner.pid! }));
     const res = await sweepOrphanedPreviews(projectDir, {
       queryIdentity: () => Promise.reject(new Error('must not be queried')),
     });
     expect(res.skippedLiveOwner).toEqual(['pv-sib']);
     expect(isAlive(c.pid!)).toBe(true);
     expect(loadPreviewRegistry(file)).toHaveLength(1); // kept
+  });
+
+  it('an entry "owned" by OUR OWN pid is a recycled predecessor, not a sibling — identity path, not a skip', async () => {
+    const c = spawnLongLived();
+    const file = previewsFile(projectDir);
+    // The sweep runs before this process registers anything, so ownerPid === process.pid can
+    // only mean a crashed predecessor whose pid was recycled onto us.
+    await registerPreview(file, entry({ previewId: 'pv-recycled', pid: c.pid!, ownerPid: process.pid }));
+    const res = await sweepOrphanedPreviews(projectDir, { queryIdentity: () => Promise.resolve(null) });
+    expect(res.skippedLiveOwner).toEqual([]);
+    expect(res.skippedUnverified).toHaveLength(1); // it reached identity verification
+    expect(isAlive(c.pid!)).toBe(true); // and was not killed without it
+  });
+
+  it('unverifiable entries older than the retirement age are DEREGISTERED, never killed', async () => {
+    const c = spawnLongLived();
+    const file = previewsFile(projectDir);
+    const e = entry({
+      previewId: 'pv-ancient',
+      pid: c.pid!,
+      ownerPid: DEAD_PID,
+      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+    });
+    await registerPreview(file, e);
+    const res = await sweepOrphanedPreviews(projectDir, { queryIdentity: () => Promise.resolve(null) });
+    expect(res.retiredStale).toEqual(['pv-ancient']);
+    expect(res.killed).toEqual([]);
+    expect(isAlive(c.pid!)).toBe(true); // deregistration is safe without identity; a kill never is
+    expect(loadPreviewRegistry(file)).toEqual([]);
+  });
+
+  it('the identity-query wall budget bounds the sweep; the remainder is reported, not queried', async () => {
+    const file = previewsFile(projectDir);
+    const kids = [spawnLongLived(), spawnLongLived(), spawnLongLived()];
+    for (let i = 0; i < kids.length; i++) {
+      await registerPreview(file, entry({ previewId: `pv-b${i}`, pid: kids[i]!.pid!, ownerPid: DEAD_PID }));
+    }
+    let queries = 0;
+    let fake = 0;
+    const res = await sweepOrphanedPreviews(projectDir, {
+      nowMs: () => {
+        // Each call advances fake time far past the budget after the first query completes.
+        fake += 30_000;
+        return fake;
+      },
+      queryIdentity: () => {
+        queries++;
+        return Promise.resolve(null);
+      },
+    });
+    expect(queries).toBeLessThan(kids.length); // the budget stopped the querying
+    expect(res.skippedUnverified.some((s) => s.detail.includes('budget exhausted'))).toBe(true);
+  });
+
+  it('a preview log with no registry record and no ended marker is reported as unaccounted', async () => {
+    const dir = path.join(projectDir, 'previews');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'sess-pv-lost.log'), 'server starting…\n');
+    fs.writeFileSync(path.join(dir, 'sess-pv-done.log'), 'served\n[agent-cli] preview ended (stopped)\n');
+    const res = await sweepOrphanedPreviews(projectDir, { queryIdentity: () => Promise.resolve(null) });
+    expect(res.unaccountedLogs).toEqual([path.join(dir, 'sess-pv-lost.log')]);
+  });
+
+  it('unregister is scoped to the owning session: an id collision cannot delete a sibling entry', async () => {
+    const file = previewsFile(projectDir);
+    await registerPreview(file, entry({ previewId: 'pv-same', ownerSessionId: 'session-A' }));
+    await registerPreview(file, entry({ previewId: 'pv-same', ownerSessionId: 'session-B' }));
+    await unregisterPreview(file, 'pv-same', 'session-A');
+    const left = loadPreviewRegistry(file);
+    expect(left).toHaveLength(1);
+    expect(left[0]!.ownerSessionId).toBe('session-B');
   });
 
   it('kills a live orphan ONLY after identity verification, and drops its entry', async () => {
