@@ -1,7 +1,8 @@
 # ARCHITECTURE
 
-How Agent CLI V0.9 (post-Session-11.5 durable-session consolidation) is actually built. This
-describes the implemented system, not aspirations — see `ROADMAP.md` for what is deferred.
+How Agent CLI V0.9 (post-Session-13: managed previews + browser/visual verification) is
+actually built. This describes the implemented system, not aspirations — see `ROADMAP.md` for
+what is deferred.
 
 ## Shape
 
@@ -25,6 +26,8 @@ src/
     text.ts                sanitizeLine — escapes bidi/zero-width/control chars for display.
     diff.ts                jsdiff wrapper: lineDiffStat, unifiedDiff, binary/size guards.
     errors.ts              Typed error classes (branch on class, never on message).
+    registry-lock.ts       The ONE file-registry lock (O_EXCL token + in-process chain), shared
+                           by the worktree and preview registries (Session 13 extraction).
   policy/
     paths.ts               validatePath — Windows-first boundary/hard-reject gate.
     engine.ts              classify + decide + Grants. Pure. The single policy choke point.
@@ -43,6 +46,17 @@ src/
     detect.ts              Bounded never-throwing manifest detection + stat fingerprint.
     recipes.ts             The declarative recipe table + toCommand (the single composer).
     normalize.ts           Exit-code-is-the-verdict normalization + named signal extraction.
+  preview/                 Session 13 — see "Managed preview processes".
+    types.ts               SupervisedSpec/Handle + PreviewRegistryEntry contracts.
+    process.ts             startSupervised — the long-running runner (fd logging, TTL, log cap).
+    recipes.ts             Preview script resolution (dev>preview>serve>start) + previewFact.
+    ready.ts               Announced-port HTTP readiness (bounded, abortable, honest).
+    registry.ts            previews.json + the identity-verified crash sweep.
+    identity.ts            Process identity (encoded-CommandLine + creation-time tolerance).
+  browser/                 Session 13 — see "Browser verification".
+    types.ts               The zod FlowSpec (typed steps/asserts) + FlowRunResult contracts.
+    probe.ts               Real launch probe (msedge→chrome→cache) + cheap plan-time guess.
+    flow.ts                The deterministic flow executor (origin lock, typed taxonomy).
   recovery/                Session 12 — see "Typed recovery". (FailureClass lives in types.ts.)
     catalogue.ts           The nine-class recovery matrix, as DATA.
     classify.ts            Deterministic classification from persisted evidence.
@@ -65,6 +79,11 @@ src/
   tools/
     index.ts               read_file/list_files/search/write_file/edit_file + registry + schemas.
     run-command.ts         Shell tool on runManaged; applies ctx.sandbox.wrap at spawn time.
+    run-check.ts           run_check — typed verification (Session 12; parent-only).
+    preview.ts             preview — the managed preview-server tool (Session 13; parent-only).
+    browser-flow.ts        browser_flow — typed browser verification (Session 13; parent-only).
+    view-image.ts          view_image — session-artifact screenshot reads (Session 13).
+    recover.ts             recover — the bounded repair ledger tool (Session 12; parent-only).
     delegate.ts            delegate_task — per-session factory; parallel groups, executor
                            orchestration, briefs (V0.8); the DAG gate (checkDagRules R1–R10),
                            plan bindings with definition shas, group digest, events-rebuilt
@@ -155,7 +174,9 @@ load (the workspace file is untrusted bytes until trust passes) → per-project 
 then `assembleSession` (the single factored construction path both interfaces consume):
 **sandbox select + probe** → **git probe** (post-trust — it executes git against the repo) →
 **orphaned-worktree sweep** (registry-driven, path-guarded, never blocks a session; concurrency
-rules in "Executor isolation") → **ranked map + retrieval index** (`buildRankedMap`; ANY
+rules in "Executor isolation") → **orphaned-preview sweep** (Session 13: identity-verified
+kills, wall-budgeted, unconditional — previews need no repo; its evidence event lands once the
+log opens) → **ranked map + retrieval index** (`buildRankedMap`; ANY
 failure falls back to the flat map with the reason surfaced as a chrome note; non-repo
 workspaces keep the flat walker map) → **project-memory load** (post-trust by construction) →
 system prompt → start/resume → post-start records in a fixed order (trust.verified,
@@ -349,6 +370,132 @@ unaffordable at one approval each, so a `session`-scope answer stores **replay c
   grant the delegates branch never reads. Consent that does nothing is worse than no consent.
 - the prompt shows every resolved command verbatim (`describeCall` has a `run_check` branch —
   without it the prompt was literally blank) and counts what `[s]` grants.
+
+## Managed preview processes (`preview/`, `tools/preview.ts`) — Session 13
+
+The first process class whose lifetime is not bounded by a tool call: a preview server is an
+explicit SESSION resource with recorded start, readiness, health, logs, and deterministic end —
+never a background shell process hiding outside the lifecycle and evidence model.
+
+- **`startSupervised`** is `runManaged`'s deliberate inverse: it returns a live handle
+  (`pid, exited, isAlive, stop, tail`) instead of awaiting an outcome. Output goes to a
+  per-preview LOG FILE via an inherited fd — no pipes, so an orphan surviving harness death can
+  never wedge on a full pipe buffer half-serving requests — and the parent's fd copy closes at
+  spawn. The child is `unref()`ed (a live preview must not hold the event loop open). Lifetime
+  bounds are typed stop reasons: TTL (30 min), log cap (16 MiB → `log-overflow`), explicit
+  stop, session end. `stop()` bounds BOTH the kill helper (a wedged taskkill must not hang the
+  quit path) and the wait for death, and re-checks OS liveness first so a crash coinciding with
+  a timer is never relabeled. POSIX children get their own process group; on Windows detaching
+  is NOT viable (DETACHED_PROCESS kills the PowerShell wrapper instantly — verified), so a
+  one-shot console Ctrl+C also reaches the preview: documented, not silent.
+- **Consent reuses the Session-12 inversion**: the model names a SCRIPT from a fixed allowlist
+  (dev > preview > serve > start — "preview" must never euphemize "run any script"); the
+  harness composes `<pm> run <name>`; the engine's check branch splits on kind `'preview'` with
+  its own rule ids (`preview.approval-required` / `preview.replay-consent` / `preview.manage`)
+  so the PERSISTED decision says "KEEPS RUNNING, binds a local port", never a bounded-check
+  description. `[s]` stores body-bound replay keys in the same Grants store (`preview.`-prefixed
+  recipeIds keep them disjoint from check consent); a DECLARED port folds into the consent
+  identity and the prompt. Grants stay in-memory: a resumed session re-asks (pinned; the live
+  E2E's phase-B re-ask is the proof). run_check-style TOCTOU re-probe refuses at execute if the
+  resolved command/body changed after the gate.
+- **Readiness is honest**: the harness probes HTTP only on a port the server's own output
+  ANNOUNCED (declared ports included — an unannounced answer is somebody else's socket), caps
+  candidates, honors the deadline and the turn abort inside the walk, re-checks liveness after
+  a successful probe, and records "socket ownership not verified". An HTTP answer means A
+  server is up; APPLICATION state is judged only by browser flows. An aborted wait leaves the
+  process running and says so; a readiness timeout stops it with `start-failed`, never a
+  user-shaped `stopped`.
+- **Events + ordering (load-bearing)**: registry entry BEFORE `preview.started` (a crash
+  between leaves a sweepable entry with no event — never an event promising a sweep that can
+  find nothing); `preview.ended` has exactly ONE writer (the exit listener, installed at spawn:
+  stop-reason first-cause, closed-log tolerant — the project's first harness-async log writer)
+  and lands BEFORE unregistration; the listener also stamps a log-file ended marker. The
+  spawn→register window itself is covered by REPORTING: the sweep scans the previews log dir
+  for recent logs with no registry record and no marker. `preview.started` joins the acceptance
+  work boundary; resume surfaces an honest note about the previous life's previews (derived
+  from events + the sweep outcome + the registry — never a stale "ready" claim).
+- **The crash sweep kills only on POSITIVE identity**: `previews.json` (the shared
+  registry-lock machinery, ownerPid-stamped) is swept at assembly — dead pid → drop; live
+  sibling owner → skip (`ownerPid !== process.pid`: our own pid means a recycled predecessor
+  and falls through to verification); live orphan → the recorded command's re-derived
+  `-EncodedCommand` token must appear in Win32_Process.CommandLine AND creation time must sit
+  within ±15s of `createdAt`, else the kill is SKIPPED and reported. There is deliberately NO
+  age hatch on kills (delayed removal is safe; killing a recycled pid is not); >24h unverifiable
+  records are deregistered WITHOUT a kill; a 20s identity wall budget bounds startup. Stop-all
+  runs on every session-end path (REPL quit/fatal, one-shot normal/aborted/error/finally, and
+  the second-Ctrl+C force-quit fires its kills before exit), reporting verified-dead vs
+  resistant separately. `/accept` deliberately does NOT stop previews (the user may browse the
+  accepted app); `/preview` lists live handles + labeled other-session records, and
+  `/preview stop` is user-typed consent.
+
+## Browser verification (`browser/`, `tools/browser-flow.ts`, `tools/view-image.ts`) — Session 13
+
+The check-inversion applied to UI: the model declares a TYPED FLOW; the harness owns execution,
+waits, and the failure taxonomy. `playwright-core` (no install scripts, no binary downloads)
+drives the SYSTEM browser — probe order msedge → chrome → Playwright-cache Chromium, cached per
+session; a machine with none degrades to the gate-waiving `unsupported/precondition`.
+
+- **FlowSpec (zod, strict)**: `goto{path (relative-only), ready_when{selector|text} REQUIRED}`,
+  `click/fill/select/press/wait_for`, typed `expect{text|visible|hidden|value|url|count}`,
+  `screenshot{label}`. Readiness honesty is structural: goto waits for 'commit' only and then
+  the DECLARED condition — a load event, networkidle, or a quiet spinner never count; expect/
+  screenshot steps cannot precede the first goto (schema) and steps run strictly in order,
+  stopping at the first failure, so an assertion or screenshot can never observe state later
+  than a failure it should have reported. Caps: ≤20 steps, ≤4 declared screenshots, per-step
+  timeouts clamped to the 60s flow wall, bounded error/request records.
+- **Typed taxonomy, honestly split**: `timeout` (an action or declared readiness never
+  completed) / `assertion` (a bounded-poll expect did not hold — last observed state recorded) /
+  `navigation` (the origin lock: any off-origin TOP-LEVEL navigation aborts the flow; a REAL
+  URL-origin comparison, not a string prefix) / `runtime` (uncaught page error) / `protocol`
+  (browser/driver died — the app was never judged). Console errors are findings, not verdicts,
+  unless `fail_on_console_error`; off-origin SUBRESOURCE requests are recorded, never blocked
+  (stated in the allow reason). A failing step gets a best-effort failure screenshot. A preview
+  dying mid-flow is `preview-died` (status error), never a timeout blamed on the app. The flow
+  observes the turn abort signal; one flow = one browser launch strictly inside the call (on
+  harness death the driver pipe closes and the browser exits — no crash registry needed).
+- **Evidence rides the check channel**: `check.started` (the browser genuinely launched) and
+  `check.completed {check:'browser'}` with `recipeId: browser.flow/<name>`, `command:
+  '(in-process browser flow — no shell command)'`, `exitCode: null` and NO termination, ALWAYS —
+  which is exactly what keeps a browser pass out of the report's file-CHECKED correlation
+  (exit-0 rule) while gates, waivers, acceptance caveats, R4 naming, classification, and the
+  repair ledger's closure all work unchanged. A `browser.flow` event carries the detail (step
+  outcomes, artifact pointers, console/page/network/off-origin records, final URL). Flows share
+  the session check budget (the same live CheckCaps instance run_check refuses on) plus a
+  64 MiB events-rebuilt artifact byte budget; dropped artifacts are recorded, never silent.
+- **Policy**: the `browser` fact's whole decision is `previewBound` — a flow bound to a RUNNING
+  managed preview auto-allows (`browser.preview-bound`; the preview approval prompt stated that
+  browser verification is included), anything else DENIES (no ask path for arbitrary origins).
+  The fact reads tool-held live-handle state (pure); execute re-verifies and a died-in-between
+  preview is a typed error, never a silent pass. `run_check`'s enum EXCLUDES 'browser' (a
+  pinned deliberate subset; `proveWith()` in the catalogue is the one composer of kind-list
+  instructions so no surface ever tells the model to run the impossible `run_check browser`).
+- **Visual judgment is judgment**: `view_image` returns real pixels for a sha ONLY if this
+  session's `browser.flow` artifacts recorded it — enforced at the GATE (the `evidenceRead`
+  fact answers `admitted`; an un-admitted sha denies as `evidence.not-session-artifact`, so the
+  decision record never claims an allowed re-read of withheld bytes: the shared blob store also
+  holds spilled output and snapshot pre-images) and re-checked at execute. Screenshots may
+  capture whatever the app renders, secrets included (documented, same class as unscrubbed
+  command output). Visual impressions can add findings but never discharge a gate or override a
+  failed deterministic assertion — stated in the prompt, the tool text, and the report footer.
+
+## Wire images (`types.ts`, `provider/anthropic.ts`, `runtime/elision.ts`) — Session 13
+
+The model can SEE screenshots, with the cost model stated: `tool_result.content` widens to
+`string | (text|image)[]`; `ToolResult.images` is a TRANSIENT channel (the `fullOutput`
+pattern) whose pixels are already content-addressed blobs. The persisted `tool.completed`
+records METADATA + the `objects/<sha>` pointer — a log line never contains base64 (pinned
+against raw log bytes) — and `reconstruct` rebuilds from `outputPreview`, so a resumed
+conversation degrades to pointers BY CONSTRUCTION (the model saw the pixels live; replaying
+them would resend what the original turn already consumed). Elision gains an EARLIER,
+unconditional image pass: image parts older than `IMAGE_KEEP_LAST_STEPS = 2` assistant steps
+become `[screenshot <label>: viewed live…; preserved at objects/<sha>]` markers even below the
+char trigger — a deliberately separate window from `keepLastSteps = 4`, monotone by the same
+append-only argument, recorded via the additive `context.compacted.newlyImageElidedCallIds`
+(and named in the chrome). The whole-result elision marker digests only what the TOOL said
+(harness image markers count as images, not tool text), and a marker that would grow the
+prompt is skipped. The provider maps parts to SDK blocks, dropping the harness-internal
+sha/label enrichment; the moving cache breakpoint verifiably lands on the top-level
+tool_result block, never a nested part.
 
 ## Managed execution (`exec/`)
 
@@ -803,9 +950,16 @@ Recovery is a POLICY, not "try again": **classification happens before any repai
 and every automatic repair needs a supported class, sufficient evidence, a recovery point, a
 materially different hypothesis, and budget it has not spent.
 
-- **Nine classes** (`types.ts`): dependency-setup, compile-type, test-assertion, lint-format,
-  runtime-process, integration-conflict, policy-approval, timeout-resource, **unknown** — a real
-  answer with real consequences (stop and escalate), never a shrug that permits another attempt.
+- **Eleven classes** (`types.ts`): dependency-setup, compile-type, test-assertion, lint-format,
+  runtime-process, integration-conflict, policy-approval, timeout-resource, **preview-startup**
+  and **browser-verification** (Session 13 — the only two the browser/preview axis genuinely
+  needed: a missing browser is dependency-setup, a server crashing while serving is
+  runtime-process, a mid-flow preview death is runtime-process with the flow as witness), and
+  **unknown** — a real answer with real consequences (stop and escalate), never a shrug that
+  permits another attempt. Browser evidence routes ONLY by its own disjoint signal namespace
+  (keyed on the kind right after the termination checks — lying legacy signals cannot misroute
+  it), and `latestFailureEvidence` reads `preview.ended` failure reasons at session scope
+  (lifecycle ends are never failures).
 - **`catalogue.ts` is DATA**, one entry per class: likely signals, required evidence, diagnostics,
   eligible actions, regression checks, auto-eligibility, what always needs the user, and stop
   conditions. It is rendered into failing `run_check` results and into gate refusals, so the
@@ -911,6 +1065,11 @@ adds `/checks` (the detected project re-probed on demand, the recipes it can act
 latest result per kind, and the session check budget), per-task gate state plus both boundary
 gates in `/tasks`, and `check.*` / `repair.*` chrome — a check reuses the live command-output
 preview channel, because watching a build scroll is exactly as useful as watching a command.
+Session 13 adds `/preview` (live handles re-probed at render; other sessions' records labeled
+and untouchable; `/preview stop <id>` = user-typed consent), a `/status` preview line, the
+browser-availability line in `/checks`, and `preview.*` / `browser.flow` chrome (previews have
+NO live output channel — they log to a file; the chrome shows lifecycle boundaries and
+`/preview` shows the tail).
 
 **The live task surface (Session 11).** `status.ts` is the sticky status area — the ONLY
 cursor-moving code in the codebase, strictly TTY- and stderr-confined: ALL chrome routes
@@ -957,11 +1116,23 @@ protectedPath }`; the engine decides.
   rationale, same pinning tests.
 - **Typed check** (`tool.check` present) → the explicit Session-12 branch, after planDoc and
   BEFORE the command branch: a check SPAWNS a process, so reaching the observe fall-through would
-  be the S6 trap with real execution behind it. All four fact combinations refuse; a throwing
+  be the S6 trap with real execution behind it. All fact combinations refuse; a throwing
   fact denies. Verdict `reversible` + `noUndo` + `execBoundary: 'unsandboxed'`, and `ask` unless
   every resolved command already carries replay consent (see "Typed verification"). The fact must
   be PURE — the tool resolves from a captured project snapshot, never the filesystem, because
-  `decide()` does no I/O and because the human must approve exactly what will run.
+  `decide()` does no I/O and because the human must approve exactly what will run. Session 13:
+  the branch splits on kind `'preview'` (distinct rule ids + persistent-process reasons — the
+  RECORD must not describe a bounded check), an empty resolution with `manage: true` records
+  `preview.manage`/`reversible` (killing a session-owned process is not observation), and
+  `ApprovalRequest.kind` derives from the VERDICT's rule prefix, never by re-deriving the fact.
+- **Browser flow** (`tool.browser` present) → the Session-13 branch after check: previewBound →
+  allow `browser.preview-bound` (`reversible`+`noUndo`; the preview approval stated browser
+  verification is included; the reason states the origin lock's real scope); anything else
+  DENIES — there is no ask path for arbitrary-origin browsing. Throw → deny; combinations deny.
+- **Session-evidence read** (`tool.evidenceRead` present) → the Session-13 branch after browser,
+  purely for honest records: allow `observe.session-evidence` only when the fact says the sha is
+  `admitted` (recorded by this session's browser artifacts); an un-admitted sha DENIES as
+  `evidence.not-session-artifact`; a non-empty (or undeclarable) mutation plan denies.
 - **Shell command** (`tool.command` present) → **automatic review** (the single default; not a
   selectable "mode"). A hardcoded circuit-breaker denies workspace/drive wipes and `format`
   (absolute). Otherwise `analyzeCommand` decides: a command it PROVES safe **and** an active OS
@@ -1127,6 +1298,15 @@ additive surface, by area (full shapes in `src/types.ts`):
   `repair.escalated {target, failureClass, signature, reason}` — deliberately NO `repair.ended`,
   because an outcome derived from later evidence cannot be lost in a crash;
   `plan.updated.graph[].checks` (so the report never has to read the plan file).
+- **previews + browser (Session 13):** `preview.started {callId, previewId, recipeId, command,
+  cwd, pid, expectedPort?}` (a REAL spawn; a `WORK_EVENT_TYPES` member), `preview.ready
+  {callId, …, probeDetail}` (the server actually answered on an announced port),
+  `preview.ended {previewId, reason, exitCode, logFile, logTail?}` (single writer: the exit
+  listener; closed-log tolerant — the first harness-async writer class), `preview.swept`
+  (identity-verified kills, retiredStale, unaccountedLogs); `browser.flow {callId, flowName,
+  status, steps[], artifacts[], console/page/network/off-origin records, finalUrl}`;
+  `tool.completed.images` (image METADATA — pixels never enter the log) and
+  `context.compacted.newlyImageElidedCallIds` (screenshots aged to pointers).
 - **durable session (Session 11.5):** `task.base-checkpoint {callId, ref, oid}` (executor-group
   base creation — the resume-seeded prune list's source); `task.started.planTaskSha` (the
   definition identity completed-state binds to); `tool.completed.fullOutputSaved` (the
@@ -1191,6 +1371,15 @@ enrichment only. Each command carries its actual boundary marker (`[sandboxed: w
 `[unsandboxed]`), and a header block renders the session's `sandbox.status` — mode, whether it
 was ENFORCED, and the verbatim `confines`/`doesNotConfine` scope — plus the probed
 `git.context` line ("at session start", never live state).
+
+Session 13 adds `## Preview processes (managed)` (start → ready → ended joined by previewId;
+a started-never-ended preview renders the crash-orphan wording — split by whether the session
+itself ended — and points at the sweep) and `## Browser verification` (typed step failures,
+`objects/<sha>` artifact pointers, console/page/network/off-origin counts, the trace-omitted
+record, and the footer: screenshots prove pixels at a declared-ready moment; the typed step
+outcomes are the functional evidence). A browser pass can never mark a file CHECKED — the
+correlation's exit-0 rule is structurally unsatisfiable by `exitCode: null` (pinned, not
+special-cased).
 
 Accumulated sections (all derived purely from events): per-file `+n/−m` churn from write-time
 diffstat; "Commits (user-commanded)" / "Checkpoints" / "Checkpoint restores" from git

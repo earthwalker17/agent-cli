@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-This is the rolling near-term direction guide for Agent CLI after Session 12.
+This is the rolling near-term direction guide for Agent CLI after Session 13.
 
 It begins from the implemented and live-proven V0.9 state described in `ARCHITECTURE.md` and
 `ROADMAP.md`. It does not replace the enduring thesis in `PROJECT.md`, and it should not become a
@@ -20,12 +20,14 @@ This is not a reason to inflate `runTurn` into a workflow engine. The coding flo
 first optimized workflow layer built on the small kernel, and should establish reusable contracts
 for later document, PDF, image, and video packs.
 
-## 2. Current Starting Point (post-Session 12, V0.9)
+## 2. Current Starting Point (post-Session 13, V0.9)
 
-The foundation is already substantial and has five recorded live proofs (the V0.7 loop, the V0.8
+The foundation is already substantial and has six recorded live proofs (the V0.7 loop, the V0.8
 large-repo retrieval run, the V0.9 crash/resume planning run, the Session 11.5 durable-session run
-through interrupt → resume → acceptance → cleanup, and the Session 12 verification/recovery run
-through crash-mid-check → classified repair → green gate → acceptance → honest escalation):
+through interrupt → resume → acceptance → cleanup, the Session 12 verification/recovery run
+through crash-mid-check → classified repair → green gate → acceptance → honest escalation, and
+the Session 13 preview/browser run through browser-found defect → classified repair →
+crash → identity-verified orphan sweep → re-consent → acceptance, 44/44 evidence checks):
 
 - one shared `runTurn` for one-shot, REPL, parent, and child sessions;
 - a central fail-closed policy choke point, recorded approvals, and narrowing-only configuration;
@@ -50,18 +52,24 @@ through crash-mid-check → classified repair → green gate → acceptance → 
   bound to the task definition that ran, and the explicit acceptance boundary (`/accept` →
   recorded consent → plan retirement + cleanup → journal handoff with resume pointers).
 
-Session 12 then made verification and recovery first-class (typed check recipes, the task-graph
-gate, the nine-class recovery catalogue with a bounded repair policy). The largest remaining
-coding-flow gaps are now the long-running/visual axis and delivery quality:
+- Session 13 — managed previews + browser/visual verification: a preview server as an explicit
+  session resource (supervised fd-logged process, announced-port readiness, TTL/log caps,
+  identity-verified crash sweep, deterministic teardown, body-bound replay consent with honest
+  persistent-process wording); typed browser flows over playwright-core + the system browser
+  (declared readiness, typed failure taxonomy, origin lock, sha-addressed screenshots/traces,
+  check-kind 'browser' feeding the same gates/acceptance/recovery); wire images (the model sees
+  screenshots live, the log keeps pointers, elision ages pixels to markers); two new recovery
+  classes.
 
-- no managed long-running preview process or browser/visual verification path exists — today a
-  check is a bounded process that ENDS, which is exactly what a preview server does not do;
+Session 13 closed the long-running/visual axis. The largest remaining coding-flow gaps are now
+delivery quality:
+
 - the final review stage is still prompt-shaped rather than a structural completion gate;
 - Git recovery is strong, but automatic phase-level audit history needs a policy that does not
   silently pollute the user's intentional branch history;
-- executors cannot self-verify (a worktree has no gitignored dependencies, so `run_check` is
-  parent-only) — acceptable today because the parent verifies after integration, but it is the
-  seam a preview/browser capability will press on.
+- executors cannot self-verify (a worktree has no gitignored dependencies, so `run_check` and
+  the preview/browser tools are parent-only) — acceptable because the parent verifies after
+  integration.
 
 ## 3. Target Coding Workflow
 
@@ -116,35 +124,17 @@ a bounded policy with typed stop reasons wired into the scheduler gate (R11/R12)
 689→868+1; 4-lens hand-verified review (21 findings fixed, incl. one critical consent hole of my
 own making); live four-life E2E, 39/40 evidence checks with 0 failures.
 
-### Session 13 — Managed Preview Processes and Browser / Visual Verification
+### Session 13 — Managed Preview Processes and Browser / Visual Verification: COMPLETE
 
-Add the minimum long-running process substrate needed to verify locally built applications.
-
-A preview server should become a managed session resource with explicit start, readiness probe,
-health, logs, timeout, cancellation, port ownership, and deterministic cleanup. Do not hide a
-background shell process outside the event and lifecycle model.
-
-Build a narrow Playwright-based verification capability or coding-workflow adapter with a structured
-flow specification: launch or attach to the preview, visit declared routes, perform bounded actions,
-assert DOM/text/state, capture console and page errors, observe failed network requests, and save
-screenshots and traces as attributable evidence.
-
-Deterministic checks should come first. Visual model judgment is supplementary for layout, clipping,
-hierarchy, consistency, and task-specific appearance; it must not turn a screenshot into unsupported
-proof of functional correctness. Where stable baselines exist, deterministic screenshot comparison
-may add another signal.
-
-Browser failures should feed the same recovery matrix and bounded repair loop — which now exists
-(`src/recovery/`), so this session ADDS classification rows and catalogue entries rather than
-inventing a mechanism. The first design question to settle is whether a preview server is a check
-KIND (it fits the recipe shape: declared applicability, preconditions, timeout, normalized result)
-or a distinct managed resource with its own lifecycle events — a check is a bounded process that
-ends, and a preview deliberately does not, which argues for the latter with the check contract
-reused for the assertions that run against it.
-
-The completion proof should include a real local application, multi-step interaction, captured
-trace/screenshot evidence, a deliberately introduced failure, targeted repair, and clean process
-teardown.
+Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md` (Managed
+preview processes / Browser verification / Wire images). The open design question resolved
+exactly as the evidence argued: a preview is a distinct managed RESOURCE (a check is a bounded
+process that ends; a preview deliberately does not) with the check contract reused for consent
+(harness-resolved command, body-bound replay) and for the assertions that run against it
+(browser flows emit check evidence of kind 'browser'). Suite 868→972+1; 4-lens hand-verified
+review (~39 findings, one fix reverted with recorded evidence); live two-life E2E with a
+browser-only seeded defect, classified repair, crash, identity-verified orphan sweep,
+re-consent, and complete acceptance — 44/44 evidence checks.
 
 ### Session 14 — Git Audit Trail, Structural Review Gate, and Coding-Flow Acceptance
 
@@ -318,13 +308,16 @@ Research current implementations again when each session begins.
 - honest escalation for unknown or repeated failures — LANDED (`recover escalate`, an acceptance
   blocker; `unknown` is a first-class stop, never a shrug).
 
-### Before browser / visual claims
+### Before browser / visual claims — ALL LANDED (Session 13)
 
-- managed preview lifecycle;
-- deterministic DOM, console, network, and process evidence;
-- attributable screenshots/traces;
-- visual judgment labeled as judgment;
-- cleanup and recovery integrated with the same runtime contracts.
+- managed preview lifecycle — LANDED (supervised runner, registry, identity-verified sweep);
+- deterministic DOM, console, network, and process evidence — LANDED (typed step taxonomy,
+  bounded records, preview lifecycle events);
+- attributable screenshots/traces — LANDED (sha-addressed blobs, budgeted, report pointers);
+- visual judgment labeled as judgment — LANDED (view_image + the prompt/report/tool wording;
+  a screenshot can never discharge a gate);
+- cleanup and recovery integrated with the same runtime contracts — LANDED (session-end
+  stop-all on every path, two catalogue classes, the shared bounded repair loop).
 
 ### Before declaring the coding flow mature
 
@@ -337,6 +330,17 @@ Research current implementations again when each session begins.
 
 ## 10. Recently Completed
 
+- **Session 13 — managed previews + browser/visual verification: COMPLETE.** `src/preview/`
+  (startSupervised — a live handle over an fd-logged, TTL/log-capped, unref'd process; preview
+  recipes over the fixed dev/preview/serve/start allowlist; announced-port readiness; the
+  identity-verified crash sweep with no age hatch on kills) + `src/browser/` (playwright-core
+  channel probe; the zod FlowSpec with REQUIRED app-meaningful readiness; the deterministic
+  executor with the typed timeout/assertion/navigation/runtime/protocol taxonomy and a real
+  origin comparison) + wire images (transient pixels, pointer-only logs, aging elision) +
+  `preview`/`browser_flow`/`view_image` tools behind explicit fail-closed policy branches +
+  kind 'browser' through the existing gates/acceptance/CHECKED/recovery machinery + two new
+  failure classes. Suite 868→972+1; 4-lens review (~39 findings, all hand-verified); live
+  two-life E2E 44/44 (see ROADMAP + `C:\Users\A\Desktop\agent-cli-s13-live\`).
 - **Session 12 — unified verification gate and typed recovery: COMPLETE.** `src/checks/`
   (bounded project detection, a declarative recipe table where a project's own script beats a
   guessed tool, `toCommand` as the single composer, and normalization whose one rule is the exit
@@ -408,7 +412,8 @@ Keep these visible, but do not let them distract from the coding-flow acceptance
 - network-egress control and a read/confidentiality sandbox boundary;
 - macOS/Linux enforced sandbox backends and a cached Windows sandbox host;
 - attribution of arbitrary approved shell-command file effects;
-- full PTY/general interactive-process support beyond the minimum managed preview need;
+- full PTY/general interactive-process support (the supervised preview substrate deliberately
+  stops at non-interactive servers; stdin stays disconnected);
 - deep inter-agent messaging and task continuation conversations;
 - broad web research, MCP, SaaS connectors, deployment, and push/PR automation;
 - SQLite indexing of events and long-term memory topic retrieval;

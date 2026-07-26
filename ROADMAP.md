@@ -7,6 +7,159 @@ attempted, verified, decided, and left open.
 
 ---
 
+## Session 13 (2026-07-26) — Managed preview processes and browser / visual verification
+
+### Objective
+
+Make locally built applications verifiable as a real user experiences them: a preview server
+as an explicit managed SESSION resource (start, announced-port readiness, logs, TTL/log caps,
+crash/resume, identity-verified sweep, deterministic teardown) and Playwright-based browser
+verification (typed flows with declared readiness, real interactions, typed failure taxonomy,
+screenshots/traces as sha-addressed evidence, model-visible screenshots for supplementary
+visual judgment) — integrated into the Session-12 check/gate/recovery/acceptance machinery,
+never beside it.
+
+### Planning provenance
+
+3 Explore recon lenses + 1 Plan-agent adversarial critique (33 findings, 2 critical), four
+user decisions asked up front (playwright-core + system browsers, no downloads; flows inherit
+preview consent, origin-locked; full wire-image support; dependency-free node:http E2E app).
+The critique killed designs before code: the E2E's replay-consent-survives-resume assumption
+(grants are session-scoped BY CONTRACT — the honest E2E re-asks), pipe-based preview capture
+(an orphan would wedge on a full pipe buffer; fd-based file logging instead), a third failure
+class that was dependency-setup in costume (cut), and a CHECKED-exclusion patch that was
+already structural (one pin instead).
+
+### What was implemented (commits `5b7b451`, `3cdb561`, `650ada8`, `0a639aa`, `370491a`, `11d36e3`, `9aff5f2`, `28fb29a`, + docs)
+
+Full contracts in ARCHITECTURE (Managed preview processes / Browser verification / Wire
+images):
+
+1. **`feat(preview)` ×2** — `startSupervised` (runManaged's inverse: a live handle, fd-based
+   file logging so an orphan can never wedge on a pipe, unref'd child, typed TTL/log-overflow
+   stops, kill-helper-bounded stop with first-cause reasons); the shared registry-lock
+   extraction; `previews.json` + the identity-verified sweep (encoded-CommandLine token +
+   ±15s creation tolerance, NO age hatch on kills, retire-without-kill >24h, 20s wall budget,
+   unaccounted-log reporting for the spawn→register window); the `preview` tool — the model
+   names a SCRIPT from a fixed allowlist, the harness composes the command, and the engine's
+   check branch splits on kind 'preview' so the persisted decision says KEEPS RUNNING /
+   binds a port; body-bound replay `[s]` in the Session-12 store; registry-before-event and
+   ended-before-unregister orderings; stop-all on every session-end path incl. force-quit.
+2. **`feat(types,provider,runtime)`** — wire images: tool_result content widens to text+image
+   parts; pixels ride a transient `ToolResult.images` whose blobs are already stored; the log
+   records metadata + `objects/<sha>` (never base64, pinned); resume degrades to pointers BY
+   CONSTRUCTION; elision's unconditional image pass ages pixels to markers after 2 assistant
+   steps (monotone; additive `context.compacted` field; the cache marker stays on the
+   top-level block).
+3. **`feat(browser)`** — playwright-core probe (msedge → chrome → cache, cached per session,
+   honest unsupported degrade); the zod FlowSpec whose `goto` REQUIRES app-meaningful
+   `ready_when` and whose steps stop at the first typed failure (timeout / assertion with
+   last-observed state / navigation via a REAL origin comparison / runtime / protocol);
+   `browser_flow` emitting check evidence (kind 'browser', `exitCode: null`, no termination —
+   gates satisfied, file-CHECKED structurally impossible) + the `browser.flow` detail event +
+   putBlob'd screenshots/traces under a 64 MiB events-rebuilt budget; `view_image` gated by
+   the `evidenceRead` fact's `admitted` answer (an un-admitted sha DENIES — the shared blob
+   store also holds deliberately withheld bytes); the `browser` policy fact (preview-bound →
+   allow, else deny; no ask path for arbitrary origins).
+4. **`feat(recovery)`** — exactly two new classes (`preview-startup`, `browser-verification`;
+   a missing browser is dependency-setup, a serving crash is runtime-process); the `preview`
+   evidence arm; kind-keyed browser classification immune to lying legacy signals;
+   `proveWith()` so no surface instructs the impossible `run_check browser`.
+5. **`feat(report,repl,memory)`** — `## Preview processes (managed)` + `## Browser
+   verification` report sections, `/preview`, `/status` + journal lines, prompt guidance
+   (checks → preview ready → flows → visual evidence; visual judgment never overrides).
+6. **`fix` ×2** — the adversarial-review batch (below) and the live-found resume 400 (an
+   EMPTY error tool_result from a no-output failing command 400'd every request of a resumed
+   conversation; `toolResultBlock` now substitutes a non-empty marker, pinned).
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite 868 → **972 passed / 1 skipped
+across 74 files (+104)**: supervised-runner lifecycle with real children, sweep PID-safety
+(mismatch → skip, verified → kill, live sibling → skip, recycled-self → identity path), a
+real Windows CIM round trip proving the encoded-token identity form, replay/TOCTOU/resume
+consent matrices, announced-port readiness incl. the foreign-service refusals, 7 real
+system-browser flow runs (origin lock, readiness honesty, taxonomy, PNG + trace artifacts),
+view_image's adversarial sha bounds, elision monotonicity + zero-base64 pins, classification
+routing, ledger closure on flow passes, and the report/gate/CHECKED pins.
+
+Bounded adversarial review: **4 differentiated read-only lenses, ~39 findings, every one
+hand-verified against the code before fixing** — 2 critical-path (a wedged taskkill hanging
+session end; foreign-local-service adoption via declared ports), the rest
+high/medium/low + several verified-HOLDS reports. One fix was attempted and REVERTED with
+recorded evidence (Windows DETACHED_PROCESS kills the PowerShell wrapper instantly), leaving
+the one-shot console-Ctrl+C reaching the preview as a documented limitation.
+
+**Live proof** (`C:\Users\A\Desktop\agent-cli-s13-live\` — setup/driver/validate,
+VALIDATION.md, transcripts, driver-run.log): two-life piped run against real claude-opus-4-8
+on the QuickNotes fixture (dependency-free node:http SPA; the seeded defect — `handleAdd`
+never re-renders — passes every API test and is only visible in a browser).
+**44/44 post-hoc checks over persisted evidence only, 0 failures.** Plan with
+`gates.completion: ['test','browser']` → sha-bound approval → test check ([s]) → preview
+(ask, [s]) → the flow FAILED typed on the seeded defect (failure screenshot at the moment of
+failure) → `recover(attempt)` classified `browser-verification` BEFORE the fix → the model
+viewed the failure screenshot to confirm its hypothesis, fixed app.js, re-proved with test +
+flow — including refusing to weaken an assertion when a count mismatch turned out to be
+in-memory test-data accumulation (it restarted the preview under replay consent instead) →
+third preview left running → SIGKILL → resume → the sweep identity-verified and killed a live
+orphan (pid genuinely dead, port free) → preview RE-ASKED (grants never restored; `[s]`
+again) → flow green → `/accept` COMPLETE → clean quit. 11 sha-verified artifact blobs incl. a
+real Playwright trace zip; the log carries pointers, never pixels; zero `refs/agent-cli`;
+`previews.json` empty. An earlier run's phase B additionally recorded the model
+reality-checking the crash aftermath (read the file, found no fix applied, predicted and
+proved the flow failure, refused the driver's "confirm it works" framing) and `/accept`
+refusing a draft plan — kept as `transcript-b` evidence of honest failure behavior.
+
+### Decisions (and why)
+
+- **A preview is a RESOURCE, not a check kind.** A check is a bounded process that ends; a
+  preview deliberately does not. The check contract is reused exactly where it fits — consent
+  to a harness-resolved command — and the lifecycle (registry, sweep, TTL, single-writer
+  ended events) is its own machinery.
+- **Browser evidence rides the check channel; the field scheme is the integration.**
+  `check:'browser'` with `exitCode: null` satisfies gates through the status rule while
+  staying structurally outside the file-CHECKED exit-0 rule — one honest shape instead of two
+  parallel mechanisms plus exclusion patches.
+- **Kills need positive identity; deletions do not.** The worktree sweep's age hatch was
+  deliberately NOT copied: a recycled pid must never be killed on a guess. Retirement
+  (deregistration without a kill) is the safe exit for stale unverifiable records.
+- **Flows inherit the preview's consent, origin-locked.** One human decision covers "run this
+  app and verify it as a user"; the engine refuses everything not bound to a running managed
+  preview — there is no ask path to browse arbitrary origins.
+- **The model sees pixels live; the log keeps pointers.** Wire images are transient by
+  construction: resume replays what the log holds, elision ages pixels out after two steps,
+  and the persisted record can never leak base64.
+- **The environment is part of the evidence.** The E2E's live orphan is driver-synthesized
+  because this machine's test-runner job object reaps every harness child on death (proven
+  empirically and recorded); the sweep's identity check and kill are fully real, and the
+  limitation is stated instead of papered over.
+
+### Open issues / boundaries (deliberate, documented)
+
+- Preview logs and screenshots are not scrubbed for secrets (same class as command output);
+  screenshots capture whatever the app renders.
+- Readiness proves an ANNOUNCED port answers HTTP — socket ownership is not verified (stated
+  in every probeDetail); the origin lock binds the port, not the socket owner, and off-origin
+  subresource egress is recorded, not confined.
+- On Windows, a ONE-SHOT console Ctrl+C also reaches the preview's process group (detaching
+  breaks the PowerShell wrapper — evidence recorded); its death reads as 'crashed' moments
+  before session-end stop-all. The REPL is unaffected.
+- Grandchildren of a dead intermediate remain unreachable by kills (the killTree gap) —
+  observed live when an npm→node chain outlived its wrapper; EADDRINUSE guidance at the next
+  start is the honest surface.
+- A `['browser']` regression proof cannot discharge on a browser-less machine (the ledger
+  accepts only real passes; escalation → `/accept confirm` is the honest exit there).
+- macOS/BSD identity queries degrade to skip-not-kill (`ps` etimes is Linux-shaped; fails
+  safe).
+
+### Recommended next step
+
+Session 14 per BLUEPRINT: the Git audit trail, the structural review gate, and the
+coding-flow acceptance run — the browser/preview axis was the last missing verification
+modality, so the delivery boundary is now the gap.
+
+---
+
 ## Session 12 (2026-07-25/26) — Unified verification gate and typed recovery
 
 ### Objective
@@ -132,163 +285,32 @@ managed resource with its own lifecycle events.
 
 ---
 
-## Session 11.5 (2026-07-24) — The durable session: lifecycle completion, acceptance boundary, crash-proof continuation
-
-### Objective
-
-A focused consolidation before Session 12: make a session a durable, self-contained unit of
-work — every artifact needed to continue or audit it at clear local paths, resume that
-reconstructs cleanup debts as well as conversation, attempt/definition state that survives
-amendment and crash, and an EXPLICIT completion boundary (user acceptance) that gates cleanup
-and drives the memory handoff. Also correct BLUEPRINT's stale post-Session-10 framing.
-
-### Planning provenance
-
-3 Explore recon lenses + 1 Plan-agent adversarial critique, load-bearing claims hand-verified;
-three user decisions asked up front (supersede-in-place plan retirement — the critique showed
-archive-by-delete adds a 4-step crash-window cluster to save two tiny files; retry ceiling
-excludes crash-interrupted attempts; spill scope = commands + delegates only — file reads are
-recoverable from files, and spilling them would persist full out-of-workspace reads). The
-critique also caught: post-accept executor behavior was mis-designed (F3 refuses on a vanished
-approved plan — retirement must go through plan.discarded); reusing `git.checkpoint` for base
-refs would let old readers misattribute harness plumbing as user consent (new event type
-instead); and the pre-existing `deleteCheckpointRefs` missing-ref-counts-as-failed bug that
-would have made event-seeded retries re-fail forever.
-
-### What was implemented (commits `c940e9f`, `ff52273`, `dbc7987`, `5e2f7fb`, `f436f26`, `efdc57a`, `901ebec`, `025bca4`, + docs)
-
-Full contracts in ARCHITECTURE (spill choke point / task DAG definition identity / acceptance
-boundary / executor base-ref lifecycle):
-
-1. **`fix(git,repl)`** — `deleteCheckpointRefs` treats an already-missing ref as deleted
-   (show-ref probe, exit 1 = gone; retries converge, never re-fail forever); live-table cap
-   denominators derived from the enforced constants.
-2. **`feat` crash-covered task-base refs** — additive `task.base-checkpoint {callId, ref, oid}`
-   at creation (deliberately NOT `git.checkpoint`: that is user-consent provenance); assembly
-   seeds the owed prune list FROM EVENTS (creations minus successfully-pruned), so a SIGKILLed
-   life's leaked refs are pruned at the resumed life's quit or /accept. Crash-covered except
-   the creation instant (documented; `agent checkpoint prune` backstop).
-3. **`feat` truncation spill blobs** — transient `ToolResult.fullOutput` attached ONLY by
-   run_command and delegate_task; the tool.completed choke point stores the pre-truncation
-   bytes as `objects/<fullOutputSha256>` + `fullOutputSaved` (skipped under ANY redaction,
-   2 MiB cap, never turn-failing, flagged only on verified hash equality). reconstruct never
-   reads blobs back (the model never saw the full bytes live). Report wording: "captured
-   output preserved" — never "full" (the exec capture cap may have dropped bytes first).
-4. **`feat` definition identity + attempt history** — `task.started.planTaskSha` (canonical
-   per-task sha, dependsOn sorted); the fold re-opens a completed task whose definition
-   changed (note carries the completed-as sha; legacy sha-less bindings stay id-sticky;
-   integrating integrates first); `attemptHistory` (every binding with outcome + sha) +
-   `definitionSha` on PlanTaskState; the interrupted note states provable re-run safety
-   honestly (worktree captured nothing; external shell side effects unknown).
-5. **`feat` R10** — the bounded retry ceiling: 3 genuine failures (error/timeout/budget/
-   stalled) per CURRENT definition refuse identical retries, naming every hatch; crashes and
-   user terminations (cancelled/user-stopped/aborted) never count; amendment resets.
-6. **`feat` the acceptance boundary** — `runtime/acceptance.ts` pure fold (COMPLETE = plan
-   fully executed AND every applicable capture applied, registry-wide; a DRAFT plan is
-   deliberately not silently complete); `/accept` (user-typed consent, stateless
-   `/accept confirm` for partial, idempotent, piped-deterministic) records `session.accepted`,
-   prunes refs now, retires a fully-executed approved plan via the existing discard flow
-   (`plan.discarded reason:'accepted'`, file kept); `/status` + quit summary completion line;
-   report `## Completion`; deterministic journal `### Handoff` built inside runMemoryUpdate
-   (one-shot parity); resume-after-accept startup note.
-7. **`feat` mid-turn /tasks unification** — the fold+live-overlay `[plan]` line (first
-   production wiring of livePhases; same visibility gate as idle /tasks); overlay-fed
-   summaries name running/awaiting-approval work.
-8. **`fix` review batch** — 3 read-only lenses over the session diff, hand-verified: the
-   accept's own retirement no longer reads as work-since (duplicate-consent trap); the
-   crash-limbo (killed between accepted and retirement) repairs idempotently on the next
-   /accept; R10 stopped counting user stops as failures; acceptance STALENESS is honest on
-   every surface (the handoff lists the LIVE blockers, never the frozen accepted list;
-   one-shots say not-applicable; resume pointer keys off live incompleteness).
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite 645→**688 passed / 1 skipped
-across 57 files (+43)** — ref-tolerance + event-seeded prune fold (incl. failed-prune retry),
-real-git creation-event + prune e2e, the spill matrix (sha equality, redaction skip, size cap,
-putBlob failure, file-tools-excluded pin, real-spawn >16k, delegate long-report), the
-definition-reopen matrix (A→B→A, legacy stickiness, integrating-not-reopened), attemptHistory,
-R10 matrix (interrupted + user-stop exclusions, legacy counting, amendment reset), /accept
-flows (refuse→confirm, retire, idempotence incl. the self-retirement pin, piped determinism),
-buildHandoffLines unit matrix (stale acceptance, one-shot wording), report rendering pins
-(Completion, task-base section, spill pointer wording, retirement provenance). Bounded
-adversarial review: 3 lenses, findings hand-verified — 2 MEDIUM + 1 MEDIUM-plausible + 3 LOW
-fixed (item 8); kernel-invariant lens: 7 of 8 HOLD, the 1 violation (duplicate consent) fixed
-and pinned.
-
-**Live proof** (`C:\Users\A\Desktop\agent-cli-s11.5-live\` — driver.mjs, validate.mjs,
-VALIDATION.md, per-phase transcripts): three-life piped run against real claude-opus-4-8,
-**30/30 post-hoc checks over persisted evidence only**. Phase A: `@plan` → 3-task canonical
-plan → sha-bound approve → one 2-executor wave (single group approval, bindings displayed) →
-deliberate SIGKILL mid-wave. Phase B: resume → orphaned worktrees swept → `/tasks` folds both
-`interrupted` → re-run as one group with IDENTICAL planTaskShas (`attempt 2` displayed) → 8
-forwarded approvals → integrate (zero refusals) → parent runs both delivered test files (real
-exit 0) → a 20,001-char command output spills to a verified blob → `/accept`: both task-base
-refs pruned INCLUDING the phase-A crash-leaked one, plan retired, acceptance recorded. Then an
-UNPLANNED second kill (a driver bug crashed the pipe after /accept) — absorbed by design.
-Phase C: resume announced "accepted (complete) … covers only work up to that point" → clean
-quit → journal Handoff (`accepted: yes (complete)`; `plan retired (accepted) · captures
-integrated`). 26 uncached parent input tokens across all three lives (cache 156k read); the
-workspace carries ZERO agent-cli refs; the delivered tests re-verified exit 0 at validation.
-
-### Decisions (and why)
-
-- **Supersede-in-place, never archive-by-delete** — the desired end state already existed as
-  the discard flow; deletion would have added the system's only un-undoable act plus crash
-  reconciliation, to reclaim two small files.
-- **A NEW event type for base-ref creation** — `git.checkpoint` is user-consent provenance;
-  for old readers, misattribution is strictly worse than skipping an unknown type.
-- **Spill is a runtime evidence write, not a tool mutation** — same category as snapshots
-  (content-addressed, state-dir, never model-visible); the S6 observe-trap stays closed.
-- **`completed` binds to the definition that ran** — re-running too much beats silently
-  skipping changed work; legacy logs keep the conservative id-sticky reading.
-- **The retry ceiling counts only model failures** — crashes and user interventions are not
-  the model retrying; counting them mislabeled user pauses as failed attempts.
-- **Acceptance is recorded consent with live-state honesty** — the event freezes what was
-  accepted; every surface derives freshness (staleness) rather than replaying the frozen view.
-
-### Open issues / boundaries (deliberate, documented)
-
-- Cleanup at acceptance is deliberately conservative: snapshots, capture blobs, spill blobs,
-  plan files, and session logs are never deleted (rollback/audit/resume outrank disk); blob
-  GC remains pooled.
-- The report's `## Completion` renders the frozen acceptance event (its provenance); staleness
-  annotations live on /status, the quit line, and the journal handoff.
-- The journal Handoff evaporates when its entry is compressed by the roll (newest-2 stay full
-  — by then the pointer is stale anyway).
-- The mid-turn `[plan]` line is TTY-gated like the rest of the mid-turn surface: exact-pattern
-  unit tests + the fold pins; no piped-driver proof by design.
-- One-shot sessions cannot accept (documented; their handoff says not-applicable) — a
-  post-hoc `agent accept <id>` CLI remains pooled.
-
-### Recommended next step
-
-Session 12 per BLUEPRINT: the unified verification gate and typed recovery — typed check
-adapters feeding the plan tasks' `verify` criteria, a failure classifier over the now-complete
-attempt history, and the bounded repair policy on top of R10's ceiling.
-
-### Addendum (2026-07-24/25) — the recorded capability demo and the fix it forced
-
-A live recorded demo (ConPTY → xterm.js → Playwright, real claude-opus-4-8; evidence + the
-4-minute MP4 at `C:\Users\A\Desktop\arcade-demo\`) exposed one real defect: a plan whose tasks
-were all `role: main` produced the on-camera contradiction "session accepted (complete) —
-plan 0/4 completed". Fixed as `4d86650` (fold summaries count parent-owned tasks apart —
-"X/Y completed · N parent-owned (asserted)" / "all N task(s) parent-owned"; update_plan's
-role guidance now states the executor-vs-main division of labor, because the demo model had
-put an entire buildable app under `main`, silently opting out of orchestration and
-verification). Suite 689 passed / 1 skipped. The re-recorded demo then showed the intended
-lifecycle end to end: auto-routed plan → sha-bound approval → one parallel executor wave
-(bound, definition-sha'd, live status area + mid-turn `[plan]` line) → drift-checked
-integration (8 files, 0 refusals) → parent-run verification → `/accept` (complete; plan
-retired; refs pruned) → memory handoff → the built app played on camera.
-
----
-
-
-## Earlier Milestones (Sessions 1–11 — compressed per the rolling-docs policy)
+## Earlier Milestones (Sessions 1–11.5 — compressed per the rolling-docs policy)
 
 Contract detail for everything below lives in `ARCHITECTURE.md`; entries here keep the
 objective, the lasting decisions (with why), the evidence, and what stayed open.
+
+### Session 11.5 (2026-07-24) — the durable session: lifecycle completion, acceptance boundary, crash-proof continuation
+
+Consolidation landed as designed (commits `c940e9f`…`025bca4` + fixes; suite 645→688+1; live
+three-life E2E with a mid-wave SIGKILL, resume, /accept, and an unplanned second kill absorbed —
+30/30 evidence checks). Landed: crash-covered task-base ref lifecycle (`task.base-checkpoint`
+creation events — deliberately NOT `git.checkpoint`, which is user-consent provenance — with
+the owed prune list seeded FROM EVENTS and missing-ref-tolerant deletion so retries converge);
+truncation spill blobs at the tool.completed choke point (commands + delegates only, redaction
+skips spill, ≤2 MiB, sha-verified, "captured" never "full"; reconstruct never reads blobs
+back); definition identity (`task.started.planTaskSha`; completed state belongs to the
+definition that RAN — an amendment re-opens changed tasks; attemptHistory on every state); R10
+(3 genuine failures per current definition; crashes and user stops never count); and the
+`/accept` boundary (a pure fold; COMPLETE = plan fully executed AND every applicable capture
+applied; user-typed consent; retirement via the EXISTING discard flow — supersede-in-place,
+never archive-by-delete, which would have added the system's only un-undoable act; idempotent
+re-accept finishes an interrupted cleanup; staleness honest on every surface; the
+deterministic journal Handoff). A recorded capability demo then exposed the all-`main`-plan
+contradiction, fixed as `4d86650` (parent-owned tasks counted apart; role guidance prefers
+executors). Still relevant: cleanup at acceptance is deliberately conservative (snapshots,
+blobs, plan files, logs are never deleted); one-shot sessions cannot accept (pooled);
+the journal Handoff evaporates when its entry compresses (by design).
 
 ### Session 11 (2026-07-23/24) — V0.9: iterative planning, task graphs, parallel-first execution
 
@@ -480,10 +502,20 @@ TOCTOU-racy; undo is file-only; single-user lock assumption.
 Adaptive thinking with block preservation (`pause_turn` is mapped but the loop would end the
 turn — latent until thinking ships); per-action / `--to` / `--steps` undo; network/web
 tools; MCP and workflow packs; SQLite index over the JSONL; conversation rewind; session
-pruning/sanitized export; prompt-history persistence + line-editing niceties; background/
-long-running process sessions; PTY support; output spill-to-file for huge command output;
+pruning/sanitized export; prompt-history persistence + line-editing niceties; PTY support
+(the supervised preview substrate deliberately stops at non-interactive servers);
 `--max-turns` flag vs internal `maxSteps` naming alignment; plan-file pruning (one doc per
 session accumulates in the state dir).
+**Preview/browser follow-ups (post-S13):** socket-ownership verification for readiness (the
+announced-port + alive-re-check design accepts a residual race; owner-pid via
+Get-NetTCPConnection is the likely shape); deterministic screenshot BASELINE comparison where
+stable baselines exist (BLUEPRINT named it; deferred — no baseline store yet); preview log
+files join the pooled blob-GC/retention question; non-Node preview recipes (a static-server
+recipe for plain HTML workspaces; python -m http.server as a data row); executor-side preview
+(blocked on the same worktree-lacks-deps seam as run_check); headed/devtools browser mode and
+multi-context flows; `ps` etime parsing for macOS/BSD sweep identity (Linux-shaped today,
+fails safe); a Windows one-shot Ctrl+C console-group workaround if the documented 'crashed'
+mislabel ever bites in practice.
 **Retrieval follow-ups (post-S10):** tree-sitter (or richer) extraction behind the same
 extract interface, more languages (go/rust/java/c#) as data-shaped table additions; a user
 config knob for the map budget; /map REPL-branch + mapNote chrome tests; a post-group child
