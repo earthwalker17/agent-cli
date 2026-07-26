@@ -110,6 +110,21 @@ describe('reconstruct crash reconciliation', () => {
     expect(JSON.stringify(r.messages)).toContain('interrupted by session crash');
   });
 
+  it('never replays an EMPTY error tool_result (the API rejects it — found live in the S13 E2E)', () => {
+    // A failing command with no output (findstr with zero matches: exit 1, empty combined
+    // capture) records outputPreview ''. Replayed verbatim, the empty is_error block 400s
+    // every later request of the resumed conversation.
+    const events: SessionEvent[] = [
+      ...base(),
+      { v: 1, seq: 4, ts: 't', type: 'tool.completed', callId: 'c1', ok: false, outputPreview: '', durationMs: 5, truncated: false },
+    ];
+    const r = reconstruct(events, ws);
+    const block = r.messages.flatMap((m) => m.content).find((b) => b.type === 'tool_result' && b.toolUseId === 'c1');
+    expect(block).toBeDefined();
+    expect(block!.type === 'tool_result' && block!.isError).toBe(true);
+    expect(block!.type === 'tool_result' && typeof block!.content === 'string' && block!.content.length > 0).toBe(true);
+  });
+
   it('uses the recorded tool.completed verbatim when present (faithful replay)', () => {
     const events: SessionEvent[] = [
       ...base(),

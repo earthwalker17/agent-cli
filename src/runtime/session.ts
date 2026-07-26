@@ -557,9 +557,14 @@ interface CallOutcome {
 }
 
 function toolResultBlock(toolUseId: string, content: string, isError: boolean): ContentBlock {
+  // The API rejects an EMPTY error tool_result ("content cannot be empty if is_error is true").
+  // A failing command with no output (e.g. findstr with zero matches, exit 1) records
+  // outputPreview '' — replayed verbatim on resume, that empty error block 400s every later
+  // request of the resumed conversation. Found live in the Session-13 E2E.
+  const c = isError && content === '' ? '(no output recorded)' : content;
   return isError
-    ? { type: 'tool_result', toolUseId, content, isError: true }
-    : { type: 'tool_result', toolUseId, content };
+    ? { type: 'tool_result', toolUseId, content: c, isError: true }
+    : { type: 'tool_result', toolUseId, content: c };
 }
 
 /** Gate, (snapshot,) execute, and record one tool call. */
