@@ -48,20 +48,21 @@ export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 150_000;
  * structurally free of command/delegates/planDoc/check/browser/evidenceRead facts. Fail closed
  * by dropping: a wrongly-shaped instance simply never reaches a child.
  */
-export function childTools(toolNames: readonly string[], retrieveTool?: Tool): Tool[] {
+export function childTools(toolNames: readonly string[], retrieveTool?: Tool, reportFindingTool?: Tool): Tool[] {
   const tools: Tool[] = TOOLS.filter((t) => toolNames.includes(t.name));
-  if (
-    retrieveTool !== undefined &&
-    toolNames.includes(retrieveTool.name) &&
-    retrieveTool.command === undefined &&
-    retrieveTool.delegates === undefined &&
-    retrieveTool.planDoc === undefined &&
-    retrieveTool.check === undefined &&
-    retrieveTool.browser === undefined &&
-    retrieveTool.evidenceRead === undefined
-  ) {
-    tools.push(retrieveTool);
-  }
+  const admissible = (t: Tool | undefined): t is Tool =>
+    t !== undefined &&
+    toolNames.includes(t.name) &&
+    t.command === undefined &&
+    t.delegates === undefined &&
+    t.planDoc === undefined &&
+    t.check === undefined &&
+    t.browser === undefined &&
+    t.evidenceRead === undefined;
+  if (admissible(retrieveTool)) tools.push(retrieveTool);
+  // Session 14: the reviewer's findings channel — the second NAMED single-tool seam (still
+  // deliberately not a generic extra-tools list; depth-1 stays a property of construction).
+  if (admissible(reportFindingTool)) tools.push(reportFindingTool);
   return tools;
 }
 
@@ -116,6 +117,13 @@ export interface SubagentDeps {
    * stays a property of construction rather than a convention.
    */
   retrieveTool?: Tool;
+  /**
+   * Session 14: the PER-TASK report_finding instance for a reviewer child (the delegate
+   * constructs one accumulator+tool per reviewer inside the fan-out, so parallel lenses can
+   * never interleave findings). Admitted only when the role contract names it AND the
+   * instance passes the same structural fact check as retrieve.
+   */
+  reportFindingTool?: Tool;
   /**
    * Session 11: task-scoped cancellation seam. Called once the child session exists with a
    * handle that cancels THIS child only (cause 'user-cancelled' → status 'cancelled'); the
@@ -265,7 +273,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       : autoDenyApprover;
   // Tools first, prompt second: the prompt states exactly the registry this child actually has
   // (retrieve is admitted per-session; the wording must not promise an absent tool).
-  const tools = childTools(contract.toolNames, deps.retrieveTool);
+  const tools = childTools(contract.toolNames, deps.retrieveTool, deps.reportFindingTool);
   let system: string;
   try {
     system = contract.buildPrompt({

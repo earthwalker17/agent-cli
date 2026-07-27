@@ -48,6 +48,13 @@ export interface RoleContract {
  * wrong-tree line references by construction.
  */
 const READ_ONLY_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 'retrieve'] as const;
+/**
+ * 'report_finding' (Session 14) follows the same named-instance discipline as 'retrieve': only
+ * the REVIEWER contract names it, and the runner admits it from SubagentDeps.reportFindingTool
+ * iff named AND structurally fact-free. It is the reviewer's ONLY findings channel — recorded
+ * findings are what the review gate reads; prose stays narration.
+ */
+const REVIEWER_TOOLS = [...READ_ONLY_TOOLS, 'report_finding'] as const;
 const EXECUTOR_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 'write_file', 'edit_file'] as const;
 const READ_ONLY_BUDGET: TaskBudget = { maxSteps: 15, timeoutMs: 300_000, maxOutputTokens: 30_000 };
 
@@ -77,7 +84,7 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
   reviewer: {
     name: 'reviewer',
     access: 'read-only',
-    toolNames: READ_ONLY_TOOLS,
+    toolNames: REVIEWER_TOOLS,
     budget: READ_ONLY_BUDGET,
     approvals: 'auto-deny',
     buildPrompt: (a) => buildReviewerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve),

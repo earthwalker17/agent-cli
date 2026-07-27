@@ -1,6 +1,8 @@
 import path from 'node:path';
 import { z } from 'zod';
-import type { SessionEvent, SubagentRoleName, TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
+import { REVIEW_SEVERITIES, type ReviewFinding, type SessionEvent, type SubagentRoleName, type TaskChangeFile, type Tool, type ToolContext, type ToolResult } from '../types.js';
+import { createFindingAccumulator, createReportFindingTool } from './report-finding.js';
+import { sanitizeLine } from '../shared/text.js';
 import type { PlanState } from '../plan/canonical.js';
 import type { GraphState } from '../plan/graph-state.js';
 import type { CheckKind } from '../types.js';
@@ -174,6 +176,9 @@ interface TaskOutcome {
   /** Extra harness lines for this task's report section (capture summary, worktree warnings). */
   notes: string[];
   capturedPaths: string[];
+  /** Session 14: recorded review findings (reviewer tasks only) — for the group digest, which
+   *  head-biased truncation can never hide. */
+  findings?: ReviewFinding[];
 }
 
 /**
@@ -670,6 +675,41 @@ export function createDelegateTool(
             provider,
             ...(ctx.reportTask !== undefined ? { reportTask: ctx.reportTask } : {}),
           };
+          if (spec.role === 'reviewer') {
+            // Session 14: one accumulator+tool PER reviewer task (parallel lenses must never
+            // interleave findings), admitted through the named SubagentDeps seam. Capture is
+            // UNCONDITIONAL for any child that existed — an empty list is a recorded clean
+            // lens, and findings from a failed/timed-out lens are still evidence (the fold
+            // decides what qualifies a round; the delegate only records).
+            const acc = createFindingAccumulator();
+            const result = await runSubagentTask({ ...taskDeps, reportFindingTool: createReportFindingTool(acc) }, spec, ctx.signal);
+            let findings: ReviewFinding[] = [];
+            if (result.childSessionId !== '') {
+              findings = acc.items.map((it, i) => ({ ...it, findingId: `${result.childSessionId}#${i + 1}` }));
+              ctx.reportTask?.({
+                kind: 'review-findings',
+                childSessionId: result.childSessionId,
+                ...(t.plan_task !== undefined ? { planTaskId: t.plan_task } : {}),
+                lens: sanitizeLine(t.task).slice(0, 60),
+                findings,
+              });
+            }
+            const bySev = new Map<string, number>();
+            for (const f of findings) bySev.set(f.severity, (bySev.get(f.severity) ?? 0) + 1);
+            const counts = REVIEW_SEVERITIES.filter((s) => bySev.has(s))
+              .map((s) => `${bySev.get(s)} ${s}`)
+              .join(', ');
+            const notes: string[] = [
+              findings.length > 0
+                ? `[harness] ${findings.length} finding(s) RECORDED via report_finding (${counts}): ${findings.map((f) => `${f.findingId} (${f.severity}) ${f.title}`).join(' · ')}`
+                : '[harness] ZERO findings recorded via report_finding — the gate reads only recorded findings',
+              // The explorer-section-check precedent: informational, never a manufactured failure.
+              ...(findings.length === 0 && /\b(critical|high)\b/i.test(result.finalText)
+                ? ['[harness] NOTE: the prose below mentions critical/high but nothing was recorded — treat prose findings as narration; they do not exist for the gate']
+                : []),
+            ];
+            return { result, notes, capturedPaths: [], findings };
+          }
           if (spec.role !== 'executor') {
             return { result: await runSubagentTask(taskDeps, spec, ctx.signal), notes: [], capturedPaths: [] };
           }
@@ -712,6 +752,17 @@ export function createDelegateTool(
         ...outcomes.flatMap((o, i) =>
           o.result.supervision.map((s) => `supervision task ${i + 1}: ${s.what}${s.detail !== undefined ? ` — ${s.detail}` : ''}`),
         ),
+        // Recorded review findings ride the DIGEST (Session 14): a truncated tail must never
+        // hide that a lens recorded a critical.
+        ...outcomes.flatMap((o, i) => {
+          if (o.findings === undefined || o.findings.length === 0) return [];
+          const bySev = new Map<string, number>();
+          for (const f of o.findings) bySev.set(f.severity, (bySev.get(f.severity) ?? 0) + 1);
+          const counts = REVIEW_SEVERITIES.filter((s) => bySev.has(s))
+            .map((s) => `${bySev.get(s)} ${s}`)
+            .join(', ');
+          return [`review task ${i + 1}: ${o.findings.length} finding(s) recorded — ${counts} (triage each critical/high via the review tool)`];
+        }),
         // Declared-vs-actual honesty: an executor that wrote outside its plan-declared touches.
         ...outcomes.flatMap((o, i) => {
           const pid = input.tasks[i]!.plan_task;
