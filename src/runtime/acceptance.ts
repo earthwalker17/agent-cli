@@ -2,6 +2,7 @@ import type { SessionEvent, TaskChangeFile } from '../types.js';
 import type { PlanState } from '../plan/canonical.js';
 import { completionGateState, type GraphState } from '../plan/graph-state.js';
 import { foldRepairs, openRepairBlockers } from '../recovery/ledger.js';
+import { foldReview } from '../review/ledger.js';
 import { proveWith } from '../recovery/catalogue.js';
 
 /**
@@ -61,6 +62,12 @@ const WORK_EVENT_TYPES = new Set([
   // declares work about to happen, and an escalation changes what is outstanding.
   'repair.attempted',
   'repair.escalated',
+  // Review records change what is outstanding the same way (Session 14): a captured round or
+  // a triage after an acceptance makes re-accepting meaningful. `harness.checkpoint` is
+  // deliberately NOT here — the accept's own delivery checkpoint must never stale the accept
+  // (the review-F1 lesson above, again).
+  'review.findings',
+  'review.triage',
   // A preview server is a spawned process that can write outputs — the `command.started` /
   // `check.started` class (Session 13). ready/ended are lifecycle echoes of the same unit.
   'preview.started',
@@ -177,6 +184,17 @@ export function computeAcceptance(
       .map((t) => t.id),
   );
   for (const blocker of openRepairBlockers(foldRepairs(events), { resolvedTargets })) unfinished.push(blocker);
+
+  // Review axis (Session 14): the structural review gate. The REQUIREMENT derives only from a
+  // plan the user actually APPROVED (a draft/superseded/diverged plan is already blocked or
+  // retired by the axes above, and a retired plan must not keep requiring reviews of new
+  // unplanned work) — but the fold runs even without one, because recorded critical/high
+  // findings block regardless of how the round came to run: evidence cannot be unseen. The
+  // blockers and caveats arrive pre-rendered from the one fold /review also shows.
+  const reviewGraph = planState.kind === 'canonical' && planState.status === 'approved' ? (planState.canonical?.graph ?? null) : null;
+  const review = foldReview(reviewGraph, events);
+  for (const blocker of review.openBlockers) unfinished.push(blocker);
+  for (const caveat of review.caveats) caveats.push(caveat);
 
   // The latest recorded acceptance, if any.
   let accepted: RecordedAcceptance | null = null;

@@ -411,6 +411,11 @@ describe('acceptance is blocked by unresolved recovery', () => {
       ev({ type: 'task.changes', callId: 'c-ch1', childSessionId: 'ch1', baseOid: 'o', files: [{ relPath: 'src/api/a.ts', kind: 'modify', blobSha256: 'b', baseSha256: null, bytes: 1 }] }),
       ev({ type: 'task.applied', callId: 'c-ch1', childSessionId: 'ch1', applied: ['src/api/a.ts'], refused: [] }),
       ev({ type: 'check.completed', callId: 'k', check: 'typecheck' as CheckKind, recipeId: 'r', status: 'pass', exitCode: 0, termination: 'exited', durationMs: 1, summary: 'ok' }),
+      // Session 14: the executor plan also derives the review requirement — a qualifying
+      // clean round keeps this test about the ESCALATION axis.
+      ev({ type: 'task.started', callId: 'rv', role: 'reviewer', childSessionId: 'child-rv', budget: {} }),
+      ev({ type: 'task.ended', callId: 'rv', childSessionId: 'child-rv', status: 'completed', steps: 1, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+      ev({ type: 'review.findings', callId: 'rv', childSessionId: 'child-rv', findings: [] }),
     ];
     const acc = computeAcceptance(state, foldGraphState(g, events), events);
     expect(acc.unfinished.join(' ')).not.toContain('repair escalated');

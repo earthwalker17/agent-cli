@@ -3,7 +3,7 @@ import { computeAcceptance, workSince } from '../src/runtime/acceptance.js';
 import { foldGraphState } from '../src/plan/graph-state.js';
 import { PlanGraphSchema, planContentSha, type PlanGraph } from '../src/plan/schema.js';
 import type { PlanState } from '../src/plan/canonical.js';
-import type { SessionEvent, TaskChangeFile } from '../src/types.js';
+import type { ReviewFinding, SessionEvent, TaskChangeFile } from '../src/types.js';
 
 /**
  * The acceptance fold (Session 11.5): one pure derivation of "is this session's work complete,
@@ -31,6 +31,12 @@ const file = (relPath: string, over: Partial<TaskChangeFile> = {}): TaskChangeFi
   bytes: 1,
   ...over,
 });
+/** A qualifying clean review round (Session 14): reviewer started → completed → captured. */
+const reviewRound = (call: string, findings: ReviewFinding[] = []): SessionEvent[] => [
+  ev({ type: 'task.started', callId: call, role: 'reviewer', childSessionId: `child-${call}`, budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 } }),
+  ev({ type: 'task.ended', callId: call, childSessionId: `child-${call}`, status: 'completed', steps: 1, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+  ev({ type: 'review.findings', callId: call, childSessionId: `child-${call}`, findings }),
+];
 
 const GRAPH: PlanGraph = PlanGraphSchema.parse({
   objective: 'demo',
@@ -84,12 +90,52 @@ describe('computeAcceptance', () => {
     const st = canonicalState('approved');
     const incomplete = computeAcceptance(st, foldGraphState(GRAPH, []), []);
     expect(incomplete.complete).toBe(false);
-    expect(incomplete.unfinished).toEqual([`plan task 't1' is queued`]);
+    // Session 14: the executor plan also derives the review requirement — both axes list.
+    expect(incomplete.unfinished).toContainEqual(`plan task 't1' is queued`);
+    expect(incomplete.unfinished.some((u) => u.includes('adversarial review required'))).toBe(true);
 
-    const done = [started('t1', 'c1'), endedAs('c1', 'completed'), changes('c1', [])];
+    const done = [
+      started('t1', 'c1'),
+      endedAs('c1', 'completed'),
+      changes('c1', [file('a.ts')]),
+      applies('c1', ['a.ts']),
+      ...reviewRound('rv1'),
+    ];
     const acc = computeAcceptance(st, foldGraphState(GRAPH, done), done);
     expect(acc.complete).toBe(true);
     expect(acc.summary).toContain('plan 1/1 completed'); // m1 counted apart as parent-owned
+  });
+
+  it('the review axis (Session 14): an executor plan blocks without a qualifying round; the round satisfies it', () => {
+    const st = canonicalState('approved');
+    const done = [started('t1', 'c1'), endedAs('c1', 'completed'), changes('c1', [file('a.ts')]), applies('c1', ['a.ts'])];
+    const noReview = computeAcceptance(st, foldGraphState(GRAPH, done), done);
+    expect(noReview.complete).toBe(false);
+    expect(noReview.unfinished.some((u) => u.includes('adversarial review required (derived: the plan has executor tasks)'))).toBe(true);
+
+    const withReview = [...done, ...reviewRound('rv1')];
+    expect(computeAcceptance(st, foldGraphState(GRAPH, withReview), withReview).complete).toBe(true);
+
+    // A recorded critical blocks even after the round; a triage clears it.
+    const withCrit = [
+      ...done,
+      ...reviewRound('rv2', [
+        {
+          findingId: 'child-rv2#1',
+          severity: 'critical',
+          title: 'bad',
+          paths: ['a.ts'],
+          evidence: 'read a.ts:1 — the guard is missing entirely',
+          scenario: 'empty input crashes',
+          confidence: 'high',
+        },
+      ]),
+    ];
+    const blocked = computeAcceptance(st, foldGraphState(GRAPH, withCrit), withCrit);
+    expect(blocked.complete).toBe(false);
+    expect(blocked.unfinished.some((u) => u.includes('child-rv2#1'))).toBe(true);
+    const refuted = [...withCrit, ev({ type: 'review.triage', callId: 'tr', findingId: 'child-rv2#1', action: 'refute', evidence: 'checked: guard exists upstream' })];
+    expect(computeAcceptance(st, foldGraphState(GRAPH, refuted), refuted).complete).toBe(true);
   });
 
   it('a diverged approval and an unreadable plan both land on the unfinished list', () => {

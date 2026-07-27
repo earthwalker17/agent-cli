@@ -91,11 +91,14 @@ export interface ReviewState {
 }
 
 /** The workspace-change event test shared by rule 2's precondition and the staleness caveat
- *  (the completionGateState change set — undo/restore count only when they restored files). */
+ *  (the completionGateState change set — undo/restore count only when they restored files —
+ *  plus effective applies: a real apply also records file.mutated, but the fold must not
+ *  depend on that coupling; an apply after a round is already a hard disqualifier anyway). */
 function isWorkspaceChange(e: SessionEvent): boolean {
   if (e.type === 'file.mutated') return true;
   if (e.type === 'undo.applied' && e.restored.length > 0) return true;
   if (e.type === 'git.restore' && e.restored.length > 0) return true;
+  if (e.type === 'task.applied' && e.applied.length > 0) return true;
   return false;
 }
 

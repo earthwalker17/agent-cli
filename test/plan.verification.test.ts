@@ -33,6 +33,12 @@ const checkDone = (check: CheckKind, status: string): SessionEvent =>
   ev({ type: 'check.completed', callId: 'k', check, recipeId: 'r', status, exitCode: status === 'pass' ? 0 : 1, durationMs: 1, summary: `${check} ${status}` });
 const mutated = (): SessionEvent =>
   ev({ type: 'file.mutated', callId: 'm', path: 'src/a.ts', kind: 'modify', beforeSha256: 'a', afterSha256: 'b', createdDirs: [] });
+/** A qualifying clean review round (Session 14) — executor-plan acceptance fixtures need one. */
+const reviewRound = (call: string): SessionEvent[] => [
+  ev({ type: 'task.started', callId: call, role: 'reviewer', childSessionId: `child-${call}`, budget: {} }),
+  ev({ type: 'task.ended', callId: call, childSessionId: `child-${call}`, status: 'completed', steps: 1, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+  ev({ type: 'review.findings', callId: call, childSessionId: `child-${call}`, findings: [] }),
+];
 
 function graphOf(over: Partial<PlanGraph> = {}, tasks?: unknown[]): PlanGraph {
   const parsed = PlanGraphSchema.parse({
@@ -380,7 +386,7 @@ describe('acceptance: gates are completion blockers', () => {
   it('a passing check completes it', () => {
     reset();
     const g = graphOf({}, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v', checks: ['test'] }]);
-    const events = [started('a', 'ch1'), endedOk('ch1'), changed('ch1', 'x'), appliedAll('ch1', ['x']), checkDone('test', 'pass')];
+    const events = [started('a', 'ch1'), endedOk('ch1'), changed('ch1', 'x'), appliedAll('ch1', ['x']), checkDone('test', 'pass'), ...reviewRound('rv')];
     const acc = computeAcceptance(planState(g), foldGraphState(g, events), events);
     expect(acc.complete).toBe(true);
   });
@@ -388,7 +394,7 @@ describe('acceptance: gates are completion blockers', () => {
   it('an unsatisfied completion gate blocks acceptance, and a later change re-opens it', () => {
     reset();
     const g = graphOf({ gates: { completion: ['build'] } }, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);
-    const done = [started('a', 'ch1'), endedOk('ch1'), changed('ch1', 'x'), appliedAll('ch1', ['x'])];
+    const done = [started('a', 'ch1'), endedOk('ch1'), changed('ch1', 'x'), appliedAll('ch1', ['x']), ...reviewRound('rv')];
     expect(computeAcceptance(planState(g), foldGraphState(g, done), done).unfinished.join(' ')).toContain("completion gate 'build'");
 
     const green = [...done, checkDone('build', 'pass')];
@@ -427,6 +433,7 @@ describe('acceptance: gates are completion blockers', () => {
       appliedAll('ch1', ['x']),
       mutated(),
       ev({ type: 'check.completed', callId: 'k', check: 'lint', recipeId: '(none)', status: 'unsupported', unsupportedReason: 'no-recipe', exitCode: null, durationMs: 0, summary: 'no lint recipe' }),
+      ...reviewRound('rv'),
     ];
     const acc = computeAcceptance(planState(g), foldGraphState(g, events), events);
     expect(acc.complete).toBe(true);
