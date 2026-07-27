@@ -280,6 +280,52 @@ export type RepairEvidence =
       reason: string;
     };
 
+/** Review finding severities and confidences (Session 14) — the shared vocabulary of the
+ *  structural review gate. Ordering in these arrays is the canonical render order. */
+export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low';
+export const REVIEW_SEVERITIES: readonly ReviewSeverity[] = ['critical', 'high', 'medium', 'low'] as const;
+export type ReviewConfidence = 'high' | 'medium' | 'low';
+
+/**
+ * One recorded reviewer finding (Session 14). Findings are TYPED AT THE SOURCE: a reviewer
+ * child records each through the report_finding tool (zod-validated, bounded), the delegate
+ * captures the batch into a `review.findings` event, and the gate reads ONLY these records —
+ * reviewer prose remains narration. `findingId` is `${childSessionId}#${ordinal}`:
+ * collision-free (session ids are structurally fresh), replay-stable (events rebuild the same
+ * ids), and deliberately NOT content-derived — two findings sharing a title are two findings,
+ * and merging them would be judgment, not derivation.
+ */
+export interface ReviewFinding {
+  findingId: string;
+  severity: ReviewSeverity;
+  title: string;
+  /** Workspace-relative path prefixes the finding claims to affect (validated at recording). */
+  paths: string[];
+  /** What was actually inspected — file:line references, the code read, the state observed. */
+  evidence: string;
+  /** The concrete failure scenario: inputs/state → wrong outcome. */
+  scenario: string;
+  confidence: ReviewConfidence;
+  reproduction?: string;
+}
+
+/**
+ * Structured triage facts reported through `ToolContext.reportReview` (Session 14; the
+ * reportRepair pattern). Triage ANNOTATES findings — it never deletes one, and the fold
+ * derives what an annotation is worth: an 'address' whose cited refs do not exist in the log
+ * clears nothing, and 'accept' is valid only for medium/low severities (re-checked in the
+ * fold, not just the tool schema). A refutation's evidence is recorded verbatim and rendered
+ * as an UNVERIFIED MODEL CLAIM everywhere it surfaces.
+ */
+export type ReviewEvidence = {
+  kind: 'triage';
+  findingId: string;
+  action: 'verify' | 'refute' | 'accept' | 'address';
+  evidence: string;
+  /** For 'address': the callIds and/or check recipeIds that contain the fix (existence-checked by the fold). */
+  refs?: string[];
+};
+
 /**
  * Subagent role names and their access class — the POLICY fact table (V0.7). Data only: the
  * runtime builds full role contracts (tool registry, prompt, budget, approval mode) on top of
@@ -415,6 +461,22 @@ export type TaskEvidence =
       checkpointKind: 'pre-integration';
       ref: string;
       oid: string;
+    }
+  | {
+      /**
+       * A reviewer child's recorded findings, captured at task end (Session 14; the
+       * task.changes capture precedent). ALWAYS emitted for a COMPLETED reviewer child —
+       * `findings: []` is a recorded clean lens, and a completed reviewer with NO capture
+       * event means the capture was lost (the round never happened; honest re-run). Findings
+       * from a failed/timed-out lens are still captured as evidence, but that lens does not
+       * qualify a round.
+       */
+      kind: 'review-findings';
+      childSessionId: string;
+      planTaskId?: string;
+      /** A short sanitized label of the lens (from the task text) for report/render surfaces. */
+      lens?: string;
+      findings: ReviewFinding[];
     };
 
 /**
@@ -453,6 +515,8 @@ export interface ToolContext {
   reportCheck?: (e: CheckEvidence) => void;
   /** Evidence channel for bounded-repair ledger facts (Session 12); persisted under this call's id. */
   reportRepair?: (e: RepairEvidence) => void;
+  /** Evidence channel for review-triage facts (Session 14); persisted under this call's id. */
+  reportReview?: (e: ReviewEvidence) => void;
   /** Evidence channel for managed-preview lifecycle facts (Session 13); persisted under this call's id. */
   reportPreview?: (e: PreviewEvidence) => void;
   /** Evidence channel for browser-flow detail (Session 13); persisted under this call's id. */
@@ -937,6 +1001,31 @@ export type EventBody =
       failureClass: FailureClass;
       signature: string;
       reason: string;
+    }
+  /**
+   * The structural review gate (Session 14, additive). `review.findings` is the delegate's
+   * capture of ONE reviewer child's typed findings (possibly empty — a recorded clean lens);
+   * the gate reads only these records, never reviewer prose. `review.triage` is the parent's
+   * recorded judgment on one finding; like repairs, what a triage is WORTH is derived (an
+   * 'address' whose cited refs do not exist clears nothing) and a triage never deletes a
+   * finding. There is deliberately no `review.completed`: a round is derived from the
+   * capture events of the delegate call that ran it.
+   */
+  | {
+      type: 'review.findings';
+      callId: string;
+      childSessionId: string;
+      planTaskId?: string;
+      lens?: string;
+      findings: ReviewFinding[];
+    }
+  | {
+      type: 'review.triage';
+      callId: string;
+      findingId: string;
+      action: 'verify' | 'refute' | 'accept' | 'address';
+      evidence: string;
+      refs?: string[];
     }
   /**
    * Managed preview processes (Session 13, additive). A preview is a SESSION resource that

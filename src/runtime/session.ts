@@ -14,6 +14,7 @@ import type {
   Provider,
   ProviderRequest,
   RepairEvidence,
+  ReviewEvidence,
   SessionEvent,
   SessionMode,
   StopReason,
@@ -723,7 +724,29 @@ function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): 
     case 'harness-checkpoint':
       session.log.append({ type: 'harness.checkpoint', kind: e.checkpointKind, ref: e.ref, oid: e.oid, callId });
       return;
+    case 'review-findings':
+      session.log.append({
+        type: 'review.findings',
+        callId,
+        childSessionId: e.childSessionId,
+        ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
+        ...(e.lens !== undefined ? { lens: e.lens } : {}),
+        findings: e.findings,
+      });
+      return;
   }
+}
+
+/** Persist a tool-reported review-triage fact under the runtime-bound callId (Session 14). */
+function recordReviewEvidence(session: Session, callId: string, e: ReviewEvidence): void {
+  session.log.append({
+    type: 'review.triage',
+    callId,
+    findingId: e.findingId,
+    action: e.action,
+    evidence: e.evidence,
+    ...(e.refs !== undefined && e.refs.length > 0 ? { refs: e.refs } : {}),
+  });
 }
 
 /** Persist a tool-reported plan-document write under the runtime-bound callId (V0.7). */
@@ -1049,6 +1072,7 @@ async function runExecution<I>(
     reportPlan: (e) => recordPlanEvidence(session, callId, e),
     reportCheck: (e) => recordCheckEvidence(session, callId, e),
     reportRepair: (e) => recordRepairEvidence(session, callId, e),
+    reportReview: (e) => recordReviewEvidence(session, callId, e),
     reportPreview: (e) => recordPreviewEvidence(session, callId, e),
     reportBrowser: (e) => recordBrowserEvidence(session, callId, e),
     ...(session.onCommandOutput
