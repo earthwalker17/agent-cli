@@ -76,6 +76,22 @@ export function renderUserPlanView(doc: CanonicalPlanDoc): string {
       lines.push(`- **completion** (after the last change, before the session can be accepted): ${g.gates.completion!.join(', ')}`);
     }
   }
+  // The review declaration is part of what the user approves — a waiver must be impossible to
+  // miss in the projection whose sha the approval binds (Session 14). The derived default
+  // (executor plans require a review round) renders too, so silence never means "no review".
+  {
+    const hasExecutor = g.tasks.some((t) => t.role === 'executor');
+    if (g.review?.mode === 'waived') {
+      lines.push('', '## Adversarial review', '', `- **WAIVED** — ${g.review.reason ?? '(no reason)'} _(recorded as an acceptance caveat)_`);
+    } else if (g.review?.mode === 'required' || hasExecutor) {
+      lines.push(
+        '',
+        '## Adversarial review',
+        '',
+        `- **required${g.review?.mode === 'required' ? ' (declared)' : ' (default for executor plans)'}** — a recorded reviewer round after integration, with critical/high findings resolved, gates /accept`,
+      );
+    }
+  }
 
   const verified = g.tasks.filter((t) => t.verify.trim() !== '');
   if (verified.length > 0) {
@@ -137,6 +153,13 @@ export function renderAgentPlanView(doc: CanonicalPlanDoc, graphState?: GraphSta
   if (g.gates !== undefined) {
     if ((g.gates.integration?.length ?? 0) > 0) lines.push(`Gate (integration): ${g.gates.integration!.join(', ')}`);
     if ((g.gates.completion?.length ?? 0) > 0) lines.push(`Gate (completion): ${g.gates.completion!.join(', ')}`);
+  }
+  if (g.review?.mode === 'waived') {
+    lines.push(`Review: WAIVED — ${g.review.reason ?? '(no reason)'} (acceptance will carry this as a caveat)`);
+  } else if (g.review?.mode === 'required' || g.tasks.some((t) => t.role === 'executor')) {
+    lines.push(
+      `Review: required${g.review?.mode === 'required' ? ' (declared)' : ' (derived: executor plan)'} — run ONE bounded reviewer round (delegate_task, 2-3 reviewer lenses) after integration; triage every critical/high finding with the review tool before /accept`,
+    );
   }
   if (g.risks !== undefined && g.risks.length > 0) lines.push(`Risks: ${g.risks.join(' | ')}`);
   if (g.notes !== undefined && g.notes.trim() !== '') lines.push(`Notes: ${g.notes}`);

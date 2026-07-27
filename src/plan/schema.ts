@@ -79,6 +79,25 @@ export const PlanGatesSchema = z
   })
   .strict();
 
+/**
+ * The adversarial-review declaration (Session 14). Optional with NO default — same sha-neutrality
+ * contract as `checks`/`gates`: plans written before this field keep their exact content sha.
+ * The REQUIREMENT itself is derived, not stored: a plan with ≥1 executor task requires a review
+ * round by default; 'waived' opts such a plan out VISIBLY (reason required — it renders in both
+ * projections and the user approves it with the plan sha, then it surfaces as an acceptance
+ * caveat); 'required' forces the gate for parent-only plans that would otherwise derive none.
+ */
+export const PlanReviewSchema = z
+  .object({
+    mode: z.enum(['required', 'waived']),
+    reason: z
+      .string()
+      .max(300)
+      .optional()
+      .describe('Why the review is waived (required when mode is "waived"; recorded as an acceptance caveat).'),
+  })
+  .strict();
+
 export const PlanGraphSchema = z
   .object({
     version: z.literal(PLAN_GRAPH_VERSION).default(PLAN_GRAPH_VERSION),
@@ -88,6 +107,8 @@ export const PlanGraphSchema = z
     notes: z.string().max(4000).optional(),
     /** Broader gates at the integration and completion boundaries (Session 12; sha-neutral when absent). */
     gates: PlanGatesSchema.optional(),
+    /** The adversarial-review declaration (Session 14; sha-neutral when absent — see PlanReviewSchema). */
+    review: PlanReviewSchema.optional(),
     tasks: z.array(PlanTaskSchema).min(1).max(20),
   })
   .strict();
@@ -175,6 +196,27 @@ export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions 
         `declared check kind(s) ${missing.join(', ')} cannot run in this project right now (runnable: ${available.length > 0 ? available.join(', ') : 'none'}) — they will record as UNSUPPORTED and be waived with a caveat rather than proving anything`,
       );
     }
+  }
+
+  // Review declaration rules (Session 14). A waiver without a reason is invisible consent —
+  // the reason is what the user actually approves and what the acceptance caveat later shows.
+  const hasExecutorTask = input.tasks.some((t) => t.role === 'executor');
+  if (input.review?.mode === 'waived') {
+    if ((input.review.reason ?? '').trim().length < 10) {
+      errors.push(
+        `review.mode 'waived' requires a substantive 'reason' (≥10 chars): the waiver is part of what the user approves, and it becomes an acceptance caveat`,
+      );
+    }
+    if (!hasExecutorTask) {
+      warnings.push(
+        `review.mode 'waived' on a plan with no executor tasks waives nothing — the review requirement only derives for executor plans`,
+      );
+    }
+  }
+  if (input.review?.mode === 'required' && input.review.reason === undefined && hasExecutorTask) {
+    warnings.push(
+      `review.mode 'required' is already the derived default for a plan with executor tasks — declaring it is harmless but redundant`,
+    );
   }
 
   const ids = new Set<string>();

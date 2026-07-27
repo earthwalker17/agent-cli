@@ -115,6 +115,59 @@ describe('schema: validation of declared gates', () => {
   });
 });
 
+describe('schema: the review declaration (Session 14)', () => {
+  const parse = (tasks: unknown[], over: Record<string, unknown> = {}): ReturnType<typeof validatePlanGraph> =>
+    validatePlanGraph(PlanGraphSchema.parse({ objective: 'o', tasks, ...over }));
+  const EXEC = { id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' };
+  const MAIN = { id: 'a', title: 'A', intent: 'i', role: 'main', verify: 'v' };
+
+  it('absent review is sha-neutral; declaring one changes the sha (semantic change)', () => {
+    const bare = graphOf({}, [EXEC]);
+    expect(canonicalJson(bare)).not.toContain('review');
+    const declared = graphOf({ review: { mode: 'required' } }, [EXEC]);
+    expect(planContentSha(declared)).not.toBe(planContentSha(bare));
+  });
+
+  it("waived requires a substantive reason — the waiver IS what the user approves", () => {
+    const noReason = parse([EXEC], { review: { mode: 'waived' } });
+    expect(noReason.ok).toBe(false);
+    expect(noReason.errors.join(' ')).toContain("'waived' requires a substantive 'reason'");
+    const thin = parse([EXEC], { review: { mode: 'waived', reason: 'meh' } });
+    expect(thin.ok).toBe(false);
+    const real = parse([EXEC], { review: { mode: 'waived', reason: 'single-file config change, no logic touched' } });
+    expect(real.ok).toBe(true);
+    expect(real.graph?.review).toEqual({ mode: 'waived', reason: 'single-file config change, no logic touched' });
+  });
+
+  it('waiving a plan with no executor tasks warns that it waives nothing', () => {
+    const v = parse([MAIN], { review: { mode: 'waived', reason: 'nothing here mutates through executors' } });
+    expect(v.ok).toBe(true);
+    expect(v.warnings.join(' ')).toContain('waives nothing');
+  });
+
+  it('declaring required on an executor plan warns it is the derived default (harmless)', () => {
+    const v = parse([EXEC], { review: { mode: 'required' } });
+    expect(v.ok).toBe(true);
+    expect(v.warnings.join(' ')).toContain('derived default');
+  });
+
+  it('both projections render the declaration — a waiver is impossible to miss, the default is stated', () => {
+    const doc = (graph: PlanGraph) =>
+      ({ planId: 'p', status: 'draft', updated: 't', graph, contentSha: 'c'.repeat(64) }) as never;
+    const waived = graphOf({ review: { mode: 'waived', reason: 'demo scope only, reviewed by hand' } }, [EXEC]);
+    expect(renderUserPlanView(doc(waived))).toContain('WAIVED');
+    expect(renderUserPlanView(doc(waived))).toContain('demo scope only, reviewed by hand');
+    expect(renderAgentPlanView(doc(waived))).toContain('Review: WAIVED');
+    const derived = graphOf({}, [EXEC]);
+    expect(renderUserPlanView(doc(derived))).toContain('default for executor plans');
+    expect(renderAgentPlanView(doc(derived))).toContain('derived: executor plan');
+    // A parent-only plan with no declaration derives nothing — and says nothing.
+    const silent = graphOf({}, [MAIN]);
+    expect(renderUserPlanView(doc(silent))).not.toContain('Adversarial review');
+    expect(renderAgentPlanView(doc(silent))).not.toContain('Review:');
+  });
+});
+
 describe('fold: the per-task gate blocks dependents', () => {
   it('an integrated task with an unsatisfied gate stays completed but does NOT satisfy dependents', () => {
     reset();
