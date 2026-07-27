@@ -81,6 +81,30 @@ wrong in BOTH directions, the review tool folding an unapproved graph, `approved
 `approvedAndCurrent`, and the `notedBaseRefs` splice dropping failed deletions. 32 attacked
 invariants HELD. Two findings were documented as deliberate boundaries rather than changed.
 
+**Live proof** (`C:\Users\A\Desktop\agent-cli-s14-live\` — setup/driver/validate, VALIDATION.md,
+transcripts, driver-run.log): a two-life piped run against real claude-opus-4-8 on the QuickBoard
+fixture (dependency-free node:http SPA with THREE seeded defects: a failing stats test, a
+browser-only no-re-render bug, and an `innerHTML` XSS that every check and the happy path pass
+over). **43/43 post-hoc checks over persisted evidence only, 0 failures, 2 not-done** (386s).
+`@plan` → approve → **the deterministic gate proof: `/accept` REFUSED before any work, naming the
+review-axis blocker** → 2 plan-bound executors in ONE parallel group → integration (a
+pre-integration checkpoint fired live under the covered-change rule) → test gate green after the
+last apply → preview + passing browser flow → a 2-lens review round whose UI lens **found the
+seeded XSS** (`public/render.js:4`, medium/high-confidence) plus two real UX defects, while the
+server lens honestly recorded zero → the parent hand-verified each at its sink and triaged all
+three → **SIGKILL** → resume (the review fold rebuilt from events; `/review` showed the restored
+gate state) → re-verify → `/accept` COMPLETE with the delivery checkpoint captured before the
+consent event and referenced by it → `/quit`. Hygiene verified independently: EXACTLY one ref
+survives under `refs/agent-cli` (the delivery anchor, a real commit object), the task-base and
+pre-integration refs were pruned, and the accepted-limitation caveat rode the acceptance summary
+into the journal handoff. The first run of this driver produced its own finding (below) and was
+re-run after the fixture was corrected.
+
+The two not-done legs are recorded honestly: no post-integration check FAILED (the planned fixes
+landed first try, so the induced failure was the seeded failing test the plan itself fixed — the
+`recover` path stays live-proven from S12/S13), and no finding came back critical/high (so the
+gate discharged on the round alone; the `accept` path for medium/low is what ran).
+
 ### Decisions (and why)
 
 - **A delivery ref's identity is the acceptance that CONSUMED it**, not the newest creation
@@ -101,6 +125,14 @@ invariants HELD. Two findings were documented as deliberate boundaries rather th
 
 ### Open issues / boundaries (deliberate, documented)
 
+- **Live-found (first E2E run, kept as evidence):** on a workspace whose on-disk bytes differ
+  from git's checkout normalization — here system `core.autocrlf=true` over an LF working tree —
+  an executor worktree materializes CRLF files while the parent holds LF, so EVERY captured file
+  is refused at apply as base drift. The harness is correct (the parent genuinely does not hold
+  the bytes the executor based its edit on) and the model behaved exactly as designed: it got the
+  work green by hand, then escalated `integration-conflict` naming the unsatisfiable bookkeeping
+  rather than claiming completion. The fixture now pins `core.autocrlf=false`; making capture
+  robust to a normalization mismatch is a real ergonomic gap, recorded in the deferred pool.
 - Executor work delegated with NO plan derives no review requirement (the user chose "executor
   plans by default" over "any mutating session"); findings from a voluntarily-run round still block.
 - A phantom creation suppresses the pre-integration rule until the next spawn — the checkpoint
@@ -526,6 +558,16 @@ pruning/sanitized export; prompt-history persistence + line-editing niceties; PT
 (the supervised preview substrate deliberately stops at non-interactive servers);
 `--max-turns` flag vs internal `maxSteps` naming alignment; plan-file pruning (one doc per
 session accumulates in the state dir).
+**Delivery/review follow-ups (post-S14):** executor capture/apply is sensitive to a workspace
+whose on-disk bytes differ from git's checkout normalization (system `core.autocrlf=true` over an
+LF tree refuses every captured file as base drift — found live; capturing the base in the
+PARENT's on-disk form, or detecting the mismatch at worktree creation, are the candidate shapes);
+the review requirement is plan-scoped, so an events-derived requirement for plan-less executor
+work is available if "any mutating session" ever becomes the wanted default; a phantom harness
+checkpoint suppresses the covered-change rule until the next spawn (ref-existence probing would
+close it, at the cost of I/O in a currently-pure rule); `/review` has no user-side dismissal for
+a finding the user judges wrong (only the model's refute or `/accept confirm`); review rounds are
+bounded by prompt guidance (2–3 lenses, ≤2 rounds) rather than a harness cap like DelegateCaps.
 **Preview/browser follow-ups (post-S13):** socket-ownership verification for readiness (the
 announced-port + alive-re-check design accepts a residual race; owner-pid via
 Get-NetTCPConnection is the likely shape); deterministic screenshot BASELINE comparison where
