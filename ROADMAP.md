@@ -7,6 +7,117 @@ attempted, verified, decided, and left open.
 
 ---
 
+## Session 14 (2026-07-27/28) — The delivery boundary: Git audit lineage + the structural review gate
+
+### Objective
+
+Turn Git, review, and final acceptance into a coherent delivery boundary: harness-owned
+recovery checkpoints at the workflow transitions that actually exist (before parallel mutation
+— already landed — before integration, and at delivery), with an audit lineage that survives
+crash and never pollutes the user's branch history; adversarial review promoted from ONE prompt
+bullet to a structural completion gate with typed findings, hand-verified triage, and honest
+blocking; and a live coding-flow acceptance run proving the whole chain.
+
+### Planning provenance
+
+3 Explore recon lenses + 1 Plan-agent adversarial critique (18 findings, 1 critical), all
+load-bearing claims hand-verified. Four user decisions asked up front: review required for
+executor plans by default (visibly waivable), the delivery ref SURVIVES the session, no managed
+commits, and the parent may refute a finding with recorded evidence. The critique killed
+designs before code: widening `task.base-checkpoint` for delivery refs (an old reader's owed
+fold would prune the durable anchor — a NEW event type instead); "a checkpoint per apply"
+(demoted to the covered-change rule); and the critical one — the review anchor degenerating
+when no `task.applied` exists, which would have let a review-of-nothing satisfy the gate.
+
+### What was implemented (commits `f99f41b`, `d4994c0`, `d911367`, `a2c49af`, `48182e6`, `ee6adcb`, `a9663bf`, `15ad955`, `82a1158`, + docs)
+
+Full contracts in ARCHITECTURE (Harness checkpoint lineage / The structural review gate):
+
+1. **`feat(git,types,runtime,tools)`** — the `onRefReady` seam (event BEFORE ref: the
+   Session-11.5 creation-instant leak is now structurally closed, and a failed ref write leaves
+   an honest phantom that prunes as already-deleted); the additive `harness.checkpoint` event +
+   `HarnessRefKind`; the seq/kind-aware `owedHarnessRefsFromEvents` re-folded from live events;
+   the pre-integration checkpoint under the covered-change rule (skip-never-refuse).
+2. **`feat(repl,types)`** — the delivery checkpoint: captured before the consent event and
+   referenced by it, surviving the session as the durable audit anchor, idempotent across the
+   crash window (reuse only when nothing work-shaped happened AND the ref exists), never
+   hostage to git, with a `/commit` suggestion instead of automation.
+3. **`feat(plan)`** — `review?: {mode, reason?}`, sha-neutral by the `checks`/`gates`
+   discipline; waivers require a substantive reason and render in both projections.
+4. **`feat(review,types,runtime)`** — `src/review/ledger.ts`: the pure fold (derived
+   requirement, round qualification against real work, never-expiring findings, derived triage
+   worth) + the `ReviewFinding`/`ReviewEvidence` contracts and additive events.
+5. **`feat(tools,runtime,roles,delegate)`** — `report_finding` (per-task accumulator, the
+   SECOND named `childTools` admission, ingestion-time neutralization) + unconditional capture
+   with severity counts in the head digest.
+6. **`feat(tools)`** — the `review` triage tool: verify/refute/accept/address with every rule
+   enforced twice (refused at the call, re-derived in the fold).
+7. **`feat(acceptance,prompt)`** — the review axis; the main-agent bullet rewritten from
+   suggestion to gate.
+8. **`feat(report,repl,memory)`** — `## Adversarial review`, `## Git recovery and audit state`,
+   `/review`, `/status` lines, chrome, journal evidence.
+9. **`fix`** — the adversarial-review batch (below).
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite 972 → **1029 passed / 1 skipped
+across 77 files (+57)**: the onRefReady order pin (the ref provably absent inside the callback),
+a REAL phantom convergence via a planted ref lock including same-`n` reuse, the kind/seq fold
+matrix, the pre-integration fires/skips matrix through real `runTurn` applies, the delivery
+boundary end to end (ref survives the quit prune; exactly one ref under `refs/agent-cli`),
+crash-window reuse vs phantom non-reuse, the review fold's qualification and triage matrices,
+the admission matrix, and the report/journal surfaces.
+
+Bounded adversarial review: **4 differentiated read-only lenses in ONE batch, 16 findings,
+every one hand-verified against the code before fixing** — and all four lenses independently
+found the same critical defect: delivery survival keyed on the newest CREATION event, so a
+phantom (update-ref failed after the append) superseded and pruned the real anchor of the last
+acceptance, leaving a dangling `deliveryRef` and zero anchors. Survival now keys on the ref the
+acceptance actually consumed. **My first fix for it was wrong** (an acceptance that captured no
+ref cleared the anchor with `null`); the regression pin caught it, and the rule is now
+conservative. Seven more fixed: address refs that predate a finding, refuted criticals invisible
+at consent, ingestion-time neutralization of child-authored strings, the covered-change set
+wrong in BOTH directions, the review tool folding an unapproved graph, `approved` without
+`approvedAndCurrent`, and the `notedBaseRefs` splice dropping failed deletions. 32 attacked
+invariants HELD. Two findings were documented as deliberate boundaries rather than changed.
+
+### Decisions (and why)
+
+- **A delivery ref's identity is the acceptance that CONSUMED it**, not the newest creation
+  event. Under event-before-ref a creation can exist for a ref that never landed; keying on
+  consumption is the only identity that is both durable and provable — and an acceptance that
+  captured nothing must not destroy an anchor it cannot replace.
+- **The covered-change rule keys on SPAWN events only.** `file.mutated`/`undo`/`restore` are
+  snapshot-backed by construction, so counting them made every apply after the first pay a
+  whole-tree capture; and a crash mid-command leaves only `command.started` — the exact
+  unknown-effects writer the point exists for.
+- **Recorded findings are the gate's only input; prose is narration.** That inversion (the same
+  one checks made for verification) is what lets review be structural rather than rhetorical.
+- **Triage annotates, never erases, and every rule is enforced twice.** A refutation is real
+  evidence of a decision, so it clears the block — but it is a bare model claim, so it is
+  recorded verbatim, labeled everywhere, and surfaced as an acceptance caveat.
+- **The review requirement is PLAN-scoped** by the user's explicit choice; recorded findings
+  block regardless of how the round came to run.
+
+### Open issues / boundaries (deliberate, documented)
+
+- Executor work delegated with NO plan derives no review requirement (the user chose "executor
+  plans by default" over "any mutating session"); findings from a voluntarily-run round still block.
+- A phantom creation suppresses the pre-integration rule until the next spawn — the checkpoint
+  is best-effort by contract and the apply stays snapshot-backed, so the residual is one missing
+  convenience point, never lost work.
+- The user-commanded CLI/REPL checkpoint path keeps its (documented) creation-instant window:
+  its ref-scan-based list/prune backstop converges without event coupling.
+- `refs/agent-cli` is no longer empty after an accepted session — by design (the delivery
+  anchor); `agent checkpoint prune` remains the user's broom.
+
+### Recommended next step
+
+Session 15 per BLUEPRINT: the first non-coding workflow pack (documents/PDF), reusing the
+context/task/verification/recovery/review/delivery contracts rather than copying them.
+
+---
+
 ## Session 13 (2026-07-26) — Managed preview processes and browser / visual verification
 
 ### Objective
@@ -160,135 +271,44 @@ modality, so the delivery boundary is now the gap.
 
 ---
 
-## Session 12 (2026-07-25/26) — Unified verification gate and typed recovery
-
-### Objective
-
-Make testing, building, checking, and debugging an explicit part of the task-graph lifecycle
-rather than a collection of model-chosen shell commands: a task declares how it will be verified,
-targeted checks run after it completes, dependents unblock only when the required gate is green,
-broader checks run at the integration and completion boundaries — and every failure is CLASSIFIED
-before any repair is planned, with repair bounded by policy and stopping honestly instead of
-looping.
-
-### Planning provenance
-
-3 Explore recon lenses + 1 Plan-agent adversarial critique, load-bearing claims hand-verified;
-four user decisions asked up front (replay consent per exact command; no dependency-install check
-kind; Node/TS first-class + Python minimal; full recovery incl. the bounded ledger). The critique
-killed three of my own designs before code: widening `GRANTABLE` to make checks session-grantable
-would have silently rendered a no-op `[s]` on the executor-spawn ask (a consent the user gives
-that does nothing); a new `unverified` task STATE would have taken a fully-integrated task out of
-R5's duplicated-mutation refusal while R10's ceiling could not bound the re-runs (a field, not a
-state); and `decide()` resolving recipes would have put filesystem I/O in the pure policy gate.
-
-### What was implemented (commits `8938cfe`, `640e44b`, `7134639`, `5823a3f`, `05e55ef`, + docs)
-
-Full contracts in ARCHITECTURE (Typed verification / The verification gate / Typed recovery):
-
-1. **`feat(checks)`** — `src/checks/`: bounded never-throwing project detection with a stat
-   fingerprint over a FIXED candidate list; a declarative recipe table (a project's own script
-   beats a guessed tool; first applicable row wins, so resolution is deterministic and consent
-   can bind to it); `toCommand` as the single composer; and normalization whose one rule is
-   **the exit code is the verdict** — parsers only enrich, and the named signals they emit are
-   what keeps later classification derivable from the log alone.
-2. **`feat(types,policy,runtime)`** — the `check` policy FACT and its explicit fail-closed branch
-   before the command branch, all four fact-combination denials, and replay consent in a separate
-   store keyed by `(recipeId, command, bodySha)` — `GRANTABLE` untouched. `ApprovalRequest.kind:
-   'check'` with its own wording and a `describeCall` branch, without which the prompt was
-   literally blank.
-3. **`feat(tools,runtime,repl,report)`** — `run_check` (parent-only, snapshot-held, three
-   refusals that spawn nothing); `check.started` emitted from `onSpawn` ONLY so it means what
-   `command.started` means; `check.completed` with status, reason, signals and findings;
-   crash replay that says a killed check produced no verdict; `/checks`; and CHECKED extended to
-   typed checks (merged and **sorted by seq**, or `find` credits the wrong evidence).
-4. **`feat(plan,graph,recovery,runtime)`** — `PlanTask.checks?` / `PlanGraph.gates?` (optional,
-   no default, so every existing plan's approval sha is byte-identical); the `verification` field
-   and the ONE `depSatisfied` predicate that blocks dependents; the integration and completion
-   boundary gates; and `src/recovery/` — nine classes as a DATA catalogue, deterministic
-   classification, a ledger whose outcomes are DERIVED (no `repair.ended` to lose in a crash), a
-   bounded policy with typed stop reasons, the `recover` tool, and R11/R12 at the scheduler gate.
-5. **`fix`** — the adversarial-review batch (below).
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite 689 → **868 passed / 1 skipped
-across 66 files (+179)**: the recipe/detection matrices, the exit-code-is-the-verdict matrix, the
-four policy fact-combination denials, the replay-consent matrix (including the body-rewrite
-re-ask and the untouched executor-spawn `[s]`), TOCTOU and budget refusals, real `npm run`
-executions through `runTurn`, the sha-compat pins, the gate-satisfaction matrix (seq ordering,
-all-bindings anchor, waiver reasons, targeted scope), acceptance's three new axes and its
-caveats, R11/R12 with their hatches, the nine-class classification matrix, and the ledger's
-derived outcomes.
-
-Bounded adversarial review: **4 differentiated read-only lenses, 21 findings, every one
-hand-verified against the code before fixing** — 1 critical, 6 high, 9 medium, 2 low fixed, plus
-2 I had already found while building the E2E, each with a regression pin. The critical one was
-mine and was exactly the property this session set out to establish: replay consent bound the
-command STRING, so rewriting `package.json`'s `test` script — an ordinary auto-allowed write —
-left the key identical and turned one `[s]` into standing consent to execute anything. Consent
-now binds the script body.
-
-**Live proof** (`C:\Users\A\Desktop\agent-cli-s12-live\` — setup/driver/validate, VALIDATION.md,
-per-phase transcripts, report.md): four-life piped run against real claude-opus-4-8 on a fresh
-dependency-free Node project with four REAL checks, each seeded with one representative defect.
-**39/40 post-hoc checks over persisted evidence only, 0 failures.** Plan with a completion gate →
-sha-bound approval → execution → **SIGKILL landing inside a running check** → resume replayed it
-as *"produced no verdict"* → `test` failed → `recover(attempt)` classified `test-assertion`,
-recorded a hypothesis and its proof, fixed the expectation and **said plainly it had changed a
-test** (the catalogue's own instruction for that class) → all four green → `/accept` complete →
-clean quit + journal handoff. A fourth life then exercised the two paths the first three missed:
-`s` on a check ask produced a genuine `check.replay-consent` re-run with no prompt, and an
-induced `module-not-found` was classified `dependency-setup`, REFUSED an automatic repair, and
-escalated — after which `/accept` refused COMPLETE naming the open escalation, and only
-`/accept confirm` recorded a partial. All four checks re-verified exit 0 independently at
-validation time; the user repo carries zero `refs/agent-cli` refs.
-
-### Decisions (and why)
-
-- **The model names KINDS; the harness names COMMANDS.** This is the whole trust argument for
-  letting checks be consented to once rather than every time — and it is why the consent key had
-  to bind the script BODY, not just the stable `npm run test` string.
-- **A field, not a state.** Keeping `completed` preserves R5's duplicated-mutation refusal and
-  R10's ceiling; the cost is that acceptance needed an explicit verification axis rather than
-  getting one for free. Worth it.
-- **A gate may only be waived by a PROJECT-capability fact.** `unsupported` was doing double
-  duty for "this project cannot" and "you asked wrong"; the second must never discharge
-  verification the user approved.
-- **Repair outcomes are derived, never recorded.** There is no `repair.ended` to lose in a crash:
-  an attempt is proven only when the regression check it declared actually passed after it.
-- **Enforced / detected / recorded are three different words.** Attempts, wall time and budgets
-  are enforced; scope expansion is DETECTED (it stops the next attempt, it does not block a
-  write); whether a hypothesis is genuinely new is only recorded for review. The code and the
-  tool output now say which is which.
-
-### Open issues / boundaries (deliberate, documented)
-
-- A `session`-targeted escalation clears only via a proven repair attempt for the same failure —
-  fixing the problem by hand does not retract it, so full acceptance stays blocked and
-  `/accept confirm` is the exit. A plan-task-targeted escalation resolves by evidence. Observed
-  live; the asymmetry is the honest cost of not letting a model retract its own hand-to-the-user.
-- `run_check` is parent-only: an executor worktree has no gitignored dependencies, so the parent
-  verifies after integration. Executors therefore cannot self-verify.
-- Non-Node/Python projects are `unsupported` with the reason; there is no dependency-install kind.
-- The per-task gate is not invalidated by unrelated later changes (the completion gate covers
-  combined state) — deliberate, and documented where both live.
-- A plan whose tasks are all `role: main` cannot use per-task gates at all (validation refuses
-  them); this is what the live run did, so the per-task gate is covered by unit tests only.
-
-### Recommended next step
-
-Session 13 per BLUEPRINT: managed preview processes and browser/visual verification — now with a
-real precedent for what a typed check capability, its consent model, and its failure classes look
-like. The first question to settle is whether a preview server is a check kind or a distinct
-managed resource with its own lifecycle events.
-
----
-
-## Earlier Milestones (Sessions 1–11.5 — compressed per the rolling-docs policy)
+## Earlier Milestones (Sessions 1–12 — compressed per the rolling-docs policy)
 
 Contract detail for everything below lives in `ARCHITECTURE.md`; entries here keep the
 objective, the lasting decisions (with why), the evidence, and what stayed open.
+
+### Session 12 (2026-07-25/26) — unified verification gate and typed recovery
+
+Verification became a typed capability whose results are durable evidence (commits
+`8938cfe`…`05e55ef`; suite 689→868+1). Landed: `src/checks/` (bounded never-throwing project
+detection; a declarative recipe table where a project's OWN script beats a guessed tool, first
+applicable row wins so consent can bind to it; `toCommand` as the single composer; normalization
+whose one rule is **the exit code is the verdict**, parsers only enrich, and the named SIGNALS are
+what keep later classification derivable from the log alone); the `check` policy fact with its
+fail-closed branch before the command branch and **replay consent keyed on `(recipeId, command,
+bodySha)`** in a store separate from `Grants`; `run_check` (parent-only, snapshot-held, three
+refusals that spawn nothing) with `check.started` emitted only on a real spawn;
+`PlanTask.checks`/`PlanGraph.gates` (sha-neutral when absent) with the single `depSatisfied`
+predicate blocking dependents plus integration/completion boundary gates and honest waivers; and
+`src/recovery/` — nine failure classes as a DATA catalogue, deterministic classification BEFORE any
+repair planning, a ledger whose outcomes are DERIVED (no `repair.ended` to lose in a crash), a
+bounded policy with typed stop reasons, and R11/R12 at the scheduler gate. Lasting decisions: **the
+model names KINDS, the harness names COMMANDS** (the whole trust argument for consent-once checks —
+and why consent had to bind the script BODY, not the stable command string: the critical review
+finding of that session, where rewriting `package.json` turned one `[s]` into standing execution
+consent); a FIELD, not a state, for verification (a new state would have taken an integrated task
+out of R5's duplicated-mutation refusal); a gate may only be waived by a PROJECT-capability fact;
+repair outcomes are derived, never recorded; and enforced/detected/recorded are three different
+words. Review: 4 lenses, 21 findings, all hand-verified. Live four-life E2E on a fresh
+dependency-free Node project with four real seeded defects: **39/40 evidence checks, 0 failures** —
+including a SIGKILL landing inside a running check (replayed as "produced no verdict"), a classified
+`test-assertion` repair that said plainly it had changed a test, a genuine `[s]` replay re-run, and
+a `dependency-setup` failure that REFUSED automatic repair and escalated (after which `/accept`
+refused COMPLETE naming the open escalation). Still relevant: a `session`-targeted escalation clears
+only via a proven attempt for the same failure (`/accept confirm` is the exit); `run_check` is
+parent-only (an executor worktree lacks gitignored deps); non-Node/Python projects are `unsupported`
+with the reason; a per-task gate is not invalidated by unrelated later changes (the completion gate
+covers combined state); an all-`main` plan cannot declare per-task gates, so that path is
+unit-tested only.
 
 ### Session 11.5 (2026-07-24) — the durable session: lifecycle completion, acceptance boundary, crash-proof continuation
 

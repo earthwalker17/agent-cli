@@ -1,8 +1,8 @@
 # ARCHITECTURE
 
-How Agent CLI V0.9 (post-Session-13: managed previews + browser/visual verification) is
-actually built. This describes the implemented system, not aspirations — see `ROADMAP.md` for
-what is deferred.
+How Agent CLI V0.9 (post-Session-14: the delivery boundary — harness checkpoint lineage and the
+structural review gate) is actually built. This describes the implemented system, not
+aspirations — see `ROADMAP.md` for what is deferred.
 
 ## Shape
 
@@ -62,6 +62,9 @@ src/
     classify.ts            Deterministic classification from persisted evidence.
     ledger.ts              Pure fold: repair attempts with DERIVED outcomes.
     policy.ts              Bounded-repair eligibility + typed stop reasons.
+  review/                  Session 14 — see "The structural review gate".
+    ledger.ts              Pure fold: derived requirement, round qualification, finding
+                           statuses with derived triage worth, blockers + caveats.
   git/
     types.ts               GitFacts / GitResult / porcelain contracts (harness capability, NOT tools).
     client.ts              runGit over runManaged — hardened on every invocation (see "GitOps").
@@ -84,10 +87,13 @@ src/
     browser-flow.ts        browser_flow — typed browser verification (Session 13; parent-only).
     view-image.ts          view_image — session-artifact screenshot reads (Session 13).
     recover.ts             recover — the bounded repair ledger tool (Session 12; parent-only).
+    report-finding.ts      report_finding — the reviewer child's ONLY findings channel; a
+                           per-task accumulator+instance (Session 14; child-only).
+    review.ts              review — parent triage over recorded findings (Session 14).
     delegate.ts            delegate_task — per-session factory; parallel groups, executor
                            orchestration, briefs (V0.8); the DAG gate (checkDagRules R1–R10),
                            plan bindings with definition shas, group digest, events-rebuilt
-                           caps (Sessions 11/11.5).
+                           caps (Sessions 11/11.5); the reviewer findings capture (S14).
     retrieve.ts            retrieve — read-only view over the session index (V0.8).
     update-plan.ts         update_plan — the model's ONLY plan write path; structured graph
                            input with full-precision validation errors (Session 11).
@@ -1000,6 +1006,93 @@ materially different hypothesis, and budget it has not spent.
   classes escalation exists for. A `session`-targeted escalation clears only via a proven attempt;
   `/accept confirm` remains the user's override.
 
+## Harness checkpoint lineage (`git/checkpoint.ts`, `cli/assemble.ts`, `tools/apply-changes.ts`, REPL `/accept`) — Session 14
+
+Recovery points at the workflow transitions the coding flow actually has, all as hidden refs
+under `refs/agent-cli/checkpoints/` — never the user's branch history, never a commit as a side
+effect of running Agent CLI.
+
+- **Event BEFORE ref (`opts.onRefReady`)**: `createCheckpoint` invokes the seam between
+  `commit-tree` and `update-ref`, and every harness call site appends its creation event there
+  (`EventLog.append` is synchronous). A crash between the two now leaves an OWED ref that does
+  not exist, and `deleteCheckpointRefs` counts a missing ref as deleted — so the Session-11.5
+  creation-instant leak is structurally closed rather than documented. The inverse case is
+  handled honestly: an `update-ref` that FAILS after the append leaves a **phantom** creation,
+  so every reader treats `agent checkpoint list` as live truth, the owed fold is
+  latest-creation-per-ref-wins (the next checkpoint may reuse the same `n`), and a throwing
+  callback aborts as `ok:false` BEFORE the ref exists. The user-commanded CLI/REPL checkpoint
+  path is deliberately NOT reordered: its list/prune backstop is ref-scan-based and converges
+  without event coupling.
+- **Three kinds, one lifecycle rule** (`HarnessRefKind`): `task-base` (per executor group,
+  Session 11.5) and `pre-integration` are session-scoped recovery points pruned at clean end;
+  `delivery` survives as the durable audit anchor. `harness.checkpoint {kind, ref, oid,
+  callId?}` is a NEW event type on purpose — widening `task.base-checkpoint` would make an old
+  reader's owed fold prune the delivery anchor; `git.checkpoint.pruned.kind` widens additively
+  (its only consumer filtered on `'task-base'`).
+- **`owedHarnessRefsFromEvents`** is seq-aware and kind-aware, re-folded from LIVE events at
+  prune time (so a second prune naturally finds nothing, and a crashed life's debts survive).
+  Delivery survival keys on the ref the latest acceptance actually CONSUMED
+  (`session.accepted.deliveryRef`) — NOT on the newest creation event, which a phantom could
+  hold and thereby prune the real anchor (found by all four review lenses); an acceptance that
+  captured no ref leaves the previous anchor alone rather than destroying one it cannot replace.
+- **Pre-integration** (`apply_task_changes`) fires only under the **covered-change rule**: an
+  un-snapshot-covered writer must have SPAWNED since the last harness checkpoint
+  (`command.started` / `check.started` / `preview.started` — the `WORK_EVENT_TYPES` reasoning,
+  so a crash mid-command still counts). `file.mutated`/`undo.applied`/`git.restore` are
+  deliberately excluded: they are snapshot-backed by construction, and counting them made every
+  apply after the first pay a whole-tree capture. Decline (large untracked set — no confirm
+  channel exists mid-turn) or failure SKIPS with a recorded note and NEVER refuses the apply.
+- **Delivery** (`/accept`, COMPLETE path, git repo only) is captured before the consent event
+  and referenced by it (`deliveryRef`/`deliveryOid`, additive). Idempotent across the crash
+  window: a recorded-but-unconsumed checkpoint is REUSED only when nothing work-shaped happened
+  since AND the ref genuinely exists (a phantom is never referenced). `harness.checkpoint` is
+  pinned OUT of `WORK_EVENT_TYPES` — the accept's own cleanup must never stale the accept.
+  Failure or a declined sweep caveats and the acceptance still records: consent is never
+  hostage to git. The boundary prints one `/commit` suggestion — commits stay user-typed.
+
+## The structural review gate (`review/ledger.ts`, `tools/report-finding.ts`, `tools/review.ts`) — Session 14
+
+Adversarial review stopped being a prompt bullet and became a completion gate. The shape is the
+house pattern applied to judgment: **the reviewers record TYPED findings, the harness derives
+what the records are worth, and the parent's judgment annotates but never erases.**
+
+- **Findings are typed at the SOURCE.** `report_finding` is the reviewer child's only findings
+  channel: a PER-TASK accumulator+instance the delegate constructs inside the fan-out (parallel
+  lenses can never interleave), admitted through the **second named `childTools` seam**
+  (`SubagentDeps.reportFindingTool`, same structural fact check as `retrieve`; only the reviewer
+  contract names it, and it is never in static `TOOLS`) — depth-1 stays a property of
+  construction. Bounded: 8 findings, 600-char fields, paths validated with the plan-touches
+  containment rule, the 9th an honest refusal. Model-authored strings are neutralized AT
+  INGESTION (`sanitizeLine`), because they are later rendered into harness-attributed lines
+  where a newline could forge a `[harness]` line or a report delimiter.
+- **Capture is unconditional** for any reviewer child that existed: `review.findings` with an
+  empty list is a recorded CLEAN lens; a completed reviewer with no capture means the round's
+  evidence was lost (the executor-F1 mirror), so the round never happened. The group digest
+  carries per-lens severity counts, so head-biased truncation cannot hide a recorded critical.
+- **`foldReview` is pure** over (approved-and-current graph, events) with three rules: the
+  REQUIREMENT is derived (≥1 executor task ⇒ required; the plan's `review` field waives it
+  visibly with a user-approved reason, or forces it) and never stored; a round QUALIFIES only
+  against real work (it must start after the last effective `task.applied` AND at least one
+  workspace change must precede it — a review of nothing satisfies nothing; post-round fix-ups
+  become a caveat rather than re-blocking, or the fix→stale→re-review loop never ends); and
+  findings NEVER expire (a weak round 2 cannot launder round 1's criticals).
+- **Triage annotates; the fold derives its worth.** `verify` keeps blocking (confirmed real and
+  unfixed is the strongest reason to block); `refute` clears but is recorded verbatim, labeled
+  an UNVERIFIED MODEL CLAIM everywhere AND surfaced as an acceptance caveat (it is the cheapest
+  path past the gate and the only one whose evidence is a bare claim); `accept` is medium/low
+  only; `address` requires refs that both EXIST in the log and POSTDATE the finding — existence
+  and ordering are derived, semantic adequacy stays a labeled claim. Every rule is enforced
+  twice: refused at the call so the log stays clean, and re-derived in the fold so a hand-forged
+  event cannot launder a blocker on replay.
+- **Acceptance axis**: the fold's blockers join `unfinished` (a missing/stale round when
+  required; every open critical/high ALWAYS — a waiver waives the round requirement, never what
+  a voluntarily-run round found), its caveats join `caveats`. `/accept confirm` remains the
+  user's sovereign override. Both tools are observe-class (events only, the `recover`
+  precedent) and confer no authority — pinned by test.
+- **Scope boundary (deliberate):** the requirement is PLAN-scoped, so executor work delegated
+  with no plan derives none (the user's explicit choice of "executor plans by default" over
+  "any mutating session"); recorded findings still block regardless.
+
 ## The acceptance boundary (`runtime/acceptance.ts`, REPL `/accept`) — Session 11.5
 
 A session's completion is an EXPLICIT, recorded boundary — never a side effect of quitting.
@@ -1313,6 +1406,16 @@ additive surface, by area (full shapes in `src/types.ts`):
   truncated-away output survives as `objects/<fullOutputSha256>`); `session.accepted
   {complete, summary, unfinished?}` (the user's completion consent); `plan.discarded.reason:
   'accepted'` (retirement provenance vs a user discard).
+- **delivery boundary + review gate (Session 14):** `harness.checkpoint {kind:
+  'pre-integration'|'delivery', ref, oid, callId?}` (a NEW type, not a widened
+  `task.base-checkpoint`: an old reader's owed fold would prune the durable delivery anchor);
+  `git.checkpoint.pruned.kind` widened to the shared `HarnessRefKind` (old readers filtering
+  `'task-base'` stay correct); `session.accepted.deliveryRef/deliveryOid` (the anchor the
+  acceptance consumed — the identity delivery survival keys on); `review.findings {callId,
+  childSessionId, planTaskId?, lens?, findings[]}` (one reviewer child's typed capture; an
+  EMPTY list is a recorded clean lens) and `review.triage {callId, findingId, action,
+  evidence, refs?}` — deliberately NO `review.completed`: a round is derived from the capture
+  events of the delegate call that ran it, exactly as a repair outcome is derived.
 
 Bounded static readers `readFirstEvent`/`readLastEvent` (first/last committed line only, never
 throw) support the child-log skip and crash detection without full parses.

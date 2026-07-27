@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-This is the rolling near-term direction guide for Agent CLI after Session 13.
+This is the rolling near-term direction guide for Agent CLI after Session 14.
 
 It begins from the implemented and live-proven V0.9 state described in `ARCHITECTURE.md` and
 `ROADMAP.md`. It does not replace the enduring thesis in `PROJECT.md`, and it should not become a
@@ -20,14 +20,16 @@ This is not a reason to inflate `runTurn` into a workflow engine. The coding flo
 first optimized workflow layer built on the small kernel, and should establish reusable contracts
 for later document, PDF, image, and video packs.
 
-## 2. Current Starting Point (post-Session 13, V0.9)
+## 2. Current Starting Point (post-Session 14, V0.9)
 
-The foundation is already substantial and has six recorded live proofs (the V0.7 loop, the V0.8
+The foundation is already substantial and has seven recorded live proofs (the V0.7 loop, the V0.8
 large-repo retrieval run, the V0.9 crash/resume planning run, the Session 11.5 durable-session run
 through interrupt → resume → acceptance → cleanup, the Session 12 verification/recovery run
-through crash-mid-check → classified repair → green gate → acceptance → honest escalation, and
-the Session 13 preview/browser run through browser-found defect → classified repair →
-crash → identity-verified orphan sweep → re-consent → acceptance, 44/44 evidence checks):
+through crash-mid-check → classified repair → green gate → acceptance → honest escalation, the
+Session 13 preview/browser run through browser-found defect → classified repair →
+crash → identity-verified orphan sweep → re-consent → acceptance (44/44 evidence checks), and
+the Session 14 delivery-boundary run through a pre-work gate refusal → parallel executors →
+integration → typed verification → review round → triage → crash → resume → accepted delivery):
 
 - one shared `runTurn` for one-shot, REPL, parent, and child sessions;
 - a central fail-closed policy choke point, recorded approvals, and narrowing-only configuration;
@@ -61,15 +63,23 @@ crash → identity-verified orphan sweep → re-consent → acceptance, 44/44 ev
   screenshots live, the log keeps pointers, elision ages pixels to markers); two new recovery
   classes.
 
-Session 13 closed the long-running/visual axis. The largest remaining coding-flow gaps are now
-delivery quality:
+- Session 14 — the delivery boundary: harness checkpoint lineage (event-before-ref, three kinds,
+  the covered-change rule, a delivery anchor keyed on the acceptance that consumed it) and the
+  structural review gate (typed findings recorded at the source, a pure fold deriving
+  requirement/qualification/triage worth, open critical/high blocking `/accept`).
 
-- the final review stage is still prompt-shaped rather than a structural completion gate;
-- Git recovery is strong, but automatic phase-level audit history needs a policy that does not
-  silently pollute the user's intentional branch history;
+Session 14 closed the delivery-quality gap. What remains open on the coding axis is narrow and
+deliberate:
+
+- the review requirement is PLAN-scoped, so executor work delegated with no plan derives none
+  (recorded findings still block) — the user's explicit choice over "any mutating session";
 - executors cannot self-verify (a worktree has no gitignored dependencies, so `run_check` and
   the preview/browser tools are parent-only) — acceptable because the parent verifies after
-  integration.
+  integration;
+- a workspace whose on-disk bytes differ from git's checkout normalization (e.g. system
+  `core.autocrlf=true` over an LF working tree) makes executor captures refuse at apply as base
+  drift — honest behavior, surfaced live as an `integration-conflict` escalation, but a real
+  ergonomic edge worth a future fix.
 
 ## 3. Target Coding Workflow
 
@@ -136,39 +146,26 @@ review (~39 findings, one fix reverted with recorded evidence); live two-life E2
 browser-only seeded defect, classified repair, crash, identity-verified orphan sweep,
 re-consent, and complete acceptance — 44/44 evidence checks.
 
-### Session 14 — Git Audit Trail, Structural Review Gate, and Coding-Flow Acceptance
+### Session 14 — Git Audit Trail, Structural Review Gate, and Coding-Flow Acceptance: COMPLETE
 
-Turn Git, review, and final acceptance into a coherent delivery boundary.
-
-Automatic recovery checkpoints should be standard at meaningful workflow transitions: before
-parallel mutation, before integration, before repair, and before delivery. These should use the
-existing snapshots, hidden refs, disposable branches, or other harness-owned side state.
-
-Do not silently commit to the user's active branch by default. If automatic local commits are added,
-use an explicit repository/user policy or a harness-managed integration branch so the user's
-intentional history remains distinct. Managed commits should be small, stage-specific, diff-reviewed,
-verified, attributable, undo-aware, and easy to squash or promote at delivery.
-
-Make adversarial review a structural gate for non-trivial mutating work rather than only a prompt
-suggestion. The orchestrator should launch a bounded set of differentiated read-only lenses, require
-severity, evidence, affected paths, confidence, and reproduction guidance, then require the main
-agent to verify load-bearing findings. Critical/high verified findings block success; lower-severity
-accepted limitations are recorded explicitly.
-
-Finish with a live coding-flow acceptance run on a realistic project:
-
-`complexity classification -> targeted retrieval -> focused explorers -> iterative approved plan ->
-task graph -> parallel executors -> integration -> typed verification -> bounded recovery ->
-Playwright/visual proof where applicable -> structural review -> Git delivery/checkpoints -> report
-and memory -> resume`
-
-The goal is not a perfect universal coding agent. It is a dependable reference workflow whose state,
-authority, evidence, recovery, and completion semantics are strong enough to serve as the template
-for later workflow packs.
+Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md` (Harness
+checkpoint lineage / The structural review gate). The delivery boundary is now coherent:
+harness-owned checkpoints at the transitions that exist (task-base already, plus
+pre-integration under a covered-change rule and a delivery anchor at `/accept`), created
+EVENT-BEFORE-REF so the creation-instant leak is structurally closed and a failed ref write
+leaves an honest phantom; delivery survival keyed on the ref an acceptance actually CONSUMED;
+zero user-branch commits (the boundary suggests `/commit`, never performs it). Review became
+structural: reviewers RECORD typed findings through `report_finding` (the second named
+child-tool admission), the pure `foldReview` derives the requirement, round qualification, and
+what each triage is WORTH, and open critical/high findings block `/accept` until the parent
+hand-verifies and triages them — with `/accept confirm` still the user's override. Suite
+972→1029+1; 4-lens hand-verified review (16 findings, 8 fixed — all four lenses independently
+found the phantom-delivery defect, and the first fix for it was itself wrong until a
+regression pin caught it).
 
 ### Session 15 (next horizon) — First Non-Coding Workflow Pack
 
-After the coding-flow acceptance gate is live-proven, begin the documents/PDF pack originally planned
+The coding-flow acceptance gate is live-proven; begin the documents/PDF pack originally planned
 for Session 10.
 
 Its likely shape remains:
@@ -319,17 +316,36 @@ Research current implementations again when each session begins.
 - cleanup and recovery integrated with the same runtime contracts — LANDED (session-end
   stop-all on every path, two catalogue classes, the shared bounded repair loop).
 
-### Before declaring the coding flow mature
+### Before declaring the coding flow mature — ALL LANDED (Session 14)
 
-- a structural review gate;
-- Git/recovery state that survives crash and supports rollback;
-- no hidden user-branch commits;
-- a realistic live end-to-end run with an induced failure and successful bounded recovery;
-- resume proof from persisted task/workflow state;
-- reports that reconstruct the full chain without relying on assistant narration.
+- a structural review gate — LANDED (`review/ledger.ts`: typed findings recorded at the source,
+  derived requirement + round qualification, triage whose worth is derived, open critical/high
+  blocking `/accept`);
+- Git/recovery state that survives crash and supports rollback — LANDED (event-before-ref
+  creation, the seq/kind-aware owed fold re-folded from live events, phantom convergence);
+- no hidden user-branch commits — LANDED (hidden refs only; `/accept` suggests `/commit`,
+  never performs it);
+- a realistic live end-to-end run with an induced failure and successful bounded recovery —
+  LANDED (see ROADMAP S14 + `C:\Users\A\Desktop\agent-cli-s14-live\`);
+- resume proof from persisted task/workflow state — LANDED (the review fold rebuilds from
+  events across a mid-arc SIGKILL);
+- reports that reconstruct the full chain without relying on assistant narration — LANDED
+  (`## Adversarial review`, `## Git recovery and audit state`, both derived purely from events).
 
 ## 10. Recently Completed
 
+- **Session 14 — the delivery boundary: Git audit lineage + the structural review gate:
+  COMPLETE.** `onRefReady` (event-before-ref: the creation-instant leak closed structurally,
+  phantoms honest and self-converging) + `harness.checkpoint`/`HarnessRefKind` + the seq/kind
+  aware `owedHarnessRefsFromEvents` (delivery survival keyed on the ref the latest acceptance
+  CONSUMED) + the pre-integration checkpoint under the spawn-only covered-change rule
+  (skip-never-refuse) + the `/accept` delivery anchor (idempotent across the crash window,
+  never hostage to git, `/commit` suggested not performed); `src/review/` + `report_finding`
+  (per-task accumulator, second named admission, ingestion-time neutralization) + the `review`
+  triage tool (every rule enforced twice) + the acceptance axis + the plan `review` field
+  (sha-neutral) + `## Adversarial review` / `## Git recovery and audit state` / `/review`.
+  Suite 972→1029+1; 4-lens hand-verified review (16 findings, 8 fixed, 32 invariants HELD; the
+  phantom-delivery defect found independently by all four lenses).
 - **Session 13 — managed previews + browser/visual verification: COMPLETE.** `src/preview/`
   (startSupervised — a live handle over an fd-logged, TTL/log-capped, unref'd process; preview
   recipes over the fixed dev/preview/serve/start allowlist; announced-port readiness; the
