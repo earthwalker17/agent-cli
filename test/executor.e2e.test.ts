@@ -8,7 +8,7 @@ import { createApprovalForwarder } from '../src/runtime/approval-forwarder.js';
 import { loadRegistry, registerWorktree, registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
 import { createDelegateTool, type ExecutorDeps, type PlanGateInfo } from '../src/tools/delegate.js';
 import type { PlanState } from '../src/plan/canonical.js';
-import { pruneTaskBaseCheckpointRefs, taskBaseRefsFromEvents } from '../src/cli/assemble.js';
+import { owedHarnessRefsFromEvents, pruneHarnessCheckpointRefs } from '../src/cli/assemble.js';
 import { createApplyChangesTool, createTaskChangesRegistry, type TaskChangesRegistry } from '../src/tools/apply-changes.js';
 import { startSession, endSession, runTurn, type Session } from '../src/runtime/session.js';
 import { applyUndo } from '../src/runtime/undo.js';
@@ -183,6 +183,8 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     childScripts: ScriptTurn[][];
     forwardOutcomes?: ApprovalOutcome[];
     planContext?: () => PlanGateInfo;
+    /** Session 14: narrows the pre-integration checkpoint's untracked guard (decline-path tests). */
+    checkpointUntrackedThreshold?: number;
   }): Harness {
     const registry = createTaskChangesRegistry();
     const forwarded: ApprovalRequest[] = [];
@@ -232,7 +234,12 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       createDelegateTool(deps, parent.id, executorDeps, {
         planContext: opts.planContext ?? (() => gateInfo({ status: 'none', currentSha: null, approvedSha: null, diverged: false })),
       }) as Tool,
-      createApplyChangesTool(registry, parent.snapshots) as Tool,
+      createApplyChangesTool(registry, parent.snapshots, {
+        cctx: { gitPath: REAL_GIT!, repoRoot: repo, workspaceRoot: repo, stateDir: layout.projectDir },
+        sessionId: parent.id,
+        events: () => parent.log.events,
+        ...(opts.checkpointUntrackedThreshold !== undefined ? { untrackedWarnThreshold: opts.checkpointUntrackedThreshold } : {}),
+      }) as Tool,
     ];
     return { parent, registry, executorDeps, forwarded, baseRefs };
   }
@@ -615,10 +622,15 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       ref: h.baseRefs[0]!,
       oid: expect.stringMatching(/^[0-9a-f]{40}$/),
     });
-    expect(taskBaseRefsFromEvents(h.parent.log.events)).toEqual(h.baseRefs);
+    expect(owedHarnessRefsFromEvents(h.parent.log.events)).toEqual(h.baseRefs.map((ref) => ({ ref, kind: 'task-base' })));
 
-    // What assembly's pruneTaskBaseRefs does at session end: delete + record + summarize.
-    const line = await pruneTaskBaseCheckpointRefs(REAL_GIT!, repo, h.baseRefs, h.parent.log);
+    // What assembly's pruneHarnessRefs does at session end: delete + record + summarize.
+    const line = await pruneHarnessCheckpointRefs(
+      REAL_GIT!,
+      repo,
+      h.baseRefs.map((ref) => ({ ref, kind: 'task-base' as const })),
+      h.parent.log,
+    );
     expect(line).toBe('pruned 1 task-base checkpoint ref(s)');
     expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout.trim()).toBe('');
     expect(h.parent.log.events.at(-1)).toMatchObject({
@@ -628,11 +640,11 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
       failed: [],
     });
     // After the recorded prune the event fold owes nothing — the crash-leak loop is closed.
-    expect(taskBaseRefsFromEvents(h.parent.log.events)).toEqual([]);
+    expect(owedHarnessRefsFromEvents(h.parent.log.events)).toEqual([]);
 
-    // Empty ref list = nothing to do, no event, no line.
+    // Empty owed list = nothing to do, no event, no line.
     const evCount = h.parent.log.events.length;
-    expect(await pruneTaskBaseCheckpointRefs(REAL_GIT!, repo, [], h.parent.log)).toBeNull();
+    expect(await pruneHarnessCheckpointRefs(REAL_GIT!, repo, [], h.parent.log)).toBeNull();
     expect(h.parent.log.events.length).toBe(evCount);
 
     // Integration AFTER the ref is gone: apply reads captured blobs, never git.
@@ -663,6 +675,107 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     await runTurn(h.parent, 'go');
     expect(JSON.stringify(h.parent.messages)).toContain('git repository');
     expect(h.parent.log.events.some((e) => e.type === 'task.started')).toBe(false);
+    endSession(h.parent, 'completed');
+  });
+
+  it('pre-integration checkpoint (Session 14): fires only on covered changes, records event-before-ref, joins the owed fold', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+
+    const h = makeHarness({
+      parentScript: [
+        { say: 'delegating', calls: [EXEC_CALL('write out.txt')] },
+        { say: 'captured' }, // turn 1 ends after capture
+        { say: 'applying', calls: [{ name: 'apply_task_changes', input: { child_session_id: 'child-session-0001' } }] },
+        { say: 'first apply done' },
+        { say: 'applying again', calls: [{ name: 'apply_task_changes', input: { child_session_id: 'child-session-0001' } }] },
+        { say: 'second apply done' },
+      ],
+      childScripts: [
+        [
+          { say: 'writing', calls: [{ name: 'write_file', input: { path: 'out.txt', content: 'made in worktree\n' } }] },
+          { say: 'REPORT: wrote out.txt' },
+        ],
+      ],
+    });
+    h.parent.approver = async () => ({ decision: 'allow', scope: 'once', source: 'user' });
+
+    await runTurn(h.parent, 'go'); // spawn + capture: base checkpoint exists, nothing covering after it
+
+    // A shell command ran since the base checkpoint — the one class of change per-file
+    // snapshots structurally cannot cover. This is exactly what the rule keys on.
+    h.parent.log.append({ type: 'command.ended', callId: 'cmd-sim', termination: 'exited', exitCode: 0, durationMs: 5 });
+
+    await runTurn(h.parent, 'apply it');
+    const hcs = h.parent.log.events.filter((e) => e.type === 'harness.checkpoint');
+    expect(hcs).toHaveLength(1);
+    const hc = hcs[0]!;
+    if (hc.type !== 'harness.checkpoint') throw new Error('unreachable');
+    expect(hc.kind).toBe('pre-integration');
+    expect(hc.callId).toBeDefined(); // runtime-bound through reportTask
+    expect((await git(repo, 'show-ref', '--verify', hc.ref)).ok).toBe(true);
+    // The apply itself succeeded and mentioned the recovery point.
+    expect(fs.readFileSync(path.join(repo, 'out.txt'), 'utf8')).toBe('made in worktree\n');
+    const applyOut = h.parent.log.events.filter((e) => e.type === 'tool.completed' && e.outputPreview?.includes('pre-integration checkpoint:'));
+    expect(applyOut.length).toBeGreaterThan(0);
+
+    // Second apply immediately after: the pre-integration creation RESET the covered-change
+    // window (its own event is the newest harness checkpoint), so no second checkpoint fires.
+    // (The first apply's file.mutated landed before the checkpoint event? No — mutations are
+    // recorded after execute; the rule is pinned by the count staying 1 either way, because a
+    // second checkpoint would only fire if file.mutated postdates the harness.checkpoint —
+    // which it does here, making this assertion the REAL matrix row: file.mutated after the
+    // checkpoint DOES fire again.)
+    await runTurn(h.parent, 'apply again');
+    const hcs2 = h.parent.log.events.filter((e) => e.type === 'harness.checkpoint');
+    expect(hcs2).toHaveLength(2); // the apply's own recorded file.mutated is a covered change
+
+    // Owed fold: pre-integration refs are session-scoped recovery state — owed like task-base.
+    const owed = owedHarnessRefsFromEvents(h.parent.log.events);
+    expect(owed).toContainEqual({ ref: hc.ref, kind: 'pre-integration' });
+    const line = await pruneHarnessCheckpointRefs(REAL_GIT!, repo, owed, h.parent.log);
+    expect(line).toContain('pre-integration');
+    expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout.trim()).toBe('');
+    endSession(h.parent, 'completed');
+  });
+
+  it('pre-integration checkpoint decline (large untracked set) SKIPS with a note and never refuses the apply', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+
+    const h = makeHarness({
+      checkpointUntrackedThreshold: 1,
+      parentScript: [
+        { say: 'delegating', calls: [EXEC_CALL('write out.txt')] },
+        { say: 'captured' },
+        { say: 'applying', calls: [{ name: 'apply_task_changes', input: { child_session_id: 'child-session-0001' } }] },
+        { say: 'done' },
+      ],
+      childScripts: [
+        [
+          { say: 'writing', calls: [{ name: 'write_file', input: { path: 'out.txt', content: 'from task\n' } }] },
+          { say: 'REPORT: wrote out.txt' },
+        ],
+      ],
+    });
+    h.parent.approver = async () => ({ decision: 'allow', scope: 'once', source: 'user' });
+    await runTurn(h.parent, 'go');
+
+    // Covering event + more untracked files than the narrowed threshold allows.
+    h.parent.log.append({ type: 'command.ended', callId: 'cmd-sim', termination: 'exited', exitCode: 0, durationMs: 5 });
+    fs.writeFileSync(path.join(repo, 'untracked-1.txt'), '1\n');
+    fs.writeFileSync(path.join(repo, 'untracked-2.txt'), '2\n');
+
+    await runTurn(h.parent, 'apply it');
+    // Declined checkpoint: no harness.checkpoint event, no ref — but the apply LANDED.
+    expect(h.parent.log.events.filter((e) => e.type === 'harness.checkpoint')).toHaveLength(0);
+    expect((await git(repo, 'for-each-ref', 'refs/agent-cli/checkpoints/')).stdout).not.toContain('pre-integration');
+    expect(fs.readFileSync(path.join(repo, 'out.txt'), 'utf8')).toBe('from task\n');
+    const skipped = h.parent.log.events.filter((e) => e.type === 'tool.completed' && e.outputPreview?.includes('pre-integration checkpoint SKIPPED'));
+    expect(skipped.length).toBeGreaterThan(0);
+    expect(h.parent.log.events.find((e) => e.type === 'task.applied')).toMatchObject({ refused: [] });
     endSession(h.parent, 'completed');
   });
 });

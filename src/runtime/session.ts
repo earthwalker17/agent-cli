@@ -720,6 +720,9 @@ function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): 
     case 'base-checkpoint':
       session.log.append({ type: 'task.base-checkpoint', callId, ref: e.ref, oid: e.oid });
       return;
+    case 'harness-checkpoint':
+      session.log.append({ type: 'harness.checkpoint', kind: e.checkpointKind, ref: e.ref, oid: e.oid, callId });
+      return;
   }
 }
 

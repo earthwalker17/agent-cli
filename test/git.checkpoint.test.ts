@@ -389,3 +389,84 @@ describe.skipIf(!hasGit)('deleteCheckpointRefs (Session 11.5: already-missing re
     expect(again.failed).toEqual([]);
   });
 });
+
+describe.skipIf(!hasGit)('onRefReady (Session 14: event-before-ref, the leak-window close)', () => {
+  it('fires after commit-tree and BEFORE update-ref: the ref does not exist yet in the callback', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'y\n');
+
+    let seen: { ref: string; oid: string; existedInCallback: boolean } | null = null;
+    const r = await createCheckpoint(cctx(), 's-order', {
+      onRefReady: (ref, oid) => {
+        // Synchronous existence probe: the loose-ref file must not exist yet (packed refs
+        // cannot contain a ref that was never created).
+        const looseRef = path.join(repo, '.git', ...ref.split('/'));
+        seen = { ref, oid, existedInCallback: fs.existsSync(looseRef) };
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(seen).not.toBeNull();
+    expect(seen!.ref).toBe(r.ref);
+    expect(seen!.oid).toBe(r.oid);
+    expect(seen!.existedInCallback).toBe(false);
+    const show = await git(repo, 'show-ref', '--verify', r.ref!);
+    expect(show.ok).toBe(true);
+    expect(show.stdout).toContain(r.oid!);
+  });
+
+  it('a throwing onRefReady aborts BEFORE the ref exists (fail closed: no unrecorded ref)', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+
+    const r = await createCheckpoint(cctx(), 's-throw', {
+      onRefReady: () => {
+        throw new Error('log closed');
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('checkpoint creation record failed');
+    expect(r.error).toContain('log closed');
+    const refs = await git(repo, 'for-each-ref', 'refs/agent-cli/');
+    expect(refs.stdout.trim()).toBe('');
+  });
+
+  it('phantom convergence: update-ref fails AFTER the append, and the recorded creation prunes as already-deleted', async () => {
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'x\n');
+    await commitAll(repo, 'base');
+
+    // Checkpoint 1 lands normally (creation recorded through the callback, like delegate does).
+    const events: { ref: string; oid: string }[] = [];
+    const first = await createCheckpoint(cctx(), 's-phantom', { onRefReady: (ref, oid) => events.push({ ref, oid }) });
+    expect(first.ok).toBe(true);
+
+    // Force update-ref to fail for n=2 by pre-planting its loose-ref lock file.
+    const lock = path.join(repo, '.git', 'refs', 'agent-cli', 'checkpoints', 's-phantom', '2.lock');
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    fs.writeFileSync(lock, '');
+    const second = await createCheckpoint(cctx(), 's-phantom', { onRefReady: (ref, oid) => events.push({ ref, oid }) });
+    expect(second.ok).toBe(false);
+    expect(second.error).toContain('update-ref failed');
+    // The creation WAS recorded (event-before-ref) — a phantom, not a leak.
+    expect(events).toHaveLength(2);
+    expect(events[1]!.ref).toBe('refs/agent-cli/checkpoints/s-phantom/2');
+
+    // After the lock clears, the SAME n is reused (the ref scan never saw the phantom) —
+    // the owed fold's latest-creation-per-ref-wins rule exists exactly for this.
+    fs.rmSync(lock, { force: true });
+    const third = await createCheckpoint(cctx(), 's-phantom', { onRefReady: (ref, oid) => events.push({ ref, oid }) });
+    expect(third.ok).toBe(true);
+    expect(third.ref).toBe('refs/agent-cli/checkpoints/s-phantom/2');
+
+    // Pruning every recorded ref converges: live refs delete; a phantom's name (now backed by
+    // the third creation) deletes once; re-pruning a now-missing ref still counts as deleted.
+    const uniqueRefs = [...new Set(events.map((e) => e.ref))];
+    const r = await deleteCheckpointRefs(REAL_GIT!, repo, uniqueRefs);
+    expect(r.deleted).toEqual(uniqueRefs);
+    expect(r.failed).toEqual([]);
+    expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout.trim()).toBe('');
+  });
+});

@@ -155,7 +155,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     checkTool: assembled.checkTool,
     checkCaps: assembled.checkCaps,
     previewTool: assembled.previewTool,
-    ...(assembled.pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs: assembled.pruneTaskBaseRefs } : {}),
+    ...(assembled.pruneHarnessRefs !== undefined ? { pruneHarnessRefs: assembled.pruneHarnessRefs } : {}),
   };
   // Resume honesty (Session 13): previews from a previous life are dead or swept — never
   // silently "still ready". The model learns via the first turn's harness note.
@@ -334,9 +334,9 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   } catch {
     /* best-effort hygiene; the next session's sweep is the backstop */
   }
-  if (assembled.pruneTaskBaseRefs !== undefined) {
+  if (assembled.pruneHarnessRefs !== undefined) {
     try {
-      const pruneLine = await assembled.pruneTaskBaseRefs();
+      const pruneLine = await assembled.pruneHarnessRefs();
       if (pruneLine !== null) renderer.chromeLine(style.dim(`  checkpoints: ${pruneLine}`));
     } catch {
       /* best-effort hygiene */

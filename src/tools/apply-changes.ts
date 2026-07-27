@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { sha256 } from '../shared/hash.js';
-import type { TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
+import { createCheckpoint, type CheckpointContext } from '../git/checkpoint.js';
+import type { SessionEvent, TaskChangeFile, Tool, ToolContext, ToolResult } from '../types.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 
 /**
@@ -101,7 +102,51 @@ function eligibility(f: TaskChangeFile, target: string): { ok: boolean; noop: bo
   };
 }
 
-export function createApplyChangesTool(registry: TaskChangesRegistry, snapshots: SnapshotStore): Tool<ApplyInputT> {
+/**
+ * Pre-integration checkpoint wiring (Session 14). Optional: absent without a git repo, and the
+ * apply NEVER refuses over checkpoint machinery — per-file snapshots already make the apply
+ * itself one undoable unit; the checkpoint is the whole-workspace point covering what snapshots
+ * structurally cannot (writes by approved commands/checks/preview servers since the last
+ * harness checkpoint).
+ */
+export interface ApplyCheckpointDeps {
+  cctx: CheckpointContext;
+  sessionId: string;
+  /** The LIVE event view (session.log.events) — the covered-change rule reads it at call time. */
+  events: () => readonly SessionEvent[];
+  /** Test seam for the large-untracked decline path; production uses the module default. */
+  untrackedWarnThreshold?: number;
+}
+
+/**
+ * The covered-change rule (Session 14, critique-demoted from "every apply"): a pre-integration
+ * checkpoint is created ONLY when an event that can mean un-snapshot-covered workspace change
+ * landed since the last harness checkpoint creation — a spawned command/check, a running
+ * preview server, or file writes (undo/restore included). Deterministic from events; in the
+ * common fan-out → apply flow there is nothing in the window and NO extra checkpoint.
+ */
+export function needsPreIntegrationCheckpoint(events: readonly SessionEvent[]): boolean {
+  let lastHarness = 0;
+  for (const e of events) {
+    if (e.type === 'task.base-checkpoint' || e.type === 'harness.checkpoint') lastHarness = Math.max(lastHarness, e.seq);
+  }
+  for (const e of events) {
+    if (e.seq <= lastHarness) continue;
+    if (e.type === 'command.ended') return true;
+    if (e.type === 'check.completed' && e.status !== 'unsupported') return true;
+    if (e.type === 'preview.started') return true;
+    if (e.type === 'file.mutated') return true;
+    if (e.type === 'undo.applied' && e.restored.length > 0) return true;
+    if (e.type === 'git.restore' && e.restored.length > 0) return true;
+  }
+  return false;
+}
+
+export function createApplyChangesTool(
+  registry: TaskChangesRegistry,
+  snapshots: SnapshotStore,
+  checkpoint?: ApplyCheckpointDeps,
+): Tool<ApplyInputT> {
   return {
     name: 'apply_task_changes',
     description:
@@ -143,6 +188,26 @@ export function createApplyChangesTool(registry: TaskChangesRegistry, snapshots:
       const refused: { relPath: string; reason: string }[] = [];
       for (const name of unknown) refused.push({ relPath: name, reason: 'not among this task\'s captured changes' });
 
+      // Pre-integration checkpoint (Session 14): a whole-workspace recovery point BEFORE this
+      // apply writes, created only when the covered-change rule says something un-snapshot-
+      // covered happened since the last harness checkpoint. Best-effort by contract: a decline
+      // (large untracked set — no confirm channel exists inside a model turn) or any failure
+      // SKIPS with a recorded note and never refuses the apply, because the apply itself is
+      // already snapshot-backed and drift-refusing.
+      const checkpointNotes: string[] = [];
+      if (checkpoint !== undefined && needsPreIntegrationCheckpoint(checkpoint.events())) {
+        const cp = await createCheckpoint(checkpoint.cctx, checkpoint.sessionId, {
+          label: 'pre-integration',
+          ...(checkpoint.untrackedWarnThreshold !== undefined ? { untrackedWarnThreshold: checkpoint.untrackedWarnThreshold } : {}),
+          onRefReady: (ref, oid) => ctx.reportTask?.({ kind: 'harness-checkpoint', checkpointKind: 'pre-integration', ref, oid }),
+        });
+        checkpointNotes.push(
+          cp.ok
+            ? `pre-integration checkpoint: ${cp.ref} (whole-workspace recovery point; restorable via /checkpoint restore)`
+            : `pre-integration checkpoint SKIPPED: ${cp.error ?? 'unknown error'} — the apply proceeds; its own per-file snapshots still make it one undoable unit`,
+        );
+      }
+
       for (const f of files) {
         const target = path.join(ctx.workspaceRoot, f.relPath);
         const e = eligibility(f, target);
@@ -167,6 +232,7 @@ export function createApplyChangesTool(registry: TaskChangesRegistry, snapshots:
 
       ctx.reportTask?.({ kind: 'applied', childSessionId: input.child_session_id, applied, refused });
       const lines = [
+        ...checkpointNotes,
         `applied ${applied.length} of ${files.length + unknown.length} selected change(s) from task ${input.child_session_id} (base ${rec.baseOid.slice(0, 12)})`,
         // The capture-time cap must stay visible at APPLY time: a reader of only this output
         // would otherwise take "applied N of N" as the task's complete change set.

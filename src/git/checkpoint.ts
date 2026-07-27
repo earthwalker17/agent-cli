@@ -77,6 +77,18 @@ export interface CreateCheckpointOptions {
   /** Asked before capturing when more than `untrackedWarnThreshold` untracked files would be swept in. */
   confirmLargeUntracked?: (count: number) => Promise<boolean>;
   untrackedWarnThreshold?: number;
+  /**
+   * Event-before-ref seam (Session 14): invoked with the chosen ref name and commit oid
+   * AFTER commit-tree and BEFORE update-ref. Harness call sites append their creation event
+   * here (EventLog.append is synchronous), so a crash between the append and the ref write
+   * leaves an owed ref that does not exist — `deleteCheckpointRefs` counts a missing ref as
+   * deleted, so the prune fold converges and the creation-instant leak is structurally
+   * closed. If update-ref then FAILS, the recorded creation is a phantom: readers must treat
+   * the ref scan (`agent checkpoint list`) as live truth and fold latest-creation-per-ref.
+   * A throw here aborts the checkpoint BEFORE the ref exists (surfaced as ok:false) — a ref
+   * with no recorded creation would be exactly the leak this seam closes.
+   */
+  onRefReady?: (ref: string, oid: string) => void;
 }
 
 export async function createCheckpoint(
@@ -125,6 +137,11 @@ export async function createCheckpoint(
     const oid = commit.stdout.trim();
 
     const ref = `${REF_ROOT}/${sessionId}/${n}`;
+    try {
+      opts.onRefReady?.(ref, oid);
+    } catch (e) {
+      return { ok: false, error: `checkpoint creation record failed: ${e instanceof Error ? e.message : String(e)}` };
+    }
     const updateRef = await g(['update-ref', ref, oid]);
     if (!updateRef.ok) return { ok: false, error: `update-ref failed: ${firstLine(updateRef.stderr)}` };
 

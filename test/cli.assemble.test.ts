@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assembleSession, taskBaseRefsFromEvents, type AssembleDeps } from '../src/cli/assemble.js';
+import { assembleSession, owedHarnessRefsFromEvents, type AssembleDeps } from '../src/cli/assemble.js';
 import { endSession } from '../src/runtime/session.js';
 import { resolveLayout } from '../src/store/layout.js';
 import { createNoneSandbox } from '../src/sandbox/none.js';
@@ -165,8 +165,9 @@ describe.skipIf(REAL_GIT === null)('assembleSession — ranked map (git-backed, 
   });
 });
 
-describe('taskBaseRefsFromEvents (Session 11.5 — the crash-leak fold)', () => {
-  const ev = (body: Record<string, unknown>): SessionEvent => ({ v: 1, seq: 0, ts: '2026-01-01T00:00:00Z', ...body }) as unknown as SessionEvent;
+describe('owedHarnessRefsFromEvents (Session 11.5 fold, kind-aware + seq-aware Session 14)', () => {
+  let seqCounter = 0;
+  const ev = (body: Record<string, unknown>): SessionEvent => ({ v: 1, seq: ++seqCounter, ts: '2026-01-01T00:00:00Z', ...body }) as unknown as SessionEvent;
 
   it('owes created refs, subtracts successfully-pruned ones, keeps failed ones for retry', () => {
     const events = [
@@ -177,15 +178,64 @@ describe('taskBaseRefsFromEvents (Session 11.5 — the crash-leak fold)', () => 
       // Work after the crash-resume creates a third base.
       ev({ type: 'task.base-checkpoint', callId: 'c3', ref: 'refs/agent-cli/checkpoints/s/3', oid: 'c'.repeat(40) }),
     ];
-    expect(taskBaseRefsFromEvents(events)).toEqual(['refs/agent-cli/checkpoints/s/2', 'refs/agent-cli/checkpoints/s/3']);
+    expect(owedHarnessRefsFromEvents(events)).toEqual([
+      { ref: 'refs/agent-cli/checkpoints/s/2', kind: 'task-base' },
+      { ref: 'refs/agent-cli/checkpoints/s/3', kind: 'task-base' },
+    ]);
   });
 
-  it('a fully pruned life owes nothing; user-checkpoint prunes (no kind) are ignored', () => {
+  it('a fully pruned life owes nothing; empty logs owe nothing', () => {
     const events = [
       ev({ type: 'task.base-checkpoint', callId: 'c1', ref: 'refs/x/1', oid: 'a'.repeat(40) }),
       ev({ type: 'git.checkpoint.pruned', kind: 'task-base', refs: ['refs/x/1'], failed: [] }),
     ];
-    expect(taskBaseRefsFromEvents(events)).toEqual([]);
-    expect(taskBaseRefsFromEvents([])).toEqual([]);
+    expect(owedHarnessRefsFromEvents(events)).toEqual([]);
+    expect(owedHarnessRefsFromEvents([])).toEqual([]);
+  });
+
+  it('pre-integration refs are owed like task-base; the LATEST delivery ref survives, superseded ones are owed', () => {
+    const events = [
+      ev({ type: 'harness.checkpoint', kind: 'pre-integration', ref: 'refs/h/pre1', oid: 'a'.repeat(40), callId: 'c1' }),
+      ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'b'.repeat(40) }),
+      // More work, a second acceptance: del1 is superseded, del2 is the durable audit anchor.
+      ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del2', oid: 'c'.repeat(40) }),
+    ];
+    expect(owedHarnessRefsFromEvents(events)).toEqual([
+      { ref: 'refs/h/pre1', kind: 'pre-integration' },
+      { ref: 'refs/h/del1', kind: 'delivery' },
+    ]);
+  });
+
+  it('a sole delivery ref is never owed (the durable audit anchor)', () => {
+    const events = [ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'a'.repeat(40) })];
+    expect(owedHarnessRefsFromEvents(events)).toEqual([]);
+  });
+
+  it('latest-creation-per-ref wins: a phantom creation whose ref name was later reused reads as the newest kind/seq', () => {
+    // Phantom: update-ref failed after the append, then the NEXT checkpoint reused n (the ref
+    // scan never saw the phantom), so the same ref name carries a second creation event.
+    const events = [
+      ev({ type: 'task.base-checkpoint', callId: 'c1', ref: 'refs/h/1', oid: 'a'.repeat(40) }),
+      ev({ type: 'harness.checkpoint', kind: 'pre-integration', ref: 'refs/h/1', oid: 'b'.repeat(40), callId: 'c2' }),
+    ];
+    expect(owedHarnessRefsFromEvents(events)).toEqual([{ ref: 'refs/h/1', kind: 'pre-integration' }]);
+  });
+
+  it('a ref pruned and then RE-CREATED later is owed again (seq-aware, not set-subtraction)', () => {
+    const events = [
+      ev({ type: 'task.base-checkpoint', callId: 'c1', ref: 'refs/h/1', oid: 'a'.repeat(40) }),
+      ev({ type: 'git.checkpoint.pruned', kind: 'task-base', refs: ['refs/h/1'], failed: [] }),
+      ev({ type: 'task.base-checkpoint', callId: 'c2', ref: 'refs/h/1', oid: 'b'.repeat(40) }),
+    ];
+    expect(owedHarnessRefsFromEvents(events)).toEqual([{ ref: 'refs/h/1', kind: 'task-base' }]);
+  });
+
+  it('deletion counts against a ref regardless of the pruned event kind grouping', () => {
+    const events = [
+      ev({ type: 'harness.checkpoint', kind: 'pre-integration', ref: 'refs/h/pre1', oid: 'a'.repeat(40), callId: 'c1' }),
+      // A prune event recorded under a different kind still names the ref as deleted.
+      ev({ type: 'git.checkpoint.pruned', kind: 'task-base', refs: ['refs/h/pre1'], failed: [] }),
+    ];
+    expect(owedHarnessRefsFromEvents(events)).toEqual([]);
   });
 });

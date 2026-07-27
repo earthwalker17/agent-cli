@@ -597,18 +597,22 @@ export function createDelegateTool(
         const base = await createCheckpoint(
           { gitPath: executor!.gitPath, repoRoot: executor!.repoRoot, workspaceRoot: deps.workspaceRoot, stateDir: executor!.stateDir },
           parentSessionId,
-          { label: 'task base' },
+          {
+            label: 'task base',
+            // Creation evidence (Session 11.5): lets a RESUMED session rebuild the prune list.
+            // Appended BEFORE update-ref (Session 14, onRefReady): a crash between the append
+            // and the ref write leaves an owed ref that does not exist — the prune counts a
+            // missing ref as deleted, so the old creation-instant leak is structurally closed.
+            onRefReady: (ref, oid) => {
+              executor!.noteBaseRef(ref);
+              ctx.reportTask?.({ kind: 'base-checkpoint', ref, oid });
+            },
+          },
         );
         if (!base.ok || base.oid === undefined) {
           return refuse(`cannot capture the task-base checkpoint: ${base.error ?? 'unknown error'}`);
         }
         baseOid = base.oid;
-        if (base.ref !== undefined) {
-          executor!.noteBaseRef(base.ref);
-          // Creation evidence (Session 11.5): lets a RESUMED session rebuild the prune list,
-          // so a crash between here and the clean-quit prune no longer leaks the ref forever.
-          ctx.reportTask?.({ kind: 'base-checkpoint', ref: base.ref, oid: base.oid });
-        }
       }
       caps.tasksStarted += input.tasks.length;
 

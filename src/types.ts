@@ -72,6 +72,17 @@ export type CommandEvidence =
 export type CheckKind = 'build' | 'test' | 'test-targeted' | 'typecheck' | 'lint' | 'format' | 'static-analysis' | 'browser';
 
 /**
+ * Harness-owned checkpoint ref kinds (Session 14): the lifecycle each ref gets at prune time.
+ * 'task-base' (executor-group base, Session 11.5) and 'pre-integration' (before an
+ * apply_task_changes with un-snapshot-covered prior changes) are session-scoped recovery
+ * points, pruned at clean end / accept; 'delivery' (the /accept COMPLETE boundary) survives
+ * as the durable audit anchor and is pruned only when superseded by a newer delivery
+ * checkpoint. All live under refs/agent-cli/checkpoints/<sessionId>/<n> — user-visible and
+ * prunable via `agent checkpoint list|prune`, never the user's branch history.
+ */
+export type HarnessRefKind = 'task-base' | 'pre-integration' | 'delivery';
+
+/**
  * Declaration order is the canonical order everywhere (schemas, views, reports, prompts) —
  * APPEND-ONLY: a mid-list insert would churn every ordered surface. 'browser' (Session 13) runs
  * through browser_flow, never run_check (its enum deliberately excludes it): a flow is an
@@ -389,6 +400,19 @@ export type TaskEvidence =
        * with executors), so no childSessionId.
        */
       kind: 'base-checkpoint';
+      ref: string;
+      oid: string;
+    }
+  | {
+      /**
+       * A harness workflow-transition checkpoint created by this call (Session 14), reported
+       * through the onRefReady seam BEFORE update-ref (the event-before-ref contract). Today
+       * only apply_task_changes creates one ('pre-integration', and only when un-snapshot-
+       * covered change events exist since the last harness checkpoint); the /accept delivery
+       * checkpoint appends its harness.checkpoint event directly (no tool call, no callId).
+       */
+      kind: 'harness-checkpoint';
+      checkpointKind: 'pre-integration';
       ref: string;
       oid: string;
     };
@@ -1101,13 +1125,16 @@ export type EventBody =
     }
   | {
       /**
-       * This session's task-base checkpoint refs were deleted at session end (V0.7.1). The
-       * base oids stay recorded in task.changes/worktree events and the captured blobs are the
-       * durable integration record — the ref was only a live recovery point while the session
-       * ran. A crash before this event leaks the refs to manual `agent checkpoint prune`.
+       * This session's harness-created checkpoint refs were deleted at session end (V0.7.1;
+       * kinds widened Session 14). The base oids stay recorded in task.changes/worktree/
+       * harness.checkpoint events and the captured blobs are the durable integration record —
+       * the ref was only a live recovery point while the session ran ('delivery' refs are the
+       * exception: they survive and are pruned here only when SUPERSEDED by a newer delivery
+       * checkpoint). One event per kind; old readers filtering kind === 'task-base' are
+       * unaffected by the widening.
        */
       type: 'git.checkpoint.pruned';
-      kind: 'task-base';
+      kind: HarnessRefKind;
       refs: string[];
       failed: string[];
     }
@@ -1166,16 +1193,40 @@ export type EventBody =
        * The task-base checkpoint captured for an executor group (Session 11.5, additive).
        * The ref is a live recovery point only while the session runs; recording CREATION lets
        * a resumed session rebuild its prune list, so a crash no longer leaks the refs forever.
-       * Crash-covered except the creation instant: a kill between update-ref and this append
-       * still leaks one ref to the `agent checkpoint prune` backstop. Deliberately NOT a
-       * `git.checkpoint` event — that type is user-commanded consent provenance, and an old
-       * reader misattributing harness plumbing to the user would be worse than skipping an
-       * unknown type.
+       * Since Session 14 the append happens BEFORE update-ref (the onRefReady seam): a kill
+       * between the two leaves an owed ref that does not exist, which the prune fold counts
+       * as already deleted — the creation-instant leak is structurally closed. A recorded
+       * creation whose update-ref then failed is a phantom; the fold reads
+       * latest-creation-per-ref-wins and `agent checkpoint list` is live truth. Deliberately
+       * NOT a `git.checkpoint` event — that type is user-commanded consent provenance, and an
+       * old reader misattributing harness plumbing to the user would be worse than skipping
+       * an unknown type.
        */
       type: 'task.base-checkpoint';
       callId: string;
       ref: string;
       oid: string;
+    }
+  | {
+      /**
+       * A harness-created recovery checkpoint at a workflow transition (Session 14, additive):
+       * 'pre-integration' before apply_task_changes writes when un-snapshot-covered changes
+       * could exist since the last harness checkpoint, 'delivery' at the /accept COMPLETE
+       * boundary (created before session.accepted so the acceptance can reference it; the
+       * delivery ref SURVIVES the session as the durable audit anchor — user-prunable via
+       * `agent checkpoint prune` — and is owed-pruned only when superseded by a newer
+       * delivery checkpoint). Appended BEFORE update-ref, same contract as
+       * task.base-checkpoint: a phantom (update-ref failed after the append) converges at
+       * prune because a missing ref counts as deleted. Deliberately a NEW type: widening
+       * task.base-checkpoint would make an old reader's owed-prune fold delete the durable
+       * delivery anchor at quit.
+       */
+      type: 'harness.checkpoint';
+      kind: 'pre-integration' | 'delivery';
+      ref: string;
+      oid: string;
+      /** Bound by the runtime when a tool call created it (pre-integration); absent for the /accept delivery path. */
+      callId?: string;
     }
   | {
       /** A delegated subagent task finished (V0.6). Usage is the CHILD's spend, recorded once

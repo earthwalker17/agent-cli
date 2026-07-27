@@ -37,8 +37,9 @@ export interface CommandContext {
   question?: (q: string) => Promise<string | null>;
   /** Session 10: the assembled read-only retrieval handle; /map renders it when present. */
   retrieval?: RetrievalHandle | null;
-  /** Session 11.5: /accept runs the task-base ref prune immediately (the assembled closure). */
-  pruneTaskBaseRefs?: () => Promise<string | null>;
+  /** Session 11.5: /accept runs the harness-ref prune immediately (the assembled closure;
+   *  kind-aware since Session 14 — the latest delivery ref survives by construction). */
+  pruneHarnessRefs?: () => Promise<string | null>;
   /** Session 12: the typed-check tool instance; /checks renders its (refreshed) project snapshot. */
   checkTool?: RunCheckTool;
   /** Session 12: the events-rebuilt check counters, for the /checks budget line. */
@@ -235,11 +236,11 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           : `the user recorded a PARTIAL acceptance (/accept confirm) with ${acc.unfinished.length} known unfinished item(s). Do not silently resume that work — ask before continuing it.`,
       );
 
-      // Cleanup (a): prune this session's task-base refs now (idempotent; the quit path's
-      // prune then finds an empty owed list).
-      if (ctx.pruneTaskBaseRefs !== undefined) {
+      // Cleanup (a): prune this session's owed harness refs now (idempotent; the quit path's
+      // re-fold then finds nothing owed — the latest delivery ref survives by construction).
+      if (ctx.pruneHarnessRefs !== undefined) {
         try {
-          const pruneLine = await ctx.pruneTaskBaseRefs();
+          const pruneLine = await ctx.pruneHarnessRefs();
           if (pruneLine !== null) ctx.renderer.chromeLine(`  checkpoints: ${pruneLine}`);
         } catch {
           /* best-effort hygiene — acceptance itself is already recorded */

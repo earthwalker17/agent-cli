@@ -34,7 +34,7 @@ import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
 import type { TrustDecision } from '../trust/gate.js';
-import type { EventBody, SessionEvent } from '../types.js';
+import type { EventBody, HarnessRefKind, SessionEvent } from '../types.js';
 import type { RunContext } from './context.js';
 
 /**
@@ -88,11 +88,13 @@ export interface Assembled {
   /** One-line summary when crash-orphaned preview processes were swept at startup (Session 13). */
   previewSweep?: string;
   /**
-   * Delete this session's task-base checkpoint refs (V0.7.1) — call at clean session end,
-   * BEFORE endSession (the provenance event must land in the open log). Returns a one-line
-   * summary for chrome, or null when there is nothing to prune. Absent without a repo.
+   * Delete this session's owed harness checkpoint refs (V0.7.1; kind-aware Session 14:
+   * task-base + pre-integration + superseded delivery — the latest delivery ref survives as
+   * the durable audit anchor) — call at clean session end, BEFORE endSession (the provenance
+   * event must land in the open log). Returns a one-line summary for chrome, or null when
+   * there is nothing to prune. Absent without a repo.
    */
-  pruneTaskBaseRefs?: () => Promise<string | null>;
+  pruneHarnessRefs?: () => Promise<string | null>;
   /** The live delegation counters (Session 11, events-rebuilt) — read-only for the status area. */
   delegateCaps: DelegateCaps;
   /** The typed-check tool instance (Session 12) — /checks reads its project snapshot. */
@@ -256,12 +258,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   for (const e of session.log.events) {
     if (e.type === 'task.changes') changesRegistry.register(e.childSessionId, e.baseOid, e.files, e.omittedCount);
   }
-  // Task-base checkpoint refs created for executor groups this session; pruned at session end.
-  // SEEDED FROM EVENTS on resume (Session 11.5, the changes-registry pattern): creation events
-  // minus refs a prior life SUCCESSFULLY pruned — so a crashed session's leaked refs are pruned
-  // at this life's clean quit instead of leaking forever. Failed prunes stay seeded (retried;
-  // deleteCheckpointRefs treats an already-missing ref as deleted, so retries converge).
-  const taskBaseRefs: string[] = taskBaseRefsFromEvents(session.log.events);
+  // Harness checkpoint refs owed a prune (Session 11.5, generalized Session 14): the owed set
+  // is RE-FOLDED FROM LIVE EVENTS at prune time — session.log.events is live, so creations
+  // appended during this session (task-base via reportTask, pre-integration via
+  // reportCheckpoint, delivery via /accept) and a crashed prior life's leaked creations are
+  // one derivation, and a second prune call naturally finds nothing (the pruned events from
+  // the first are in the fold). The in-memory list below is belt-and-suspenders for base refs
+  // noted on paths where no reportTask channel exists (the noteBaseRef seam predates the
+  // events fold and some tests exercise it directly).
+  const notedBaseRefs: string[] = [];
   // Executor orchestration bundle — absent (⇒ honest tool-level refusal) without a probed repo.
   const executorDeps: ExecutorDeps | undefined =
     gitFacts.isRepo && gitFacts.gitPath !== null && gitFacts.repoRoot !== null
@@ -274,7 +279,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
           registryFile: registryFile(layout.projectDir),
           snapshots: session.snapshots,
           registerChanges: (childSessionId, baseOid, files, omittedCount) => changesRegistry.register(childSessionId, baseOid, files, omittedCount),
-          noteBaseRef: (ref) => taskBaseRefs.push(ref),
+          noteBaseRef: (ref) => notedBaseRefs.push(ref),
           clockIso: () => session.clock.iso(),
         }
       : undefined;
@@ -300,14 +305,22 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // left off — the changes-registry pattern applied to the budget counters.
   const delegateCaps = delegateCapsFromEvents(session.log.events);
 
-  // Session-end hygiene (V0.7.1): the task-base ref is a live recovery point only while the
-  // session runs — blobs + task.changes events are the durable record. Announced + recorded;
-  // a crash before this leaks the refs to manual `agent checkpoint prune` (documented).
-  const pruneTaskBaseRefs =
+  // Session-end hygiene (V0.7.1, kind-aware Session 14): task-base and pre-integration refs
+  // are live recovery points only while the session runs — blobs + events are the durable
+  // record; the LATEST delivery ref survives as the durable audit anchor. Announced +
+  // recorded. Since Session 14 the creation event lands BEFORE update-ref, so there is no
+  // crash instant that leaks a harness ref (a phantom creation prunes as already-deleted).
+  const pruneHarnessRefs =
     executorDeps === undefined
       ? undefined
-      : (): Promise<string | null> =>
-          pruneTaskBaseCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, taskBaseRefs.splice(0), session.log);
+      : async (): Promise<string | null> => {
+          const owed = owedHarnessRefsFromEvents(session.log.events);
+          const seen = new Set(owed.map((o) => o.ref));
+          for (const ref of notedBaseRefs.splice(0)) {
+            if (!seen.has(ref)) owed.push({ ref, kind: 'task-base' });
+          }
+          return pruneHarnessCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, owed, session.log);
+        };
 
   // retrieve (Session 10): a per-session READ-ONLY view over the assembly-built index. The
   // parent gets it directly; read-only child roles get the SAME instance through the named
@@ -465,7 +478,19 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       // non-blocking warning surface; the real launch probe is the runtime truth.
       availableChecks: () => [...availableKinds(checkTool.projectSnapshot()), ...(likelyBrowserAvailable() ? (['browser'] as const) : [])],
     }),
-    createApplyChangesTool(changesRegistry, session.snapshots),
+    createApplyChangesTool(
+      changesRegistry,
+      session.snapshots,
+      // Pre-integration checkpoint deps (Session 14): repo-gated like the executor bundle. The
+      // apply itself never depends on this — absent deps simply mean no whole-workspace point.
+      executorDeps !== undefined
+        ? {
+            cctx: { gitPath: executorDeps.gitPath, repoRoot: executorDeps.repoRoot, workspaceRoot: ctx.ws, stateDir: layout.projectDir },
+            sessionId: session.id,
+            events: () => session.log.events,
+          }
+        : undefined,
+    ),
     // recover (Session 12): the bounded repair ledger. Parent-only like the other orchestration
     // tools — a child cannot plan its own retry policy. It reads the live log and the approved
     // graph fresh per call (bytes and events are truth) and writes only evidence.
@@ -492,7 +517,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(previewSweep !== undefined ? { previewSweep } : {}),
-    ...(pruneTaskBaseRefs !== undefined ? { pruneTaskBaseRefs } : {}),
+    ...(pruneHarnessRefs !== undefined ? { pruneHarnessRefs } : {}),
   };
 }
 
@@ -513,47 +538,85 @@ export function repairVerdictsFor(graph: PlanGraph, events: readonly SessionEven
   return out;
 }
 
-/**
- * Task-base refs still owed a prune, folded purely from events (Session 11.5): every
- * `task.base-checkpoint` creation minus every ref a `git.checkpoint.pruned` records as
- * successfully deleted. Refs whose deletion FAILED stay owed (retried at the next quit;
- * the missing-ref tolerance in deleteCheckpointRefs makes retries converge).
- */
-export function taskBaseRefsFromEvents(events: readonly SessionEvent[]): string[] {
-  const refs: string[] = [];
-  for (const e of events) {
-    if (e.type === 'task.base-checkpoint') refs.push(e.ref);
-    else if (e.type === 'git.checkpoint.pruned' && e.kind === 'task-base') {
-      const gone = new Set(e.refs);
-      for (let i = refs.length - 1; i >= 0; i--) {
-        if (gone.has(refs[i]!)) refs.splice(i, 1);
-      }
-    }
-  }
-  return refs;
+/** A harness-owned checkpoint ref still owed a prune, with the kind that decides its lifecycle. */
+export interface OwedHarnessRef {
+  ref: string;
+  kind: HarnessRefKind;
 }
 
 /**
- * The session-end task-base prune (V0.7.1), factored for testability: delete the refs, record
- * the provenance event (a silent ref delete would violate the evidence invariant), return the
- * chrome summary line. `splice(0)` at the call site guarantees never-double-prune.
+ * Harness checkpoint refs still owed a prune, folded purely from events (Session 11.5,
+ * generalized Session 14): task-base and pre-integration creations minus successful deletions;
+ * delivery creations additionally survive while they are the LATEST delivery checkpoint (the
+ * durable audit anchor — only a newer acceptance supersedes one into the owed list). The fold
+ * is seq-aware and latest-writer-per-ref-wins: after a PHANTOM creation (update-ref failed
+ * after the event append) the next checkpoint may reuse the same ref name, and a ref pruned
+ * then re-created later is owed again. Refs whose deletion FAILED stay owed (retried at the
+ * next prune; the missing-ref tolerance in deleteCheckpointRefs makes retries converge — a
+ * phantom's owed ref simply counts as already deleted).
  */
-export async function pruneTaskBaseCheckpointRefs(
+export function owedHarnessRefsFromEvents(events: readonly SessionEvent[]): OwedHarnessRef[] {
+  const created = new Map<string, { kind: HarnessRefKind; seq: number }>();
+  const deleted = new Map<string, number>();
+  let latestDeliverySeq = 0;
+  for (const e of events) {
+    if (e.type === 'task.base-checkpoint') {
+      created.set(e.ref, { kind: 'task-base', seq: e.seq });
+    } else if (e.type === 'harness.checkpoint') {
+      created.set(e.ref, { kind: e.kind, seq: e.seq });
+      if (e.kind === 'delivery') latestDeliverySeq = Math.max(latestDeliverySeq, e.seq);
+    } else if (e.type === 'git.checkpoint.pruned') {
+      // Deletion is tracked per ref regardless of the event's kind grouping — the ref name is
+      // the identity; the kind on the pruned event exists for readers, not for this fold.
+      for (const ref of e.refs) deleted.set(ref, e.seq);
+    }
+  }
+  const owed: OwedHarnessRef[] = [];
+  for (const [ref, c] of created) {
+    if ((deleted.get(ref) ?? 0) >= c.seq) continue;
+    if (c.kind === 'delivery' && c.seq === latestDeliverySeq) continue;
+    owed.push({ ref, kind: c.kind });
+  }
+  return owed;
+}
+
+/**
+ * The session-end harness-ref prune (V0.7.1, kind-aware since Session 14), factored for
+ * testability: delete the refs, record one provenance event per kind (a silent ref delete
+ * would violate the evidence invariant), return the chrome summary line. Idempotence comes
+ * from the events themselves: the pruned events this appends make the next
+ * `owedHarnessRefsFromEvents` fold exclude everything successfully deleted.
+ */
+export async function pruneHarnessCheckpointRefs(
   gitPath: string,
   repoRoot: string,
-  refs: readonly string[],
+  owed: readonly OwedHarnessRef[],
   log: { append(body: EventBody): unknown },
 ): Promise<string | null> {
-  if (refs.length === 0) return null;
-  const r = await deleteCheckpointRefs(gitPath, repoRoot, [...new Set(refs)]);
-  try {
-    log.append({ type: 'git.checkpoint.pruned', kind: 'task-base', refs: r.deleted, failed: r.failed });
-  } catch {
-    /* best-effort hygiene: a failing log at quit must not block the end path */
+  if (owed.length === 0) return null;
+  const byKind = new Map<HarnessRefKind, string[]>();
+  for (const o of owed) {
+    const list = byKind.get(o.kind) ?? [];
+    if (!list.includes(o.ref)) list.push(o.ref);
+    byKind.set(o.kind, list);
+  }
+  const parts: string[] = [];
+  let failedTotal = 0;
+  for (const kind of ['task-base', 'pre-integration', 'delivery'] as const) {
+    const refs = byKind.get(kind);
+    if (refs === undefined) continue;
+    const r = await deleteCheckpointRefs(gitPath, repoRoot, refs);
+    try {
+      log.append({ type: 'git.checkpoint.pruned', kind, refs: r.deleted, failed: r.failed });
+    } catch {
+      /* best-effort hygiene: a failing log at quit must not block the end path */
+    }
+    parts.push(`${r.deleted.length} ${kind}`);
+    failedTotal += r.failed.length;
   }
   return (
-    `pruned ${r.deleted.length} task-base checkpoint ref(s)` +
-    (r.failed.length > 0 ? `; ${r.failed.length} failed (agent checkpoint prune)` : '')
+    `pruned ${parts.join(' + ')} checkpoint ref(s)` +
+    (failedTotal > 0 ? `; ${failedTotal} failed (agent checkpoint prune)` : '')
   );
 }
 
