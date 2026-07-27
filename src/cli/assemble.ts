@@ -317,10 +317,17 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       : async (): Promise<string | null> => {
           const owed = owedHarnessRefsFromEvents(session.log.events);
           const seen = new Set(owed.map((o) => o.ref));
-          for (const ref of notedBaseRefs.splice(0)) {
-            if (!seen.has(ref)) owed.push({ ref, kind: 'task-base' });
+          // The noted refs are consumed here, but a ref whose deletion genuinely FAILED is
+          // put back: it has no creation event (that is precisely why this fallback list
+          // exists), so the events fold could never re-own it and the retry would be lost.
+          const noted = notedBaseRefs.splice(0);
+          for (const ref of noted) if (!seen.has(ref)) owed.push({ ref, kind: 'task-base' });
+          const result = await pruneHarnessCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, owed, session.log);
+          if (result !== null && result.failed.length > 0) {
+            const notedSet = new Set(noted);
+            for (const ref of result.failed) if (notedSet.has(ref)) notedBaseRefs.push(ref);
           }
-          return pruneHarnessCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, owed, session.log);
+          return result?.line ?? null;
         };
 
   // retrieve (Session 10): a per-session READ-ONLY view over the assembly-built index. The
@@ -500,10 +507,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       planGraph: () => readPlanState(layout, session.id, session.log.events).canonical?.graph ?? null,
     }),
     // review (Session 14): triage over recorded findings — the same observe-class, events-only
-    // shape as recover, reading the live log fresh per call.
+    // shape as recover, reading the live log fresh per call. The graph is filtered to an
+    // APPROVED-AND-CURRENT plan exactly as computeAcceptance and /review filter it: three
+    // derivations of one gate must never disagree about whether a round is required.
     createReviewTool({
       events: () => session.log.events,
-      planGraph: () => readPlanState(layout, session.id, session.log.events).canonical?.graph ?? null,
+      planGraph: () => {
+        const st = readPlanState(layout, session.id, session.log.events);
+        return st.kind === 'canonical' && st.status === 'approved' && st.approvedAndCurrent ? (st.canonical?.graph ?? null) : null;
+      },
     }),
   ];
 
@@ -554,24 +566,37 @@ export interface OwedHarnessRef {
 /**
  * Harness checkpoint refs still owed a prune, folded purely from events (Session 11.5,
  * generalized Session 14): task-base and pre-integration creations minus successful deletions;
- * delivery creations additionally survive while they are the LATEST delivery checkpoint (the
- * durable audit anchor — only a newer acceptance supersedes one into the owed list). The fold
- * is seq-aware and latest-writer-per-ref-wins: after a PHANTOM creation (update-ref failed
- * after the event append) the next checkpoint may reuse the same ref name, and a ref pruned
- * then re-created later is owed again. Refs whose deletion FAILED stay owed (retried at the
- * next prune; the missing-ref tolerance in deleteCheckpointRefs makes retries converge — a
- * phantom's owed ref simply counts as already deleted).
+ * a delivery ref survives ONLY while it is the one the latest recorded acceptance actually
+ * CONSUMED (`session.accepted.deliveryRef`). The fold is seq-aware and
+ * latest-writer-per-ref-wins: after a PHANTOM creation (update-ref failed after the event
+ * append) the next checkpoint may reuse the same ref name, and a ref pruned then re-created
+ * later is owed again. Refs whose deletion FAILED stay owed (retried at the next prune; the
+ * missing-ref tolerance in deleteCheckpointRefs makes retries converge — a phantom's owed ref
+ * simply counts as already deleted).
+ *
+ * Keying delivery survival on the ACCEPTANCE rather than on the newest creation event is
+ * load-bearing (review, 4/4 lenses): under event-before-ref a creation event can exist for a
+ * ref that never landed, and a phantom holding the newest seq would supersede — and therefore
+ * prune — the real anchor of the last recorded acceptance, leaving a dangling deliveryRef and
+ * zero audit anchors. An acceptance's recorded ref is the only identity that is both durable
+ * and provably consumed; an acceptance that captured NO ref leaves the previous anchor alone
+ * rather than destroying one it cannot replace.
  */
 export function owedHarnessRefsFromEvents(events: readonly SessionEvent[]): OwedHarnessRef[] {
   const created = new Map<string, { kind: HarnessRefKind; seq: number }>();
   const deleted = new Map<string, number>();
-  let latestDeliverySeq = 0;
+  let acceptedDeliveryRef: string | null = null;
   for (const e of events) {
     if (e.type === 'task.base-checkpoint') {
       created.set(e.ref, { kind: 'task-base', seq: e.seq });
     } else if (e.type === 'harness.checkpoint') {
       created.set(e.ref, { kind: e.kind, seq: e.seq });
-      if (e.kind === 'delivery') latestDeliverySeq = Math.max(latestDeliverySeq, e.seq);
+    } else if (e.type === 'session.accepted' && e.deliveryRef !== undefined) {
+      // The latest acceptance that actually CAPTURED a ref defines the surviving anchor. An
+      // acceptance with no ref (git failure, decline, non-repo, or a phantom whose update-ref
+      // failed) does NOT clear the previous one: it has nothing to replace it with, and the
+      // earlier acceptance's recorded deliveryRef must not be left dangling.
+      acceptedDeliveryRef = e.deliveryRef;
     } else if (e.type === 'git.checkpoint.pruned') {
       // Deletion is tracked per ref regardless of the event's kind grouping — the ref name is
       // the identity; the kind on the pruned event exists for readers, not for this fold.
@@ -581,7 +606,7 @@ export function owedHarnessRefsFromEvents(events: readonly SessionEvent[]): Owed
   const owed: OwedHarnessRef[] = [];
   for (const [ref, c] of created) {
     if ((deleted.get(ref) ?? 0) >= c.seq) continue;
-    if (c.kind === 'delivery' && c.seq === latestDeliverySeq) continue;
+    if (c.kind === 'delivery' && ref === acceptedDeliveryRef) continue;
     owed.push({ ref, kind: c.kind });
   }
   return owed;
@@ -599,7 +624,7 @@ export async function pruneHarnessCheckpointRefs(
   repoRoot: string,
   owed: readonly OwedHarnessRef[],
   log: { append(body: EventBody): unknown },
-): Promise<string | null> {
+): Promise<{ line: string; failed: string[] } | null> {
   if (owed.length === 0) return null;
   const byKind = new Map<HarnessRefKind, string[]>();
   for (const o of owed) {
@@ -608,7 +633,7 @@ export async function pruneHarnessCheckpointRefs(
     byKind.set(o.kind, list);
   }
   const parts: string[] = [];
-  let failedTotal = 0;
+  const failed: string[] = [];
   for (const kind of ['task-base', 'pre-integration', 'delivery'] as const) {
     const refs = byKind.get(kind);
     if (refs === undefined) continue;
@@ -619,12 +644,12 @@ export async function pruneHarnessCheckpointRefs(
       /* best-effort hygiene: a failing log at quit must not block the end path */
     }
     parts.push(`${r.deleted.length} ${kind}`);
-    failedTotal += r.failed.length;
+    failed.push(...r.failed);
   }
-  return (
-    `pruned ${parts.join(' + ')} checkpoint ref(s)` +
-    (failedTotal > 0 ? `; ${failedTotal} failed (agent checkpoint prune)` : '')
-  );
+  return {
+    line: `pruned ${parts.join(' + ')} checkpoint ref(s)` + (failed.length > 0 ? `; ${failed.length} failed (agent checkpoint prune)` : ''),
+    failed,
+  };
 }
 
 /** Map the loaded docs onto the system-prompt injection shape (only usable docs are injected). */

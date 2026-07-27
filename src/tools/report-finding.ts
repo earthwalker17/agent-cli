@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { normalizeRelPrefix } from '../shared/pathutil.js';
+import { sanitizeLine } from '../shared/text.js';
 import type { ReviewFinding, Tool, ToolResult } from '../types.js';
 
 /**
@@ -86,14 +87,22 @@ export function createReportFindingTool(acc: FindingAccumulator): Tool<FindingIn
         }
         if (!paths.includes(norm)) paths.push(norm);
       }
+      // Neutralize AT INGESTION (the retrieval-extractor discipline): these strings are
+      // model-authored by a CHILD and are later rendered into harness-attributed lines — the
+      // delegate's `[harness] … RECORDED` note, the group digest, gate blocker text, the
+      // report, /review, and the journal. A title carrying a newline could forge a `[harness]`
+      // line or a `--- subagent report end ---` delimiter in space the parent reads as harness
+      // provenance (review: the Session-10 spoofing class, reopened through this channel).
+      // One choke point here beats six render-site fixes, and single-line is what every one of
+      // those surfaces wants anyway.
       acc.items.push({
         severity: input.severity,
-        title: input.title,
+        title: sanitizeLine(input.title),
         paths,
-        evidence: input.evidence,
-        scenario: input.scenario,
+        evidence: sanitizeLine(input.evidence),
+        scenario: sanitizeLine(input.scenario),
         confidence: input.confidence,
-        ...(input.reproduction !== undefined ? { reproduction: input.reproduction } : {}),
+        ...(input.reproduction !== undefined ? { reproduction: sanitizeLine(input.reproduction) } : {}),
       });
       return done(
         true,

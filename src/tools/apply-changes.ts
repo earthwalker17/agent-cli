@@ -120,10 +120,26 @@ export interface ApplyCheckpointDeps {
 
 /**
  * The covered-change rule (Session 14, critique-demoted from "every apply"): a pre-integration
- * checkpoint is created ONLY when an event that can mean un-snapshot-covered workspace change
- * landed since the last harness checkpoint creation — a spawned command/check, a running
- * preview server, or file writes (undo/restore included). Deterministic from events; in the
- * common fan-out → apply flow there is nothing in the window and NO extra checkpoint.
+ * checkpoint is created ONLY when an UN-SNAPSHOT-COVERED workspace change could have happened
+ * since the last harness checkpoint — that is, a process spawned that can write files the
+ * snapshot machinery never saw.
+ *
+ * The set is exactly the spawn events, for two reasons the review made concrete:
+ * - `file.mutated` / `undo.applied` / `git.restore` are DELIBERATELY excluded: every one of
+ *   them is snapshot-backed by construction (the runtime captures pre-images before a declared
+ *   mutation; undo restores from those snapshots; a checkpoint restore snapshots first and is
+ *   itself one undo unit). Including them made every apply after the first create a
+ *   whole-tree checkpoint over changes that were already recoverable — the exact cost the
+ *   demotion existed to avoid.
+ * - The STARTED events, not the ended ones, are the trigger: a session that crashed mid-command
+ *   leaves only `command.started`, and that is precisely the unknown-effects writer a recovery
+ *   point is for. This is the same reasoning `WORK_EVENT_TYPES` uses in the acceptance fold.
+ *
+ * Known bound (accepted): `lastHarness` counts creation EVENTS, and under event-before-ref a
+ * creation can be a phantom whose ref never landed. A phantom therefore suppresses the rule
+ * until the next spawn. The checkpoint is best-effort by contract and the apply stays
+ * snapshot-backed and drift-refusing, so the residual is one missing whole-tree convenience
+ * point, never lost work.
  */
 export function needsPreIntegrationCheckpoint(events: readonly SessionEvent[]): boolean {
   let lastHarness = 0;
@@ -132,12 +148,7 @@ export function needsPreIntegrationCheckpoint(events: readonly SessionEvent[]): 
   }
   for (const e of events) {
     if (e.seq <= lastHarness) continue;
-    if (e.type === 'command.ended') return true;
-    if (e.type === 'check.completed' && e.status !== 'unsupported') return true;
-    if (e.type === 'preview.started') return true;
-    if (e.type === 'file.mutated') return true;
-    if (e.type === 'undo.applied' && e.restored.length > 0) return true;
-    if (e.type === 'git.restore' && e.restored.length > 0) return true;
+    if (e.type === 'command.started' || e.type === 'check.started' || e.type === 'preview.started') return true;
   }
   return false;
 }

@@ -13,6 +13,14 @@ import type { ReviewFinding, SessionEvent } from '../types.js';
  *    history; deriving it keeps resumed pre-S14 plans honest — they newly block, which is the
  *    point of a structural gate, and /accept confirm remains the user's sovereign exit.
  *
+ *    SCOPE BOUNDARY (deliberate, review-confirmed): the requirement is PLAN-scoped. Executor
+ *    work delegated with no plan at all — which the DAG gate deliberately permits, with the
+ *    per-spawn human ask as the consent floor — derives no requirement, so such a session can
+ *    be accepted without a review round. This is the user's explicit choice of "executor plans
+ *    by default" over "any mutating session"; the alternative would change acceptance for
+ *    every plan-less session. What is NOT optional: findings recorded by a round that DID run
+ *    block regardless of requirement or plan (see the blockers below).
+ *
  * 2. A ROUND QUALIFIES ONLY AGAINST REAL WORK. A qualifying round must START after the last
  *    effective integration (`task.applied` with applied files) AND at least one workspace
  *    change must PRECEDE its start — otherwise a review run before any work (or before the
@@ -23,8 +31,10 @@ import type { ReviewFinding, SessionEvent } from '../types.js';
  * 3. FINDINGS NEVER EXPIRE; TRIAGE ANNOTATES. A later round does not supersede earlier
  *    findings — that would let a weak round 2 launder round 1's criticals. Every critical/high
  *    finding must be individually cleared: refuted with recorded evidence (an UNVERIFIED MODEL
- *    CLAIM, labeled as such everywhere), or addressed with cited refs the fold can verify
- *    EXIST in the log (existence is derived; semantic adequacy stays a model claim), or
+ *    CLAIM, labeled as such everywhere — and surfaced as an acceptance CAVEAT, because it is
+ *    the cheapest path past the gate and the only one whose evidence is a bare claim), or
+ *    addressed with cited refs the fold verifies both EXIST in the log and POSTDATE the
+ *    finding (existence and ordering are derived; semantic adequacy stays a model claim), or
  *    carried past the gate by the user's /accept confirm. 'accept' (a recorded limitation) is
  *    valid for medium/low only — re-checked here, not just in the tool schema.
  */
@@ -217,17 +227,27 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
   }
 
   // 'address' existence check: cited refs must name evidence that EXISTS in this log — a
-  // callId that produced mutations/applies/passing checks, or a passing check's recipeId.
-  const mutatingCallIds = new Set<string>();
-  const passingRecipeIds = new Set<string>();
+  // callId that produced mutations/applies/passing checks, or a passing check's recipeId —
+  // and that evidence must POSTDATE the finding it claims to address (review: citing a check
+  // that passed before the round ran, or the very mutation the finding criticizes, cleared a
+  // critical with no new evidence at all). Existence and ordering are both derived; whether
+  // the fix is semantically adequate stays a labeled model claim.
+  const refSeqs = new Map<string, number>();
+  const noteRef = (key: string, seq: number): void => {
+    refSeqs.set(key, Math.max(refSeqs.get(key) ?? 0, seq));
+  };
   for (const e of events) {
-    if (e.type === 'file.mutated' || (e.type === 'task.applied' && e.applied.length > 0)) mutatingCallIds.add(e.callId);
+    if (e.type === 'file.mutated' || (e.type === 'task.applied' && e.applied.length > 0)) noteRef(e.callId, e.seq);
     else if (e.type === 'check.completed' && e.status === 'pass') {
-      mutatingCallIds.add(e.callId);
-      passingRecipeIds.add(e.recipeId);
+      noteRef(e.callId, e.seq);
+      noteRef(e.recipeId, e.seq);
     }
   }
-  const refExists = (ref: string): boolean => mutatingCallIds.has(ref) || passingRecipeIds.has(ref);
+  /** The seq at which each finding was RECORDED (its capture event) — the ordering anchor. */
+  const findingSeq = new Map<string, number>();
+  for (const e of events) {
+    if (e.type === 'review.findings') for (const f of e.findings) findingSeq.set(f.findingId, e.seq);
+  }
 
   for (const e of events) {
     if (e.type !== 'review.triage') continue;
@@ -246,13 +266,18 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
       rec.note = `'accept' is invalid for ${sev} findings — refute with evidence, address with cited refs, or the user records /accept confirm`;
     } else if (e.action === 'address') {
       const refs = e.refs ?? [];
-      const missing = refs.filter((r) => !refExists(r));
+      const anchor = findingSeq.get(e.findingId) ?? 0;
+      const missing = refs.filter((r) => !refSeqs.has(r));
+      const stale = refs.filter((r) => refSeqs.has(r) && (refSeqs.get(r) ?? 0) < anchor);
       if (refs.length === 0) {
         rec.effective = false;
         rec.note = "'address' requires refs citing the fix (mutating callIds or passing check recipeIds)";
       } else if (missing.length > 0) {
         rec.effective = false;
         rec.note = `cited ref(s) not found in this session's evidence: ${missing.join(', ')}`;
+      } else if (stale.length > 0) {
+        rec.effective = false;
+        rec.note = `cited ref(s) predate the finding and cannot be its fix: ${stale.join(', ')} — make the change, then re-run the check that proves it`;
       }
     }
     st.triage.push(rec);
@@ -306,6 +331,15 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
   for (const st of findings) {
     if (st.status === 'accepted') {
       caveats.push(`accepted limitation (${st.finding.severity}): ${st.finding.findingId} '${st.finding.title}'`);
+    }
+    // A REFUTED critical/high is the cheapest path past the gate and the only one whose
+    // evidence is a bare model claim — it must be as visible at the consent boundary as an
+    // accepted medium (review: 'complete' otherwise showed nothing at all). ADDRESSED is
+    // deliberately not a caveat: its refs are existence- and order-checked against the log.
+    if (st.status === 'refuted' && (st.finding.severity === 'critical' || st.finding.severity === 'high')) {
+      caveats.push(
+        `${st.finding.severity} finding ${st.finding.findingId} '${st.finding.title}' was REFUTED by the agent, not fixed — an UNVERIFIED model claim (see /review or the report for its evidence)`,
+      );
     }
   }
   if (latestQualifying !== null) {

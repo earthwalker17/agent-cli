@@ -188,7 +188,12 @@ describe('finding triage (rule 3)', () => {
     expect(bad.satisfied).toBe(false);
 
     reset();
-    const good = foldReview(graphOf(), [mutated(), ...round('r1', [{ id: 'rev-aaaa', findings: [CRIT] }]), triage('rev-aaaa#1', 'address', 'fixed it', ['m'])]);
+    const good = foldReview(graphOf(), [
+      mutated(),
+      ...round('r1', [{ id: 'rev-aaaa', findings: [CRIT] }]),
+      mutated(), // the actual fix, recorded AFTER the finding (the ordering rule)
+      triage('rev-aaaa#1', 'address', 'fixed it', ['m']),
+    ]);
     expect(good.findings[0]!.status).toBe('addressed');
     expect(good.satisfied).toBe(true);
 
@@ -207,6 +212,60 @@ describe('finding triage (rule 3)', () => {
       triage('rev-aaaa#1', 'address', 'fix landed and the suite is green', ['npm-script:test']),
     ]);
     expect(st.findings[0]!.status).toBe('addressed');
+  });
+
+  it('REVIEW FIX: an address ref that PREDATES the finding cannot clear it (zero new evidence)', () => {
+    // Found by the gate-evasion lens: refExists only asked "does this ref appear anywhere",
+    // so citing a check that passed BEFORE the round — or the very mutation the finding
+    // criticizes — flipped a critical to non-blocking with no fix and no re-run.
+    reset();
+    const st = foldReview(graphOf(), [
+      ev({ type: 'check.completed', callId: 'k', check: 'typecheck', recipeId: 'tsc', status: 'pass', exitCode: 0, durationMs: 1, summary: 'ok' }),
+      mutated(), // callId 'm', BEFORE the round
+      ...round('r1', [{ id: 'rev-aaaa', findings: [CRIT] }]),
+      triage('rev-aaaa#1', 'address', 'claiming an old green check as the fix', ['tsc']),
+      triage('rev-aaaa#1', 'address', 'claiming the criticized mutation as its own fix', ['m']),
+    ]);
+    expect(st.findings[0]!.status).toBe('open');
+    expect(st.findings[0]!.blocking).toBe(true);
+    expect(st.findings[0]!.triage[0]!.effective).toBe(false);
+    expect(st.findings[0]!.triage[0]!.note).toContain('predate the finding');
+    expect(st.findings[0]!.triage[1]!.effective).toBe(false);
+
+    // A ref recorded AFTER the finding still clears it.
+    reset();
+    const fixed = foldReview(graphOf(), [
+      mutated(),
+      ...round('r1', [{ id: 'rev-aaaa', findings: [CRIT] }]),
+      ev({ type: 'file.mutated', callId: 'fix', path: 'src/a.ts', kind: 'modify', beforeSha256: 'b', afterSha256: 'c', createdDirs: [] }),
+      triage('rev-aaaa#1', 'address', 'the real fix, after the finding', ['fix']),
+    ]);
+    expect(fixed.findings[0]!.status).toBe('addressed');
+  });
+
+  it('REVIEW FIX: a REFUTED critical/high is surfaced as a consent caveat (an unverified model claim)', () => {
+    // Found by the consent lens: refute was the cheapest gate-clearing path AND the only one
+    // invisible on the /accept summary — an accepted MEDIUM was more visible than a refuted
+    // CRITICAL. ADDRESSED stays caveat-free: its refs are existence- and order-checked.
+    reset();
+    const st = foldReview(graphOf(), [
+      mutated(),
+      ...round('r1', [{ id: 'rev-aaaa', findings: [CRIT] }]),
+      triage('rev-aaaa#1', 'refute', 'checked src/a.ts:12 — the guard exists upstream'),
+    ]);
+    expect(st.satisfied).toBe(true);
+    expect(st.caveats.join(' ')).toContain('was REFUTED by the agent, not fixed');
+    expect(st.caveats.join(' ')).toContain('UNVERIFIED model claim');
+    expect(st.caveats.join(' ')).toContain('rev-aaaa#1');
+
+    // A refuted MEDIUM is not a consent caveat (it never blocked in the first place).
+    reset();
+    const med = foldReview(graphOf(), [
+      mutated(),
+      ...round('r1', [{ id: 'rev-aaaa', findings: [finding('rev-aaaa#1', 'medium')] }]),
+      triage('rev-aaaa#1', 'refute', 'checked it, not real at all'),
+    ]);
+    expect(med.caveats.join(' ')).not.toContain('REFUTED');
   });
 
   it("'accept' is invalid for critical/high (ineffective, with why) but valid for medium/low → caveat", () => {

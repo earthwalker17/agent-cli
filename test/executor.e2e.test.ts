@@ -625,13 +625,13 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     expect(owedHarnessRefsFromEvents(h.parent.log.events)).toEqual(h.baseRefs.map((ref) => ({ ref, kind: 'task-base' })));
 
     // What assembly's pruneHarnessRefs does at session end: delete + record + summarize.
-    const line = await pruneHarnessCheckpointRefs(
+    const pruneResult = await pruneHarnessCheckpointRefs(
       REAL_GIT!,
       repo,
       h.baseRefs.map((ref) => ({ ref, kind: 'task-base' as const })),
       h.parent.log,
     );
-    expect(line).toBe('pruned 1 task-base checkpoint ref(s)');
+    expect(pruneResult).toEqual({ line: 'pruned 1 task-base checkpoint ref(s)', failed: [] });
     expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout.trim()).toBe('');
     expect(h.parent.log.events.at(-1)).toMatchObject({
       type: 'git.checkpoint.pruned',
@@ -703,9 +703,10 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
 
     await runTurn(h.parent, 'go'); // spawn + capture: base checkpoint exists, nothing covering after it
 
-    // A shell command ran since the base checkpoint — the one class of change per-file
-    // snapshots structurally cannot cover. This is exactly what the rule keys on.
-    h.parent.log.append({ type: 'command.ended', callId: 'cmd-sim', termination: 'exited', exitCode: 0, durationMs: 5 });
+    // A shell command SPAWNED since the base checkpoint — the one class of change per-file
+    // snapshots structurally cannot cover. This is exactly what the rule keys on (the STARTED
+    // event, so a crash mid-command — which never records an ended — still triggers it).
+    h.parent.log.append({ type: 'command.started', callId: 'cmd-sim', pid: 4242, shell: 'pwsh', cwd: repo, timeoutMs: 1000 });
 
     await runTurn(h.parent, 'apply it');
     const hcs = h.parent.log.events.filter((e) => e.type === 'harness.checkpoint');
@@ -720,22 +721,20 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     const applyOut = h.parent.log.events.filter((e) => e.type === 'tool.completed' && e.outputPreview?.includes('pre-integration checkpoint:'));
     expect(applyOut.length).toBeGreaterThan(0);
 
-    // Second apply immediately after: the pre-integration creation RESET the covered-change
-    // window (its own event is the newest harness checkpoint), so no second checkpoint fires.
-    // (The first apply's file.mutated landed before the checkpoint event? No — mutations are
-    // recorded after execute; the rule is pinned by the count staying 1 either way, because a
-    // second checkpoint would only fire if file.mutated postdates the harness.checkpoint —
-    // which it does here, making this assertion the REAL matrix row: file.mutated after the
-    // checkpoint DOES fire again.)
+    // REVIEW FIX: a second apply right after creates NO second checkpoint. The covered-change
+    // set is exactly the SPAWN events; the first apply's own file.mutated events are
+    // snapshot-backed by construction and were wrongly counted before, which made every apply
+    // after the first pay a whole-tree capture over already-recoverable changes.
     await runTurn(h.parent, 'apply again');
     const hcs2 = h.parent.log.events.filter((e) => e.type === 'harness.checkpoint');
-    expect(hcs2).toHaveLength(2); // the apply's own recorded file.mutated is a covered change
+    expect(hcs2).toHaveLength(1);
 
     // Owed fold: pre-integration refs are session-scoped recovery state — owed like task-base.
     const owed = owedHarnessRefsFromEvents(h.parent.log.events);
     expect(owed).toContainEqual({ ref: hc.ref, kind: 'pre-integration' });
-    const line = await pruneHarnessCheckpointRefs(REAL_GIT!, repo, owed, h.parent.log);
-    expect(line).toContain('pre-integration');
+    const pruned = await pruneHarnessCheckpointRefs(REAL_GIT!, repo, owed, h.parent.log);
+    expect(pruned?.line).toContain('pre-integration');
+    expect(pruned?.failed).toEqual([]);
     expect((await git(repo, 'for-each-ref', 'refs/agent-cli/')).stdout.trim()).toBe('');
     endSession(h.parent, 'completed');
   });
@@ -764,7 +763,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     await runTurn(h.parent, 'go');
 
     // Covering event + more untracked files than the narrowed threshold allows.
-    h.parent.log.append({ type: 'command.ended', callId: 'cmd-sim', termination: 'exited', exitCode: 0, durationMs: 5 });
+    h.parent.log.append({ type: 'command.started', callId: 'cmd-sim', pid: 4242, shell: 'pwsh', cwd: repo, timeoutMs: 1000 });
     fs.writeFileSync(path.join(repo, 'untracked-1.txt'), '1\n');
     fs.writeFileSync(path.join(repo, 'untracked-2.txt'), '2\n');
 

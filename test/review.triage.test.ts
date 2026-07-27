@@ -59,7 +59,8 @@ function makeSession(script: ScriptTurn[], seed: { findings: ReviewFinding[]; wi
   session.tools = [
     createReviewTool({ events: () => session.log.events, planGraph: () => null }) as Tool,
   ];
-  session.log.append({ type: 'file.mutated', callId: 'fix-call', path: path.join(ws, 'a.ts'), kind: 'modify', beforeSha256: 'a', afterSha256: 'b', createdDirs: [] });
+  // A pre-round change (what the reviewers looked at) — never valid as an address ref.
+  session.log.append({ type: 'file.mutated', callId: 'pre-round', path: path.join(ws, 'a.ts'), kind: 'modify', beforeSha256: 'a', afterSha256: 'b', createdDirs: [] });
   session.log.append({ type: 'task.started', callId: 'rev-call', role: 'reviewer', childSessionId: 'child-rev-0001', budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 } });
   session.log.append({
     type: 'task.ended',
@@ -72,6 +73,8 @@ function makeSession(script: ScriptTurn[], seed: { findings: ReviewFinding[]; wi
     durationMs: 1,
   });
   session.log.append({ type: 'review.findings', callId: 'rev-call', childSessionId: 'child-rev-0001', findings: seed.findings });
+  // The fix lands AFTER the findings capture — the only ordering an address ref may cite.
+  session.log.append({ type: 'file.mutated', callId: 'fix-call', path: path.join(ws, 'a.ts'), kind: 'modify', beforeSha256: 'b', afterSha256: 'c', createdDirs: [] });
   if (seed.withFix === true) {
     session.log.append({ type: 'check.completed', callId: 'chk', check: 'test', recipeId: 'npm-script:test', status: 'pass', exitCode: 0, durationMs: 1, summary: 'ok' });
   }
@@ -167,6 +170,18 @@ describe('review triage tool', () => {
     expect(noRefs.log.events.find((e) => e.type === 'review.triage')).toBeUndefined();
     expect(JSON.stringify(noRefs.messages)).toContain("'address' requires refs");
     endSession(noRefs, 'completed');
+  });
+
+  it('REVIEW FIX: an address ref that PREDATES the finding is refused at the call (tool and fold agree)', async () => {
+    const s = makeSession(call({ finding: 'child-rev-0001#1', action: 'address', evidence: EVIDENCE, refs: ['pre-round'] }), {
+      findings: [finding('child-rev-0001#1', 'critical')],
+    });
+    await runTurn(s, 'triage it');
+    expect(s.log.events.find((e) => e.type === 'review.triage')).toBeUndefined();
+    const msg = JSON.stringify(s.messages);
+    expect(msg).toContain('predate the finding');
+    expect(msg).toContain('pre-round');
+    endSession(s, 'completed');
   });
 
   it('an unknown finding id is refused, naming the known ids', async () => {

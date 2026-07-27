@@ -45,7 +45,8 @@ export type ReviewInputT = z.infer<typeof ReviewInput>;
 export interface ReviewToolDeps {
   /** The live session events (read fresh per call; the triage event lands through reportReview). */
   events: () => readonly SessionEvent[];
-  /** The approved plan graph, when one exists — the fold derives the requirement from it. */
+  /** The APPROVED-AND-CURRENT plan graph, when one exists — the fold derives the requirement
+   *  from it. The caller filters (assembly): /review, /accept and this tool must agree. */
   planGraph: () => PlanGraph | null;
 }
 
@@ -99,23 +100,38 @@ export function createReviewTool(deps: ReviewToolDeps): Tool<ReviewInputT> {
             startedAt,
           );
         }
-        // The same existence rule the fold applies — refused here so the log stays clean.
+        // The same existence AND ordering rules the fold applies (they must never disagree) —
+        // refused here so a malformed triage never lands on the log at all.
         const events = deps.events();
-        const mutatingCallIds = new Set<string>();
-        const passingRecipeIds = new Set<string>();
+        const refSeqs = new Map<string, number>();
+        const noteRef = (key: string, seq: number): void => {
+          refSeqs.set(key, Math.max(refSeqs.get(key) ?? 0, seq));
+        };
+        let anchor = 0;
         for (const e of events) {
-          if (e.type === 'file.mutated' || (e.type === 'task.applied' && e.applied.length > 0)) mutatingCallIds.add(e.callId);
+          if (e.type === 'file.mutated' || (e.type === 'task.applied' && e.applied.length > 0)) noteRef(e.callId, e.seq);
           else if (e.type === 'check.completed' && e.status === 'pass') {
-            mutatingCallIds.add(e.callId);
-            passingRecipeIds.add(e.recipeId);
+            noteRef(e.callId, e.seq);
+            noteRef(e.recipeId, e.seq);
+          } else if (e.type === 'review.findings' && e.findings.some((f) => f.findingId === input.finding)) {
+            anchor = e.seq;
           }
         }
-        const missing = refs.filter((r) => !mutatingCallIds.has(r) && !passingRecipeIds.has(r));
+        const missing = refs.filter((r) => !refSeqs.has(r));
         if (missing.length > 0) {
           return fail(
             `ref(s) not found in this session's evidence: ${missing.join(', ')}`,
             'An address ref must EXIST in the log: a callId that recorded file mutations / applied captures / a passing check, ' +
               'or a passing check recipeId. The fix must be recorded evidence before it can clear a finding.',
+            startedAt,
+          );
+        }
+        const stale = refs.filter((r) => (refSeqs.get(r) ?? 0) < anchor);
+        if (stale.length > 0) {
+          return fail(
+            `ref(s) predate the finding: ${stale.join(', ')}`,
+            'An address ref must POSTDATE the finding it claims to fix — a check that passed before the review ran, or the very ' +
+              'change the finding criticizes, is not evidence of a fix. Make the change, re-run the check that proves it, then cite those.',
             startedAt,
           );
         }

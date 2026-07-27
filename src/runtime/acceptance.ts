@@ -191,7 +191,13 @@ export function computeAcceptance(
   // unplanned work) — but the fold runs even without one, because recorded critical/high
   // findings block regardless of how the round came to run: evidence cannot be unseen. The
   // blockers and caveats arrive pre-rendered from the one fold /review also shows.
-  const reviewGraph = planState.kind === 'canonical' && planState.status === 'approved' ? (planState.canonical?.graph ?? null) : null;
+  // approvedAndCurrent, not merely 'approved' (review): a plan file that DIVERGED after
+  // approval must not drive the requirement — a hand-inserted `review: {mode:'waived'}` would
+  // otherwise render "WAIVED by the approved plan" for content the user never approved (and
+  // bypass validatePlanGraph's reason rule, which only runs on update_plan writes). Divergence
+  // is already its own blocker; this keeps the ATTRIBUTION honest too.
+  const reviewGraph =
+    planState.kind === 'canonical' && planState.status === 'approved' && planState.approvedAndCurrent ? (planState.canonical?.graph ?? null) : null;
   const review = foldReview(reviewGraph, events);
   for (const blocker of review.openBlockers) unfinished.push(blocker);
   for (const caveat of review.caveats) caveats.push(caveat);

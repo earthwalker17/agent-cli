@@ -193,12 +193,14 @@ describe('owedHarnessRefsFromEvents (Session 11.5 fold, kind-aware + seq-aware S
     expect(owedHarnessRefsFromEvents([])).toEqual([]);
   });
 
-  it('pre-integration refs are owed like task-base; the LATEST delivery ref survives, superseded ones are owed', () => {
+  it('pre-integration refs are owed like task-base; the ACCEPTED delivery ref survives, superseded ones are owed', () => {
     const events = [
       ev({ type: 'harness.checkpoint', kind: 'pre-integration', ref: 'refs/h/pre1', oid: 'a'.repeat(40), callId: 'c1' }),
       ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'b'.repeat(40) }),
+      ev({ type: 'session.accepted', complete: true, summary: 's1', deliveryRef: 'refs/h/del1', deliveryOid: 'b'.repeat(40) }),
       // More work, a second acceptance: del1 is superseded, del2 is the durable audit anchor.
       ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del2', oid: 'c'.repeat(40) }),
+      ev({ type: 'session.accepted', complete: true, summary: 's2', deliveryRef: 'refs/h/del2', deliveryOid: 'c'.repeat(40) }),
     ];
     expect(owedHarnessRefsFromEvents(events)).toEqual([
       { ref: 'refs/h/pre1', kind: 'pre-integration' },
@@ -206,9 +208,38 @@ describe('owedHarnessRefsFromEvents (Session 11.5 fold, kind-aware + seq-aware S
     ]);
   });
 
-  it('a sole delivery ref is never owed (the durable audit anchor)', () => {
-    const events = [ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'a'.repeat(40) })];
+  it('the accepted delivery ref is never owed (the durable audit anchor)', () => {
+    const events = [
+      ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'a'.repeat(40) }),
+      ev({ type: 'session.accepted', complete: true, summary: 's', deliveryRef: 'refs/h/del1', deliveryOid: 'a'.repeat(40) }),
+    ];
     expect(owedHarnessRefsFromEvents(events)).toEqual([]);
+  });
+
+  it('REVIEW FIX: a PHANTOM delivery creation never supersedes the accepted anchor', () => {
+    // The bug all four review lenses found: survival keyed on the newest CREATION event, so a
+    // delivery event whose update-ref failed (or was crash-interrupted) held the newest seq and
+    // pruned the real anchor of the last acceptance — leaving a dangling deliveryRef and ZERO
+    // audit anchors. Survival now keys on the ref the latest acceptance actually CONSUMED.
+    const events = [
+      ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'a'.repeat(40) }),
+      ev({ type: 'session.accepted', complete: true, summary: 's1', deliveryRef: 'refs/h/del1', deliveryOid: 'a'.repeat(40) }),
+      ev({ type: 'file.mutated', callId: 'w', path: 'a.ts', kind: 'modify', beforeSha256: 'x', afterSha256: 'y', createdDirs: [] }),
+      // Second /accept: the creation event lands, then update-ref FAILS — the acceptance
+      // honestly records no deliveryRef.
+      ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del2', oid: 'b'.repeat(40) }),
+      ev({ type: 'session.accepted', complete: true, summary: 's2' }),
+    ];
+    const owed = owedHarnessRefsFromEvents(events);
+    // The phantom is owed (pruning a ref that never existed converges as already-deleted)…
+    expect(owed).toContainEqual({ ref: 'refs/h/del2', kind: 'delivery' });
+    // …and the REAL anchor of the last acceptance that captured one is NOT destroyed.
+    expect(owed.map((o) => o.ref)).not.toContain('refs/h/del1');
+  });
+
+  it('REVIEW FIX: an unconsumed delivery creation (crash before session.accepted) is owed', () => {
+    const events = [ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'a'.repeat(40) })];
+    expect(owedHarnessRefsFromEvents(events)).toEqual([{ ref: 'refs/h/del1', kind: 'delivery' }]);
   });
 
   it('latest-creation-per-ref wins: a phantom creation whose ref name was later reused reads as the newest kind/seq', () => {

@@ -107,7 +107,8 @@ export function sessionAcceptance(ctx: Pick<CommandContext, 'session' | 'layout'
 export function sessionReview(ctx: Pick<CommandContext, 'session' | 'layout'>): ReviewState {
   const events = ctx.session.log.events;
   const state = readPlanState(ctx.layout, ctx.session.id, events);
-  const graph = state.kind === 'canonical' && state.status === 'approved' ? (state.canonical?.graph ?? null) : null;
+  const graph =
+    state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent ? (state.canonical?.graph ?? null) : null;
   return foldReview(graph, events);
 }
 
