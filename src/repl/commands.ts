@@ -223,12 +223,58 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         return 'continue';
       }
 
+      // Delivery checkpoint (Session 14) — COMPLETE path, git repo only: capture the exact
+      // accepted state as a hidden ref BEFORE the consent event, so the acceptance references
+      // it. The ref SURVIVES the session (the durable audit anchor — the owed-prune fold keeps
+      // the latest delivery ref by construction; a later acceptance supersedes it). Best-effort
+      // by contract: a failure or declined untracked sweep becomes an honest chrome line and
+      // the acceptance still records — a git hiccup must never hold user consent hostage.
+      let delivery: { ref: string; oid: string } | null = null;
+      if (acc.complete) {
+        const g = ctx.session.gitFacts;
+        if (g?.isRepo === true && g.gitPath !== null && g.repoRoot !== null) {
+          const cctx: CheckpointContext = { gitPath: g.gitPath, repoRoot: g.repoRoot, workspaceRoot: ctx.session.workspaceRoot, stateDir: ctx.session.stateDir };
+          // Crash-window idempotence: a kill between a prior delivery checkpoint and its
+          // session.accepted leaves the checkpoint recorded but unconsumed. Reuse it when
+          // nothing work-shaped happened since AND the ref genuinely exists (a phantom whose
+          // update-ref failed must not be referenced) — never stack a second delivery ref.
+          const prior = [...ctx.session.log.events].reverse().find((e) => e.type === 'harness.checkpoint' && e.kind === 'delivery');
+          const priorReusable =
+            prior !== undefined && prior.type === 'harness.checkpoint' && !workSince(ctx.session.log.events, prior.seq)
+              ? (await listCheckpoints(cctx, ctx.session.id)).some((c) => c.ref === prior.ref)
+              : false;
+          if (prior !== undefined && prior.type === 'harness.checkpoint' && priorReusable) {
+            delivery = { ref: prior.ref, oid: prior.oid };
+            ctx.renderer.chromeLine(`  delivery checkpoint reused (interrupted acceptance repair): ${prior.ref}`);
+          } else {
+            const r = await createCheckpoint(cctx, ctx.session.id, {
+              label: 'delivery (accepted)',
+              onRefReady: (ref, oid) => ctx.session.log.append({ type: 'harness.checkpoint', kind: 'delivery', ref, oid }),
+              confirmLargeUntracked: async (count) => {
+                if (!ctx.question) return false;
+                const a = await ctx.question(`  capture ${count} untracked files in the delivery checkpoint too? [y/N] `);
+                return a !== null && /^y(es)?$/i.test(a.trim());
+              },
+            });
+            if (r.ok && r.ref !== undefined && r.oid !== undefined) delivery = { ref: r.ref, oid: r.oid };
+            else {
+              ctx.renderer.chromeLine(
+                `  delivery checkpoint not captured: ${sanitizeLine(r.error ?? 'unknown error')} (acceptance proceeds; /checkpoint is the manual path)`,
+              );
+            }
+          }
+        } else {
+          ctx.renderer.chromeLine('  delivery checkpoint: not a git repository — skipped (the event log remains the audit record)');
+        }
+      }
+
       // The recorded consent. complete=false only through the explicit confirm path.
       ctx.session.log.append({
         type: 'session.accepted',
         complete: acc.complete,
         summary: acc.summary,
         ...(acc.unfinished.length > 0 ? { unfinished: acc.unfinished } : {}),
+        ...(delivery !== null ? { deliveryRef: delivery.ref, deliveryOid: delivery.oid } : {}),
       });
       ctx.pendingNotes.push(
         acc.complete
@@ -263,6 +309,15 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       }
 
       ctx.renderer.chromeLine(`session accepted (${acc.complete ? 'complete' : 'partial'}) — ${sanitizeLine(acc.summary)}`);
+      if (acc.complete) {
+        // The delivery boundary suggestion (Session 14): commits stay user-typed and are never
+        // a side effect — this is one line of guidance, not automation.
+        ctx.renderer.chromeLine(
+          delivery !== null
+            ? `  delivery: checkpoint ${delivery.oid.slice(0, 12)} survives as the audit anchor (agent checkpoint list) — /commit turns the accepted work into a user-visible commit (optional)`
+            : '  delivery: /commit turns the accepted work into a user-visible commit (optional)',
+        );
+      }
       return 'continue';
     }
 

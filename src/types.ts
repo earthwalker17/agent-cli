@@ -1340,6 +1340,14 @@ export type EventBody =
       complete: boolean;
       summary: string;
       unfinished?: string[];
+      /**
+       * The delivery checkpoint capturing the exact accepted state (Session 14, additive;
+       * COMPLETE acceptances in a git repo only). The ref survives the session as the durable
+       * audit anchor; a failed/declined/skipped capture simply leaves these absent — the
+       * acceptance itself never depends on git.
+       */
+      deliveryRef?: string;
+      deliveryOid?: string;
     }
   | {
       /**
