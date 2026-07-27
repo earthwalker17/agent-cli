@@ -642,6 +642,31 @@ describe('REPL: /accept — the completion boundary (Session 11.5)', () => {
   });
 });
 
+describe('REPL: /review — the structural review gate surface (Session 14)', () => {
+  it('a session with no plan and no findings reads not-required; /status shows no review line', async () => {
+    const r = await drive([{ say: 'hi' }], ['hello\n', '/review\n', '/status\n', '/quit\n']);
+    expect(r.chromeOut).toContain('adversarial review: not required');
+    expect(r.chromeOut).toContain('rounds: none recorded');
+    expect(r.chromeOut).toContain('gate: satisfied');
+    // No review noise on /status when nothing derives and nothing was recorded.
+    expect(r.chromeOut).not.toContain('review: required');
+  });
+
+  it('an approved executor plan derives the requirement: /review and /status say so, /accept refuses', async () => {
+    const PLAN = { objective: 'obj', tasks: [{ id: 't1', title: 'x', intent: 'y', role: 'executor', verify: 'v' }] };
+    const r = await drive(
+      [{ say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN } }] }, { say: 'written' }],
+      ['plan it\n', '/plan approve\n', '/review\n', '/status\n', '/accept\n', '/quit\n'],
+    );
+    expect(r.chromeOut).toContain('adversarial review: required (derived: the approved plan has executor tasks)');
+    expect(r.chromeOut).toContain('gate: NOT satisfied');
+    expect(r.chromeOut).toContain('review: required (derived)');
+    // /accept lists the review blocker among the unfinished work.
+    expect(r.chromeOut).toContain('cannot accept as complete');
+    expect(r.chromeOut).toContain('adversarial review required');
+  });
+});
+
 describe('renderer: live command output unit behavior', () => {
   let seq = 0;
   function ev(body: Record<string, unknown>): SessionEvent {

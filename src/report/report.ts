@@ -1,5 +1,6 @@
 import type { CommandTermination, SessionEvent } from '../types.js';
 import { foldRepairs } from '../recovery/ledger.js';
+import { foldReview } from '../review/ledger.js';
 
 /**
  * The deterministic evidence report: a PURE function from the event log to a structured object
@@ -168,6 +169,13 @@ export interface ReportJson {
   previews?: ReportPreview[];
   /** Browser verification flows (Session 13, additive), in run order. */
   browserFlows?: ReportBrowserFlow[];
+  /** Harness workflow-transition checkpoints (Session 14, additive): pre-integration +
+   *  delivery. The ref scan (`agent checkpoint list`) is live truth — a recorded creation
+   *  whose ref is absent was pruned, superseded, or never landed (a phantom). */
+  harnessCheckpoints?: { kind: 'pre-integration' | 'delivery'; ref: string; oid: string }[];
+  /** The structural review gate's recorded evidence (Session 14, additive): rounds, findings
+   *  with DERIVED triage status, caveats. Statuses come from the same fold acceptance reads. */
+  review?: ReportReview;
   /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
    *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
   tasksDelegated: {
@@ -188,6 +196,24 @@ export interface ReportJson {
   taskChanges?: { childSessionId: string; baseOid: string; files: number; oversize: number; omitted: number }[];
   taskApplies?: { childSessionId: string; applied: number; refused: { relPath: string; reason: string }[] }[];
   integrity: { truncatedTail: boolean; corruptAt?: { line: number; kind: string } };
+}
+
+export interface ReportReview {
+  rounds: { callId: string; lenses: number; captured: number; deadLenses: string[]; findings: number; qualifying: boolean; note?: string }[];
+  findings: {
+    findingId: string;
+    severity: string;
+    title: string;
+    paths: string[];
+    confidence: string;
+    status: string;
+    blocking: boolean;
+    lens?: string;
+    evidence: string;
+    scenario: string;
+    triage: { action: string; evidence: string; refs?: string[]; effective: boolean; note?: string }[];
+  }[];
+  caveats: string[];
 }
 
 export interface ReportPlan {
@@ -396,6 +422,47 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   const taskBaseCheckpoints = events
     .filter((e): e is Extract<SessionEvent, { type: 'task.base-checkpoint' }> => e.type === 'task.base-checkpoint')
     .map((e) => ({ ref: e.ref, oid: e.oid }));
+
+  const harnessCheckpoints = events
+    .filter((e): e is Extract<SessionEvent, { type: 'harness.checkpoint' }> => e.type === 'harness.checkpoint')
+    .map((e) => ({ kind: e.kind, ref: e.ref, oid: e.oid }));
+
+  // The structural review gate (Session 14): the same fold acceptance reads. The graph is
+  // deliberately null — the report never reads the plan FILE, so the requirement line is not
+  // derived here; the recorded rounds/findings/triage are the evidence, and ## Completion
+  // already carries any acceptance blockers verbatim.
+  const reviewFold = foldReview(null, events);
+  const review: ReportReview = {
+    rounds: reviewFold.rounds.map((r) => ({
+      callId: r.callId,
+      lenses: r.lenses,
+      captured: r.captured,
+      deadLenses: r.deadLenses,
+      findings: r.findingsCount,
+      qualifying: r.qualifying,
+      ...(r.note !== undefined ? { note: r.note } : {}),
+    })),
+    findings: reviewFold.findings.map((f) => ({
+      findingId: f.finding.findingId,
+      severity: f.finding.severity,
+      title: f.finding.title,
+      paths: f.finding.paths,
+      confidence: f.finding.confidence,
+      status: f.status,
+      blocking: f.blocking,
+      ...(f.lens !== undefined ? { lens: f.lens } : {}),
+      evidence: f.finding.evidence,
+      scenario: f.finding.scenario,
+      triage: f.triage.map((t) => ({
+        action: t.action,
+        evidence: t.evidence,
+        ...(t.refs !== undefined ? { refs: t.refs } : {}),
+        effective: t.effective,
+        ...(t.note !== undefined ? { note: t.note } : {}),
+      })),
+    })),
+    caveats: reviewFold.caveats,
+  };
 
   const gitRestores = events
     .filter((e): e is Extract<SessionEvent, { type: 'git.restore' }> => e.type === 'git.restore')
@@ -671,6 +738,8 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     ...(repairs.length > 0 ? { repairs } : {}),
     ...(previews.length > 0 ? { previews } : {}),
     ...(browserFlows.length > 0 ? { browserFlows } : {}),
+    ...(harnessCheckpoints.length > 0 ? { harnessCheckpoints } : {}),
+    ...(review.rounds.length > 0 || review.findings.length > 0 ? { review } : {}),
     taskChanges,
     taskApplies,
     integrity: {
@@ -849,6 +918,33 @@ function renderMarkdown(r: ReportJson): string {
     L.push('');
   }
 
+  if (r.review !== undefined && (r.review.rounds.length > 0 || r.review.findings.length > 0)) {
+    L.push(`## Adversarial review (recorded findings and triage)`);
+    for (let i = 0; i < r.review.rounds.length; i++) {
+      const rd = r.review.rounds[i]!;
+      L.push(
+        `- round ${i + 1}: ${rd.captured}/${rd.lenses} lens(es) completed with capture, ${rd.findings} finding(s) recorded — ${rd.qualifying ? 'QUALIFYING' : `not qualifying (${rd.note ?? 'see /review'})`}${rd.deadLenses.length > 0 ? `; dead lens(es): ${rd.deadLenses.join(', ')}` : ''}`,
+      );
+    }
+    for (const f of r.review.findings) {
+      L.push(`- ${f.findingId} [${f.severity}, confidence ${f.confidence}] '${f.title}' → ${f.status.toUpperCase()}${f.blocking ? ' (BLOCKING)' : ''}`);
+      L.push(`  paths: ${f.paths.join(', ')}${f.lens !== undefined ? ` · lens: ${f.lens}` : ''}`);
+      L.push(`  scenario: ${f.scenario}`);
+      L.push(`  reviewer evidence: ${f.evidence}`);
+      for (const t of f.triage) {
+        L.push(
+          `  triage ${t.action}${t.effective ? '' : ' (INEFFECTIVE)'}: ${t.evidence}${t.refs !== undefined ? ` [refs: ${t.refs.join(', ')}]` : ''}${t.note !== undefined ? ` — ${t.note}` : ''}`,
+        );
+      }
+    }
+    for (const c of r.review.caveats) L.push(`- caveat: ${c}`);
+    L.push('');
+    L.push(
+      'Recorded findings are the review gate\'s only input; reviewer prose is narration. Triage is model judgment: a refutation is an UNVERIFIED model claim, rendered here verbatim for audit — an address counts only when its cited refs exist in this log.',
+    );
+    L.push('');
+  }
+
   L.push(`## Actions`);
   for (const a of r.actions) {
     const outcome = a.ok === null ? 'no-result' : a.ok ? 'ok' : 'error';
@@ -883,6 +979,22 @@ function renderMarkdown(r: ReportJson): string {
     for (const c of r.taskBaseCheckpoints) {
       L.push(`- ${c.oid.slice(0, 12)} ${c.ref} — executor-group base; pruned at clean session end`);
     }
+    L.push('');
+  }
+
+  if (r.harnessCheckpoints !== undefined && r.harnessCheckpoints.length > 0) {
+    L.push(`## Git recovery and audit state (hidden refs, harness-created)`);
+    for (const c of r.harnessCheckpoints) {
+      L.push(
+        c.kind === 'delivery'
+          ? `- ${c.oid.slice(0, 12)} ${c.ref} — DELIVERY (the accepted state; survives the session until superseded or pruned by the user)`
+          : `- ${c.oid.slice(0, 12)} ${c.ref} — pre-integration (whole-workspace point before an apply; pruned at clean session end)`,
+      );
+    }
+    L.push('');
+    L.push(
+      'Recorded creations, not live refs: `agent checkpoint list` is live truth — a recorded ref that is absent there was pruned, superseded, or never landed (creation is recorded BEFORE the ref is written, so a crash or a failed ref write leaves an honest phantom that prunes as already-deleted).',
+    );
     L.push('');
   }
 

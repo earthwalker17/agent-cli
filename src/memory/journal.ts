@@ -140,6 +140,22 @@ function evidenceLines(report: ReportJson, endedReason: string, logPath: string)
       );
     }
   }
+  {
+    // The structural review gate (Session 14): rounds/findings/triage are session evidence a
+    // resumed reader needs — above all whether anything was still BLOCKING at session end.
+    const rv = report.review;
+    if (rv !== undefined && (rv.rounds.length > 0 || rv.findings.length > 0)) {
+      const blocking = rv.findings.filter((f) => f.blocking).length;
+      const triaged = rv.findings.reduce((n, f) => n + f.triage.length, 0);
+      lines.push(
+        `- review: ${rv.rounds.length} round(s), ${rv.findings.length} finding(s) recorded, ${triaged} triage record(s)${blocking > 0 ? `, ${blocking} still BLOCKING` : ''}`,
+      );
+    }
+  }
+  if ((report.harnessCheckpoints ?? []).some((c) => c.kind === 'delivery')) {
+    const d = report.harnessCheckpoints!.filter((c) => c.kind === 'delivery').at(-1)!;
+    lines.push(`- delivery checkpoint: ${d.oid.slice(0, 12)} (${d.ref})`);
+  }
   const u = report.session.usage;
   lines.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out (cache: ${u.cacheReadInputTokens ?? 0} read / ${u.cacheCreationInputTokens ?? 0} written)`);
   lines.push(`- ended: ${endedReason}`);

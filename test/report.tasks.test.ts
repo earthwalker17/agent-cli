@@ -282,3 +282,71 @@ describe('report: Session 11.5 surfaces (completion, task-base checkpoints, spil
     expect(discarded.md).not.toContain('RETIRED at acceptance');
   });
 });
+
+describe('report: Session 14 surfaces (adversarial review, harness checkpoint lineage)', () => {
+  const FINDING = {
+    findingId: 'c-9#1',
+    severity: 'critical' as const,
+    title: 'XSS via innerHTML',
+    paths: ['public/app.js'],
+    evidence: 'read public/app.js:42 — unescaped interpolation',
+    scenario: 'a crafted note executes script',
+    confidence: 'high' as const,
+  };
+
+  it('renders rounds, findings with derived triage status, and the audit footer', () => {
+    const events = [
+      ...baseEvents(),
+      evt({ type: 'file.mutated', callId: 'w', path: 'C:\ws\a.ts', kind: 'modify', beforeSha256: 'a', afterSha256: 'b', createdDirs: [] }),
+      evt({ type: 'task.started', callId: 'rv', role: 'reviewer', childSessionId: 'c-9', budget: BUDGET }),
+      evt({ type: 'task.ended', callId: 'rv', childSessionId: 'c-9', status: 'completed', steps: 1, usage: { inputTokens: 1, outputTokens: 1 }, resultSha256: 'x', durationMs: 1 }),
+      evt({ type: 'review.findings', callId: 'rv', childSessionId: 'c-9', lens: 'correctness', findings: [FINDING] }),
+      evt({ type: 'review.triage', callId: 'tr', findingId: 'c-9#1', action: 'refute', evidence: 'checked the sanitizer upstream: input is escaped at ingestion' }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.review?.findings).toHaveLength(1);
+    expect(json.review?.findings[0]).toMatchObject({ findingId: 'c-9#1', status: 'refuted', blocking: false });
+    expect(md).toContain('## Adversarial review (recorded findings and triage)');
+    expect(md).toContain("c-9#1 [critical, confidence high] 'XSS via innerHTML' → REFUTED");
+    expect(md).toContain('triage refute: checked the sanitizer upstream');
+    expect(md).toContain('a refutation is an UNVERIFIED model claim');
+  });
+
+  it('an ineffective triage renders as INEFFECTIVE with its reason; blocking findings say BLOCKING', () => {
+    const events = [
+      ...baseEvents(),
+      evt({ type: 'task.started', callId: 'rv', role: 'reviewer', childSessionId: 'c-9', budget: BUDGET }),
+      evt({ type: 'task.ended', callId: 'rv', childSessionId: 'c-9', status: 'completed', steps: 1, usage: { inputTokens: 1, outputTokens: 1 }, resultSha256: 'x', durationMs: 1 }),
+      evt({ type: 'review.findings', callId: 'rv', childSessionId: 'c-9', findings: [FINDING] }),
+      evt({ type: 'review.triage', callId: 'tr', findingId: 'c-9#1', action: 'accept', evidence: 'we can live with this for now, truly' }),
+    ];
+    const { md } = buildReport({ events });
+    expect(md).toContain('(BLOCKING)');
+    expect(md).toContain('triage accept (INEFFECTIVE)');
+    expect(md).toContain("'accept' is invalid for critical");
+  });
+
+  it('harness checkpoints render as the audit lineage with the phantom-honest footer', () => {
+    const events = [
+      ...baseEvents(),
+      evt({ type: 'harness.checkpoint', kind: 'pre-integration', ref: 'refs/agent-cli/checkpoints/p-1/2', oid: 'a'.repeat(40), callId: 'ap' }),
+      evt({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/agent-cli/checkpoints/p-1/3', oid: 'b'.repeat(40) }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.harnessCheckpoints).toHaveLength(2);
+    expect(md).toContain('## Git recovery and audit state (hidden refs, harness-created)');
+    expect(md).toContain('pre-integration (whole-workspace point before an apply');
+    expect(md).toContain('DELIVERY (the accepted state; survives the session');
+    expect(md).toContain('`agent checkpoint list` is live truth');
+    // Never misattributed to the user-commanded section.
+    expect(json.gitCheckpoints).toHaveLength(0);
+  });
+
+  it('sessions without review or harness checkpoints omit both sections (additive-optional)', () => {
+    const { json, md } = buildReport({ events: baseEvents() });
+    expect(json.review).toBeUndefined();
+    expect(json.harnessCheckpoints).toBeUndefined();
+    expect(md).not.toContain('## Adversarial review');
+    expect(md).not.toContain('## Git recovery and audit state');
+  });
+});

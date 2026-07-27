@@ -10,6 +10,7 @@ import { readPlan, setPlanStatus } from '../plan/store.js';
 import { readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
 import { completionGateState, foldGraphState, integrationGateState, type PlanTaskState } from '../plan/graph-state.js';
 import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
+import { foldReview, type ReviewState } from '../review/ledger.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import { CHECKS_PER_SESSION, describeProject, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
@@ -68,10 +69,14 @@ export const HELP = [
   '                  unblocks planned execution) or discard it. You can also edit the file directly.',
   '  /accept [confirm]',
   '                  accept the session result (the completion boundary): verifies the plan is',
-  '                  fully executed and every capture integrated, records the acceptance, prunes',
-  '                  task-base refs, and retires a completed plan. With unfinished work, /accept',
-  '                  lists it and "/accept confirm" records a partial acceptance instead.',
+  '                  fully executed, every capture integrated, gates green, and the review gate',
+  '                  satisfied; captures the DELIVERY checkpoint (a hidden ref that survives as',
+  '                  the audit anchor), records the acceptance, prunes session-scoped harness',
+  '                  refs, and retires a completed plan. With unfinished work, /accept lists it',
+  '                  and "/accept confirm" records a partial acceptance instead.',
   '  /checks         what this project can be verified with, and the latest result per kind',
+  '  /review         the structural review gate: rounds, recorded findings, triage state,',
+  '                  blockers (executor plans require a recorded review round before /accept)',
   '  /preview [stop <id>]',
   '                  list this session\'s managed preview servers (pid, url, uptime, log tail);',
   '                  "stop <id>" stops one — a preview otherwise runs until session end or its TTL',
@@ -95,6 +100,15 @@ export function sessionAcceptance(ctx: Pick<CommandContext, 'session' | 'layout'
   const state = readPlanState(ctx.layout, ctx.session.id, events);
   const graph = state.canonical?.graph ?? null;
   return { state, acc: computeAcceptance(state, graph !== null ? foldGraphState(graph, events) : null, events) };
+}
+
+/** One derivation for /review and the /status review line — the acceptance axis's exact fold
+ *  (the requirement derives only from an APPROVED plan, same as computeAcceptance). */
+export function sessionReview(ctx: Pick<CommandContext, 'session' | 'layout'>): ReviewState {
+  const events = ctx.session.log.events;
+  const state = readPlanState(ctx.layout, ctx.session.id, events);
+  const graph = state.kind === 'canonical' && state.status === 'approved' ? (state.canonical?.graph ?? null) : null;
+  return foldReview(graph, events);
 }
 
 /** The one-line completion summary used by /status and the quit path. */
@@ -171,6 +185,15 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           `  model: ${s.model} · provider: ${s.provider.name}`,
           `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out${cache}`,
           `  ${completionLine(ctx)}`,
+          ...((): string[] => {
+            // The review gate at a glance (Session 14): the same fold /review and acceptance read.
+            const rv = sessionReview(ctx);
+            if (rv.requirement.kind === 'none' && rv.rounds.length === 0 && rv.findings.length === 0) return [];
+            const blocking = rv.findings.filter((f) => f.blocking).length;
+            return [
+              `  review: ${rv.requirement.kind === 'required' ? `required (${rv.requirement.source})` : rv.requirement.kind} · ${rv.rounds.filter((r) => r.qualifying).length}/${rv.rounds.length} qualifying round(s) · ${rv.findings.length} finding(s)${blocking > 0 ? ` · ${blocking} BLOCKING` : ''} (${rv.satisfied ? 'satisfied' : 'blocking /accept'}; /review)`,
+            ];
+          })(),
           ...((): string[] => {
             const alive = ctx.previewTool?.active().filter((a) => a.handle.isAlive()) ?? [];
             return alive.length > 0
@@ -654,6 +677,39 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         map.text.split('\n').map(sanitizeLine).join('\n') +
           `\n\n(${map.fileCount} files${map.truncated ? ', truncated' : ''})\n`,
       );
+      return 'continue';
+    }
+
+    case 'review': {
+      const rv = sessionReview(ctx);
+      const lines: string[] = [];
+      const reqLabel =
+        rv.requirement.kind === 'required'
+          ? `required (${rv.requirement.source === 'declared' ? 'declared by the plan' : 'derived: the approved plan has executor tasks'})`
+          : rv.requirement.kind === 'waived'
+            ? `WAIVED by the approved plan — ${sanitizeLine(rv.requirement.reason)} (recorded as an acceptance caveat)`
+            : 'not required (no approved plan with executor tasks; recorded findings still bind)';
+      lines.push(`adversarial review: ${reqLabel}`);
+      if (rv.rounds.length === 0) {
+        lines.push('  rounds: none recorded — one delegate_task call with 2-3 reviewer lenses records a round');
+      }
+      rv.rounds.forEach((r, i) => {
+        lines.push(
+          `  round ${i + 1}: ${r.captured}/${r.lenses} lens(es) captured, ${r.findingsCount} finding(s) — ${r.qualifying ? 'QUALIFYING' : `not qualifying (${sanitizeLine(r.note ?? '')})`}${r.deadLenses.length > 0 ? `; dead: ${r.deadLenses.join(', ')}` : ''}`,
+        );
+      });
+      for (const f of rv.findings) {
+        lines.push(
+          `  ${sanitizeLine(f.finding.findingId)} [${f.finding.severity}] ${sanitizeLine(f.finding.title)} → ${f.status}${f.blocking ? ' (BLOCKING)' : ''}`,
+        );
+        for (const t of f.triage) {
+          lines.push(`    triage ${t.action}${t.effective ? '' : ' (INEFFECTIVE)'}: ${sanitizeLine(t.evidence).slice(0, 120)}${t.note !== undefined ? ` — ${sanitizeLine(t.note)}` : ''}`);
+        }
+      }
+      for (const b of rv.openBlockers) lines.push(`  BLOCKER: ${sanitizeLine(b)}`);
+      for (const c of rv.caveats) lines.push(`  caveat: ${sanitizeLine(c)}`);
+      lines.push(`  gate: ${rv.satisfied ? 'satisfied' : 'NOT satisfied — /accept will refuse COMPLETE'}`);
+      ctx.renderer.chromeLine(lines.join('\n'));
       return 'continue';
     }
 

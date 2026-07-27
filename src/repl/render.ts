@@ -314,6 +314,31 @@ export function createRenderer(opts: {
           chromeLine(style.dim(`  ${g.bullet} task-base checkpoint ${e.oid.slice(0, 12)} (harness recovery point; pruned at session end)`));
           break;
         }
+        case 'harness.checkpoint': {
+          chromeLine(
+            style.dim(
+              e.kind === 'delivery'
+                ? `  ${g.bullet} delivery checkpoint ${e.oid.slice(0, 12)} (the accepted state; SURVIVES the session — agent checkpoint list)`
+                : `  ${g.bullet} pre-integration checkpoint ${e.oid.slice(0, 12)} (whole-workspace recovery point; pruned at session end)`,
+            ),
+          );
+          break;
+        }
+        case 'review.findings': {
+          const sevCounts = new Map<string, number>();
+          for (const f of e.findings) sevCounts.set(f.severity, (sevCounts.get(f.severity) ?? 0) + 1);
+          const counts = [...sevCounts.entries()].map(([s, n]) => `${n} ${s}`).join(', ');
+          chromeLine(
+            e.findings.length === 0
+              ? style.dim(`  ${g.bullet} review lens ${sanitizeLine(e.childSessionId.slice(-4))}: clean (zero findings recorded)`)
+              : style.yellow(`  ${g.warn} review lens ${sanitizeLine(e.childSessionId.slice(-4))}: ${e.findings.length} finding(s) recorded — ${counts}`),
+          );
+          break;
+        }
+        case 'review.triage': {
+          chromeLine(style.dim(`  ${g.bullet} review triage: ${sanitizeLine(e.findingId)} → ${e.action} (see /review)`));
+          break;
+        }
         case 'task.started': {
           counters.tasks++;
           chromeLine(style.dim(`  ${g.bullet} task ${sanitizeLine(e.role)}·${sanitizeLine(e.childSessionId.slice(-4))} started — child session ${sanitizeLine(e.childSessionId)}`));
