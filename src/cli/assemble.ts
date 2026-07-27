@@ -18,6 +18,7 @@ import { likelyBrowserAvailable, probeBrowser, type BrowserAvailability } from '
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createRecoverTool } from '../tools/recover.js';
+import { createReviewTool } from '../tools/review.js';
 import { classifyFailure, latestFailureEvidence } from '../recovery/classify.js';
 import { foldRepairs } from '../recovery/ledger.js';
 import { evaluateRepair, type RepairVerdict } from '../recovery/policy.js';
@@ -495,6 +496,12 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     // tools — a child cannot plan its own retry policy. It reads the live log and the approved
     // graph fresh per call (bytes and events are truth) and writes only evidence.
     createRecoverTool({
+      events: () => session.log.events,
+      planGraph: () => readPlanState(layout, session.id, session.log.events).canonical?.graph ?? null,
+    }),
+    // review (Session 14): triage over recorded findings — the same observe-class, events-only
+    // shape as recover, reading the live log fresh per call.
+    createReviewTool({
       events: () => session.log.events,
       planGraph: () => readPlanState(layout, session.id, session.log.events).canonical?.graph ?? null,
     }),
