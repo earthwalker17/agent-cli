@@ -71,11 +71,6 @@ export function resolveGitPath(): string | null {
   return cachedGitPath;
 }
 
-/** Test seam: reset the process-wide cache. */
-export function resetGitPathCacheForTests(): void {
-  cachedGitPath = undefined;
-}
-
 export interface GitInvocation {
   /** Absolute path to the git binary (from resolveGitPath / findGitOnPath). */
   gitPath: string;

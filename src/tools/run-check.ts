@@ -85,6 +85,14 @@ export interface CheckToolDeps {
   /** Injectable for deterministic tests; defaults to the real detector. */
   detect?: (root: string) => DetectedProject;
   probe?: (root: string) => ManifestStamp[];
+  /**
+   * S14.5 (E): the bound plan task's declared `touches`, for defaulting a test-targeted scope
+   * when the model omits one. null/absent = no plan context — the bad-request refusal stands
+   * untouched. Safe by construction: gate matching is per-KIND, so a scoped `test-targeted`
+   * pass can never discharge a full `test` gate, and the graph gate's scope-overlap rule
+   * naturally matches (touches overlap touches).
+   */
+  planTouches?: (planTaskId: string) => string[] | null;
 }
 
 export interface RunCheckTool extends Tool<RunCheckInputT> {
@@ -129,8 +137,21 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
   const probe = deps.probe ?? probeStamps;
   let project = detect(deps.workspaceRoot);
 
+  // S14.5 (E): an omitted test-targeted scope defaults from the BOUND plan task's touches.
+  // Explicit scope always wins; without a binding (or plan context) nothing changes and the
+  // bad-request refusal stays verbatim. The substitution happens HERE — before the `check:`
+  // policy fact resolves — so the human approves exactly the command that will run.
+  const scopeFor = (input: RunCheckInputT): { scope: string[]; defaultedFrom?: string } => {
+    const explicit = input.scope_paths ?? [];
+    if (explicit.length > 0 || input.plan_task === undefined || !input.checks.includes('test-targeted')) {
+      return { scope: explicit };
+    }
+    const touches = deps.planTouches?.(input.plan_task) ?? null;
+    if (touches === null || touches.length === 0) return { scope: explicit };
+    return { scope: touches, defaultedFrom: input.plan_task };
+  };
   const resolveFor = (input: RunCheckInputT): ReturnType<typeof resolveChecks> =>
-    resolveChecks(project, input.checks, input.scope_paths ?? []);
+    resolveChecks(project, input.checks, scopeFor(input).scope);
 
   return {
     name: 'run_check',
@@ -290,7 +311,12 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       }
 
       const failed = results.filter((r) => r.status === 'fail' || r.status === 'error');
-      const head = `run_check — ${results.length} kind(s): ${results.map((r) => `${r.kind}=${r.status}`).join(', ')}`;
+      const scoped = scopeFor(input);
+      const head =
+        `run_check — ${results.length} kind(s): ${results.map((r) => `${r.kind}=${r.status}`).join(', ')}` +
+        (scoped.defaultedFrom !== undefined
+          ? `\n(test-targeted scope defaulted from plan task '${scoped.defaultedFrom}' touches: ${scoped.scope.join(', ')})`
+          : '');
       const blocks = results.map((r) => {
         const rendered = renderResult(r);
         if (r.status !== 'fail' && r.status !== 'error') return rendered;

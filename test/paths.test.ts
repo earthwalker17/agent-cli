@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { validatePath } from '../src/policy/paths.js';
 import { PathError } from '../src/shared/errors.js';
+import { normalizeRelPrefix, relPrefixesOverlap } from '../src/shared/pathutil.js';
 
 const isWin = process.platform === 'win32';
 const itWin = isWin ? it : it.skip;
@@ -86,5 +87,27 @@ describe('validatePath symlink/junction escape', () => {
     }
     const v = validatePath(ws, 'link/secret.txt');
     expect(v.inWorkspace).toBe(false);
+  });
+});
+
+describe('normalizeRelPrefix (S14.5 unit edges — the containment rule shared by plan touches, check scopes, and finding paths)', () => {
+  it('normalizes separators, leading ./, trailing /, and surrounding whitespace', () => {
+    expect(normalizeRelPrefix('src\\api\\')).toBe('src/api');
+    expect(normalizeRelPrefix('./lib')).toBe('lib');
+    expect(normalizeRelPrefix('a/b/')).toBe('a/b');
+    expect(normalizeRelPrefix('  src  ')).toBe('src');
+    expect(normalizeRelPrefix('a/.hidden')).toBe('a/.hidden');
+  });
+  it('rejects empty, dot, absolute, drive-lettered, and ..-escaping forms as null (never disk-probed)', () => {
+    for (const bad of ['', '.', './', '/abs/path', '\\\\server\\share', 'C:/x', 'c:x', '../up', 'a/../b', 'a/..', '..']) {
+      expect(normalizeRelPrefix(bad), bad).toBeNull();
+    }
+  });
+  it('relPrefixesOverlap: equality and path-nesting only — sibling name prefixes never overlap', () => {
+    expect(relPrefixesOverlap('src', 'src')).toBe(true);
+    expect(relPrefixesOverlap('src', 'src/api')).toBe(true);
+    expect(relPrefixesOverlap('src/api', 'src')).toBe(true);
+    expect(relPrefixesOverlap('src', 'srcx')).toBe(false);
+    expect(relPrefixesOverlap('src/a', 'src/ab')).toBe(false);
   });
 });

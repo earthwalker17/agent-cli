@@ -4,6 +4,7 @@ import type { SessionEvent, MutationKind } from '../types.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 import { sha256 } from '../shared/hash.js';
 import { DIFF_MAX_BYTES, isProbablyBinary, unifiedDiff } from '../shared/diff.js';
+import { collectPassingEvidence, firstPassingEvidenceAfter } from './report.js';
 
 /**
  * The attributable session diff (V0.5): for every path the session's file tools mutated,
@@ -27,6 +28,10 @@ export interface SessionDiffFile {
   patch?: string;
   /** Why there is no patch (binary, too large, net-unchanged, missing blob). */
   note?: string;
+  /** S14.5 (F): the report's CHECKED verdict beside the diff — the SAME correlation, never a
+   *  second meaning ("check ran, exit 0" after this path's last mutation; no correctness claim). */
+  checked?: boolean;
+  checkedBy?: string;
 }
 
 /**
@@ -55,10 +60,20 @@ export function sessionMutationState(events: readonly SessionEvent[]): {
 
 export function buildSessionDiff(events: readonly SessionEvent[], snapshots: SnapshotStore, workspaceRoot: string): SessionDiffFile[] {
   const { firstBefore, expectedNow } = sessionMutationState(events);
+  // CHECKED annotation (S14.5): the last-mutation seq per path (tracked here, NOT in
+  // sessionMutationState — /commit shares that fold and its contract stays byte-stable), fed
+  // through the report's own correlation so the verdict has exactly one implementation.
+  const lastMutationSeq = new Map<string, number>();
+  for (const e of events) {
+    if (e.type === 'file.mutated') lastMutationSeq.set(e.path, e.seq);
+  }
+  const passingEvidence = collectPassingEvidence(events);
 
   const out: SessionDiffFile[] = [];
   for (const [p, baseline] of [...firstBefore.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const relPath = path.relative(workspaceRoot, p).split(path.sep).join('/');
+    const evidence = firstPassingEvidenceAfter(passingEvidence, lastMutationSeq.get(p) ?? Number.MAX_SAFE_INTEGER);
+    const checkedFields = { checked: evidence !== undefined, ...(evidence !== undefined ? { checkedBy: evidence.command } : {}) };
     let current: Buffer | null = null;
     try {
       current = fs.readFileSync(p);
@@ -77,19 +92,19 @@ export function buildSessionDiff(events: readonly SessionEvent[], snapshots: Sna
     try {
       before = baseline !== null ? snapshots.getBlob(baseline) : Buffer.alloc(0);
     } catch {
-      out.push({ path: p, relPath, kind, drifted, note: 'pre-image blob missing; cannot render a diff' });
+      out.push({ path: p, relPath, kind, drifted, note: 'pre-image blob missing; cannot render a diff', ...checkedFields });
       continue;
     }
     const after = current ?? Buffer.alloc(0);
     if (before.length > DIFF_MAX_BYTES || after.length > DIFF_MAX_BYTES) {
-      out.push({ path: p, relPath, kind, drifted, note: `too large to diff (${before.length} → ${after.length} bytes)` });
+      out.push({ path: p, relPath, kind, drifted, note: `too large to diff (${before.length} → ${after.length} bytes)`, ...checkedFields });
       continue;
     }
     if (isProbablyBinary(before) || isProbablyBinary(after)) {
-      out.push({ path: p, relPath, kind, drifted, note: `binary change (${before.length} → ${after.length} bytes)` });
+      out.push({ path: p, relPath, kind, drifted, note: `binary change (${before.length} → ${after.length} bytes)`, ...checkedFields });
       continue;
     }
-    out.push({ path: p, relPath, kind, drifted, patch: unifiedDiff(relPath, before.toString('utf8'), after.toString('utf8')) });
+    out.push({ path: p, relPath, kind, drifted, patch: unifiedDiff(relPath, before.toString('utf8'), after.toString('utf8')), ...checkedFields });
   }
   return out;
 }
@@ -100,7 +115,8 @@ export function renderSessionDiff(files: SessionDiffFile[]): string {
   const L: string[] = [];
   for (const f of files) {
     const drift = f.drifted ? '  [DRIFTED: the file changed outside this session after the last recorded action]' : '';
-    L.push(`${f.kind} ${f.relPath}${drift}`);
+    const verdict = f.checked === true ? `  [CHECKED: ${f.checkedBy ?? ''} — check ran, exit 0; no correctness claim]` : f.checked === false ? '  [UNCHECKED]' : '';
+    L.push(`${f.kind} ${f.relPath}${drift}${verdict}`);
     if (f.note) L.push(`  (${f.note})`);
     else if (f.patch && f.patch.length > 0) L.push(f.patch);
   }

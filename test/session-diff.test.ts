@@ -63,6 +63,35 @@ describe('session diff over a real session', () => {
     });
   }
 
+  it("S14.5 (F): /diff carries the report's CHECKED verdict — one correlation, two surfaces", async () => {
+    fs.writeFileSync(path.join(ws, 'a.txt'), 'one\n');
+    fs.writeFileSync(path.join(ws, 'b.txt'), 'two\n');
+    const session = makeSession([
+      { say: 'editing a', calls: [{ name: 'edit_file', input: { path: 'a.txt', old_string: 'one', new_string: 'ONE' } }] },
+      { say: 'a done' },
+      { say: 'editing b', calls: [{ name: 'edit_file', input: { path: 'b.txt', old_string: 'two', new_string: 'TWO' } }] },
+      { say: 'b done' },
+    ]);
+    await runTurn(session, 'edit a.txt');
+    // A passing typed check lands AFTER a.txt's mutation…
+    session.log.append({
+      type: 'check.completed', callId: 'chk-1', check: 'test', recipeId: 'node.pkgjson.test',
+      status: 'pass', exitCode: 0, termination: 'exited', durationMs: 5, summary: 'ok',
+    });
+    // …and b.txt mutates AFTER the check, so no evidence covers it.
+    await runTurn(session, 'edit b.txt');
+    endSession(session, 'completed');
+
+    const files = buildSessionDiff(session.log.events, session.snapshots, ws);
+    const byRel = new Map(files.map((f) => [f.relPath, f]));
+    expect(byRel.get('a.txt')).toMatchObject({ checked: true, checkedBy: 'test check (node.pkgjson.test)' });
+    expect(byRel.get('b.txt')).toMatchObject({ checked: false });
+    const rendered = renderSessionDiff(files);
+    expect(rendered).toContain('[CHECKED: test check (node.pkgjson.test)');
+    expect(rendered).toContain('no correctness claim');
+    expect(rendered).toContain('[UNCHECKED]');
+  });
+
   it('records diffstat evidence on file.mutated and renders the change as a unified diff', async () => {
     fs.writeFileSync(path.join(ws, 'a.txt'), 'one\ntwo\nthree\n');
     const session = makeSession([

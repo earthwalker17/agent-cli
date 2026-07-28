@@ -8,8 +8,9 @@ import type { ZodType } from 'zod';
 import type { ExecSpec } from './exec/run.js';
 
 // ── Action taxonomy ────────────────────────────────────────────────────────────────────────
-// Consequence classes from the constitution's safety policy. This is the "approval" axis only;
-// V0.1 has no OS "sandbox" axis (documented honestly).
+// Consequence classes from the constitution's safety policy. This is the "approval" axis; the
+// OS "sandbox" axis (V0.4, `ExecSandbox` below) is deliberately separate — constitution
+// principle 4: technical access limits and human confirmation policy must not be conflated.
 export type ActionClass = 'observe' | 'reversible' | 'external' | 'destructive' | 'sensitive';
 
 export type SessionMode = 'interactive' | 'non-interactive';

@@ -213,6 +213,36 @@ describe('run_check — real execution and evidence', () => {
     expect(evidence).toEqual([]);
   });
 
+  it('S14.5 (E): an omitted test-targeted scope defaults from the bound plan task touches; explicit scope wins', async () => {
+    nodeProject({ test: 'node -e ""' });
+    const tool = createRunCheckTool({
+      workspaceRoot: ws,
+      caps: { checksRun: 0 },
+      planTouches: (id) => (id === 'api' ? ['src/api'] : null),
+    });
+    const { ctx, evidence } = collectingCtx();
+    const r = await tool.execute({ checks: ['test-targeted'], plan_task: 'api' }, ctx);
+    expect(r.output).toContain("scope defaulted from plan task 'api' touches: src/api");
+    // The recorded evidence carries the substituted scope — what the graph gate's overlap
+    // rule matches against the task's touches.
+    const started = evidence.find((e) => e.kind === 'started');
+    expect(started?.kind === 'started' ? started.scopePaths : []).toEqual(['src/api']);
+
+    // Explicit scope always wins over the default.
+    const { ctx: ctx2, evidence: ev2 } = collectingCtx();
+    const r2 = await tool.execute({ checks: ['test-targeted'], plan_task: 'api', scope_paths: ['src/other'] }, ctx2);
+    expect(r2.output).not.toContain('scope defaulted');
+    const started2 = ev2.find((e) => e.kind === 'started');
+    expect(started2?.kind === 'started' ? started2.scopePaths : []).toEqual(['src/other']);
+
+    // An UNBOUND call (or an unknown plan task) still refuses as bad-request, verbatim.
+    const { ctx: ctx3, evidence: ev3 } = collectingCtx();
+    const r3 = await tool.execute({ checks: ['test-targeted'], plan_task: 'nope' }, ctx3);
+    expect(r3.ok).toBe(false);
+    expect(r3.error).toContain('invalid check request');
+    expect(ev3).toEqual([]);
+  }, 60_000);
+
   it('mixes supported and unsupported kinds in one call honestly', async () => {
     nodeProject({ test: 'node -e ""' });
     const tool = createRunCheckTool({ workspaceRoot: ws, caps: { checksRun: 0 } });

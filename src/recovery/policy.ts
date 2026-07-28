@@ -158,9 +158,3 @@ export function evaluateRepair(input: RepairEvaluationInput): RepairVerdict {
     ],
   };
 }
-
-/** One compact line for the status/task surfaces. */
-export function describeVerdict(v: RepairVerdict): string {
-  if (v.stop !== undefined) return `repair BLOCKED (${v.stop.reason}): ${v.stop.detail}`;
-  return `repair eligible — ${v.failureClass}, attempt ${v.attemptsUsed + 1}/${MAX_REPAIR_ATTEMPTS}${v.needsNewPlan ? ' (a fresh repair plan is required)' : ''}`;
-}

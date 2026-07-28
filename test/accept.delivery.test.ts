@@ -279,6 +279,40 @@ describe.skipIf(!hasGit)('/accept delivery checkpoint — crash-window idempoten
     }
   });
 
+  it('S14.5 (L): /review renders rounds, findings, triage, blockers, and the gate line from the live log', async () => {
+    await initWsRepo();
+    const session = makeSession();
+    try {
+      session.log.append({ type: 'file.mutated', callId: 'm', path: path.join(ws, 'a.txt'), kind: 'modify', beforeSha256: 'a', afterSha256: 'b', createdDirs: [] });
+      session.log.append({ type: 'task.started', callId: 'rv', role: 'reviewer', childSessionId: 'child-rev-0001', budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 } });
+      session.log.append({
+        type: 'task.ended', callId: 'rv', childSessionId: 'child-rev-0001', status: 'completed', steps: 1,
+        usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1,
+      });
+      session.log.append({
+        type: 'review.findings', callId: 'rv', childSessionId: 'child-rev-0001', lens: 'security',
+        findings: [{
+          findingId: 'child-rev-0001#1', severity: 'critical', title: 'XSS via innerHTML', paths: ['src/render.js'],
+          evidence: 'read src/render.js:4-9; unescaped interpolation into innerHTML', scenario: 'a name containing <img onerror=…> executes in every viewer', confidence: 'high',
+        }],
+      });
+      // An INEFFECTIVE triage (accept on a critical) — must render labeled, never clear the block.
+      session.log.append({ type: 'review.triage', callId: 't1', findingId: 'child-rev-0001#1', action: 'accept', evidence: 'we can live with this limitation for now' });
+
+      const chrome: string[] = [];
+      await dispatchSlash('/review', acceptCtx(session, chrome));
+      const text = chrome.join('\n');
+      expect(text).toContain('adversarial review: not required');
+      expect(text).toContain('round 1: 1/1 lens(es) captured, 1 finding(s) — QUALIFYING');
+      expect(text).toContain('child-rev-0001#1 [critical] XSS via innerHTML → open (BLOCKING)');
+      expect(text).toContain('triage accept (INEFFECTIVE)');
+      expect(text).toContain('BLOCKER:');
+      expect(text).toContain('gate: NOT satisfied — /accept will refuse COMPLETE');
+    } finally {
+      endSession(session, 'completed');
+    }
+  });
+
   it('S14.5 FIX: a THROWING harness-ref prune is reported in chrome, and the acceptance still records', async () => {
     // The only silent catch on the S14 surface: a prune throw left ZERO trace that cleanup was
     // ever attempted while the user was told "session accepted" as if hygiene ran.

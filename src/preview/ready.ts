@@ -5,7 +5,7 @@ import type { SupervisedHandle } from './types.js';
  * ANY HTTP status counts as process-level ready (a 500 is a running server with a bug; the
  * browser flows are what judge application state). What readiness NEVER means here: a load
  * event, a spinner, or the mere absence of a crash. Application-level readiness is declared
- * per browser flow (`readyWhen`), not inferred by the harness.
+ * per browser flow (the FlowSpec's `ready_when`), not inferred by the harness.
  */
 
 export interface ReadyOutcome {

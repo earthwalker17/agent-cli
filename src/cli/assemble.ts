@@ -350,7 +350,17 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // on a precondition almost every time; the parent verifies after apply_task_changes, where the
   // workspace is real.
   const checkCaps = checkCapsFromEvents(session.log.events);
-  const checkTool = createRunCheckTool({ workspaceRoot: ctx.ws, caps: checkCaps });
+  const checkTool = createRunCheckTool({
+    workspaceRoot: ctx.ws,
+    caps: checkCaps,
+    // S14.5 (E): a bound test-targeted run with no explicit scope defaults to the plan task's
+    // declared touches — same approved-and-current filter as every other gate consumer.
+    planTouches: (planTaskId) => {
+      const graph = approvedCurrentGraph(readPlanState(layout, session.id, session.log.events));
+      const t = graph?.tasks.find((x) => x.id === planTaskId);
+      return t !== undefined ? [...t.touches] : null;
+    },
+  });
 
   // preview (Session 13): the managed preview-server tool — per-session for the same snapshot
   // reason as run_check, plus it owns this session's live process handles. `appendEnded` is the

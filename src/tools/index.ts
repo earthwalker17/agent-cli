@@ -264,7 +264,3 @@ export function toToolSchema(tool: Tool): ToolSchema {
   delete json['$schema']; // the Messages API input_schema does not want the meta-schema key
   return { name: tool.name, description: tool.description, input_schema: json };
 }
-
-export function findTool(name: string): Tool | undefined {
-  return TOOLS.find((t) => t.name === name);
-}

@@ -253,6 +253,72 @@ function short(h: string | null): string {
   return h === null ? '∅' : h.slice(0, 8);
 }
 
+export interface PassingEvidenceEntry {
+  command: string;
+  seq: number;
+  exitCode?: number;
+  ok: boolean;
+  termination?: CommandTermination;
+}
+
+/**
+ * S14.5 (F): THE CHECKED correlation's evidence set, extracted so the report and /diff share
+ * ONE implementation — "CHECKED" must never mean two different things on two surfaces.
+ * Commands that actually ran (denied/never-executed calls excluded), merged with passing typed
+ * checks (whose `pass` is derived from the identical exited-0 rule), SORTED BY SEQ — `find`
+ * takes the first entry after a mutation, so an unsorted concatenation would credit the wrong
+ * evidence.
+ */
+export function collectPassingEvidence(events: readonly SessionEvent[]): PassingEvidenceEntry[] {
+  const commandByCall = new Map<string, string>();
+  const decisionByCall = new Set<string>();
+  const neverRan = new Set<string>();
+  const endedByCall = new Map<string, CommandTermination>();
+  for (const e of events) {
+    if (e.type === 'tool.requested' && e.tool === 'run_command') {
+      const cmd = (e.input as { command?: unknown }).command;
+      if (typeof cmd === 'string') commandByCall.set(e.callId, cmd);
+    } else if (e.type === 'policy.decision') {
+      decisionByCall.add(e.callId);
+      if (e.decision === 'deny') neverRan.add(e.callId);
+    } else if (e.type === 'approval.resolved') {
+      if (e.decision !== 'allow') neverRan.add(e.callId);
+    } else if (e.type === 'command.ended') {
+      endedByCall.set(e.callId, e.termination);
+    }
+  }
+  const out: PassingEvidenceEntry[] = [];
+  for (const e of events) {
+    if (e.type === 'tool.completed') {
+      const cmd = commandByCall.get(e.callId);
+      if (cmd === undefined || neverRan.has(e.callId) || !decisionByCall.has(e.callId)) continue;
+      const term = endedByCall.get(e.callId);
+      out.push({
+        command: cmd,
+        seq: e.seq,
+        ok: e.ok,
+        ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
+        ...(term !== undefined ? { termination: term } : {}),
+      });
+    } else if (e.type === 'check.completed' && e.status === 'pass') {
+      out.push({
+        command: `${e.check} check (${e.recipeId})`,
+        seq: e.seq,
+        ok: true,
+        ...(e.exitCode !== null ? { exitCode: e.exitCode } : {}),
+        ...(e.termination !== undefined ? { termination: e.termination } : {}),
+      });
+    }
+  }
+  return out.sort((a, b) => a.seq - b.seq);
+}
+
+/** The exact CHECKED rule: the first evidence after `seq` that genuinely EXITED with code 0
+ *  (a killed command has no exit code by contract; termination evidence enforces it). */
+export function firstPassingEvidenceAfter(evidence: readonly PassingEvidenceEntry[], seq: number): PassingEvidenceEntry | undefined {
+  return evidence.find((cc) => cc.seq > seq && cc.exitCode === 0 && (cc.termination === undefined || cc.termination === 'exited'));
+}
+
 export function buildReport(input: ReportInput): { json: ReportJson; md: string } {
   const { events } = input;
 
@@ -318,8 +384,6 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     });
   }
 
-  // Command completions with their seq, for CHECKED correlation.
-  const commandCompletions: { command: string; seq: number; exitCode?: number; ok: boolean; termination?: CommandTermination }[] = [];
   const commands: ReportCommand[] = [];
   for (const e of events) {
     if (e.type !== 'tool.completed') continue;
@@ -339,13 +403,6 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       ...(term !== undefined ? { termination: term } : {}),
       ...(sbx !== undefined ? { sandbox: sbx } : {}),
       ...(e.fullOutputSaved === true && e.fullOutputSha256 !== undefined ? { outputBlobSha256: e.fullOutputSha256 } : {}),
-    });
-    commandCompletions.push({
-      command: cmd,
-      seq: e.seq,
-      ok: e.ok,
-      ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
-      ...(term !== undefined ? { termination: term } : {}),
     });
   }
   // Commands that SPAWNED but never completed: the session died while they ran. Their side
@@ -374,31 +431,13 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       churn.set(e.path, c);
     }
   }
-  // Typed checks (Session 12) are evidence of exactly the same KIND as a passing command, so
-  // they join the CHECKED correlation rather than living in a parallel universe. `status: 'pass'`
-  // is derived from `termination === 'exited' && exitCode === 0`, which is the identical rule the
-  // command path applies — that equivalence is what makes extending the verdict honest. The two
-  // sources are MERGED AND SORTED BY SEQ: `find` takes the first entry after the mutation, so an
-  // unsorted concatenation would attribute a file to a check that ran BEFORE the command.
-  const checkCompletions: { command: string; seq: number; exitCode?: number; ok: boolean; termination?: CommandTermination }[] = [];
-  for (const e of events) {
-    if (e.type !== 'check.completed' || e.status !== 'pass') continue;
-    checkCompletions.push({
-      command: `${e.check} check (${e.recipeId})`,
-      seq: e.seq,
-      ok: true,
-      ...(e.exitCode !== null ? { exitCode: e.exitCode } : {}),
-      ...(e.termination !== undefined ? { termination: e.termination } : {}),
-    });
-  }
-  const passingEvidence = [...commandCompletions, ...checkCompletions].sort((a, b) => a.seq - b.seq);
+  // Typed checks (Session 12) are evidence of exactly the same KIND as a passing command —
+  // `pass` derives from the identical exited-0 rule. Since S14.5 the whole correlation lives
+  // in collectPassingEvidence/firstPassingEvidenceAfter, shared verbatim with /diff.
+  const passingEvidence = collectPassingEvidence(events);
 
   const filesChanged: ReportFile[] = [...lastMutation.values()].map((m) => {
-    // A check must have genuinely EXITED with 0. A killed command has no exit code by contract;
-    // for V0.3+ logs the termination evidence enforces this even against a stray exitCode.
-    const check = passingEvidence.find(
-      (cc) => cc.seq > m.seq && cc.exitCode === 0 && (cc.termination === undefined || cc.termination === 'exited'),
-    );
+    const check = firstPassingEvidenceAfter(passingEvidence, m.seq);
     const file: ReportFile = {
       path: m.path,
       kind: m.kind,

@@ -262,12 +262,3 @@ function archivePriorBytes(file: string, snapshots: SnapshotStore): string | nul
 function composeWrapper(planId: string, status: PlanStatus, graph: PlanGraph, clock: Clock): string {
   return JSON.stringify({ version: 1, planId, status, updated: clock.iso(), plan: graph }, null, 2) + '\n';
 }
-
-/** Convenience for tests and callers needing the raw-bytes sha of the current file. */
-export function canonicalFileSha(layout: ProjectLayout, planId: string): string | null {
-  try {
-    return sha256(fs.readFileSync(layout.canonicalPlanFile(planId)));
-  } catch {
-    return null;
-  }
-}

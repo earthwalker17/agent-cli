@@ -32,7 +32,7 @@ function toPosix(p: string): string {
 /**
  * A bounded, gitignore-aware map of the workspace: a sorted list of relative file paths. This
  * flat form remains the fallback everywhere the ranked map (Session 10, `buildRankedMap` in
- * cli/assemble.ts) does not apply: pre-trust `agent map`, non-repo workspaces, executor
+ * retrieval/ranked-map.ts) does not apply: pre-trust `agent map`, non-repo workspaces, executor
  * worktrees, and any index failure. The returned text is what feeds the model, and its sha256
  * is recorded so the report can prove exactly what the model saw. Only the root .gitignore is
  * honored by this walker (git-backed listing honors nested ones natively).

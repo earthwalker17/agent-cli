@@ -4,17 +4,6 @@
  * states explicit; do not convert failure into success through prose).
  */
 
-/** A tool's input failed schema validation. Returned to the model as an error result. */
-export class ToolInputError extends Error {
-  override readonly name = 'ToolInputError';
-  constructor(
-    message: string,
-    readonly toolName: string,
-  ) {
-    super(message);
-  }
-}
-
 /** A path escaped the workspace boundary or hit a protected/invalid target. */
 export class PathError extends Error {
   override readonly name = 'PathError';
