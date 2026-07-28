@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is the load-bearing job: the Low-integrity + Job Object sandbox suites
+        # and the Windows path-rule tests execute ONLY there. ubuntu-latest proves the
+        # cross-platform logic; several suites legitimately skip on it (see the summary step).
+        os: [windows-latest, ubuntu-latest]
+        node: ['22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` runs the `prepare` script, which builds dist/. The build must exist BEFORE the
+      # tests: test/cli.smoke.test.ts spawns the real built CLI and skips itself when dist/ is
+      # absent — so a CI that tested without building would report a green run that never
+      # exercised the binary at all.
+      - name: Install (runs prepare → build)
+        run: npm ci
+
+      - name: Verify the build produced the CLI entry point
+        shell: bash
+        run: test -f dist/cli/index.js || (echo "dist/cli/index.js missing — the smoke suite would silently skip" && exit 1)
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        # AGENT_LIVE_TEST is deliberately never set: the one opt-in test makes a real, billable
+        # Anthropic API call. CI stays hermetic — no network, no key.
+        run: npm test
