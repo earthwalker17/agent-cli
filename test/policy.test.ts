@@ -54,6 +54,26 @@ describe('decide: reads', () => {
     const d = decide(reader, { path: '.env' }, ctx, new Grants());
     expect(d).toMatchObject({ classification: 'sensitive', decision: 'ask', rule: 'path.secret-name', redactOutput: true });
   });
+  it('S14.5 FIX: a symlink ALIAS of a secret file still classifies as secret (resolved path, not the raw name)', () => {
+    // The check ran on the model-supplied string only, so an alias whose basename looks
+    // innocent — a symlink, or a Windows 8.3 short name like ENV~1 — reached .env bytes with no
+    // approval and no redaction, straight into the model and the persisted log.
+    fs.writeFileSync(path.join(tmp, '.env'), 'API_KEY=super-secret\n');
+    let linked = false;
+    try {
+      fs.symlinkSync(path.join(tmp, '.env'), path.join(tmp, 'config.json'), 'file');
+      linked = true;
+    } catch {
+      /* symlink creation needs privileges on Windows; the assertion below is then skipped */
+    }
+    if (linked) {
+      const d = decide(reader, { path: 'config.json' }, ctx, new Grants());
+      expect(d).toMatchObject({ classification: 'sensitive', decision: 'ask', rule: 'path.secret-name', redactOutput: true });
+    }
+    // The raw-name path keeps working regardless (both spellings are checked).
+    expect(decide(reader, { path: '.env' }, ctx, new Grants()).rule).toBe('path.secret-name');
+  });
+
   it('a session grant downgrades a sensitive read to allow', () => {
     const g = new Grants();
     g.add('read_file', 'sensitive');

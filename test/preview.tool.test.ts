@@ -23,6 +23,7 @@ import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
 import { fixedClock } from '../src/shared/clock.js';
 import { seededIdGen } from '../src/shared/ids.js';
 import { detectProject } from '../src/checks/detect.js';
+import { sha256 } from '../src/shared/hash.js';
 import type { DetectedProject } from '../src/checks/types.js';
 import type { PreviewStopReason, SupervisedExit, SupervisedHandle } from '../src/preview/types.js';
 import type { ApprovalOutcome, ApprovalRequest, Approver, PreviewEvidence, SessionEvent, ToolContext } from '../src/types.js';
@@ -117,6 +118,8 @@ describe('resolvePreview', () => {
     kinds: ['node'],
     packageManager: 'npm',
     scripts,
+    // Mirror detectProject: consent binds the sha of the FULL script value.
+    scriptShas: Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, sha256(v)])),
     nodeTools: [],
     pythonTools: [],
     hasNodeModules: true,

@@ -161,7 +161,16 @@ export interface ReportJson {
   /** User-commanded checkpoint restores (each an undoable batch; V0.5 logs). */
   gitRestores: { ref: string; oid: string; restored: number; refused: { path: string; reason: string }[] }[];
   /** The latest user /accept (Session 11.5, additive) — the explicit completion boundary. */
-  accepted?: { complete: boolean; summary: string; unfinished?: string[] };
+  accepted?: {
+    complete: boolean;
+    summary: string;
+    unfinished?: string[];
+    /** The delivery ref this acceptance CONSUMED (S14.5, additive) — the identity that actually
+     *  survives session-end pruning. Consumers must prefer it over the newest creation event,
+     *  which a phantom (event appended, update-ref failed) can hold. */
+    deliveryRef?: string;
+    deliveryOid?: string;
+  };
   /** Typed check runs (Session 12, additive), in order. `neverCompleted` = spawned, no verdict. */
   checks?: ReportCheck[];
   /** Bounded repair attempts and escalations (Session 12, additive); outcomes are DERIVED. */
@@ -323,7 +332,13 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   const { events } = input;
 
   const started = events.find((e) => e.type === 'session.started');
-  const ended = events.find((e) => e.type === 'session.ended');
+  // The NEWEST lifecycle event decides how this log ended (S14.5 review finding): `find` took
+  // the FIRST session.ended, so a session that quit cleanly, was resumed, and then CRASHED
+  // reported "ended: user-quit" — and the preview section chose its benign wording — while the
+  // current life died abnormally. Same predicate memory/load.ts uses for the crash note.
+  const lifecycle = events.filter((e) => e.type === 'session.started' || e.type === 'session.resumed' || e.type === 'session.ended');
+  const lastLifecycle = lifecycle[lifecycle.length - 1];
+  const ended = lastLifecycle?.type === 'session.ended' ? lastLifecycle : undefined;
   const sandboxEvent = events.find((e) => e.type === 'sandbox.status');
   const gitEvent = events.find((e) => e.type === 'git.context');
   const commandByCall = new Map<string, string>();
@@ -606,7 +621,13 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   let accepted: ReportJson['accepted'];
   for (const e of events) {
     if (e.type === 'session.accepted') {
-      accepted = { complete: e.complete, summary: e.summary, ...(e.unfinished !== undefined ? { unfinished: e.unfinished } : {}) };
+      accepted = {
+        complete: e.complete,
+        summary: e.summary,
+        ...(e.unfinished !== undefined ? { unfinished: e.unfinished } : {}),
+        ...(e.deliveryRef !== undefined ? { deliveryRef: e.deliveryRef } : {}),
+        ...(e.deliveryOid !== undefined ? { deliveryOid: e.deliveryOid } : {}),
+      };
     }
   }
 

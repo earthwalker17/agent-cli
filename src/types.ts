@@ -890,6 +890,15 @@ export type EventBody =
       /** Line diffstat for this mutation (V0.5, additive; absent for binary/huge/no-op changes). */
       linesAdded?: number;
       linesRemoved?: number;
+      /**
+       * S14.5 (additive): the write happened but reading the resulting bytes back FAILED, so
+       * `afterSha256` is null for an unknown reason rather than a deletion. The mutation is
+       * recorded regardless — undo restores from the recorded pre-image — and surfaces carry
+       * the honest wording instead of silently reading as "deleted" or, worse, as never having
+       * run (the pre-fix behavior lost the event entirely when the readback threw).
+       */
+      postStateUnverified?: true;
+      postStateError?: string;
     }
   | {
       type: 'tool.completed';

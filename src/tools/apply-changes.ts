@@ -89,10 +89,16 @@ function eolOnlyMismatch(a: Buffer | null, b: Buffer | null): boolean {
   return norm(a) === norm(b);
 }
 
+// The refusal must not prescribe an exit the scheduler refuses. A captured-but-unapplied task
+// folds to 'integrating', and R5 then refuses re-spawning it — so "re-run the executor task"
+// was a dead end (S14.5 review). The EOL pin also only engages for a UNIFORMLY-LF parent, so a
+// mixed tree reaches here with no pin in force: name the exits that actually work.
 const EOL_DRIFT_REASON =
   'line-ending normalization mismatch, not a content edit: the workspace file and the task base differ only by CRLF/LF ' +
-  '(git checkout conversion — core.autocrlf materialized the capture in a different EOL form than the parent holds). ' +
-  'Re-run the executor task: worktree checkout and capture are now EOL-pinned to the parent form';
+  '(git checkout conversion — core.autocrlf materialized the capture in a different EOL form than this workspace holds). ' +
+  'The executor worktree is EOL-pinned only when the parent tree is uniformly LF, which it is not here. ' +
+  'Exits: normalize the workspace line endings (or set core.autocrlf=false and re-checkout) and apply again, ' +
+  'or make this change directly as the parent — do NOT re-run the task, which the scheduler refuses while it holds captured changes';
 
 /** Is this file appliable against the CURRENT workspace state? (Side-effect-free: mutates() calls
  *  this at policy time; re-checked at execute time. Pre-image archiving is the snapshot's job.)

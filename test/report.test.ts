@@ -76,6 +76,26 @@ describe('buildReport determinism & honesty', () => {
     expect(md).not.toContain('ended: completed');
   });
 
+  it('S14.5 FIX: a resumed-then-crashed session does NOT report the earlier clean end', () => {
+    // `find` took the FIRST session.ended, so a session that quit cleanly, was resumed, and
+    // then died reported "ended: user-quit" — the one artifact whose job is exposing abnormal
+    // termination claimed a clean one. The NEWEST lifecycle event decides.
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'session.ended', reason: 'user-quit' }),
+      evt({ seq: 3, type: 'session.resumed', priorSeq: 2, orphanedCallIds: [], unknownPostStateCallIds: [] }),
+      evt({ seq: 4, type: 'user.message', text: 'more work' }),
+    ];
+    const r = buildReport({ events });
+    expect(r.json.session.endedReason).toBeNull();
+    expect(r.md).toContain('IN PROGRESS or CRASHED/UNKNOWN');
+    expect(r.md).not.toContain('ended: user-quit');
+
+    // …while a resume that ENDS cleanly still reports the newest end.
+    const clean: SessionEvent[] = [...events, evt({ seq: 5, type: 'session.ended', reason: 'completed' })];
+    expect(buildReport({ events: clean }).json.session.endedReason).toBe('completed');
+  });
+
   it('excludes denied commands from "Commands run" (they never executed)', () => {
     const events: SessionEvent[] = [
       started,

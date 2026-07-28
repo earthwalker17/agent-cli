@@ -19,7 +19,7 @@ import { renderUserPlanView } from '../plan/views.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
-import { createCheckpoint, listCheckpoints, pruneCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
+import { createCheckpoint, deleteCheckpointRefs, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { AnthropicProvider } from '../provider/anthropic.js';
 import { sanitizeLine } from '../shared/text.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
@@ -54,7 +54,8 @@ Usage:
                                  --all = every workspace change; requires workspace trust)
   agent checkpoint [label]       Capture the workspace to a hidden git ref (recovery point)
   agent checkpoint list|prune    List checkpoints, or delete this session's refs so git gc
-                                 can collect them (prune takes --all / --yes)
+                                 can collect them (prune takes --all / --yes;
+                                 delivery anchors are KEPT unless --include-delivery)
   agent checkpoint restore <n>   Return the workspace to checkpoint <n> (snapshot-first,
                                  one undoable batch; deletes files the checkpoint predates)
   agent report [<id>] [--json]   Print the evidence report for a session (default: latest)
@@ -116,6 +117,7 @@ function parse(argv: string[]): Args {
       'max-turns': { type: 'string' },
       'dangerously-allow-all': { type: 'boolean' },
       'trust-this-workspace': { type: 'boolean' },
+      'include-delivery': { type: 'boolean' },
       version: { type: 'boolean' },
       revoke: { type: 'boolean' },
       list: { type: 'boolean' },
@@ -410,10 +412,24 @@ async function cmdCheckpoint(values: CliValues, sub?: string, subArg?: string): 
       process.stderr.write('no session to prune checkpoints for (use --all for every session)\n');
       return 1;
     }
-    const refs = await listCheckpoints(cctx, target);
+    const all = await listCheckpoints(cctx, target);
+    // Delivery anchors are the DURABLE audit record of an accepted session — the one harness
+    // ref kind session-end cleanup deliberately preserves. This command is recommended as the
+    // cleanup backstop, so pruning them by default silently destroyed the anchor every durable
+    // surface (report, journal, owed-ref fold) still points at (S14.5 review finding).
+    const isDelivery = (subject: string): boolean => subject.includes(': delivery (accepted)');
+    const refs = values['include-delivery'] === true ? all : all.filter((c) => !isDelivery(c.subject));
+    const keptDelivery = all.length - refs.length;
     if (refs.length === 0) {
-      process.stdout.write('no checkpoint refs to prune\n');
+      process.stdout.write(
+        keptDelivery > 0
+          ? `no checkpoint refs to prune (${keptDelivery} delivery anchor(s) kept — pass --include-delivery to remove them too)\n`
+          : 'no checkpoint refs to prune\n',
+      );
       return 0;
+    }
+    if (keptDelivery > 0) {
+      process.stderr.write(`keeping ${keptDelivery} delivery anchor(s) (the accepted state); pass --include-delivery to remove them too\n`);
     }
     if (values.yes !== true) {
       const isTty = process.stdin.isTTY === true && process.stderr.isTTY === true;
@@ -427,8 +443,12 @@ async function cmdCheckpoint(values: CliValues, sub?: string, subArg?: string): 
         return 2;
       }
     }
-    const r = await pruneCheckpoints(cctx, target);
-    process.stdout.write(`pruned ${r.deleted.length} checkpoint ref(s)${r.failed.length > 0 ? `; ${r.failed.length} failed` : ''}\n`);
+    const r = await deleteCheckpointRefs(cctx.gitPath, cctx.repoRoot, refs.map((c) => c.ref));
+    process.stdout.write(
+      `pruned ${r.deleted.length} checkpoint ref(s)${r.failed.length > 0 ? `; ${r.failed.length} failed` : ''}` +
+        (keptDelivery > 0 ? ` (${keptDelivery} delivery anchor(s) kept)` : '') +
+        '\n',
+    );
     return r.failed.length > 0 ? 1 : 0;
   }
 

@@ -89,6 +89,14 @@ function classifyCheck(e: Extract<FailureEvidence, { source: 'check' }>): Failur
     cls = 'timeout-resource';
     confidence = 'high';
     fired.push('termination:timeout');
+  } else if (e.termination === 'aborted') {
+    // A user interruption produced NO verdict, so it is not a defect to repair. This test must
+    // sit HERE, beside timeout: below the per-kind branches it was unreachable (every CheckKind
+    // matches one of them), and a Ctrl+C'd typecheck classified as a repairable compile-type
+    // failure — a cancellation becoming a diagnosis, spending the repair budget on non-evidence.
+    cls = 'unknown';
+    confidence = 'high';
+    fired.push('termination:aborted');
   } else if (e.check === 'browser') {
     // Browser evidence routes ONLY by its own disjoint signal namespace (Session 13) and never
     // falls through to the shell-output branches: a page error whose text happens to say
@@ -147,11 +155,6 @@ function classifyCheck(e: Extract<FailureEvidence, { source: 'check' }>): Failur
     confidence = 'high';
     fired.push(`kind:${e.check}`);
     if (s.has('lint-violation')) fired.push('lint-violation');
-  } else if (e.termination === 'aborted') {
-    // A user interruption is not a failure to repair; it produced no verdict at all.
-    cls = 'unknown';
-    confidence = 'high';
-    fired.push('termination:aborted');
   }
 
   const detail =

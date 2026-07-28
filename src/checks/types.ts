@@ -38,8 +38,14 @@ export interface DetectedProject {
   /** Ecosystems with usable evidence; empty ⇒ every check kind is unsupported. */
   kinds: ProjectKind[];
   packageManager: PackageManager | null;
-  /** package.json scripts: name → command text (both bounded). */
+  /** package.json scripts: name → command text (both bounded) — DISPLAY/precondition use only. */
   scripts: Record<string, string>;
+  /**
+   * name → sha256 of the UNTRUNCATED script value. Consent identity must bind the whole body:
+   * `scripts` is capped at 200 chars, so binding its sha let an agent append anything past
+   * character 200 and re-run under the earlier `[s]` with no prompt (S14.5 review finding).
+   */
+  scriptShas: Record<string, string>;
   /** Interesting dependency names found in package.json deps/devDeps. */
   nodeTools: string[];
   /** Interesting tool names found in pyproject.toml / setup.cfg text. */
@@ -82,8 +88,12 @@ export interface CheckRecipe {
   /** A precondition that is NOT satisfied right now, stated for the human; null when ready. */
   unmetPrecondition(p: DetectedProject): string | null;
   argv(p: DetectedProject, scope: readonly string[]): string[] | null;
-  /** The workspace-authored body this recipe invokes, when it invokes one — consent binds it. */
-  body?(p: DetectedProject): string | null;
+  /**
+   * The workspace-authored script this recipe invokes, when it invokes one: the NAME, so the
+   * resolver can bind consent to the UNTRUNCATED body sha (`scriptShas`) while `scripts` keeps
+   * the bounded text for display.
+   */
+  bodyScript?(p: DetectedProject): string | null;
   timeoutMs: number;
   effects: CheckEffects;
 }

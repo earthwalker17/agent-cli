@@ -25,6 +25,29 @@ const browserCheck = (signals: string[], status: 'fail' | 'error' = 'fail'): Fai
   summary: 'flow failed',
 });
 
+describe('S14.5 FIX: a user-ABORTED check is not a repairable defect', () => {
+  it('classifies aborted as unknown for EVERY check kind (the branch was unreachable below the per-kind rules)', () => {
+    // `termination: 'aborted'` sat after branches matching every CheckKind, so a Ctrl+C'd
+    // typecheck classified as 'compile-type' — auto-eligible — and a cancellation that produced
+    // NO verdict became a diagnosis that spent the repair budget.
+    for (const kind of ['typecheck', 'build', 'test', 'test-targeted', 'lint', 'format', 'static-analysis'] as const) {
+      const c = classifyFailure({
+        source: 'check',
+        seq: 1,
+        check: kind,
+        recipeId: `node.${kind}`,
+        status: 'error',
+        exitCode: null,
+        termination: 'aborted',
+        signals: [],
+        summary: `${kind} check → error`,
+      });
+      expect(c.class, kind).toBe('unknown');
+      expect(c.signals, kind).toContain('termination:aborted');
+    }
+  });
+});
+
 describe('classifyCheck — the browser branch', () => {
   it('routes assertion/timeout/navigation/page-error failures to browser-verification (high)', () => {
     for (const sig of ['browser-assertion-failed', 'browser-timeout', 'browser-navigation', 'page-error']) {

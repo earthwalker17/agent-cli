@@ -229,6 +229,22 @@ export async function sweepOrphanedPreviews(projectDir: string, opts: PreviewSwe
       },
       { isAlive, nowMs },
     );
+    // Stamp the ended marker on every log this sweep actually DROPPED — and only after the
+    // registry write succeeded, so a lock-unavailable sweep still touches nothing. The marker's
+    // only other writer is the owner's exit listener, which by definition never runs for a
+    // crash orphan; without this, the NEXT session saw a log with no record and no marker and
+    // reported "a start may have been lost" for a preview already recorded and reaped — every
+    // session for 48h (S14.5 review finding).
+    for (const e of entries) {
+      if (!dispose.has(e.previewId)) continue;
+      try {
+        if (fs.existsSync(e.logFile) && !readTail(e.logFile, 512).includes(LOG_ENDED_MARKER)) {
+          fs.appendFileSync(e.logFile, `\n${LOG_ENDED_MARKER} (swept by a later session: the owning process was gone)\n`);
+        }
+      } catch {
+        /* marker stamping is reporting hygiene; a failure only restores the old noisy behavior */
+      }
+    }
   } catch {
     /* postponed: dead entries are harmless and drop on the next sweep */
   }

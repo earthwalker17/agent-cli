@@ -50,7 +50,11 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   if (req.detail && req.detail !== req.summary) {
     for (const l of req.detail.split('\n').slice(0, 12)) lines.push(`    ${sanitizeLine(l)}`);
   }
-  lines.push(`  reason: ${req.reason}`);
+  // The reason embeds untrusted model text for command asks (analyzeCommand quotes the
+  // executable and offending arguments), so it needs the same escaping as every other line —
+  // a bidi override here would reverse the very line stating that approved commands run
+  // unsandboxed and un-undoable (S14.5 review finding).
+  lines.push(`  reason: ${sanitizeLine(req.reason)}`);
   if (req.noUndoWarning) lines.push('  ⚠ this action is NOT undoable');
   // [s] is shown only when a session grant would actually be STORED: the class must be
   // grantable AND the request must not be a shell command — grant enforcement refuses

@@ -110,11 +110,9 @@ function nodeScriptRecipe(
       return runScript(p, name, opts.scoped === true ? forward(p, scope) : []);
     },
     // `<pm> run <name>` is a stable command whose BEHAVIOR lives in package.json. Consent and the
-    // execute-time re-resolve both bind this body, so rewriting the script re-asks the human.
-    body: (p) => {
-      const name = firstScript(p, names);
-      return name === null ? null : (p.scripts[name] ?? null);
-    },
+    // execute-time re-resolve both bind that body's sha, so rewriting the script re-asks the
+    // human — binding the NAME here lets the resolver use the untruncated sha.
+    bodyScript: (p) => firstScript(p, names),
     timeoutMs,
     effects: SCRIPT_EFFECTS,
   };
@@ -289,12 +287,15 @@ export function resolveChecks(
       unsupported.push({ kind, why: 'no-recipe', reason: `recipe ${ready.id} could not produce a command for this project` });
       continue;
     }
-    const body = ready.body?.(project) ?? null;
+    // Consent binds the UNTRUNCATED body: project.scripts is display-capped at 200 chars, so
+    // hashing it would let an append past that cap ride the earlier approval (S14.5 finding).
+    const bodyName = ready.bodyScript?.(project) ?? null;
+    const bodySha = bodyName !== null ? (project.scriptShas[bodyName] ?? null) : null;
     resolved.push({
       kind,
       recipeId: ready.id,
       command: toCommand(argv),
-      ...(body !== null ? { bodySha: sha256(body) } : {}),
+      ...(bodySha !== null ? { bodySha } : {}),
       timeoutMs: ready.timeoutMs,
       effects: ready.effects,
       scopePaths: kindTakesScope(kind) ? paths : [],

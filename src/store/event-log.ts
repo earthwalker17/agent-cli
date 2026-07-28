@@ -191,11 +191,44 @@ export class EventLog {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
     // Lock exists: refuse if a live foreign process holds it; steal if stale.
-    let holder: LockInfo | undefined;
-    try {
-      holder = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as LockInfo;
-    } catch {
-      holder = undefined;
+    // The exclusive CREATE is visible to other processes before the JSON bytes land, so an
+    // unparseable read may mean "a sibling is publishing its lock right now", not "stale
+    // garbage". Treating that as stale let two starts own one log — interleaved appends,
+    // duplicate seqs, each instance blind to the other's events (S14.5 review finding). Re-read
+    // once after a brief pause, and refuse a lock whose bytes are still unreadable but FRESH.
+    const readHolder = (): LockInfo | undefined => {
+      try {
+        return JSON.parse(fs.readFileSync(lockFile, 'utf8')) as LockInfo;
+      } catch {
+        return undefined;
+      }
+    };
+    let holder = readHolder();
+    if (holder === undefined) {
+      const waitUntil = Date.now() + 150;
+      while (Date.now() < waitUntil && holder === undefined) {
+        try {
+          // Synchronous pause: acquireLock runs before any async work exists for this log.
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+        } catch {
+          /* SharedArrayBuffer unavailable: fall through and re-read immediately */
+        }
+        holder = readHolder();
+      }
+      if (holder === undefined) {
+        let ageMs = Number.POSITIVE_INFINITY;
+        try {
+          ageMs = Date.now() - fs.statSync(lockFile).mtimeMs;
+        } catch {
+          /* the lock vanished — a stale holder released it; fall through to the reclaim */
+        }
+        if (ageMs < 5_000) {
+          throw new SessionLockedError(
+            'session lock is being written by another process right now (unreadable but fresh); retry in a moment',
+            0,
+          );
+        }
+      }
     }
     if (holder && holder.pid !== process.pid && isAlive(holder.pid)) {
       throw new SessionLockedError(

@@ -22,3 +22,20 @@ const UNSAFE = new RegExp(
 export function sanitizeLine(s: string): string {
   return s.replace(/[\t\n\r]/g, ' ').replace(UNSAFE, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
 }
+
+/**
+ * Break any line that mimics a harness FENCE (`--- <label> begin|end ---`). Such a line inside
+ * untrusted text would fake a provenance boundary the model trusts: closing a region early and
+ * occupying space labeled harness-authored. A visible middle dot breaks the mimicry without
+ * hiding content.
+ *
+ * Session 10 introduced this for child reports and forwarded context; S14.5 generalized the
+ * pattern to EVERY fence and extended it to the memory documents (AGENT.md is workspace bytes a
+ * cloned repo controls; JOURNAL.md/CODEBASE.md carry model-authored text from earlier sessions
+ * — both are injected into the system prompt itself).
+ */
+export function neutralizeHarnessDelimiters(text: string): string {
+  // Any line that OPENS like a fence and carries begin/end — the trailing `---` is optional,
+  // because the mimicry only needs the opening form to be convincing in a prompt.
+  return text.replace(/^(\s*)(---\s+\S.*\b(?:begin|end)\b.*)$/gm, '$1·$2');
+}

@@ -937,12 +937,23 @@ async function runExecutorTask(
   const eolPin = await probeEolPin(ex.gitPath, ex.repoRoot, wsRelForPin);
   const add = await addWorktree(ex.gitPath, ex.repoRoot, dir, baseOid, eolPin.pinArgs);
   if (!add.ok) {
-    try {
-      await unregisterWorktree(ex.registryFile, dir);
-    } catch {
-      /* registry cleanup is best-effort; the sweep is path-guarded anyway */
+    // Clean up BEFORE unregistering (S14.5 review finding): `worktree add` creates the directory
+    // first, and a timeout kill leaves a partial checkout plus a `.git/worktrees/<name>` admin
+    // entry. Dropping the registry entry without removing them made both unreachable forever —
+    // no sweep looks outside the registry — so `git worktree list` kept a phantom for good.
+    // A removal that FAILS keeps its entry, which is exactly what the startup sweep exists for.
+    const rem = await removeWorktree(ex.gitPath, ex.repoRoot, dir);
+    if (rem.ok) {
+      try {
+        await unregisterWorktree(ex.registryFile, dir);
+      } catch {
+        /* stale entry is harmless: the sweep skips missing dirs */
+      }
     }
-    return failResult(`executor setup failed: git worktree add: ${add.error ?? 'unknown error'}`);
+    return failResult(
+      `executor setup failed: git worktree add: ${add.error ?? 'unknown error'}` +
+        (rem.ok ? '' : ` (cleanup also failed: ${rem.detail ?? 'unknown'}; the worktree stays registered for the startup sweep)`),
+    );
   }
   // childSessionId is '' here by necessity: the worktree exists BEFORE its child session; the
   // shared callId joins this event to the task.started that follows.

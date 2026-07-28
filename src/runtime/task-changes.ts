@@ -54,17 +54,36 @@ export async function captureTaskChanges(deps: CaptureDeps): Promise<CaptureResu
   // repo; a subdir workspace must never capture — or later apply — outside itself).
   const wsPrefix = deps.wsRel.length > 0 ? `${deps.wsRel}/` : '';
   const candidates: string[] = [];
+  const renamePairs = new Map<string, string>(); // origPath → path (both halves must survive the cap)
   for (const e of parsePorcelainV2(status.stdout).entries) {
     if (e.kind === 'ignored') continue;
     if (wsPrefix.length > 0 && !caseFold(e.path + '/').startsWith(caseFold(wsPrefix))) continue;
     candidates.push(e.path);
     if (e.kind === 'renamed' && e.origPath !== undefined) {
-      if (wsPrefix.length === 0 || caseFold(e.origPath + '/').startsWith(caseFold(wsPrefix))) candidates.push(e.origPath);
+      if (wsPrefix.length === 0 || caseFold(e.origPath + '/').startsWith(caseFold(wsPrefix))) {
+        candidates.push(e.origPath);
+        renamePairs.set(e.origPath, e.path);
+      }
     }
   }
   const unique = [...new Set(candidates)].sort();
-  const kept = unique.slice(0, MAX_TASK_CHANGE_FILES);
+  let kept = unique.slice(0, MAX_TASK_CHANGE_FILES);
   const omittedCount = unique.length - kept.length;
+  if (omittedCount > 0 && renamePairs.size > 0) {
+    // A rename is TWO paths. Cutting an alphabetically sorted list could keep the delete half
+    // (`src/aaa.ts`) while dropping the create half (`src/zzz.ts`), and the apply would then
+    // remove the old file and never write the new one — content gone from the tree, recoverable
+    // only via /undo, under an "applied N of N" line (S14.5 review finding). Drop the orphaned
+    // half instead: an un-captured pair is a visible omission, a half-applied move is data loss.
+    const keptSet = new Set(kept);
+    const orphaned = new Set<string>();
+    for (const [from, to] of renamePairs) {
+      if (keptSet.has(from) !== keptSet.has(to)) {
+        orphaned.add(keptSet.has(from) ? from : to);
+      }
+    }
+    if (orphaned.size > 0) kept = kept.filter((p) => !orphaned.has(p));
+  }
   if (kept.length === 0) return { files: [], omittedCount };
 
   const tag = `${process.pid}-${randomBytes(4).toString('hex')}`;

@@ -1,3 +1,4 @@
+import { neutralizeHarnessDelimiters } from '../shared/text.js';
 import type { WorkspaceMap } from './map.js';
 import type { EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
@@ -226,7 +227,11 @@ function memorySections(memory?: SystemPromptMemory): string[] {
       '',
       'Project constitution (AGENT.md at the workspace root — written by the USER; durable project instructions that apply to every session):',
       '--- AGENT.md begin ---',
-      memory.agentText.trimEnd(),
+      // Every injected memory doc is UNTRUSTED text inside a harness fence: AGENT.md is
+      // workspace bytes a cloned repo controls, and JOURNAL/CODEBASE carry model-authored text
+      // from earlier sessions. A line mimicking a fence would close the region early and let
+      // the rest occupy space the model is told is harness-authored (S14.5 review finding).
+      neutralizeHarnessDelimiters(memory.agentText.trimEnd()),
       ...(memory.agentTruncated === true ? [TRUNCATION_MARKER] : []),
       '--- AGENT.md end ---',
     );
@@ -241,7 +246,7 @@ function memorySections(memory?: SystemPromptMemory): string[] {
     if (hasJournal) {
       lines.push(
         '--- JOURNAL.md (rolling session memory, newest first) begin ---',
-        memory.journalText!.trimEnd(),
+        neutralizeHarnessDelimiters(memory.journalText!.trimEnd()),
         ...(memory.journalTruncated === true ? [TRUNCATION_MARKER] : []),
         '--- JOURNAL.md end ---',
       );
@@ -249,7 +254,7 @@ function memorySections(memory?: SystemPromptMemory): string[] {
     if (hasCodebase) {
       lines.push(
         `--- CODEBASE.md (architecture summary${memory.codebaseStale === true ? '; MAY BE STALE: the workspace has changed since it was generated' : ''}) begin ---`,
-        memory.codebaseText!.trimEnd(),
+        neutralizeHarnessDelimiters(memory.codebaseText!.trimEnd()),
         '--- CODEBASE.md end ---',
       );
     }

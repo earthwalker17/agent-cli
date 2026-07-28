@@ -44,6 +44,13 @@ export interface ElisionOptions {
   keepLastSteps?: number;
   /** Trailing assistant steps whose IMAGE parts stay pixels. Default 2 (see module doc). */
   imageKeepLastSteps?: number;
+  /**
+   * callIds this session has ALREADY elided (S14.5). They stay elided regardless of the budget,
+   * which is what actually makes the boundary monotone: the image pass can free enough chars
+   * that the char walk would otherwise restore older outputs verbatim — invalidating the cache
+   * suffix and contradicting the `context.compacted` record. The runtime passes its live set.
+   */
+  alreadyElided?: readonly string[];
 }
 
 export interface ElisionOutcome {
@@ -181,12 +188,36 @@ export function elideHistory(messages: readonly ChatMessage[], opts: ElisionOpti
   // ── Pass 2: the V0.5 char-budget walk, over the image-elided view.
   const protectFrom = protectionBoundary(messages, keep);
   const elidedCallIds: string[] = [];
+  // MONOTONICITY (S14.5 review finding): an output this session already elided STAYS elided.
+  // Pass 1 subtracts image weight unconditionally, so an aging screenshot could free enough
+  // budget that pass 2 stopped early and RESTORED previously-elided outputs verbatim — which
+  // invalidated the moving cache breakpoint (the whole suffix re-billed) and left
+  // `context.compacted` claiming the model could not see text it could. The module's own
+  // monotonicity promise is only true with this carry-over, since the trigger is not.
+  const sticky = new Set(opts.alreadyElided ?? []);
+  if (sticky.size > 0) {
+    for (let i = 0; i < protectFrom; i++) {
+      const m = out[i]!;
+      if (m.role !== 'user') continue;
+      for (let j = 0; j < m.content.length; j++) {
+        const b = m.content[j]!;
+        if (b.type !== 'tool_result' || !sticky.has(b.toolUseId)) continue;
+        if (typeof b.content === 'string' && b.content.startsWith('[elided to save context:')) continue; // already a marker
+        const replacement = marker(b.content);
+        if (replacement.length >= contentChars(b.content)) continue;
+        sentChars -= contentChars(b.content) - replacement.length;
+        m.content[j] = { type: 'tool_result', toolUseId: b.toolUseId, content: replacement, ...(b.isError ? { isError: true } : {}) };
+        elidedCallIds.push(b.toolUseId);
+      }
+    }
+  }
   outer: for (let i = 0; i < protectFrom; i++) {
     const m = out[i]!;
     if (m.role !== 'user') continue;
     for (let j = 0; j < m.content.length; j++) {
       const b = m.content[j]!;
       if (b.type !== 'tool_result') continue;
+      if (elidedCallIds.includes(b.toolUseId)) continue; // already handled by the sticky pass
       if (sentChars <= target) break outer;
       const replacement = marker(b.content);
       if (replacement.length >= contentChars(b.content)) continue; // eliding tiny outputs would grow the prompt

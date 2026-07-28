@@ -71,7 +71,7 @@ export function resolvePreview(p: DetectedProject, requestedScript?: string): Pr
   if (p.hasDependencies && !p.hasNodeModules) {
     return { candidates, resolved: null, reason: NEEDS_NODE_MODULES };
   }
-  const body = p.scripts[name]!;
+  const body = p.scripts[name]!; // display text (bounded)
   return {
     candidates,
     resolved: {
@@ -79,7 +79,10 @@ export function resolvePreview(p: DetectedProject, requestedScript?: string): Pr
       scriptName: name,
       command: toCommand([p.packageManager, 'run', name]),
       body,
-      bodySha: sha256(body),
+      // Consent binds the UNTRUNCATED body (S14.5): `scripts` is display-capped at 200 chars,
+      // so hashing it let an append past the cap ride the earlier `[s]` with no prompt — the
+      // exact authority this prompt promises rewriting the script would revoke.
+      bodySha: p.scriptShas[name] ?? sha256(body),
     },
   };
 }

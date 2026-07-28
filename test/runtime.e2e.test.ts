@@ -250,6 +250,37 @@ describe('runTurn stop reasons', () => {
     expect(result.finalText).toBe('');
   });
 
+  it('S14.5 FIX: tool_use blocks with a NON-tool_use stop reason are answered — the live history stays API-valid', async () => {
+    // A max_tokens cut mid-tool-call yields tool_use blocks with stopReason 'max_tokens'. The
+    // old loop broke without answering them, so the next user message produced an unanswered
+    // tool_use on the wire: a 400 on THAT turn and every later one (repairDanglingToolUses
+    // cannot help once a user message is last). The session was dead until quit+resume.
+    const session = makeSession(
+      [
+        { say: 'starting', calls: [{ name: 'read_file', input: { path: 'a.txt' } }], stopReason: 'max_tokens' },
+        { say: 'second turn ran fine' },
+      ],
+      autoDenyApprover,
+    );
+    fs.writeFileSync(path.join(ws, 'a.txt'), 'hello\n');
+    const first = await runTurn(session, 'read it');
+    expect(first.stopReason).toBe('max_tokens');
+
+    // The unanswered call is closed with evidence AND a tool_result, so the history is valid.
+    const events = readLog(session);
+    const completed = events.filter((e) => e.type === 'tool.completed');
+    expect(completed).toHaveLength(1);
+    expect((completed[0] as { outputPreview: string }).outputPreview).toContain("stop reason 'max_tokens'");
+    const last = session.messages[session.messages.length - 1]!;
+    expect(last.role).toBe('user');
+    expect(last.content.some((b) => b.type === 'tool_result')).toBe(true);
+
+    // The very next turn is the proof: it must not throw and must reach the model.
+    const second = await runTurn(session, 'carry on');
+    endSession(session, 'completed');
+    expect(second.finalText).toBe('second turn ran fine');
+  });
+
   it('denies an out-of-workspace write with a terminal tool.completed', async () => {
     const session = makeSession(
       [{ calls: [{ name: 'write_file', input: { path: '..\\evil.txt', content: 'x' } }] }, { say: 'done' }],

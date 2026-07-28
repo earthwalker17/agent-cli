@@ -60,12 +60,19 @@ export function sessionMutationState(events: readonly SessionEvent[]): {
 
 export function buildSessionDiff(events: readonly SessionEvent[], snapshots: SnapshotStore, workspaceRoot: string): SessionDiffFile[] {
   const { firstBefore, expectedNow } = sessionMutationState(events);
-  // CHECKED annotation (S14.5): the last-mutation seq per path (tracked here, NOT in
+  // CHECKED annotation (S14.5): the last CONTENT-CHANGE seq per path (tracked here, NOT in
   // sessionMutationState — /commit shares that fold and its contract stays byte-stable), fed
   // through the report's own correlation so the verdict has exactly one implementation.
+  // undo.applied and git.restore count: they write bytes back to disk while recording only
+  // their own event, so anchoring on file.mutated alone printed [CHECKED] over content the
+  // passing check never saw (a partial /undo after a green check — S14.5 review finding).
   const lastMutationSeq = new Map<string, number>();
   for (const e of events) {
     if (e.type === 'file.mutated') lastMutationSeq.set(e.path, e.seq);
+    else if (e.type === 'undo.applied' || e.type === 'git.restore') {
+      // undo.applied records {path, toSha256}; git.restore records plain paths.
+      for (const r of e.restored) lastMutationSeq.set(typeof r === 'string' ? r : r.path, e.seq);
+    }
   }
   const passingEvidence = collectPassingEvidence(events);
 

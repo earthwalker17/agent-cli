@@ -148,7 +148,17 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
       const changed: string[] = [];
       for (const e of events) {
         if (e.seq <= a.seq || e.seq >= windowEnd) continue;
-        if (e.type === 'check.completed' && e.status === 'pass' && a.regressionChecks.includes(e.check)) passed.add(e.check);
+        if (e.type === 'check.completed' && e.status === 'pass' && a.regressionChecks.includes(e.check)) {
+          // A SCOPE-BEARING kind proves the repair only when the run actually covered the
+          // failing scope: a green `test-targeted` over somebody else's paths said PROVEN while
+          // the originally failing test was never re-run — the same "unrelated green check"
+          // hole the tool's own refusal guards against at the call (S14.5 review finding, made
+          // easier to hit by scope defaulting from plan touches). An unscoped (full) run counts.
+          const runScope = e.scopePaths ?? [];
+          const proves =
+            a.scopePaths.length === 0 || runScope.length === 0 || a.scopePaths.every((want) => runScope.some((got) => withinScope(want.replace(/\\/g, '/'), [got])));
+          if (proves) passed.add(e.check);
+        }
         else if (e.type === 'file.mutated') changed.push(e.path);
         else if (e.type === 'task.applied') {
           // Only this target's own integrations count toward its scope. Integrating a DIFFERENT

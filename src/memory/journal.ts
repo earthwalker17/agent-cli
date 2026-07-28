@@ -152,9 +152,16 @@ function evidenceLines(report: ReportJson, endedReason: string, logPath: string)
       );
     }
   }
-  if ((report.harnessCheckpoints ?? []).some((c) => c.kind === 'delivery')) {
-    const d = report.harnessCheckpoints!.filter((c) => c.kind === 'delivery').at(-1)!;
-    lines.push(`- delivery checkpoint: ${d.oid.slice(0, 12)} (${d.ref})`);
+  // The durable anchor is the ref the ACCEPTANCE consumed — not the newest creation event, which
+  // a phantom (event appended, update-ref failed) can hold and which session-end pruning then
+  // discards. The journal is the cross-session handoff, so naming a pruned ref there is the
+  // worst place to be wrong (S14.5 review finding).
+  if (report.accepted?.deliveryRef !== undefined) {
+    lines.push(`- delivery checkpoint: ${(report.accepted.deliveryOid ?? '').slice(0, 12)} (${report.accepted.deliveryRef})`);
+  } else {
+    const live = (report.harnessCheckpoints ?? []).filter((c) => c.kind === 'delivery' && c.pruned !== true);
+    const d = live.at(-1);
+    if (d !== undefined) lines.push(`- delivery checkpoint recorded (not consumed by an acceptance; verify with \`agent checkpoint list\`): ${d.oid.slice(0, 12)} (${d.ref})`);
   }
   const u = report.session.usage;
   lines.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out (cache: ${u.cacheReadInputTokens ?? 0} read / ${u.cacheCreationInputTokens ?? 0} written)`);

@@ -27,6 +27,7 @@ export interface CliValues {
   json?: boolean;
   all?: boolean;
   continue?: boolean;
+  'include-delivery'?: boolean;
   help?: boolean;
   version?: boolean;
   m?: string;

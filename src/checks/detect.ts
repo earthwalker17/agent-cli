@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { sha256 } from '../shared/hash.js';
 import type { DetectedProject, ManifestStamp, PackageManager, ProjectKind } from './types.js';
 
 /**
@@ -132,6 +133,7 @@ export function detectProject(root: string): DetectedProject {
   const kinds: ProjectKind[] = [];
   const evidence: string[] = [];
   const scripts: Record<string, string> = {};
+  const scriptShas: Record<string, string> = {};
   const nodeTools: string[] = [];
   const pythonTools: string[] = [];
 
@@ -159,6 +161,7 @@ export function detectProject(root: string): DetectedProject {
         if (typeof value !== 'string') continue;
         if (name.length > MAX_SCRIPT_NAME || !SAFE_NAME_RE.test(name)) continue;
         scripts[name] = value.slice(0, MAX_SCRIPT_VALUE);
+        scriptShas[name] = sha256(value); // the FULL value — what consent binds
         n++;
       }
     }
@@ -208,6 +211,7 @@ export function detectProject(root: string): DetectedProject {
     kinds,
     packageManager: detectPackageManager(root, pkg),
     scripts,
+    scriptShas,
     nodeTools,
     pythonTools,
     hasNodeModules,

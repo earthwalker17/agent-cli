@@ -505,14 +505,12 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
 }
 
 /**
- * Session 10 hardening: a line inside child output or forwarded context that mimics a harness
- * delimiter would fake a provenance boundary the model trusts. A visible middle dot breaks the
- * mimicry without hiding any content. Applied to child reports (delegate tool) and to the
- * context block below.
+ * Session 10 hardening, generalized in S14.5 and moved to shared/text.ts (the memory injection
+ * needed the same guard and workspace/ must not import runtime/). Re-exported here because the
+ * delegate tool and several tests import it from this module.
  */
-export function neutralizeHarnessDelimiters(text: string): string {
-  return text.replace(/^(\s*)(--- (?:subagent report|context) (?:begin|end))/gm, '$1·$2');
-}
+import { neutralizeHarnessDelimiters } from '../shared/text.js';
+export { neutralizeHarnessDelimiters };
 
 function delegationPrompt(spec: SubagentSpec): string {
   return [

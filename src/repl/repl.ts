@@ -232,7 +232,11 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       const planNote = buildPlanNote(layout, session, lastInjectedPlanSha);
       if (planNote !== null) lastInjectedPlanSha = planNote.sha;
       const notes = [...(planNote !== null ? [planNote.note] : []), ...pendingNotes];
-      const userText = notes.length > 0 ? `[[harness note: ${notes.join(' | ')}]]\n\n${line}` : line;
+      // A note carries model-authored text (plan titles/intents flow through buildPlanNote), and
+      // the prompt tells the model everything AFTER the `]]` is the user's own words. A `]]`
+      // inside a note would close the wrapper early and let plan text occupy the one channel the
+      // constitution declares sovereign, so the sequence is broken here (S14.5 review finding).
+      const userText = notes.length > 0 ? `[[harness note: ${notes.join(' | ').replaceAll(']]', '] ]')}]]\n\n${line}` : line;
       pendingNotes.length = 0;
 
       const controller = new AbortController();

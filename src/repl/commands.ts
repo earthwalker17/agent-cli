@@ -734,11 +734,32 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       } else {
         lines.push('typed checks are unavailable in this session');
       }
-      const latest = new Map<string, Extract<(typeof ctx.session.log.events)[number], { type: 'check.completed' }>>();
-      for (const e of ctx.session.log.events) if (e.type === 'check.completed') latest.set(e.check, e);
+      // The newest EVIDENCE per kind, not the newest verdict: a check that spawned and never
+      // completed (crash mid-run) left the previous PASS standing here as "latest result",
+      // while /report over the same log said "STARTED but never completed; no verdict". Two
+      // surfaces, one log, opposite answers — and this one read stronger (S14.5 review).
+      type Completed = Extract<(typeof ctx.session.log.events)[number], { type: 'check.completed' }>;
+      const latest = new Map<string, { seq: number; done: Completed | null }>();
+      const openRuns = new Map<string, number>(); // `${callId}::${kind}` → seq
+      for (const e of ctx.session.log.events) {
+        if (e.type === 'check.started') openRuns.set(`${e.callId}::${e.check}`, e.seq);
+        else if (e.type === 'check.completed') {
+          openRuns.delete(`${e.callId}::${e.check}`);
+          latest.set(e.check, { seq: e.seq, done: e });
+        }
+      }
+      for (const [key, seq] of openRuns) {
+        const kind = key.slice(key.indexOf('::') + 2);
+        const prior = latest.get(kind);
+        if (prior === undefined || seq > prior.seq) latest.set(kind, { seq, done: null });
+      }
       lines.push('', latest.size > 0 ? 'latest result per kind:' : 'no checks have run in this session yet');
-      for (const [kind, e] of latest) {
-        lines.push(`  ${kind}: ${e.status} — ${sanitizeLine(e.summary)}`);
+      for (const [kind, entry] of latest) {
+        lines.push(
+          entry.done === null
+            ? `  ${kind}: NO VERDICT — started but never completed (the session ended while it ran); effects unknown, re-run it`
+            : `  ${kind}: ${entry.done.status} — ${sanitizeLine(entry.done.summary)}`,
+        );
       }
       lines.push(
         `browser checks: ${likelyBrowserAvailable() ? 'likely available (a system browser or Playwright cache is present; proven at the first flow)' : 'unavailable (no system Edge/Chrome or Playwright cache found)'}`,

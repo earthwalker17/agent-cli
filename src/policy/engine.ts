@@ -518,7 +518,11 @@ export function decide<I>(
         grants,
       );
     }
-    if (isSecretName(p, ctx.rules?.secretPatterns)) {
+    // Classify on BOTH the raw request and the RESOLVED path (S14.5 review finding): the
+    // resolver expands symlinks and Windows 8.3 short names, so `ENV~1` or a checked-in
+    // `config/local.json -> ../.env.production` reached `.env` bytes while the basename test
+    // saw an innocent name — no ask, no redaction, secrets verbatim into the log.
+    if (isSecretName(p, ctx.rules?.secretPatterns) || isSecretName(v.resolved, ctx.rules?.secretPatterns)) {
       return applyGrant(
         decision(
           'sensitive',

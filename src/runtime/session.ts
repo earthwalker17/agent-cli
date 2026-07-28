@@ -422,8 +422,11 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
     if (signal?.aborted) return abortedResult('model', steps);
     // Wire-side elision: pure and recomputed per request over the untouched session.messages.
     // The event records exactly which outputs the model can no longer see (only when the set grows).
-    const elision = elideHistory(session.messages, session.contextBudget);
     const prevElided = session.elidedCallIds ?? new Set<string>();
+    // Carry the already-elided set so the boundary is genuinely monotone (S14.5): without it an
+    // aging screenshot could free budget and restore older outputs the log already recorded as
+    // elided — a cache-invalidating, evidence-contradicting oscillation.
+    const elision = elideHistory(session.messages, { ...session.contextBudget, alreadyElided: [...prevElided] });
     const prevImageElided = session.imageElidedCallIds ?? new Set<string>();
     const newlyImages = elision.imageElidedCallIds.filter((id) => !prevImageElided.has(id));
     if (elision.elidedCallIds.length > prevElided.size || newlyImages.length > 0) {
@@ -475,7 +478,19 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
     });
     session.messages.push({ role: 'assistant', content: turn.blocks });
 
-    if (turn.stopReason !== 'tool_use' || toolUses.length === 0) break;
+    if (toolUses.length === 0) break;
+    if (turn.stopReason !== 'tool_use') {
+      // Blocks and stopReason CAN diverge: a max_tokens cut mid-tool-call yields tool_use
+      // blocks with stopReason 'max_tokens' (the SDK partial-parses the truncated input). The
+      // old condition broke here without answering them, leaving an unanswered tool_use in the
+      // live history — every later request 400s, and repairDanglingToolUses cannot help once
+      // the next user message is appended. Answer them as not-run and end the turn honestly.
+      const skipped = toolUses.map((tu) =>
+        recordSkippedCall(session, tu, `not run: the model's turn ended with stop reason '${turn.stopReason}' before this call could be executed`),
+      );
+      session.messages.push({ role: 'user', content: skipped });
+      break;
+    }
 
     // Pre-gate: once the turn is aborted or the user chose deny-&-stop, NO further call may
     // execute — including auto-allowed in-workspace writes, which never reach an approver.
@@ -580,8 +595,12 @@ async function executeCall(
   session.log.append({ type: 'tool.requested', callId, tool: tu.name, input: tu.input });
 
   if (!tool) {
-    session.log.append({ type: 'tool.completed', callId, ok: false, outputPreview: '', durationMs: 0, truncated: false });
-    return { toolResult: toolResultBlock(callId, `unknown tool: ${tu.name}`, true), denied: false, stop: false };
+    // outputPreview is contractually "the exact string the model saw", so a resumed
+    // conversation replays byte-identically — persisting '' lost WHICH tool was rejected and
+    // made the replay differ from the original turn (S14.5 review finding).
+    const message = `unknown tool: ${tu.name}`;
+    session.log.append({ type: 'tool.completed', callId, ok: false, outputPreview: message, durationMs: 0, truncated: false });
+    return { toolResult: toolResultBlock(callId, message, true), denied: false, stop: false };
   }
 
   const parsed = tool.schema.safeParse(tu.input);
@@ -648,8 +667,12 @@ function availabilitySandbox(facts: EnforcementFacts): ExecSandbox {
  */
 function callSandbox(session: Session, boundary: 'sandbox' | 'unsandboxed' | undefined): ExecSandbox | undefined {
   if (!session.sandboxFacts) return undefined;
-  const active = boundary === 'sandbox';
   const backend = session.sandbox;
+  // `active` is what the LOG asserts about confinement, so it must require a backend that can
+  // actually confine: with facts but no backend (independent optionals — "both or neither" was
+  // only a comment) an auto-run command ran unwrapped while command.started recorded the
+  // enforcing mode. Fail honest: no backend means not active, so the record says 'none'.
+  const active = boundary === 'sandbox' && backend !== undefined;
   return {
     mode: session.sandboxFacts.mode,
     enforced: session.sandboxFacts.enforced,
@@ -1083,13 +1106,41 @@ async function runExecution<I>(
 
   if (snapshot) {
     for (const cf of snapshot) {
-      const exists = fs.existsSync(cf.path);
-      const afterBytes = exists ? fs.readFileSync(cf.path) : null;
+      // The readback must never throw past this point: the bytes are ALREADY on disk, and an
+      // escaping error meant zero file.mutated events — so `/undo` could not restore a file
+      // whose pre-image was sitting in the snapshot store, while the repair path recorded the
+      // call as "failed before it ran". A transient EPERM/EBUSY (AV/indexer holding a
+      // just-written file) or an EISDIR is enough to trigger it. Record the mutation either
+      // way; an unreadable post-state is honest as afterSha256 null.
+      let afterBytes: Buffer | null = null;
+      let readFailed: string | null = null;
+      try {
+        afterBytes = fs.existsSync(cf.path) ? fs.readFileSync(cf.path) : null;
+      } catch (e) {
+        readFailed = (e as Error).message;
+      }
       const afterSha256 = afterBytes !== null ? sha256(afterBytes) : null;
       const kind = cf.beforeSha256 === null ? 'create' : afterSha256 === null ? 'delete' : 'modify';
-      const createdDirs = [...missingDirsBefore].filter((d) => fs.existsSync(d));
+      let createdDirs: string[] = [];
+      try {
+        createdDirs = [...missingDirsBefore].filter((d) => fs.existsSync(d));
+      } catch {
+        /* directory probing is enrichment, never the reason a mutation goes unrecorded */
+      }
       const stat = mutationDiffStat(session, cf.beforeSha256, afterSha256, afterBytes);
-      session.log.append({ type: 'file.mutated', callId, path: cf.path, kind, beforeSha256: cf.beforeSha256, afterSha256, createdDirs, ...stat });
+      session.log.append({
+        type: 'file.mutated',
+        callId,
+        path: cf.path,
+        // An unreadable post-state is NOT a delete: say the mutation happened and that its
+        // resulting bytes could not be read, rather than recording a deletion that never was.
+        kind: readFailed !== null ? (cf.beforeSha256 === null ? 'create' : 'modify') : kind,
+        beforeSha256: cf.beforeSha256,
+        afterSha256,
+        createdDirs,
+        ...stat,
+        ...(readFailed !== null ? { postStateUnverified: true as const, postStateError: readFailed } : {}),
+      });
     }
   }
 
