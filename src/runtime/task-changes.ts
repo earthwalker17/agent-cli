@@ -32,6 +32,9 @@ export interface CaptureDeps {
   snapshots: SnapshotStore;
   /** Harness scratch for the temp index/staging (outside the worktree; cleaned in finally). */
   scratchDir: string;
+  /** S14.5: `-c` EOL-pin args (probeEolPin) — the capture must materialize base bytes under the
+   *  SAME config the worktree was checked out with, or base shas diverge from worktree reality. */
+  pinArgs?: readonly string[];
 }
 
 export interface CaptureResult {
@@ -42,7 +45,7 @@ export interface CaptureResult {
 
 export async function captureTaskChanges(deps: CaptureDeps): Promise<CaptureResult> {
   const g = (argv: string[], env?: Record<string, string>) =>
-    runGit({ gitPath: deps.gitPath, argv, cwd: deps.worktreeDir, ...(env ? { env } : {}), timeoutMs: 60_000 });
+    runGit({ gitPath: deps.gitPath, argv: [...(deps.pinArgs ?? []), ...argv], cwd: deps.worktreeDir, ...(env ? { env } : {}), timeoutMs: 60_000 });
 
   const status = await g(['status', '--porcelain=v2', '-z', '--untracked-files=all']);
   if (!status.ok) return { files: [], omittedCount: 0, error: `status failed: ${firstLine(status.stderr)}` };

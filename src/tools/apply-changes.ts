@@ -70,25 +70,53 @@ function selectFiles(rec: CapturedTaskChanges, subset: readonly string[] | undef
   return { files, unknown };
 }
 
-function currentSha(target: string): { exists: boolean; sha: string | null } {
+function currentState(target: string): { exists: boolean; sha: string | null; bytes: Buffer | null } {
   try {
-    return { exists: true, sha: sha256(fs.readFileSync(target)) };
+    const bytes = fs.readFileSync(target);
+    return { exists: true, sha: sha256(bytes), bytes };
   } catch {
-    return { exists: false, sha: null };
+    return { exists: false, sha: null, bytes: null };
   }
 }
 
+/** S14.5 (A-i): true when two byte sequences differ ONLY by CRLF/LF normalization — the
+ *  live-found refusal class where git's checkout filter, not an edit, produced the "drift".
+ *  Binary content (NUL-bearing) never matches: EOL comparison is meaningless there. */
+function eolOnlyMismatch(a: Buffer | null, b: Buffer | null): boolean {
+  if (a === null || b === null) return false;
+  if (a.includes(0) || b.includes(0)) return false;
+  const norm = (x: Buffer): string => x.toString('latin1').replace(/\r\n/g, '\n');
+  return norm(a) === norm(b);
+}
+
+const EOL_DRIFT_REASON =
+  'line-ending normalization mismatch, not a content edit: the workspace file and the task base differ only by CRLF/LF ' +
+  '(git checkout conversion — core.autocrlf materialized the capture in a different EOL form than the parent holds). ' +
+  'Re-run the executor task: worktree checkout and capture are now EOL-pinned to the parent form';
+
 /** Is this file appliable against the CURRENT workspace state? (Side-effect-free: mutates() calls
- *  this at policy time; re-checked at execute time. Pre-image archiving is the snapshot's job.) */
-function eligibility(f: TaskChangeFile, target: string): { ok: boolean; noop: boolean; reason?: string } {
+ *  this at policy time; re-checked at execute time. Pre-image archiving is the snapshot's job.)
+ *  `readBlob` (optional) only ENRICHES a refusal reason — never changes the verdict. */
+function eligibility(
+  f: TaskChangeFile,
+  target: string,
+  readBlob?: (sha: string) => Buffer | null,
+): { ok: boolean; noop: boolean; reason?: string } {
   if (f.oversize === true || (f.kind !== 'delete' && f.blobSha256 === null)) {
     return { ok: false, noop: false, reason: 'content was over the capture cap and was never stored' };
   }
-  const cur = currentSha(target);
+  const cur = currentState(target);
+  const baseBytes = (): Buffer | null => (f.baseSha256 !== null ? (readBlob?.(f.baseSha256) ?? null) : null);
   if (f.kind === 'delete') {
     if (!cur.exists) return { ok: true, noop: true }; // already gone
     if (cur.sha === f.baseSha256) return { ok: true, noop: false };
-    return { ok: false, noop: false, reason: 'drift: the workspace file differs from the task base; refusing to delete it' };
+    return {
+      ok: false,
+      noop: false,
+      reason: eolOnlyMismatch(cur.bytes, baseBytes())
+        ? EOL_DRIFT_REASON
+        : 'drift: the workspace file differs from the task base; refusing to delete it',
+    };
   }
   if (cur.sha !== null && cur.sha === f.blobSha256) return { ok: true, noop: true }; // already applied
   if (f.kind === 'create' && !cur.exists) return { ok: true, noop: false };
@@ -97,7 +125,9 @@ function eligibility(f: TaskChangeFile, target: string): { ok: boolean; noop: bo
     ok: false,
     noop: false,
     reason: cur.exists
-      ? 'drift: the workspace file changed since the task base (external edit or another task applied first); refusing to overwrite'
+      ? eolOnlyMismatch(cur.bytes, baseBytes())
+        ? EOL_DRIFT_REASON
+        : 'drift: the workspace file changed since the task base (external edit or another task applied first); refusing to overwrite'
       : 'drift: the workspace file was deleted since the task base',
   };
 }
@@ -176,7 +206,7 @@ export function createApplyChangesTool(
       const paths: string[] = [];
       for (const f of files) {
         const target = path.join(ctx.workspaceRoot, f.relPath);
-        const e = eligibility(f, target);
+        const e = eligibility(f, target); // no blob reads at policy time (reasons are unused here)
         if (e.ok && !e.noop) paths.push(target);
       }
       return { paths };
@@ -219,9 +249,16 @@ export function createApplyChangesTool(
         );
       }
 
+      const readBlob = (sha: string): Buffer | null => {
+        try {
+          return snapshots.getBlob(sha);
+        } catch {
+          return null;
+        }
+      };
       for (const f of files) {
         const target = path.join(ctx.workspaceRoot, f.relPath);
-        const e = eligibility(f, target);
+        const e = eligibility(f, target, readBlob);
         if (!e.ok) {
           refused.push({ relPath: f.relPath, reason: e.reason ?? 'not appliable' });
           continue;

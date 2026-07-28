@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import { isInside } from '../shared/pathutil.js';
 import { captureTaskChanges, type CaptureResult } from '../runtime/task-changes.js';
 import { newWorktreeDir, registerWorktree, unregisterWorktree } from '../runtime/worktrees.js';
-import { addWorktree, removeWorktree, worktreeSupport } from '../git/worktree.js';
+import { addWorktree, probeEolPin, removeWorktree, worktreeSupport } from '../git/worktree.js';
 import { createCheckpoint } from '../git/checkpoint.js';
 import { detectGitFacts } from '../git/facts.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
@@ -638,10 +638,37 @@ export function createDelegateTool(
               executor!.noteBaseRef(ref);
               ctx.reportTask?.({ kind: 'base-checkpoint', ref, oid });
             },
+            // S14.5 (I7): the large-untracked guard ASKS through the same channel executor
+            // approvals use (parent approver; non-interactive fails closed to decline) instead
+            // of hard-refusing every executor group in any repo with a big un-ignored dir.
+            // A decline still refuses the group below — the task-base guarantee is not
+            // negotiable — but the human now gets the choice, and the refusal names the fix.
+            ...(deps.forwardAsk !== undefined
+              ? {
+                  confirmLargeUntracked: async (count: number) => {
+                    const outcome = await deps.forwardAsk!(
+                      {
+                        callId: 'task-base-untracked-guard',
+                        tool: 'delegate_task',
+                        classification: 'reversible',
+                        summary: `task-base checkpoint would capture ${count} UNTRACKED files`,
+                        detail: 'The executor group needs a whole-workspace base checkpoint. A large untracked set usually means something big is not gitignored (build output, vendored deps). Allow captures them all; deny refuses the group so you can gitignore first.',
+                        reason: 'untracked-sweep guard (threshold exceeded)',
+                      },
+                      ctx.signal,
+                    );
+                    return outcome.decision === 'allow';
+                  },
+                }
+              : {}),
           },
         );
         if (!base.ok || base.oid === undefined) {
-          return refuse(`cannot capture the task-base checkpoint: ${base.error ?? 'unknown error'}`);
+          return refuse(
+            base.declined === true
+              ? `task-base checkpoint declined: ${base.error ?? 'large untracked set'} — gitignore the bulky paths (or re-run and allow the capture); executor groups need the whole-workspace base`
+              : `cannot capture the task-base checkpoint: ${base.error ?? 'unknown error'}`,
+          );
         }
         baseOid = base.oid;
       }
@@ -902,7 +929,13 @@ async function runExecutorTask(
   } catch (err) {
     return failResult(`executor setup failed: cannot record the worktree registry entry (${(err as Error).message})`);
   }
-  const add = await addWorktree(ex.gitPath, ex.repoRoot, dir, baseOid);
+  // S14.5: probe whether checkout normalization would materialize different bytes than the
+  // parent workspace holds (the live-found autocrlf capture failure: every file refused at
+  // apply as base drift), and pin BOTH the worktree checkout and the capture staging when the
+  // parent is uniformly LF. A probe failure means no pin — never a refusal.
+  const wsRelForPin = path.relative(ex.repoRoot, taskDeps.workspaceRoot).split(path.sep).join('/');
+  const eolPin = await probeEolPin(ex.gitPath, ex.repoRoot, wsRelForPin);
+  const add = await addWorktree(ex.gitPath, ex.repoRoot, dir, baseOid, eolPin.pinArgs);
   if (!add.ok) {
     try {
       await unregisterWorktree(ex.registryFile, dir);
@@ -916,6 +949,7 @@ async function runExecutorTask(
   ctx.reportTask?.({ kind: 'worktree-created', childSessionId: '', path: dir, baseOid });
 
   const notes: string[] = [];
+  if (eolPin.detail !== '') notes.push(`[harness] ${eolPin.detail}`);
   let capturedPaths: string[] = [];
   let result: SubagentResult = failResult('executor task did not run').result;
   try {
@@ -947,6 +981,7 @@ async function runExecutorTask(
       baseOid,
       snapshots: ex.snapshots,
       scratchDir: ex.stateDir,
+      ...(eolPin.pinArgs.length > 0 ? { pinArgs: eolPin.pinArgs } : {}),
     });
     if (cap.error !== undefined) {
       notes.push(`[harness] change capture FAILED: ${cap.error} — nothing from this task can be integrated`);

@@ -28,12 +28,66 @@ export interface WorktreeAddResult {
   error?: string;
 }
 
-/** Create a detached worktree of `commitOid` at `dir` (parent dirs created). */
-export async function addWorktree(gitPath: string, repoRoot: string, dir: string, commitOid: string): Promise<WorktreeAddResult> {
+/** Create a detached worktree of `commitOid` at `dir` (parent dirs created). `pinArgs` are
+ *  `-c` config overrides prepended to the invocation (the S14.5 EOL pin — see probeEolPin). */
+export async function addWorktree(gitPath: string, repoRoot: string, dir: string, commitOid: string, pinArgs: readonly string[] = []): Promise<WorktreeAddResult> {
   fs.mkdirSync(dir, { recursive: true });
-  const r = await runGit({ gitPath, argv: ['worktree', 'add', '--detach', dir, commitOid], cwd: repoRoot, timeoutMs: 60_000 });
+  const r = await runGit({ gitPath, argv: [...pinArgs, 'worktree', 'add', '--detach', dir, commitOid], cwd: repoRoot, timeoutMs: 60_000 });
   if (!r.ok) return { ok: false, error: firstLine(r.stderr) || `git worktree add failed (exit ${r.exitCode})` };
   return { ok: true };
+}
+
+export interface EolPinProbe {
+  /** `-c` args to prepend to every worktree-materializing git call; empty = no pin. */
+  pinArgs: string[];
+  /** Honest one-line description when the pin is active ('' otherwise). */
+  detail: string;
+}
+
+/**
+ * The checkout-normalization pin probe (S14.5 — the top live-found S14 gap). With system
+ * `core.autocrlf=true` over an LF working tree, `worktree add` and capture's `checkout-index`
+ * re-apply the smudge filter and materialize CRLF while the parent's on-disk bytes are LF: the
+ * parent genuinely does not hold the bytes the executor based its edits on, so EVERY captured
+ * file refuses at apply as base drift — and had the base matched, the apply would have written
+ * CRLF over LF, attributing a whole-file EOL flip to the task.
+ *
+ * The pin: when the effective config would convert (`core.autocrlf=true`) AND the parent's
+ * tracked files under the workspace are uniformly LF in the worktree (`git ls-files --eol`,
+ * the `w/` column), executor state is materialized with `-c core.autocrlf=false -c
+ * core.eol=lf` so worktree bytes equal parent bytes. Deliberately the uniform-LF case ONLY:
+ * mixed or CRLF parents keep today's behavior plus the apply-side diagnosis (the honest
+ * fallback), and `.gitattributes`-governed paths are unaffected either way (attributes
+ * outrank core.* in both trees, so base and after stay self-consistent). A failed probe
+ * yields no pin — never a refusal.
+ */
+export async function probeEolPin(gitPath: string, repoRoot: string, wsRel: string): Promise<EolPinProbe> {
+  const none: EolPinProbe = { pinArgs: [], detail: '' };
+  const conf = await runGit({ gitPath, argv: ['config', '--get', 'core.autocrlf'], cwd: repoRoot, timeoutMs: 15_000 });
+  if (!conf.ok || conf.stdout.trim().toLowerCase() !== 'true') return none; // 'input'/'false'/unset never smudge LF at checkout
+  const ls = await runGit({
+    gitPath,
+    argv: ['ls-files', '--eol', '-z', '--', wsRel.length > 0 ? wsRel : '.'],
+    cwd: repoRoot,
+    timeoutMs: 30_000,
+  });
+  if (!ls.ok) return none;
+  let lf = 0;
+  let other = 0;
+  for (const rec of ls.stdout.split('\0')) {
+    if (rec.length === 0) continue;
+    const info = rec.split('\t')[0] ?? '';
+    const m = /w\/(\S+)/.exec(info);
+    if (m === null) continue;
+    if (m[1] === 'lf') lf++;
+    else if (m[1] === 'crlf' || m[1] === 'mixed') other++;
+    // 'none' (no EOLs) and '-text' (binary) constrain nothing.
+  }
+  if (lf === 0 || other > 0) return none;
+  return {
+    pinArgs: ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf'],
+    detail: `EOL pin active: the parent working tree is uniformly LF under core.autocrlf=true, so executor worktrees and capture staging are materialized with -c core.autocrlf=false -c core.eol=lf (worktree bytes = parent bytes)`,
+  };
 }
 
 export interface WorktreeRemoveResult {

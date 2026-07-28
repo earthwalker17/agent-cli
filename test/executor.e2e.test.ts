@@ -249,6 +249,127 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     input: { tasks: [{ role: 'executor', task }] },
   });
 
+  it('S14.5 REGRESSION (live-found S14): core.autocrlf=true over an LF tree — the EOL pin makes captures appliable', async () => {
+    // The S14 live E2E failure class: system autocrlf=true materialized CRLF worktrees over an
+    // LF parent, so EVERY captured file refused at apply as base drift (and a matching base
+    // would have written CRLF over LF). The suite's emptied global/system config HID this;
+    // repo-local config reproduces it, the way the live machine's system config did.
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'line one\nline two\n'); // LF on disk
+    await commitAll(repo, 'base');
+    expect((await git(repo, 'config', 'core.autocrlf', 'true')).ok).toBe(true);
+
+    const h = makeHarness({
+      parentScript: [
+        { say: 'delegating', calls: [EXEC_CALL()] },
+        { say: 'applying', calls: [{ name: 'apply_task_changes', input: { child_session_id: 'child-session-0001' } }] },
+        { say: 'done' },
+      ],
+      childScripts: [
+        [
+          {
+            say: 'writing',
+            calls: [
+              { name: 'edit_file', input: { path: 'a.txt', old_string: 'line two', new_string: 'line two EDITED' } },
+              { name: 'write_file', input: { path: 'new.txt', content: 'created by executor\n' } },
+            ],
+          },
+          { say: 'REPORT: edited a.txt, created new.txt.' },
+        ],
+      ],
+    });
+    h.parent.approver = async () => ({ decision: 'allow', scope: 'once', source: 'user' });
+
+    const r = await runTurn(h.parent, 'edit under autocrlf');
+    expect(r.finalText).toBe('done');
+
+    const events = h.parent.log.events;
+    // The pin was announced in the delegate result (honest evidence of the changed config).
+    const delegateReq = events.find((e) => e.type === 'tool.requested' && e.tool === 'delegate_task');
+    const delegateCallId = delegateReq?.type === 'tool.requested' ? delegateReq.callId : '';
+    const delegateDone = events.find((e) => e.type === 'tool.completed' && e.callId === delegateCallId);
+    expect(delegateDone?.type === 'tool.completed' ? delegateDone.outputPreview : '').toContain('EOL pin active');
+    // Every captured file APPLIED — zero drift refusals (the pre-fix behavior refused all).
+    const appliedEv = events.find((e) => e.type === 'task.applied');
+    expect(appliedEv).toBeDefined();
+    if (appliedEv?.type === 'task.applied') {
+      expect(appliedEv.refused).toEqual([]);
+      expect([...appliedEv.applied].sort()).toEqual(['a.txt', 'new.txt']);
+    }
+    // The workspace file keeps the parent's LF form — no EOL flip attributed to the task.
+    const bytes = fs.readFileSync(path.join(repo, 'a.txt'));
+    expect(bytes.includes('\r')).toBe(false);
+    expect(bytes.toString()).toContain('line two EDITED');
+  });
+
+  it('S14.5 (A-i): an EOL-only base mismatch refuses with the NORMALIZATION diagnosis, not generic drift', async () => {
+    // The un-pinned path (mixed parents, old captures) keeps refusing — but the reason must
+    // name the real cause, or it reads as unsatisfiable bookkeeping (the live-run experience).
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'eol.txt'), 'alpha\nbeta\n'); // parent holds LF
+    await commitAll(repo, 'base');
+    const { SnapshotStore } = await import('../src/store/snapshots.js');
+    const snapshots = new SnapshotStore(layout.objectsDir);
+    const registry = createTaskChangesRegistry();
+    const baseSha = snapshots.putBlob(Buffer.from('alpha\r\nbeta\r\n')); // capture saw CRLF
+    const afterSha = snapshots.putBlob(Buffer.from('alpha\r\nbeta EDITED\r\n'));
+    registry.register('child-eol', 'f'.repeat(40), [
+      { relPath: 'eol.txt', kind: 'modify', baseSha256: baseSha, blobSha256: afterSha, bytes: 14 },
+    ]);
+    const tool = createApplyChangesTool(registry, snapshots);
+    const r = await tool.execute({ child_session_id: 'child-eol' }, { workspaceRoot: repo, stateDir: layout.projectDir });
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain('line-ending normalization mismatch');
+    expect(r.output).toContain('EOL-pinned');
+    expect(fs.readFileSync(path.join(repo, 'eol.txt')).toString()).toBe('alpha\nbeta\n'); // untouched
+  });
+
+  it('S14.5: probeEolPin pins uniform-LF-under-autocrlf only; CRLF/mixed and non-converting configs get no pin', async () => {
+    const { probeEolPin } = await import('../src/git/worktree.js');
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'one\ntwo\n');
+    await commitAll(repo, 'lf base');
+
+    // No autocrlf configured (the emptied global/system config) → no conversion → no pin.
+    expect((await probeEolPin(REAL_GIT!, repo, '')).pinArgs).toEqual([]);
+
+    expect((await git(repo, 'config', 'core.autocrlf', 'true')).ok).toBe(true);
+    const pinned = await probeEolPin(REAL_GIT!, repo, '');
+    expect(pinned.pinArgs).toEqual(['-c', 'core.autocrlf=false', '-c', 'core.eol=lf']);
+    expect(pinned.detail).toContain('EOL pin active');
+
+    // A CRLF file in the working tree makes the parent non-uniform → no pin (A-i diagnoses).
+    fs.writeFileSync(path.join(repo, 'crlf.txt'), 'one\r\ntwo\r\n');
+    expect((await git(repo, 'add', '-A', '--', '.')).ok).toBe(true);
+    const mixed = await probeEolPin(REAL_GIT!, repo, '');
+    expect(mixed.pinArgs).toEqual([]);
+  });
+
+  it('S14.5 (I7): the large-untracked guard ASKS through the forwarded channel; a deny refuses the group with the fix named', async () => {
+    // Pre-fix behavior: any repo with >200 untracked files made ALL executor delegation
+    // permanently impossible with an error that read as a git problem, while the SAME guard at
+    // apply-time degraded gracefully — two call sites, opposite policies, neither chosen.
+    await initRepo(repo);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
+    await commitAll(repo, 'base');
+    for (let i = 0; i < 201; i++) fs.writeFileSync(path.join(repo, `untracked-${i}.txt`), 'x\n');
+
+    const h = makeHarness({
+      parentScript: [{ say: 'unused' }],
+      childScripts: [[{ say: 'never runs' }]],
+      forwardOutcomes: [{ decision: 'deny', scope: 'once', source: 'user' }],
+    });
+    const tool = h.parent.tools.find((t) => t.name === 'delegate_task')!;
+    const r = await tool.execute({ tasks: [{ role: 'executor', task: 'x' }] } as never, { workspaceRoot: repo, stateDir: layout.projectDir });
+    // The guard ask reached the forwarded channel with an honest summary…
+    expect(h.forwarded.some((q) => q.summary.includes('UNTRACKED'))).toBe(true);
+    // …and the deny refused the whole group, naming the gitignore exit; nothing spawned.
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('task-base checkpoint declined');
+    expect(r.error).toContain('gitignore');
+    expect(h.parent.log.events.some((e) => e.type === 'task.started')).toBe(false);
+  });
+
   it('full flow: worktree isolation, capture, cleanup, apply, undo', async () => {
     await initRepo(repo);
     fs.writeFileSync(path.join(repo, 'a.txt'), 'committed\n');
