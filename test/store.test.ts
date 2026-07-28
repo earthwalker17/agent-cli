@@ -51,6 +51,24 @@ describe('resolveLayout', () => {
     const inside = path.join(ws, '.agent-cli');
     expect(() => resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: inside } })).toThrow(ConfigError);
   });
+
+  it('refuses a state dir that is inside the workspace under a DIFFERENT spelling of the path', () => {
+    // CI-found (Windows runner): the workspace was realpath'd while the state root was only
+    // path.resolve'd, so the same directory spelled two ways compared unequal and the guard did
+    // not fire. On the runner that was an 8.3 short path (RUNNER~1 vs runneradmin); here we
+    // reproduce it with a symlink, which is the same hole on any platform. If the guard ever
+    // regresses, the harness writes its audit/recovery substrate inside the workspace.
+    const ws = path.join(tmp, 'ws-real');
+    fs.mkdirSync(ws);
+    const alias = path.join(tmp, 'ws-alias');
+    try {
+      fs.symlinkSync(ws, alias, 'junction');
+    } catch {
+      return; // symlink/junction creation can require privileges; the assertion below needs one
+    }
+    // `alias/.agent-cli` IS `ws/.agent-cli`, spelled through the link and not yet existing.
+    expect(() => resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: path.join(alias, '.agent-cli') } })).toThrow(ConfigError);
+  });
 });
 
 describe('EventLog append/replay', () => {

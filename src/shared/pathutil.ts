@@ -1,8 +1,35 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 /** Case-fold for path comparison. Windows and macOS default filesystems are case-insensitive. */
 export function caseFold(p: string): string {
   return process.platform === 'win32' ? p.toLowerCase() : p;
+}
+
+/**
+ * Realpath the deepest existing ancestor, then re-append the non-existing tail. This catches
+ * symlink/junction escapes even when the final target does not yet exist, and
+ * `realpathSync.native` also expands Windows 8.3 short names on the existing portion.
+ *
+ * Any containment decision must run BOTH sides through this. Comparing a realpath'd path against
+ * a merely `path.resolve`d one is a hole: `C:\Users\RUNNER~1\…` and `C:\Users\runneradmin\…` are
+ * the same directory and do not compare equal (found by CI on a Windows runner, where the state
+ * root is typically the not-yet-created path being checked).
+ */
+export function realpathBoundary(abs: string): string {
+  let cur = path.resolve(abs);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native(cur);
+      return tail.length ? path.join(real, ...tail.reverse()) : real;
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(abs); // hit the filesystem root; nothing existed
+      tail.push(path.basename(cur));
+      cur = parent;
+    }
+  }
 }
 
 /**

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PathError } from '../shared/errors.js';
-import { isInside } from '../shared/pathutil.js';
+import { isInside, realpathBoundary } from '../shared/pathutil.js';
 
 export interface PathVerdict {
   /** Resolved absolute path: realpath of the deepest existing ancestor + the non-existing tail. */
@@ -17,27 +17,6 @@ const isWin = process.platform === 'win32';
 
 function segments(input: string): string[] {
   return input.split(/[\\/]+/).filter((s) => s.length > 0);
-}
-
-/**
- * Realpath the deepest existing ancestor, then re-append the non-existing tail. This catches
- * symlink/junction escapes even when the final target does not yet exist. `realpathSync.native`
- * also expands Windows 8.3 short names on the existing portion.
- */
-function realpathBoundary(abs: string): string {
-  let cur = abs;
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      const real = fs.realpathSync.native(cur);
-      return tail.length ? path.join(real, ...tail.reverse()) : real;
-    } catch {
-      const parent = path.dirname(cur);
-      if (parent === cur) return abs; // hit the filesystem root; nothing existed
-      tail.push(path.basename(cur));
-      cur = parent;
-    }
-  }
 }
 
 /**

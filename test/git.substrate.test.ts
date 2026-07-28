@@ -52,10 +52,18 @@ describe('findGitOnPath', () => {
   });
 
   it('skips relative PATH entries — they would resolve against cwd', () => {
-    const dir = tmpdir('agitpath-');
-    fs.writeFileSync(path.join(dir, 'git.exe'), 'x');
-    const rel = path.relative(process.cwd(), dir);
-    expect(findGitOnPath({ PATH: rel }, 'win32')).toBeNull();
+    // The fixture dir must live under cwd so `path.relative` yields a genuinely RELATIVE entry.
+    // Using the OS temp dir breaks on Windows CI, where cwd is on D: and TEMP on C:: with no
+    // common root, path.relative returns an ABSOLUTE path and the test asserts nothing.
+    const dir = fs.mkdtempSync(path.join(process.cwd(), 'tmp-relpath-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'git.exe'), 'x');
+      const rel = path.relative(process.cwd(), dir);
+      expect(path.isAbsolute(rel)).toBe(false); // the premise the assertion depends on
+      expect(findGitOnPath({ PATH: rel }, 'win32')).toBeNull();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('strips surrounding quotes from PATH entries', () => {

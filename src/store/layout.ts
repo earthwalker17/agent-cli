@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { sha256 } from '../shared/hash.js';
-import { caseFold, isInside } from '../shared/pathutil.js';
+import { caseFold, isInside, realpathBoundary } from '../shared/pathutil.js';
 import { ConfigError } from '../shared/errors.js';
 
 /**
@@ -26,12 +26,7 @@ export interface ProjectLayout {
 }
 
 function realIfExists(p: string): string {
-  const abs = path.resolve(p);
-  try {
-    return fs.realpathSync.native(abs);
-  } catch {
-    return abs;
-  }
+  return realpathBoundary(p);
 }
 
 function projectSlug(workspaceReal: string): string {
@@ -61,7 +56,12 @@ export function resolveLayout(
   const workspaceReal = realIfExists(workspaceRoot);
   const stateRoot = resolveStateRoot(env);
 
-  if (isInside(workspaceReal, stateRoot)) {
+  // BOTH sides must be resolved the same way. The workspace was realpath'd while the state root
+  // was only `path.resolve`d, so a state dir that genuinely sits inside the workspace could
+  // evade this guard whenever the two were spelled differently — a Windows 8.3 short path, or a
+  // symlink/junction — and the harness would then write its audit and recovery substrate inside
+  // the workspace the file tools can reach, which is the exact thing this refusal exists for.
+  if (isInside(workspaceReal, realpathBoundary(stateRoot))) {
     throw new ConfigError(
       `state dir (${stateRoot}) resolves inside the workspace (${workspaceReal}); ` +
         `the audit/recovery substrate must live outside the workspace. ` +

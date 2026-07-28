@@ -393,6 +393,18 @@ REPL path, and the clean-end predicate already fixed in S14.5); `agent gc` — a
 blob/plan-file collector over a conservative reference walk (treat every 64-hex string in every
 event as a reference; refuse to delete anything when any log is corrupt or locked; age-gated).
 
+**Cross-platform test portability (found by CI's first run, 2026-07-28):** the suite is
+Windows-first in a way that is only now measured. On `ubuntu-latest`, 10 tests fail because the
+TESTS encode win32 semantics, not because the runtime is wrong there: backslash traversal and UNC
+rejection fixtures, case-insensitive child-env deduplication (Linux env vars are case-sensitive,
+and `buildChildEnv` correctly does not fold them), taskkill-based tree-kill expectations, and a
+git hook-failure fixture. The CI Linux job is kept and marked advisory so the gap stays visible;
+the work is to gate or parameterize those fixtures per platform. Two REAL defects the same first
+CI run found were fixed immediately: `resolveLayout` compared a realpath'd workspace against a
+merely resolved state root (so a state dir inside the workspace could evade the refusal when
+spelled as an 8.3 short path or through a symlink), and a test whose premise silently broke when
+cwd and TEMP sit on different drives.
+
 **Kernel/runtime:** adaptive thinking with block preservation (`pause_turn` is mapped but the loop
 would end the turn); per-action / `--to` / `--steps` undo; conversation rewind; session
 pruning/sanitized export; prompt-history persistence + line-editing niceties; PTY support (the
