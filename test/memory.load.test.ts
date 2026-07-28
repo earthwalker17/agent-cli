@@ -142,6 +142,32 @@ describe('loadMemory', () => {
     expect(loadMemory(layout, ws, { currentMapSha256: 'x', resumeId: '20260720-000002-bbbb' }).crashNote).toBeNull();
   });
 
+  it('post-hoc CLI appends after session.ended do NOT read as a crash (the false-accusation pin)', () => {
+    // Regression pin: `agent checkpoint/undo/commit` append provenance events to an ended log.
+    // The old predicate read only the LAST event, so the very next session announced a false
+    // "did not record a clean end" for a session that ended perfectly.
+    const { ws, layout } = fixture();
+    writeLog(layout, '20260720-000004-eeee', [
+      started('20260720-000004-eeee'),
+      ended,
+      { v: 1, seq: 3, ts: 't', type: 'git.checkpoint', ref: 'refs/agent-cli/checkpoints/x/1', oid: 'a'.repeat(40) },
+      ...Array.from({ length: 5 }, (_, i) => ({ v: 1, seq: 4 + i, ts: 't', type: 'file.mutated', callId: 'post', path: `f${i}.txt`, kind: 'edit' })),
+    ]);
+    expect(loadMemory(layout, ws, { currentMapSha256: 'x' }).crashNote).toBeNull();
+  });
+
+  it('a resumed-then-killed session keeps its note: the newest LIFECYCLE event decides', () => {
+    const { ws, layout } = fixture();
+    writeLog(layout, '20260720-000005-ffff', [
+      started('20260720-000005-ffff'),
+      ended,
+      { v: 1, seq: 3, ts: 't', type: 'session.resumed', priorSeq: 2, orphanedCallIds: [], unknownPostStateCallIds: [] },
+      { v: 1, seq: 4, ts: 't', type: 'user.message', text: 'more work' },
+    ]);
+    const note = loadMemory(layout, ws, { currentMapSha256: 'x' }).crashNote;
+    expect(note).toContain('20260720-000005-ffff');
+  });
+
   it('a torn tail (crash mid-write) still reads as "not cleanly ended"', () => {
     const { ws, layout } = fixture();
     const file = layout.sessionFile('20260720-000009-dddd');

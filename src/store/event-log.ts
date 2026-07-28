@@ -266,16 +266,59 @@ export class EventLog {
   }
 
   /**
-   * Parse only the LAST complete line of a log (bounded tail read; never throws). A cleanly ended
-   * session's last event is session.ended — nothing appends after it — so this is the cheap
-   * clean-end check for crash detection. A torn tail parses as nothing and reads as "not ended".
+   * Parse only the LAST complete line of a log (bounded tail read; never throws). NOTE: the last
+   * line is NOT necessarily session.ended even for a cleanly ended session — the post-hoc CLI
+   * commands (`agent checkpoint/undo/commit`) legitimately append provenance events to an ended
+   * log. For the clean-end question use readLastEventOfTypes with the lifecycle types instead.
    */
   static readLastEvent(file: string): SessionEvent | undefined {
     return boundedLineEvent(file, 'last');
   }
+
+  /**
+   * Scan complete lines BACKWARD from the tail (bounded window; never throws) and return the
+   * newest event whose type is in `types`. Built for the clean-end predicate: a log is cleanly
+   * ended iff its newest LIFECYCLE event (session.started/resumed/ended) is session.ended —
+   * post-hoc CLI appends after it are non-lifecycle and stay invisible to this question.
+   * Undefined when no matching event sits inside the window (callers choose the safe reading).
+   */
+  static readLastEventOfTypes(file: string, types: readonly string[]): SessionEvent | undefined {
+    try {
+      const fd = fs.openSync(file, 'r');
+      try {
+        const size = fs.fstatSync(fd).size;
+        const len = Math.min(size, LIFECYCLE_SCAN_BYTES);
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, size - len);
+        const text = buf.toString('utf8');
+        // Everything after the final newline is a torn tail; if the window starts mid-line the
+        // first fragment is also incomplete unless the window covers the whole file.
+        const complete = text.slice(0, text.lastIndexOf('\n') + 1);
+        const lines = complete.split('\n').filter((l) => l.trim().length > 0);
+        const start = len === size ? 0 : 1; // drop the leading fragment of a mid-line window
+        for (let i = lines.length - 1; i >= start; i--) {
+          try {
+            const parsed: unknown = JSON.parse(lines[i]!);
+            const type = (parsed as { type?: unknown } | null)?.type;
+            if (typeof type === 'string' && types.includes(type)) return parsed as SessionEvent;
+          } catch {
+            // an unparseable interior line is readLenient's problem, not this bounded scan's
+          }
+        }
+        return undefined;
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 const BOUNDED_READ_BYTES = 16 * 1024;
+// The lifecycle scan needs headroom past BOUNDED_READ_BYTES: a checkpoint restore appends a
+// batch of file.mutated events AFTER session.ended, and the scan must still see the ended line.
+const LIFECYCLE_SCAN_BYTES = 64 * 1024;
 
 function boundedLineEvent(file: string, which: 'first' | 'last'): SessionEvent | undefined {
   try {

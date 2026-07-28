@@ -111,8 +111,14 @@ function detectCrashNote(layout: ProjectLayout, resumeId?: string): string | nul
     const first = EventLog.readFirstEvent(file);
     if (first === undefined || first.type !== 'session.started') continue;
     if ((first as { lineage?: unknown }).lineage !== undefined) continue; // a subagent task session
-    const last = EventLog.readLastEvent(file);
-    if (last !== undefined && last.type === 'session.ended') return null; // newest non-child session ended cleanly
+    // Clean-end predicate: the newest LIFECYCLE event decides. The plain last-line check
+    // accused sessions falsely — `agent checkpoint/undo/commit` append provenance events to an
+    // ended log, so "last event is not session.ended" does not mean the session never ended.
+    // A resumed-and-killed session correctly stays a note (its newest lifecycle event is
+    // session.resumed); an empty scan (no lifecycle event inside the bounded window) keeps the
+    // note too — a long crashed session's lifecycle events sit far behind its tool-event tail.
+    const lastLifecycle = EventLog.readLastEventOfTypes(file, ['session.started', 'session.resumed', 'session.ended']);
+    if (lastLifecycle !== undefined && lastLifecycle.type === 'session.ended') return null; // ended cleanly
     return (
       `previous session ${id} did not record a clean end (it may have crashed, or may still be ` +
       `running elsewhere). Its evidence log survives: agent report ${id}`
