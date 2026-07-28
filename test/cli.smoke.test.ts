@@ -4,6 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { grantTrust } from '../src/trust/store.js';
+import { writeCanonicalPlan, setCanonicalStatus } from '../src/plan/canonical.js';
+import { PlanGraphSchema } from '../src/plan/schema.js';
+import { resolveLayout } from '../src/store/layout.js';
+import { SnapshotStore } from '../src/store/snapshots.js';
+import { fixedClock } from '../src/shared/clock.js';
 
 const CLI = path.resolve('dist/cli/index.js');
 const hasBuild = fs.existsSync(CLI);
@@ -143,6 +148,38 @@ d('CLI end-to-end via the built binary', () => {
     }
     // The usage header carries the live version, not a hardcoded stamp.
     expect(run(['--help']).stdout).toContain(`Agent CLI v${pkg.version}`);
+  });
+
+  it('agent plan <id> reads a CANONICAL plan through the one reader: real status, content sha, approval state', async () => {
+    // Regression pin: cmdPlan read only the legacy markdown store for three sessions after the
+    // canonical format shipped, so every modern plan printed "status: unknown" and a raw-file
+    // sha instead of its approval state.
+    const sid = '20260728-000000-planpin';
+    const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: state }, ensure: true });
+    const snapshots = new SnapshotStore(layout.objectsDir);
+    const graph = PlanGraphSchema.parse({
+      objective: 'ship the pinned feature',
+      tasks: [{ id: 't1', title: 'core', intent: 'build', role: 'executor', verify: 'tests pass', touches: ['src'] }],
+    });
+    const w = await writeCanonicalPlan(layout, sid, graph, snapshots, fixedClock(Date.UTC(2026, 6, 28), 1000));
+    if ('error' in w) throw new Error(w.error);
+    await setCanonicalStatus(layout, sid, 'approved', snapshots);
+    const line = (seq: number, body: Record<string, unknown>): string => JSON.stringify({ v: 1, seq, ts: '2026-07-28T00:00:00.000Z', ...body });
+    fs.writeFileSync(
+      layout.sessionFile(sid),
+      [
+        line(1, { type: 'session.started', sessionId: sid, workspaceRoot: ws, model: 'mock', mode: 'confirm' }),
+        line(2, { type: 'plan.approved', sha256: w.contentSha }),
+        line(3, { type: 'session.ended', reason: 'user-quit' }),
+      ].join('\n') + '\n',
+    );
+    const res = run(['plan', sid]);
+    expect(res.code).toBe(0);
+    expect(res.stderr).toContain('canonical task graph · status: approved');
+    expect(res.stderr).toContain(`content sha: ${w.contentSha}`);
+    expect(res.stderr).toContain('executor gate: open (approved and current)');
+    expect(res.stdout).toContain('ship the pinned feature');
+    expect(res.stderr).not.toContain('status: unknown');
   });
 
   it('count flags refuse non-numeric values loudly instead of becoming NaN', () => {

@@ -14,7 +14,8 @@ import { endReasonForTurn, endSession, runTurn, type Session } from '../runtime/
 import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
-import { readPlan } from '../plan/store.js';
+import { readPlanState } from '../plan/canonical.js';
+import { renderUserPlanView } from '../plan/views.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
@@ -513,17 +514,41 @@ function cmdPlan(values: CliValues, id?: string): number {
     process.stderr.write('no sessions found for this workspace\n');
     return 1;
   }
-  const plan = readPlan(layout, sessionId);
-  if (!plan.exists) {
+  // readPlanState is THE plan reader (canonical JSON preferred, legacy markdown fallback).
+  // This command read only the legacy store for three sessions after the canonical format
+  // shipped, so every modern plan printed "status: unknown" with a raw-file sha instead of
+  // its real approval state — the un-migrated surface, now on the one reader like everyone.
+  const events = EventLog.readLenient(layout.sessionFile(sessionId)).events;
+  const state = readPlanState(layout, sessionId, events);
+  if (state.kind === 'none') {
     process.stderr.write(`no plan document for session ${sessionId}\n`);
     return 1;
   }
+  if (state.kind === 'legacy') {
+    const plan = state.legacy!;
+    process.stderr.write(
+      `plan ${sanitizeLine(plan.planId)} — legacy markdown · status: ${plan.status} · sha256 ${plan.sha256 ?? 'unreadable'} · ${plan.bytes} bytes\n` +
+        `approval: ${state.approvedSha === null ? 'none recorded' : state.approvedAndCurrent ? `approved and current (sha ${state.approvedSha.slice(0, 12)}…)` : `recorded for sha ${state.approvedSha.slice(0, 12)}… — ${state.diverged ? 'content has DIVERGED' : `status is '${plan.status}'`}`}\n` +
+        `file (editable): ${sanitizeLine(plan.file)}\n\n`,
+    );
+    process.stdout.write(plan.text + (plan.text.endsWith('\n') ? '' : '\n'));
+    if (plan.truncated) process.stderr.write('(display truncated; the full plan is in the file)\n');
+    return 0;
+  }
+  const doc = state.canonical!;
   process.stderr.write(
-    `plan ${sanitizeLine(plan.planId)} — status: ${plan.status} · sha256 ${plan.sha256 ?? 'unreadable'} · ${plan.bytes} bytes\n` +
-      `file (editable): ${sanitizeLine(plan.file)}\n\n`,
+    `plan ${sanitizeLine(doc.planId)} — canonical task graph · status: ${doc.status}${state.diverged ? ' · DIVERGED from approval' : ''} · ${doc.bytes} bytes\n` +
+      `content sha: ${state.currentSha ?? 'unusable'}\n` +
+      `approved sha: ${state.approvedSha ?? 'none recorded'} · executor gate: ${state.approvedAndCurrent ? 'open (approved and current)' : 'closed'}\n` +
+      `file (canonical): ${sanitizeLine(doc.file)}\n\n`,
   );
-  process.stdout.write(plan.text + (plan.text.endsWith('\n') ? '' : '\n'));
-  if (plan.truncated) process.stderr.write('(display truncated; the full plan is in the file)\n');
+  if (doc.graph !== null) {
+    const view = renderUserPlanView(doc);
+    process.stdout.write(view.split('\n').map(sanitizeLine).join('\n') + (view.endsWith('\n') ? '' : '\n'));
+  } else {
+    process.stderr.write(`the canonical document does not parse/validate: ${sanitizeLine(doc.parseError ?? 'unknown error')}\n`);
+    return 1;
+  }
   return 0;
 }
 
