@@ -145,6 +145,23 @@ d('CLI end-to-end via the built binary', () => {
     expect(run(['--help']).stdout).toContain(`Agent CLI v${pkg.version}`);
   });
 
+  it('count flags refuse non-numeric values loudly instead of becoming NaN', () => {
+    // Regression pin: NaN maxSteps made `stepsUsed >= maxSteps` false-shaped comparisons end
+    // every turn after ZERO steps — the task "ran" and did nothing, with no error anywhere.
+    const bad = run(['--max-turns', 'abc', 'do nothing']);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toMatch(/--max-turns requires a positive integer/);
+    expect(sessionEvents()).toEqual([]); // refused before any session existed
+
+    const conflict = run(['--max-steps', '5', '--max-turns', '6', 'do nothing']);
+    expect(conflict.code).toBe(1);
+    expect(conflict.stderr).toMatch(/aliases for the same limit/);
+
+    const budget = run(['map', '--budget', 'abc']);
+    expect(budget.code).toBe(1);
+    expect(budget.stderr).toMatch(/--budget requires a positive integer/);
+  });
+
   it('runs when invoked through a symlinked path (npm link bin shim)', () => {
     // npm link points the global bin at <prefix>/node_modules/agent-cli -> repo junction.
     // Node realpaths the main module's import.meta.url, so the entry guard must realpath

@@ -16,6 +16,7 @@ export interface CliValues {
   model?: string;
   'no-input'?: boolean;
   interactive?: boolean;
+  'max-steps'?: string;
   'max-turns'?: string;
   'dangerously-allow-all'?: boolean;
   'trust-this-workspace'?: boolean;
@@ -34,6 +35,14 @@ export interface CliValues {
 }
 
 export const DEFAULT_MODEL = 'claude-opus-4-8';
+
+/** A count-valued CLI flag must be a positive integer; anything else refuses loudly (never NaN). */
+export function parseCountFlag(flag: string, raw: string): number {
+  if (!/^[0-9]+$/.test(raw.trim()) || Number(raw) < 1) {
+    throw new Error(`--${flag} requires a positive integer (got '${raw}')`);
+  }
+  return Number(raw);
+}
 
 export function workspaceRoot(values: CliValues): string {
   const dir = values.C ? path.resolve(values.C) : process.cwd();
@@ -107,7 +116,14 @@ export function buildRunContext(values: CliValues, opts: RunContextOptions = {})
   const provider = makeProvider(values);
   const approver = makeApprover(values, mode, opts.io, opts.approvalSignal);
   const model = values.model ?? opts.config?.model ?? DEFAULT_MODEL;
-  const maxSteps = values['max-turns'] ? Number(values['max-turns']) : (opts.config?.maxSteps ?? 20);
+  // --max-steps is the honest name (the value bounds model steps per turn, not turns);
+  // --max-turns stays accepted as the legacy alias. A non-numeric value used to become NaN,
+  // and `NaN > maxSteps` comparisons made every turn end after ZERO steps — refuse loudly.
+  if (values['max-steps'] !== undefined && values['max-turns'] !== undefined && values['max-steps'] !== values['max-turns']) {
+    throw new Error(`--max-steps and --max-turns are aliases for the same limit; got conflicting values '${values['max-steps']}' and '${values['max-turns']}'`);
+  }
+  const stepsRaw = values['max-steps'] ?? values['max-turns'];
+  const maxSteps = stepsRaw !== undefined ? parseCountFlag(values['max-steps'] !== undefined ? 'max-steps' : 'max-turns', stepsRaw) : (opts.config?.maxSteps ?? 20);
   const maxTokens = provider.name === 'anthropic' ? 64_000 : 16_000;
   return { ws, mode, provider, approver, model, maxSteps, maxTokens };
 }

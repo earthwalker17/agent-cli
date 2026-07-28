@@ -72,7 +72,8 @@ Options:
   --model <id>             Model id (default: claude-opus-4-8)
   --no-input               Non-interactive: every approval auto-denies (also auto-detected off a TTY)
   --interactive            Force interactive mode on piped stdio (expect-style test driving)
-  --max-turns <n>          Maximum agent steps per task (default: 20)
+  --max-steps <n>          Maximum agent steps per turn (default: 20; --max-turns is the
+                           legacy alias for the same limit)
   --dangerously-allow-all  Bypass approvals (loud; every auto-allow is logged). No isolation whatsoever.
   --session <id>           Target session for undo (default: latest)
   --trust-this-workspace   Proceed in an untrusted workspace for THIS invocation only (not recorded)
@@ -110,6 +111,7 @@ function parse(argv: string[]): Args {
       model: { type: 'string' },
       'no-input': { type: 'boolean' },
       interactive: { type: 'boolean' },
+      'max-steps': { type: 'string' },
       'max-turns': { type: 'string' },
       'dangerously-allow-all': { type: 'boolean' },
       'trust-this-workspace': { type: 'boolean' },
@@ -599,6 +601,10 @@ function cmdSessions(values: CliValues): number {
 
 function cmdMap(values: CliValues): number {
   const ws = workspaceRoot(values);
+  if (values.budget !== undefined && (!/^[0-9]+$/.test(values.budget.trim()) || Number(values.budget) < 1)) {
+    process.stderr.write(`--budget requires a positive integer (got '${values.budget}')\n`);
+    return 1;
+  }
   const map = buildWorkspaceMap(ws, values.budget ? { budget: Number(values.budget) } : {});
   // File names are untrusted folder content; escape terminal-spoofing characters for display.
   const safe = map.text.split('\n').map(sanitizeLine).join('\n');
