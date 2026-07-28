@@ -42,13 +42,25 @@ What that means concretely:
 ## Install
 
 ```sh
-npm install
-npm run build        # compiles src → dist
+git clone https://github.com/earthwalker17/agent-cli.git
+cd agent-cli
+npm install          # also builds src → dist (the `prepare` script)
 npm link             # optional: puts `agent` on your PATH
 ```
 
-Requires Node 22+. Windows-first (developed and tested on Windows 11); the logic is
-cross-platform but only the Windows path rules are exercised in CI.
+Requires **Node 22+**. Windows-first: developed and tested on Windows 11, and the OS-enforced
+sandbox backend exists **only** for Windows. The rest of the logic is cross-platform and CI runs
+the suite on both Windows and Linux, but on non-Windows the sandbox suites skip and the agent
+runs with approval only (auto-run is disabled — fail closed).
+
+To actually run the agent you need an Anthropic API key:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...    # PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+**Running the agent costs money** (it calls the Anthropic API). The test suite does not — it is
+hermetic and needs no key.
 
 ## Interactive use
 
@@ -317,10 +329,29 @@ It is not wired into an npm script on purpose: a bare `AGENT_LIVE_TEST=1 vitest`
 portable on Windows without adding a dependency, and a test that spends money should be typed
 out, not inherited.
 
+Note that `npm test` needs `dist/` to exist for the CLI smoke suite to run rather than skip —
+`npm install` builds it for you, and CI verifies the entry point exists before testing.
+
+## Contributing
+
+Issues and pull requests are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) — it covers
+the verification bar (evidence over narration), what tends to get pushback, and which suites are
+platform-gated. Security problems go through [`SECURITY.md`](SECURITY.md), privately, not the
+public issue tracker.
+
 ## Documentation
 
-- `PROJECT.md` — long-term product thesis and principles.
-- `CLAUDE.md` — the project constitution and operating rules.
-- `ARCHITECTURE.md` — how the current system is built.
-- `ROADMAP.md` — session-by-session evolution and next steps.
+- [`PROJECT.md`](PROJECT.md) — the long-term thesis, principles, and reference context.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the current system is actually built: contracts,
+  load-bearing orderings, and honest limits. Start here to understand the code.
+- [`ROADMAP.md`](ROADMAP.md) — session-by-session evolution, verification evidence, and the
+  deferred pool (what is deliberately not built yet, and why).
+- [`BLUEPRINT.md`](BLUEPRINT.md) — planned near-term direction. **Not implemented behaviour.**
+- [`CLAUDE.md`](CLAUDE.md) — the operating contract given to the AI agent that develops this
+  repository. It is part of the build-in-public record, not user documentation.
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes.
+
+## Licence
+
+[MIT](LICENSE) © Eric Mono
 - `BLUEPRINT.md` — the rolling near-term development horizon.

@@ -292,7 +292,7 @@ Research current implementations again when each session begins.
 - no hidden user-branch commits — LANDED (hidden refs only; `/accept` suggests `/commit`,
   never performs it);
 - a realistic live end-to-end run with an induced failure and successful bounded recovery —
-  LANDED (see ROADMAP S14 + `C:\Users\A\Desktop\agent-cli-s14-live\`);
+  LANDED (see ROADMAP S14; the run record is a local evidence dir, not published);
 - resume proof from persisted task/workflow state — LANDED (the review fold rebuilds from
   events across a mid-arc SIGKILL);
 - reports that reconstruct the full chain without relying on assistant narration — LANDED
@@ -334,7 +334,7 @@ Research current implementations again when each session begins.
   `preview`/`browser_flow`/`view_image` tools behind explicit fail-closed policy branches +
   kind 'browser' through the existing gates/acceptance/CHECKED/recovery machinery + two new
   failure classes. Suite 868→972+1; 4-lens review (~39 findings, all hand-verified); live
-  two-life E2E 44/44 (see ROADMAP + `C:\Users\A\Desktop\agent-cli-s13-live\`).
+  two-life E2E 44/44 (see ROADMAP; run record kept locally, not published).
 - **Session 12 — unified verification gate and typed recovery: COMPLETE.** `src/checks/`
   (bounded project detection, a declarative recipe table where a project's own script beats a
   guessed tool, `toCommand` as the single composer, and normalization whose one rule is the exit
@@ -349,7 +349,7 @@ Research current implementations again when each session begins.
   fixed — including the critical one where replay consent bound the command string and not the
   script body, so rewriting `package.json` turned one `[s]` into standing execution consent.
   Live four-life E2E on a fresh dependency-free Node project with four real seeded defects:
-  39/40 evidence checks, 0 failures (see ROADMAP + `C:\Users\A\Desktop\agent-cli-s12-live\`).
+  39/40 evidence checks, 0 failures (see ROADMAP; run record kept locally, not published).
 - **Session 11.5 — the durable session (consolidation): COMPLETE.** Crash-covered task-base ref
   lifecycle (`task.base-checkpoint` creation events, resume-seeded pruning, missing-ref-tolerant
   deletion); truncation spill blobs for command/delegate output (redaction-guarded, size-capped,
@@ -386,7 +386,7 @@ Research current implementations again when each session begins.
   live proof on a 3,064-file vitest clone: flat map showed 0/14 packages, ranked map 14/14
   in ≤16k chars; two disjoint-focus explorers with zero shared reads; parent re-verified all
   load-bearing claims; 16 uncached input tokens. Evidence:
-  `C:\Users\A\Desktop\agent-cli-s10-live\` + ROADMAP.
+  ROADMAP + `test/retrieval.*` (the live run dir was local and has since been cleaned up).
 - **Session 9 — consolidation and live V0.7 proof: COMPLETE.** Fixed concurrent-session worktree
   safety, surfaced plan-consent state at executor spawn, pruned task-base refs with provenance,
   hardened approval/render/apply/cost paths, fixed command-grant keying from the live run, and

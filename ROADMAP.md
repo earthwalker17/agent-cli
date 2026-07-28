@@ -136,7 +136,7 @@ cap identity, in-window vs after-window applies, and the all-dead-lens caveat.
 
 ### Live proof — the recorded V1.0 demo
 
-`C:\Users\A\Desktop\pulse-demo\` (fixture generator, recording chain, `VALIDATION.txt`,
+A local demo workspace outside this repo (fixture generator, recording chain, `VALIDATION.txt`,
 `DEMO.md`, a 4:54 MP4). A single continuous session against real claude-opus-4-8, driven by a
 scripted typist over a real ConPTY, on the "Pulse" fixture — a working dependency-free habit
 tracker with THREE seeded defects, each reachable only by a different capability: a failing
