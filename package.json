@@ -2,10 +2,37 @@
   "name": "agent-cli",
   "version": "1.0.0",
   "description": "A local-first, terminal-native, safely extensible general-purpose agent harness.",
+  "keywords": [
+    "agent",
+    "cli",
+    "llm",
+    "anthropic",
+    "claude",
+    "terminal",
+    "sandbox",
+    "coding-agent",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/earthwalker17/agent-cli#readme",
+  "bugs": {
+    "url": "https://github.com/earthwalker17/agent-cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/earthwalker17/agent-cli.git"
+  },
+  "license": "MIT",
+  "author": "Eric Mono (https://github.com/earthwalker17)",
   "type": "module",
   "bin": {
     "agent": "dist/cli/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -14,7 +41,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "node dist/cli/index.js"
+    "start": "node dist/cli/index.js",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

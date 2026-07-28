@@ -3,3 +3,23 @@ dist/
 *.tsbuildinfo
 .agent-cli/
 coverage/
+
+# Local editor/agent settings. Keep this here, not only in a personal global ignore:
+# a contributor running Claude Code generates settings.local.json with machine paths in it.
+.claude/settings.local.json
+
+# Credentials and key material must never be committed. The harness's own checkpoint flow runs
+# `git add -A` over the workspace, and that honours .gitignore — so these entries also keep a
+# stray secret out of the hidden recovery refs it writes.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Packaging output and OS cruft
+*.tgz
+.DS_Store
+Thumbs.db

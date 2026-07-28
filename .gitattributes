@@ -1,0 +1,18 @@
+# Normalize line endings for every text file: LF in the repository AND in the working tree.
+#
+# This is not cosmetic here. Agent CLI materializes executor worktrees with git and compares
+# captured bytes against the parent workspace; when a machine's `core.autocrlf=true` smudges an
+# LF tree to CRLF on checkout, every captured file is refused at apply as base drift. The
+# runtime works around that case (see `probeEolPin` in src/git/worktree.ts), but attributes beat
+# `core.*` config, so pinning it here removes the class rather than compensating for it.
+* text=auto eol=lf
+
+# Binary-ish assets, never normalized.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.mp4 binary
+*.webm binary
+*.zip binary
+*.tgz binary
