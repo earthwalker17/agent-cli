@@ -70,6 +70,8 @@ export interface CreateCheckpointResult {
   error?: string;
   /** True when the untracked-sweep guard asked and the caller declined. */
   declined?: boolean;
+  /** Honest degrade notes (e.g. the untracked guard could not run) — display, never a verdict. */
+  notes?: string[];
 }
 
 export interface CreateCheckpointOptions {
@@ -99,6 +101,7 @@ export async function createCheckpoint(
   const g = (argv: string[], env?: Record<string, string>, cwd?: string) =>
     runGit({ gitPath: cctx.gitPath, argv, cwd: cwd ?? cctx.repoRoot, ...(env ? { env } : {}) });
 
+  const notes: string[] = [];
   const untracked = await g(['ls-files', '-z', '--others', '--exclude-standard'], undefined, cctx.workspaceRoot);
   if (untracked.ok) {
     const count = untracked.stdout.split('\0').filter((p) => p.length > 0).length;
@@ -109,6 +112,11 @@ export async function createCheckpoint(
         return { ok: false, declined: true, error: `declined: ${count} untracked files would be captured (is something big not gitignored?)` };
       }
     }
+  } else {
+    // The guard could not run (ls-files failed) — proceeding is the right call (this is a
+    // convenience guard against sweeping huge un-ignored trees, not a boundary), but doing so
+    // SILENTLY was not: the caller and the user must see that the sweep size went unchecked.
+    notes.push(`untracked-sweep guard skipped (ls-files failed: ${firstLine(untracked.stderr) || 'unknown error'}) — the checkpoint may capture a large untracked set`);
   }
 
   const indexFile = path.join(cctx.stateDir, `checkpoint-index-${tempTag()}`);
@@ -147,7 +155,7 @@ export async function createCheckpoint(
 
     const diff = await g(['diff-tree', '-r', '--name-only', '-z', hasHead ? 'HEAD' : EMPTY_TREE, oid]);
     const filesChanged = diff.ok ? diff.stdout.split('\0').filter((p) => p.length > 0).length : 0;
-    return { ok: true, ref, oid, n, filesChanged };
+    return { ok: true, ref, oid, n, filesChanged, ...(notes.length > 0 ? { notes } : {}) };
   } finally {
     fs.rmSync(indexFile, { force: true });
   }

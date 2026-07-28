@@ -279,6 +279,27 @@ describe.skipIf(!hasGit)('/accept delivery checkpoint — crash-window idempoten
     }
   });
 
+  it('S14.5 FIX: a THROWING harness-ref prune is reported in chrome, and the acceptance still records', async () => {
+    // The only silent catch on the S14 surface: a prune throw left ZERO trace that cleanup was
+    // ever attempted while the user was told "session accepted" as if hygiene ran.
+    await initWsRepo();
+    const session = makeSession();
+    try {
+      const chrome: string[] = [];
+      const ctx = { ...acceptCtx(session, chrome), pruneHarnessRefs: async (): Promise<string | null> => { throw new Error('git wedged'); } };
+      await dispatchSlash('/accept', ctx);
+
+      const text = chrome.join('\n');
+      expect(text).toContain('prune FAILED (git wedged)');
+      expect(text).toContain('agent checkpoint prune is the backstop');
+      const accepted = session.log.events.find((e) => e.type === 'session.accepted');
+      if (accepted?.type !== 'session.accepted') throw new Error('no acceptance recorded');
+      expect(accepted.complete).toBe(true);
+    } finally {
+      endSession(session, 'completed');
+    }
+  });
+
   it('a checkpoint failure caveats and the acceptance still records (consent is never hostage to git)', async () => {
     await initWsRepo();
     const session = makeSession();

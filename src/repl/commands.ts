@@ -280,6 +280,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
                 return a !== null && /^y(es)?$/i.test(a.trim());
               },
             });
+            for (const note of r.notes ?? []) ctx.renderer.chromeLine(`  note: ${sanitizeLine(note)}`);
             if (r.ok && r.ref !== undefined && r.oid !== undefined) delivery = { ref: r.ref, oid: r.oid };
             else {
               ctx.renderer.chromeLine(
@@ -312,8 +313,14 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         try {
           const pruneLine = await ctx.pruneHarnessRefs();
           if (pruneLine !== null) ctx.renderer.chromeLine(`  checkpoints: ${pruneLine}`);
-        } catch {
-          /* best-effort hygiene — acceptance itself is already recorded */
+        } catch (e) {
+          // Best-effort hygiene — acceptance itself is already recorded — but a swallowed
+          // throw left ZERO trace that a prune was ever attempted (the only silent catch on
+          // this surface, found by the S14.5 pre-scan). The quit path retries; the CLI backstop
+          // is always available.
+          ctx.renderer.chromeLine(
+            `  checkpoints: prune FAILED (${sanitizeLine((e as Error).message)}) — this session's refs remain under refs/agent-cli (retried at quit; agent checkpoint prune is the backstop)`,
+          );
         }
       }
 
@@ -649,6 +656,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           return a !== null && /^y(es)?$/i.test(a.trim());
         },
       });
+      for (const note of r.notes ?? []) ctx.renderer.chromeLine(`  note: ${sanitizeLine(note)}`);
       if (r.ok && r.ref && r.oid) {
         ctx.session.log.append({ type: 'git.checkpoint', ref: r.ref, oid: r.oid, label: label ?? null, filesChanged: r.filesChanged ?? 0 });
       } else {

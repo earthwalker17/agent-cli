@@ -331,15 +331,17 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   try {
     const stopLine = await assembled.stopAllPreviews();
     if (stopLine !== null) renderer.chromeLine(style.dim(`  previews: ${stopLine}`));
-  } catch {
-    /* best-effort hygiene; the next session's sweep is the backstop */
+  } catch (e) {
+    // Best-effort hygiene; the next session's identity-verified sweep is the backstop — but
+    // the failure itself must be visible, not swallowed.
+    renderer.chromeLine(style.dim(`  previews: stop-all FAILED (${sanitizeLine((e as Error).message)}) — the next session's sweep is the backstop`));
   }
   if (assembled.pruneHarnessRefs !== undefined) {
     try {
       const pruneLine = await assembled.pruneHarnessRefs();
       if (pruneLine !== null) renderer.chromeLine(style.dim(`  checkpoints: ${pruneLine}`));
-    } catch {
-      /* best-effort hygiene */
+    } catch (e) {
+      renderer.chromeLine(style.dim(`  checkpoints: prune FAILED (${sanitizeLine((e as Error).message)}) — refs remain under refs/agent-cli; agent checkpoint prune is the backstop`));
     }
   }
   await runMemoryUpdate(session, {

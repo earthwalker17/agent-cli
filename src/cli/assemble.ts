@@ -322,12 +322,20 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
           // exists), so the events fold could never re-own it and the retry would be lost.
           const noted = notedBaseRefs.splice(0);
           for (const ref of noted) if (!seen.has(ref)) owed.push({ ref, kind: 'task-base' });
-          const result = await pruneHarnessCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, owed, session.log);
-          if (result !== null && result.failed.length > 0) {
-            const notedSet = new Set(noted);
-            for (const ref of result.failed) if (notedSet.has(ref)) notedBaseRefs.push(ref);
+          try {
+            const result = await pruneHarnessCheckpointRefs(executorDeps.gitPath, executorDeps.repoRoot, owed, session.log);
+            if (result !== null && result.failed.length > 0) {
+              const notedSet = new Set(noted);
+              for (const ref of result.failed) if (notedSet.has(ref)) notedBaseRefs.push(ref);
+            }
+            return result?.line ?? null;
+          } catch (e) {
+            // A THROW (spawn failure, wedged git) must not lose the fallback list the way a
+            // reported per-ref failure does not: put every noted ref back so a later retry
+            // (the /accept path, then the quit path) can still own them. Callers report.
+            for (const ref of noted) if (!notedBaseRefs.includes(ref)) notedBaseRefs.push(ref);
+            throw e;
           }
-          return result?.line ?? null;
         };
 
   // retrieve (Session 10): a per-session READ-ONLY view over the assembly-built index. The

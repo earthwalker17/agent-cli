@@ -477,6 +477,7 @@ async function cmdCheckpoint(values: CliValues, sub?: string, subArg?: string): 
         return a !== null && /^y(es)?$/i.test(a.trim());
       },
     });
+    for (const note of r.notes ?? []) process.stderr.write(`note: ${sanitizeLine(note)}\n`);
     if (!r.ok || !r.ref || !r.oid) {
       process.stderr.write(`checkpoint not created: ${r.error}\n`);
       return r.declined ? 2 : 1;
