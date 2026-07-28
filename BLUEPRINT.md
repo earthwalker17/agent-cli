@@ -2,34 +2,30 @@
 
 ## 1. Purpose
 
-This is the rolling near-term direction guide for Agent CLI after Session 14.
+This is the rolling near-term direction guide for Agent CLI after **v1.0** (Session 14.5).
 
-It begins from the implemented and live-proven V0.9 state described in `ARCHITECTURE.md` and
+It begins from the implemented and live-proven **v1.0** state described in `ARCHITECTURE.md` and
 `ROADMAP.md`. It does not replace the enduring thesis in `PROJECT.md`, and it should not become a
 detailed implementation checklist. Each session must still begin in plan mode, inspect the current
 repository, validate the assumptions below, and propose a session-sized design from evidence.
 
-The near-term decision has changed slightly:
+The near-term decision, now that the coding flow is complete:
 
-> Before the first non-coding workflow pack, turn the current coding capabilities into a coherent,
-> proportionate, evidence-driven workflow that can understand large repositories, plan iteratively,
-> execute in parallel when justified, verify real outcomes, recover from typed failures, and leave
-> every change reviewable and reversible.
+> Build the first NON-CODING workflow pack on the contracts the coding flow established —
+> reusing context, tasks, verification, recovery, review, and delivery rather than copying them —
+> and let that reuse prove the kernel generalizes beyond code.
 
-This is not a reason to inflate `runTurn` into a workflow engine. The coding flow should become the
-first optimized workflow layer built on the small kernel, and should establish reusable contracts
-for later document, PDF, image, and video packs.
+This is not a reason to inflate `runTurn` into a workflow engine. The coding flow is the first
+optimized workflow layer built on the small kernel; the documents/PDF pack is the second, and the
+seam between them is what the next sessions are really testing.
 
-## 2. Current Starting Point (post-Session 14, V0.9)
+## 2. Current Starting Point (post-Session 14.5, **v1.0**)
 
-The foundation is already substantial and has seven recorded live proofs (the V0.7 loop, the V0.8
-large-repo retrieval run, the V0.9 crash/resume planning run, the Session 11.5 durable-session run
-through interrupt → resume → acceptance → cleanup, the Session 12 verification/recovery run
-through crash-mid-check → classified repair → green gate → acceptance → honest escalation, the
-Session 13 preview/browser run through browser-found defect → classified repair →
-crash → identity-verified orphan sweep → re-consent → acceptance (44/44 evidence checks), and
-the Session 14 delivery-boundary run through a pre-work gate refusal → parallel executors →
-integration → typed verification → review round → triage → crash → resume → accepted delivery):
+The foundation is substantial and has eight recorded live proofs — most recently the V1.0 demo
+(one natural-language request → plan → user-requested revision → sha-bound approval → parallel
+worktree executors → integration → typed checks → managed preview → browser verification →
+adversarial review → crash → resume → acceptance → memory handoff). The coding flow is complete
+and the kernel is clean; Session 15 begins the first non-coding workflow pack.
 
 - one shared `runTurn` for one-shot, REPL, parent, and child sessions;
 - a central fail-closed policy choke point, recorded approvals, and narrowing-only configuration;
@@ -40,13 +36,13 @@ integration → typed verification → review round → triage → crash → res
 - ranked incremental repository retrieval, focused explorer briefs, and structured child reports;
 - one canonical structured plan per session with content-sha approval, amendment invalidation,
   observable routing, and user/agent projections;
-- a dependency-aware task DAG gate (R1–R10) over bounded parallel executor groups, plan bindings
+- a dependency-aware task DAG gate (R1–R12) over bounded parallel executor groups, plan bindings
   with per-definition identity, events-rebuilt budgets, bounded supervision, task-scoped
   cancellation, and the live TTY task surface;
 - Session 12 — typed verification and recovery: project-aware check recipes with normalized
   exit-code verdicts and named signals, a `check` policy fact with body-bound replay consent, the
   task-graph verification gate (dependents unblock only on green) with integration/completion
-  boundary gates and honest waivers, and the nine-class recovery catalogue with deterministic
+  boundary gates and honest waivers, and the eleven-class recovery catalogue with deterministic
   classification, a derived-outcome repair ledger, and a bounded policy enforced at the scheduler;
 - Session 11.5 — the durable session: crash-covered task-base ref lifecycle (creation events +
   resume-seeded pruning), truncation spill blobs (command/delegate output survives as
@@ -68,18 +64,23 @@ integration → typed verification → review round → triage → crash → res
   structural review gate (typed findings recorded at the source, a pure fold deriving
   requirement/qualification/triage worth, open critical/high blocking `/accept`).
 
-Session 14 closed the delivery-quality gap. What remains open on the coding axis is narrow and
-deliberate:
+- Session 14.5 — v1.0 consolidation: a repo-wide 4-lens adversarial review (23 findings, all
+  hand-verified and fixed, including a replay-consent hole where a 200-char display cap was the
+  consent identity, a `max_tokens`-mid-tool-call wire bug that permanently invalidated a live
+  session, and an unreachable `aborted` classification branch that turned cancellations into
+  repairable defects); the executor-capture EOL pin; review-gate coherence (in-window
+  de-qualification, capture-as-work, a reviewer budget that fits its own brief, a harness round
+  cap); and honest-degrade fixes across the hygiene paths.
+
+What remains open on the coding axis is narrow and deliberate:
 
 - the review requirement is PLAN-scoped, so executor work delegated with no plan derives none
   (recorded findings still block) — the user's explicit choice over "any mutating session";
 - executors cannot self-verify (a worktree has no gitignored dependencies, so `run_check` and
   the preview/browser tools are parent-only) — acceptable because the parent verifies after
   integration;
-- a workspace whose on-disk bytes differ from git's checkout normalization (e.g. system
-  `core.autocrlf=true` over an LF working tree) makes executor captures refuse at apply as base
-  drift — honest behavior, surfaced live as an `integration-conflict` escalation, but a real
-  ergonomic edge worth a future fix.
+- the EOL pin covers a uniformly-LF parent tree; a genuinely MIXED tree still refuses captured
+  files at apply, now with a diagnosis that names line-ending normalization and exits that work.
 
 ## 3. Target Coding Workflow
 
@@ -103,69 +104,34 @@ workflow packs all observe the same truth.
 
 ## 4. Indicative Session Sequence
 
-### Session 11 — Iterative Planning, Task Graphs, and Parallel-First Execution: COMPLETE (V0.9)
+Sessions 11 → 14 built the coding workflow and are COMPLETE; their full records live in
+`ROADMAP.md` and their contracts in `ARCHITECTURE.md`. In one line each:
 
-Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md`. One canonical
-JSON plan with content-sha approval (amendment structurally invalidates; superseded un-trapped),
-user/agent projections, observable routing (`@plan`/`@direct` + `plan.route`), the DAG gate
-(R1–R9) with plan bindings and events-rebuilt caps, bounded supervision (loop/budget/stall) with
-the head-of-result group digest, task-scoped `/cancel`, the TTY sticky status area + live task
-table, and crash/resume honesty (interrupted tasks re-spawnable; capture loss folds to failed).
+- **11 — iterative planning, task graphs, parallel-first execution.** One canonical JSON plan
+  with content-sha approval, observable routing, the DAG gate, bounded supervision, `/cancel`,
+  the live task surface.
+- **11.5 — the durable session.** Crash-covered ref lifecycle, spill blobs, definition-bound
+  completed state, the retry ceiling, and the `/accept` boundary with cleanup and handoff.
+- **12 — unified verification gate + typed recovery.** The model names KINDS, the harness names
+  COMMANDS; exit-code-is-the-verdict; gates that block dependents; the failure-class catalogue
+  with derived repair outcomes and a bounded policy.
+- **13 — managed previews + browser/visual verification.** A preview is a RESOURCE, not a check
+  kind; typed flows over the system browser emit check evidence of kind 'browser'.
+- **14 — the delivery boundary.** Harness checkpoint lineage (event-before-ref, delivery keyed on
+  the acceptance that CONSUMED it) and the structural review gate.
 
-### Session 11.5 — The Durable Session (consolidation): COMPLETE
+### Session 14.5 — v1.0 consolidation: COMPLETE
 
-Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md`. A session is
-now a durable, self-contained unit of work: crash-covered task-base ref lifecycle, truncation
-spill blobs, definition-bound completed state with per-attempt history, the R10 retry ceiling,
-and the explicit `/accept` completion boundary with cleanup and journal handoff — live-proven
-through a deliberate mid-wave SIGKILL, resume, completion, acceptance, and memory handoff.
-
-### Session 12 — Unified Verification Gate and Typed Recovery: COMPLETE
-
-Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md`. Typed
-project-aware check recipes (the model names KINDS, the harness names COMMANDS) with
-exit-code-is-the-verdict normalization and named signals that keep classification derivable from
-the log; a `check` policy fact with its own fail-closed branch and replay consent bound to the
-resolved command AND the script body it invokes; `PlanTask.checks` / `PlanGraph.gates` with one
-`depSatisfied` predicate blocking dependents until a gate is green, plus integration- and
-completion-boundary gates; and `src/recovery/` — nine failure classes as a DATA catalogue,
-deterministic classification before any repair planning, a ledger whose outcomes are DERIVED, and
-a bounded policy with typed stop reasons wired into the scheduler gate (R11/R12). Suite
-689→868+1; 4-lens hand-verified review (21 findings fixed, incl. one critical consent hole of my
-own making); live four-life E2E, 39/40 evidence checks with 0 failures.
-
-### Session 13 — Managed Preview Processes and Browser / Visual Verification: COMPLETE
-
-Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md` (Managed
-preview processes / Browser verification / Wire images). The open design question resolved
-exactly as the evidence argued: a preview is a distinct managed RESOURCE (a check is a bounded
-process that ends; a preview deliberately does not) with the check contract reused for consent
-(harness-resolved command, body-bound replay) and for the assertions that run against it
-(browser flows emit check evidence of kind 'browser'). Suite 868→972+1; 4-lens hand-verified
-review (~39 findings, one fix reverted with recorded evidence); live two-life E2E with a
-browser-only seeded defect, classified repair, crash, identity-verified orphan sweep,
-re-consent, and complete acceptance — 44/44 evidence checks.
-
-### Session 14 — Git Audit Trail, Structural Review Gate, and Coding-Flow Acceptance: COMPLETE
-
-Landed as designed; full record in `ROADMAP.md`, contracts in `ARCHITECTURE.md` (Harness
-checkpoint lineage / The structural review gate). The delivery boundary is now coherent:
-harness-owned checkpoints at the transitions that exist (task-base already, plus
-pre-integration under a covered-change rule and a delivery anchor at `/accept`), created
-EVENT-BEFORE-REF so the creation-instant leak is structurally closed and a failed ref write
-leaves an honest phantom; delivery survival keyed on the ref an acceptance actually CONSUMED;
-zero user-branch commits (the boundary suggests `/commit`, never performs it). Review became
-structural: reviewers RECORD typed findings through `report_finding` (the second named
-child-tool admission), the pure `foldReview` derives the requirement, round qualification, and
-what each triage is WORTH, and open critical/high findings block `/accept` until the parent
-hand-verifies and triages them — with `/accept confirm` still the user's override. Suite
-972→1029+1; 4-lens hand-verified review (16 findings, 8 fixed — all four lenses independently
-found the phantom-delivery defect, and the first fix for it was itself wrong until a
-regression pin caught it).
+Landed as designed; full record in `ROADMAP.md`. A repo-wide bounded adversarial review (4
+lenses, 23 findings, 48 invariants held, every finding hand-verified before fixing), the
+executor-capture EOL pin that closed the last live-found S14 gap, review-gate coherence, the
+deferred-pool items worth doing now, the V1.0 stamp, and a documentation consolidation pass.
+Suite 1029→1072+1. The skipped live-API test was reviewed and RUN live: the guard stays (CI must
+be hermetic), and the run re-proved the default model id and the provider adapter.
 
 ### Session 15 (next horizon) — First Non-Coding Workflow Pack
 
-The coding-flow acceptance gate is live-proven; begin the documents/PDF pack originally planned
+The coding flow is complete and live-proven; begin the documents/PDF pack originally planned
 for Session 10.
 
 Its likely shape remains:
@@ -295,7 +261,7 @@ Research current implementations again when each session begins.
 ### Before automatic recovery — ALL LANDED (Session 12)
 
 - normalized verification results — LANDED (`CheckResult`, exit-code-is-the-verdict);
-- typed failure classification — LANDED (nine classes, deterministic, event-derivable);
+- typed failure classification — LANDED (eleven classes, deterministic, event-derivable);
 - bounded eligibility and stopping rules — LANDED (`recovery/policy.ts`, typed stop reasons);
 - checkpoints before each repair — LANDED by REUSE, not by new machinery: parent edits are
   snapshot-backed by construction and an executor re-run creates a fresh group base checkpoint,
@@ -334,6 +300,18 @@ Research current implementations again when each session begins.
 
 ## 10. Recently Completed
 
+- **Session 14.5 — v1.0: consolidation, repo-wide adversarial review, live proof: COMPLETE.**
+  4 read-only lenses over the whole repo → 23 findings, all hand-verified and fixed, headlined by
+  a replay-consent hole (a 200-char DISPLAY cap was serving as the consent identity, so an append
+  past it rode the earlier `[s]`), a `max_tokens`-mid-tool-call wire bug that permanently
+  invalidated a live session, an unguarded post-write readback that discarded all mutation
+  evidence, an unreachable `aborted` classification branch, a report that claimed a clean end for
+  resumed-then-crashed sessions, secret classification on the unresolved path, and prompt-fence
+  spoofing through memory docs and plan notes. Plus the executor-capture EOL pin, review-gate
+  coherence (in-window de-qualification, capture-as-work, a reviewer budget that fits its brief,
+  a harness round cap), `agent version/help` no longer starting real sessions, and the docs
+  compression. Suite 1029→1072+1.
+
 - **Session 14 — the delivery boundary: Git audit lineage + the structural review gate:
   COMPLETE.** `onRefReady` (event-before-ref: the creation-instant leak closed structurally,
   phantoms honest and self-converging) + `harness.checkpoint`/`HarnessRefKind` + the seq/kind
@@ -366,7 +344,7 @@ Research current implementations again when each session begins.
   spawn; `PlanTask.checks`/`PlanGraph.gates` (sha-neutral when absent) with the `verification`
   field and the single `depSatisfied` predicate that blocks dependents, plus integration- and
   completion-boundary gates and honest waivers surfaced as acceptance caveats; `src/recovery/`
-  (nine-class DATA catalogue, deterministic classification, derived-outcome ledger, bounded
+  (eleven-class DATA catalogue, deterministic classification, derived-outcome ledger, bounded
   policy, `recover` tool, R11/R12). Suite 689→868+1; 4-lens hand-verified review, 21 findings
   fixed — including the critical one where replay consent bound the command string and not the
   script body, so rewriting `package.json` turned one `[s]` into standing execution consent.

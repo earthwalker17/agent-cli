@@ -1,40 +1,43 @@
 # Agent CLI
 
-A local-first, terminal-native agent harness. V0.1 proved a **bounded local agent loop**:
-the agent understands a workspace, plans, acts through explicit typed tools, has every action
-gated by one policy engine, records attributable evidence to an append-only log, can undo its
-file changes, resumes across runs, and produces a deterministic evidence report. V0.2 added the
-**interactive REPL**, a **workspace-trust consent gate**, and **narrowing-only policy
-configuration**. V0.3 added a **managed execution kernel** — real mid-command cancellation, typed
-termination (a killed command has no exit code), best-effort tree kill, and command-lifecycle
-evidence. V0.4 added a **genuinely OS-enforced Windows sandbox** (Low integrity + Job Object) and
-**automatic command review**: demonstrably read-only commands auto-run *inside* the sandbox, and
-everything else asks — a single default, fail-closed, backed by enforcement rather than the
-model's opinion. V0.5 makes the harness **Git-native and context-efficient**: probed repository
-context, an attributable session diff (`/diff`), deliberate session-scoped commits (`/commit`),
-hidden-ref recovery checkpoints with undoable restore (`/checkpoint`), prompt caching, and
-deterministic long-session history compaction — the agent itself still never touches version
-control unless you explicitly ask. V0.6 added **project memory** (a user-owned `AGENT.md`
-constitution plus harness-generated journal/codebase docs — always labeled context, never
-authority) and the first **delegated subagent tasks**. V0.7 grew that into a minimal,
-bounded **agent-teams layer**: explicit role contracts (explorer/planner/reviewer read-only;
-executor mutating), parallel task groups, **plan mode** with an explicit user approval gate,
-and **worktree-isolated executors** whose approvals forward to you and whose changes reach
-the workspace only through reviewed, drift-refusing integration. V0.8 added **repository
-intelligence**: a ranked, incrementally indexed workspace map under a hard context budget
-(the complete directory tree is always visible — ranking orders detail, it never hides
-existence), a **`retrieve` tool** whose ranked hits explain WHY they matched and whose line
-excerpts are always read live from disk, and **non-overlapping explorer briefs** with a
-structured report contract — so large codebases are explored selectively instead of scanned.
+A local-first, terminal-native agent harness. It understands a workspace, plans, acts through
+explicit typed tools, has **every** action gated by one policy engine, records attributable
+evidence to an append-only log, verifies real outcomes, recovers from typed failures, undoes its
+own changes, resumes across crashes, and reaches an explicit completion boundary — with honest
+limits stated everywhere they exist.
 
-> **Status:** V0.8, **proven live end-to-end twice** — the V0.7 loop (plan → approval → two
-> parallel executors → forwarded approvals → reviewed integration → undo → review panel →
-> session memory) and the V0.8 large-repo run (a 3,064-file monorepo where the old flat map
-> showed 0 of 14 packages and the ranked map shows all 14; two disjoint-focus explorers with
-> zero overlapping reads; every load-bearing claim re-verified first-hand) — with 574 tests
-> incl. real-OS sandbox, real-repository git, and adversarial-review suites. This is an open,
-> build-in-public engineering effort — see `PROJECT.md` for the thesis and `ROADMAP.md` for
-> what is done, deferred, and next.
+What that means concretely:
+
+- **The bounded loop.** Typed tools, one policy choke point, append-only JSONL evidence,
+  content-addressed snapshots with drift-refusing undo, crash-reconciling resume, and a
+  deterministic evidence report that marks a file CHECKED only when a real process exited zero
+  after its last mutation.
+- **Managed execution + an OS-enforced Windows sandbox.** Typed termination (a killed command has
+  no exit code, everywhere), real mid-command cancellation, verified tree kill — and demonstrably
+  read-only commands auto-run *inside* a Low-integrity Job Object boundary that is **probed**, not
+  assumed. Everything else asks. Fail closed.
+- **Git-native, without touching your history.** Probed repo context, an attributable session
+  diff, deliberate session-scoped commits you ask for, and hidden-ref recovery checkpoints whose
+  restore is itself one undoable unit.
+- **Repository intelligence.** A ranked, incrementally indexed map under a hard context budget
+  (the complete directory tree stays visible — ranking orders detail, it never hides existence)
+  plus a `retrieve` tool whose hits explain WHY they matched and whose excerpts are read live.
+- **An agent-teams layer with real boundaries.** Explicit role contracts, parallel task groups,
+  worktree-isolated executors whose approvals forward to you and whose changes land only through
+  reviewed, drift-refusing integration.
+- **A structured plan with sha-bound approval**, a dependency-aware task graph, typed
+  verification (the model names KINDS, the harness names COMMANDS), managed preview servers,
+  Playwright browser flows over the *system* browser, a typed recovery policy, a **structural
+  review gate**, and an explicit `/accept` delivery boundary.
+
+> **Status: v1.0.** 1072 tests across 78 files (real-OS sandbox, real-repository git, real
+> browser flows, adversarial-review suites) plus one opt-in live-API smoke. Proven live
+> end-to-end across eight recorded runs, most recently a full V1.0 demo: one natural-language
+> request → plan → revision → sha-bound approval → parallel worktree executors → integration →
+> typed checks → managed preview → browser verification → adversarial review → crash → resume →
+> acceptance → memory handoff. This is an open, build-in-public engineering effort — see
+> `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is
+> done, deferred, and next.
 
 ## Install
 
@@ -72,13 +75,17 @@ agent session 20260715-101730-5d56
 - **Ctrl+C** interrupts the running turn (pending tool calls are skipped and recorded as
   interrupted); at the idle prompt press it twice to quit. **Ctrl+D** on an empty line quits.
 - **Slash commands:** `/help`, `/status`, `/undo [all]` (in-session undo; the model is told via
-  a delimited harness note), `/diff` (what this session changed, as a unified diff),
-  `/commit [-m "msg"] [--all]` (deliver session changes — preview + confirmation),
+  a delimited harness note), `/diff` (what this session changed, with each file's CHECKED
+  verdict), `/commit [-m "msg"] [--all]` (deliver session changes — preview + confirmation),
   `/checkpoint [label | list | restore <n>]` (recovery points in hidden git refs),
   `/plan [show | approve | discard]` (the plan document and its approval gate),
-  `/tasks` (delegated subagent tasks + a children-total cost line), `/report`, `/map`, `/quit`.
+  `/tasks` (the task graph + delegated subagents), `/cancel <ref>` (stop one task),
+  `/checks` (what this project can verify and the latest evidence per kind),
+  `/preview [stop <id>]` (managed dev servers), `/review` (the review gate's state),
+  `/accept [confirm]` (the completion boundary), `/report`, `/map`, `/quit`.
 - **`@plan <request>`** forces plan mode: the model investigates read-only, writes a
   persistent plan document, and waits — executor tasks stay blocked until `/plan approve`.
+  **`@direct <request>`** forces the direct path for a request that needs no ceremony.
 - A running `run_command` IS interruptible: Ctrl+C tree-kills it (best effort, verified) and the
   kill is recorded as evidence — a killed command never reads as a passing check.
 - stdout carries only model text and requested artifacts; all status chrome goes to stderr, so
@@ -111,8 +118,9 @@ agent trust [--revoke|--list]  # manage recorded workspace trust
 Key flags: `-C <dir>` (workspace root), `--provider anthropic|mock`, `--script <file>`
 (scripted turns for `mock`), `--model <id>`, `--no-input` (non-interactive; auto-detected off a
 TTY), `--interactive` (force interactive mode over piped stdio, e.g. expect-style drivers),
-`--max-turns <n>`, `--trust-this-workspace` (one invocation, never recorded),
-`--dangerously-allow-all`.
+`--max-steps <n>` (model steps per turn; `--max-turns` is the legacy alias for the same limit),
+`--trust-this-workspace` (one invocation, never recorded), `--dangerously-allow-all`,
+`--version`. `agent version` and `agent help` print and exit — they never start a session.
 
 Exit codes: `0` ok · `1` error · `2` one-shot completed with denials or hit the step budget
 (the REPL reports these inline and exits 0 on a clean quit) · `3` workspace not trusted.
@@ -134,7 +142,7 @@ not what a process *can technically* do. Untrusted + non-interactive runs refuse
 
 ## Configuration (narrowing-only)
 
-- `<state>/config.json` (user): `model`, `maxSteps`, plus the narrowing knobs.
+- `<state>/config.json` (user): `model`, `maxSteps`, `memoryUpdates`, plus the narrowing knobs.
 - `<workspace>/.agent-cli/config.json` (workspace): **narrowing knobs only** — a workspace
   cannot choose your model or budgets, and the agent's file tools cannot write to `.agent-cli/`.
 
@@ -147,14 +155,28 @@ merges as a union across layers.
 
 ## What the agent can do
 
-Six typed core tools: `read_file` (with line paging for large files), `list_files`, `search`,
-`write_file`, `edit_file` (exact-match replace, optionally `replace_all`), `run_command` —
-plus three per-session tools the main agent (and only the main agent) receives:
-`delegate_task` (bounded subagent groups), `update_plan` (the model's single gated write path
-to the plan document), and `apply_task_changes` (reviewed integration of executor changes).
+Six typed core tools — `read_file` (line paging for large files), `list_files`, `search`,
+`write_file`, `edit_file` (exact-match replace, optionally `replace_all`), `run_command` — plus
+per-session tools the main agent (and only the main agent) receives:
+
+| Tool | What it does |
+| --- | --- |
+| `retrieve` | Ranked, signal-attributed search over the session index; excerpts read live |
+| `update_plan` | The model's ONLY write path to the canonical plan graph |
+| `delegate_task` | Bounded subagent groups (1–3 per call, run in parallel) |
+| `apply_task_changes` | Reviewed, drift-refusing integration of executor changes |
+| `run_check` | Typed verification — the model names kinds, the harness resolves commands |
+| `preview` | A managed dev-server process with recorded readiness, logs, and teardown |
+| `browser_flow` | Typed browser steps against a running preview; screenshots + traces |
+| `view_image` | Re-read a screenshot this session actually captured |
+| `recover` | The bounded repair ledger (classify → attempt → prove, or escalate) |
+| `review` | Parent triage over findings reviewers recorded |
+| `report_finding` | The reviewer child's ONLY findings channel (child-only) |
+
 Every call passes through the policy engine before it runs. Reads and searches inside the
 workspace run automatically; in-workspace writes run automatically **and are snapshotted so they
-can be undone**; reads outside the workspace or of secret-looking files require approval.
+can be undone**; reads outside the workspace or of secret-looking files require approval — and
+secret classification runs on the RESOLVED path, so a symlink or 8.3 alias cannot evade it.
 
 Long sessions stay affordable: requests use **prompt caching** (the conversation prefix is
 re-read from cache each step; `/status` and the report show cache read/write tokens), and when
@@ -283,7 +305,17 @@ npm test             # vitest
 npm run build        # emit dist/
 ```
 
-`AGENT_LIVE_TEST=1 npm test` additionally runs one real Anthropic API call (excluded from CI).
+The suite is hermetic — no network, no API key, no billing. ONE test is opt-in: a single real
+Anthropic API call that also re-proves the default model id and the provider adapter. Run it
+deliberately (PowerShell):
+
+```powershell
+$env:AGENT_LIVE_TEST=1; npx vitest run test/anthropic.test.ts
+```
+
+It is not wired into an npm script on purpose: a bare `AGENT_LIVE_TEST=1 vitest` prefix is not
+portable on Windows without adding a dependency, and a test that spends money should be typed
+out, not inherited.
 
 ## Documentation
 
