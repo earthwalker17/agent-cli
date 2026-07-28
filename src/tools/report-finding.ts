@@ -77,13 +77,21 @@ export function createReportFindingTool(acc: FindingAccumulator): Tool<FindingIn
             'raise remaining observations as lower-severity notes in your final report prose',
         );
       }
-      // Paths are later rendered, joined against plan touches, and read by humans — validate
-      // them with the same containment rule as plan touches (never disk-probed).
+      // Paths are later rendered into harness-attributed lines (/report, /review, the group
+      // digest) and read by humans — validate with the same containment rule as plan touches
+      // (never disk-probed). A path is an IDENTIFIER, not prose: unlike the prose fields below
+      // (which sanitize), a path that sanitization would ALTER is refused outright — a newline
+      // or bidi override inside "a path" is spoofing, and escaping it into the record would
+      // store a name no repository file can have. (This was the one model-authored field that
+      // skipped the ingestion choke point; /report rendered it raw.)
       const paths: string[] = [];
       for (const raw of input.paths) {
         const norm = normalizeRelPrefix(raw);
         if (norm === null) {
-          return done(false, '', `path '${raw}' is not a contained workspace-relative prefix — name the file as it appears in the repository`);
+          return done(false, '', `path '${sanitizeLine(raw)}' is not a contained workspace-relative prefix — name the file as it appears in the repository`);
+        }
+        if (sanitizeLine(norm) !== norm) {
+          return done(false, '', `path '${sanitizeLine(raw)}' contains control or spoofing characters — name the file as it appears in the repository`);
         }
         if (!paths.includes(norm)) paths.push(norm);
       }
