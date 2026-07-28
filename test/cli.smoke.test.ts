@@ -130,6 +130,21 @@ d('CLI end-to-end via the built binary', () => {
     expect(res.stdout).toMatch(/fail closed/);
   });
 
+  it('--version and `agent version` print the package version and NEVER start a session', () => {
+    // Regression pin: before 'version'/'help' joined KNOWN, the unknown-positional fallthrough
+    // started a REAL one-shot agent session with the literal task string "version".
+    const pkg = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8')) as { version: string };
+    for (const args of [['--version'], ['version'], ['help']]) {
+      const res = run(args);
+      expect(res.code).toBe(0);
+      if (args[0] === 'help') expect(res.stdout).toMatch(/Usage:/);
+      else expect(res.stdout.trim()).toBe(`agent-cli ${pkg.version}`);
+      expect(sessionEvents()).toEqual([]); // no session log was ever created
+    }
+    // The usage header carries the live version, not a hardcoded stamp.
+    expect(run(['--help']).stdout).toContain(`Agent CLI v${pkg.version}`);
+  });
+
   it('runs when invoked through a symlinked path (npm link bin shim)', () => {
     // npm link points the global bin at <prefix>/node_modules/agent-cli -> repo junction.
     // Node realpaths the main module's import.meta.url, so the entry guard must realpath

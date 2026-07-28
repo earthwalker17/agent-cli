@@ -27,6 +27,7 @@ export interface CliValues {
   all?: boolean;
   continue?: boolean;
   help?: boolean;
+  version?: boolean;
   m?: string;
   yes?: boolean;
   'no-trailer'?: boolean;

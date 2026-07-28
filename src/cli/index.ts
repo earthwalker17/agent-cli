@@ -26,7 +26,20 @@ import { assembleSession } from './assemble.js';
 import { memoryDir, parseFrontmatter, readDocCapped } from '../memory/store.js';
 import { runMemoryUpdate } from '../memory/update.js';
 
-const USAGE = `Agent CLI — a bounded local agent harness (V0.7).
+// The single version source is package.json; the CLI reads its own copy so the banner can
+// never drift from the published version again (the usage header sat at "V0.7" for seven
+// sessions). Read once at module load; any failure degrades to 'unknown', never a throw.
+function cliVersion(): string {
+  try {
+    const v = (JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version?: unknown }).version;
+    return typeof v === 'string' ? v : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+export const VERSION = cliVersion();
+
+const USAGE = `Agent CLI v${VERSION} — a bounded local agent harness.
 
 Usage:
   agent                          Start an interactive session (REPL) in the current directory
@@ -50,6 +63,7 @@ Usage:
   agent map [--budget <n>]       Print the workspace map the model would receive
   agent memory                   Show the project-memory documents (paths, status, provenance)
   agent trust [--revoke|--list]  Manage recorded workspace trust (consent, not a sandbox)
+  agent version | help           Print the version / this help (never starts a session)
 
 Options:
   -C <dir>                 Workspace root (default: current directory)
@@ -62,6 +76,7 @@ Options:
   --dangerously-allow-all  Bypass approvals (loud; every auto-allow is logged). No isolation whatsoever.
   --session <id>           Target session for undo (default: latest)
   --trust-this-workspace   Proceed in an untrusted workspace for THIS invocation only (not recorded)
+  --version                Print the version and exit
   -h, --help               Show this help
 
 Exit codes: 0 ok · 1 error · 2 denials or stopped (one-shot only; the REPL reports denials
@@ -74,7 +89,10 @@ asks; approved commands run UNSANDBOXED with full privilege and are not undoable
 sandbox is available, auto-run is disabled and every command asks (fail closed). Workspace trust is
 recorded consent, not isolation. See README "Security model & honest limitations".`;
 
-const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust']);
+// 'version' and 'help' MUST be members: an unknown first positional falls through to a REAL
+// one-shot model session, so before they were named here, `agent version` silently started a
+// paid agent run with the literal task string "version".
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust', 'version', 'help']);
 
 interface Args {
   values: CliValues;
@@ -95,6 +113,7 @@ function parse(argv: string[]): Args {
       'max-turns': { type: 'string' },
       'dangerously-allow-all': { type: 'boolean' },
       'trust-this-workspace': { type: 'boolean' },
+      version: { type: 'boolean' },
       revoke: { type: 'boolean' },
       list: { type: 'boolean' },
       session: { type: 'string' },
@@ -627,9 +646,21 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(USAGE + '\n');
     return 0;
   }
+  if (values.version) {
+    process.stdout.write(`agent-cli ${VERSION}\n`);
+    return 0;
+  }
 
   try {
     const cmd = positionals[0];
+    if (cmd === 'version') {
+      process.stdout.write(`agent-cli ${VERSION}\n`);
+      return 0;
+    }
+    if (cmd === 'help') {
+      process.stdout.write(USAGE + '\n');
+      return 0;
+    }
     if (cmd === 'report') return cmdReport(values, positionals[1]);
     if (cmd === 'plan') return cmdPlan(values, positionals[1]);
     if (cmd === 'diff') return cmdDiff(values, positionals[1]);
