@@ -1,5 +1,10 @@
 # Agent CLI
 
+[![CI](https://github.com/earthwalker17/agent-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/earthwalker17/agent-cli/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/earthwalker17/agent-cli)](https://github.com/earthwalker17/agent-cli/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
+
 A local-first, terminal-native agent harness. It understands a workspace, plans, acts through
 explicit typed tools, has **every** action gated by one policy engine, records attributable
 evidence to an append-only log, verifies real outcomes, recovers from typed failures, undoes its
