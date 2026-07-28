@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # typescript is pinned with a tilde on purpose (patch-only): TS minors routinely surface new
+    # errors in a codebase this strict, and that should be a deliberate upgrade, not a bot PR.
+    versioning-strategy: increase-if-necessary
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    ignore:
+      # playwright-core is a RUNTIME dependency whose browser-channel behaviour is exactly what
+      # the browser suite exercises against a real system browser. Bumps get reviewed by hand.
+      - dependency-name: playwright-core
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

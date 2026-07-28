@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a capability or a change in behaviour
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing something structural, please skim
+        [PROJECT.md](https://github.com/earthwalker17/agent-cli/blob/main/PROJECT.md) (the thesis)
+        and the **deferred pool** at the end of
+        [ROADMAP.md](https://github.com/earthwalker17/agent-cli/blob/main/ROADMAP.md) — a lot of
+        obvious ideas are already there with a recorded design and a reason they are waiting.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that is hard or impossible today?
+      placeholder: When I ... I have to ... because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should happen instead? Be concrete about the contract, not just the outcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "do nothing" — why is that not good enough?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: fit
+    attributes:
+      label: Fit with the project's constraints
+      description: >
+        This project keeps a small kernel with a single fail-closed policy choke point, and it
+        prefers honest limits over broad claims. Tick whichever apply.
+      options:
+        - label: This does not widen the agent's authority, or if it does, it goes through the policy engine
+        - label: This does not add a second runtime loop or a second source of truth for session state
+        - label: I checked the deferred pool in ROADMAP.md and this is not already recorded there

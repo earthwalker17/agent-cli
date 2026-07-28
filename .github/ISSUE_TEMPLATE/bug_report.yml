@@ -1,0 +1,93 @@
+name: Bug report
+description: Something the harness did that it should not have, or did not do that it should have
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The single most useful thing you can attach is the **evidence log**:
+        `agent report <session-id>` prints a deterministic report derived purely from events.
+
+        ⚠️ **Redact first.** Command output is not scrubbed for secrets, so a report can contain
+        whatever your commands printed.
+
+        For security issues, do **not** open a public issue — see
+        [SECURITY.md](https://github.com/earthwalker17/agent-cli/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did the harness do, and what did you expect instead?
+      placeholder: |
+        I asked it to ... and it ...
+        I expected ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence you can find that shows it.
+      placeholder: |
+        1. `agent` in an empty folder
+        2. type "..."
+        3. approve the command
+        4. observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Paste the relevant part of `agent report <id>`, the chrome output, or the event log lines.
+        Redact anything sensitive.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Agent CLI version
+      description: Output of `agent --version`
+      placeholder: "agent-cli 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version`
+      placeholder: "v22.x.x"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: >
+            I checked the documented limitations in
+            [ROADMAP.md](https://github.com/earthwalker17/agent-cli/blob/main/ROADMAP.md)
+            and this is not one of them
+          required: true
+        - label: I have redacted secrets from any output I pasted
+          required: true
