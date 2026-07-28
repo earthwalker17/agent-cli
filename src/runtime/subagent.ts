@@ -398,7 +398,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
         }
       } else if (e.type === 'tool.requested') {
         pushStatus({ phase: 'tool', tool: e.tool, steps: stepsSeen, outTokens: outputTokens });
-        const sig = sha256(`${e.tool} ${JSON.stringify(e.input)}`);
+        const sig = sha256(`${e.tool}\u0000${JSON.stringify(e.input)}`);
         identicalCalls = sig === lastCallSig ? identicalCalls + 1 : 1;
         lastCallSig = sig;
         if (identicalCalls === LOOP_ANNOTATE_AT) {
