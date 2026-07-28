@@ -1,4 +1,5 @@
 import type { CommandTermination, SessionEvent } from '../types.js';
+import type { PlanGraph } from '../plan/schema.js';
 import { foldRepairs } from '../recovery/ledger.js';
 import { foldReview } from '../review/ledger.js';
 
@@ -172,7 +173,7 @@ export interface ReportJson {
   /** Harness workflow-transition checkpoints (Session 14, additive): pre-integration +
    *  delivery. The ref scan (`agent checkpoint list`) is live truth — a recorded creation
    *  whose ref is absent was pruned, superseded, or never landed (a phantom). */
-  harnessCheckpoints?: { kind: 'pre-integration' | 'delivery'; ref: string; oid: string }[];
+  harnessCheckpoints?: { kind: 'pre-integration' | 'delivery'; ref: string; oid: string; pruned?: boolean }[];
   /** The structural review gate's recorded evidence (Session 14, additive): rounds, findings
    *  with DERIVED triage status, caveats. Statuses come from the same fold acceptance reads. */
   review?: ReportReview;
@@ -199,6 +200,10 @@ export interface ReportJson {
 }
 
 export interface ReportReview {
+  /** Present when the caller supplied the approved graph (S14.5): the gate's requirement. */
+  requirement?: string;
+  /** Open gate blockers at the end of the log (S14.5) — additive; old consumers unaffected. */
+  blockers?: string[];
   rounds: { callId: string; lenses: number; captured: number; deadLenses: string[]; findings: number; qualifying: boolean; note?: string }[];
   findings: {
     findingId: string;
@@ -234,6 +239,14 @@ export interface ReportInput {
   events: readonly SessionEvent[];
   truncatedTail?: boolean;
   corruptAt?: { line: number; kind: string };
+  /**
+   * The APPROVED-AND-CURRENT plan graph, when the caller has one (S14.5). The report stays a
+   * pure function — the graph is an input, never a file read — but without it the review
+   * REQUIREMENT could not be derived, so an unaccepted session's report showed findings and
+   * rounds while never saying the gate itself was unsatisfied (`## Completion` renders
+   * acceptance blockers only for sessions that recorded an acceptance).
+   */
+  approvedGraph?: PlanGraph | null;
 }
 
 function short(h: string | null): string {
@@ -423,16 +436,32 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     .filter((e): e is Extract<SessionEvent, { type: 'task.base-checkpoint' }> => e.type === 'task.base-checkpoint')
     .map((e) => ({ ref: e.ref, oid: e.oid }));
 
+  // S14.5 (I10): a delivery line must not assert liveness for a ref a LATER pruned event says
+  // was deleted — annotate per ref from the log's own evidence (the footer still points at
+  // `agent checkpoint list` as live truth for everything the log cannot know: phantoms, other
+  // sessions' prunes).
+  const prunedRefSeqs = new Map<string, number>();
+  for (const e of events) {
+    if (e.type === 'git.checkpoint.pruned') for (const ref of e.refs) prunedRefSeqs.set(ref, Math.max(prunedRefSeqs.get(ref) ?? 0, e.seq));
+  }
   const harnessCheckpoints = events
     .filter((e): e is Extract<SessionEvent, { type: 'harness.checkpoint' }> => e.type === 'harness.checkpoint')
-    .map((e) => ({ kind: e.kind, ref: e.ref, oid: e.oid }));
+    .map((e) => ({ kind: e.kind, ref: e.ref, oid: e.oid, ...((prunedRefSeqs.get(e.ref) ?? 0) > e.seq ? { pruned: true } : {}) }));
 
-  // The structural review gate (Session 14): the same fold acceptance reads. The graph is
-  // deliberately null — the report never reads the plan FILE, so the requirement line is not
-  // derived here; the recorded rounds/findings/triage are the evidence, and ## Completion
-  // already carries any acceptance blockers verbatim.
-  const reviewFold = foldReview(null, events);
+  // The structural review gate (Session 14): the same fold acceptance reads. The graph comes
+  // from the CALLER when it has one (S14.5) — the report never reads the plan file itself —
+  // so the requirement and open-blocker lines render for unaccepted sessions too; without a
+  // supplied graph the fold still renders the recorded rounds/findings/triage evidence.
+  const reviewFold = foldReview(input.approvedGraph ?? null, events);
+  const requirementLine =
+    reviewFold.requirement.kind === 'required'
+      ? `required (${reviewFold.requirement.source === 'declared' ? 'declared by the plan' : 'derived: the plan has executor tasks'})`
+      : reviewFold.requirement.kind === 'waived'
+        ? `waived by the approved plan: ${reviewFold.requirement.reason}`
+        : undefined;
   const review: ReportReview = {
+    ...(requirementLine !== undefined ? { requirement: requirementLine } : {}),
+    ...(input.approvedGraph !== undefined ? { blockers: reviewFold.openBlockers } : {}),
     rounds: reviewFold.rounds.map((r) => ({
       callId: r.callId,
       lenses: r.lenses,
@@ -918,8 +947,10 @@ function renderMarkdown(r: ReportJson): string {
     L.push('');
   }
 
-  if (r.review !== undefined && (r.review.rounds.length > 0 || r.review.findings.length > 0)) {
+  if (r.review !== undefined && (r.review.rounds.length > 0 || r.review.findings.length > 0 || r.review.requirement !== undefined)) {
     L.push(`## Adversarial review (recorded findings and triage)`);
+    if (r.review.requirement !== undefined) L.push(`- requirement: ${r.review.requirement}`);
+    for (const b of r.review.blockers ?? []) L.push(`- OPEN BLOCKER: ${b}`);
     for (let i = 0; i < r.review.rounds.length; i++) {
       const rd = r.review.rounds[i]!;
       L.push(
@@ -985,10 +1016,11 @@ function renderMarkdown(r: ReportJson): string {
   if (r.harnessCheckpoints !== undefined && r.harnessCheckpoints.length > 0) {
     L.push(`## Git recovery and audit state (hidden refs, harness-created)`);
     for (const c of r.harnessCheckpoints) {
+      const prunedSuffix = c.pruned === true ? ' [later pruned/superseded in this log]' : '';
       L.push(
         c.kind === 'delivery'
-          ? `- ${c.oid.slice(0, 12)} ${c.ref} — DELIVERY (the accepted state; survives the session until superseded or pruned by the user)`
-          : `- ${c.oid.slice(0, 12)} ${c.ref} — pre-integration (whole-workspace point before an apply; pruned at clean session end)`,
+          ? `- ${c.oid.slice(0, 12)} ${c.ref} — DELIVERY (the accepted state; intended to survive the session)${prunedSuffix}`
+          : `- ${c.oid.slice(0, 12)} ${c.ref} — pre-integration (whole-workspace point before an apply; pruned at clean session end)${prunedSuffix}`,
       );
     }
     L.push('');

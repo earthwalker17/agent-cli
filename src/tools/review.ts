@@ -62,8 +62,8 @@ export function createReviewTool(deps: ReviewToolDeps): Tool<ReviewInputT> {
       '(checked, not real — your evidence is recorded verbatim and labeled an unverified model claim), accept ' +
       '(medium/low only — a recorded limitation), or address (the fix landed — cite the mutating callIds or ' +
       'passing check recipeIds). Verify load-bearing findings against the ACTUAL code yourself before triaging; ' +
-      'never refute from memory. Open critical/high findings block /accept until triaged (or the user records ' +
-      '/accept confirm).',
+      'never refute from memory. Open critical/high findings block /accept until CLEARED — refuted or addressed; ' +
+      'a verified finding keeps blocking until fixed (or the user records /accept confirm).',
     schema: ReviewInput,
     mutates: () => ({ paths: [] }),
 
@@ -137,7 +137,17 @@ export function createReviewTool(deps: ReviewToolDeps): Tool<ReviewInputT> {
         }
       }
 
-      ctx.reportReview?.({
+      // The channel is wired unconditionally by the runtime; if it is ever absent that is a
+      // WIRING regression, and silently returning "is now refuted" over an unchanged log would
+      // be a success-reporting no-op — the exact lie this tool exists to prevent (S14.5).
+      if (ctx.reportReview === undefined) {
+        return fail(
+          'triage evidence channel missing (wiring error)',
+          'This call context cannot record review.triage events, so NOTHING was recorded and the finding is unchanged.',
+          startedAt,
+        );
+      }
+      ctx.reportReview({
         kind: 'triage',
         findingId: input.finding,
         action: input.action,

@@ -248,7 +248,38 @@ describe('delegateCapsFromEvents — resume keeps counting', () => {
       ev({ type: 'task.started', callId: 'c2', role: 'explorer', childSessionId: 'c2x', budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 } }),
       ev({ type: 'task.ended', callId: 'c2', childSessionId: 'c2x', status: 'completed', steps: 1, usage: { inputTokens: 5, outputTokens: 41 }, resultSha256: 'x', durationMs: 1 }),
     ];
-    expect(delegateCapsFromEvents(events)).toEqual({ tasksStarted: 2, childOutputTokens: 42 });
+    expect(delegateCapsFromEvents(events)).toEqual({ tasksStarted: 2, childOutputTokens: 42, reviewRoundsStarted: 0 });
+  });
+
+  it('S14.5: counts review rounds by DISTINCT reviewer callId (the foldReview round identity)', () => {
+    seq = 0;
+    const rev = (callId: string, child: string): SessionEvent =>
+      ev({ type: 'task.started', callId, role: 'reviewer', childSessionId: child, budget: { maxSteps: 1, timeoutMs: 1, maxOutputTokens: 1 } });
+    const caps = delegateCapsFromEvents([rev('r1', 'a'), rev('r1', 'b'), rev('r2', 'c'), started('t1', 'c1')]);
+    expect(caps.reviewRoundsStarted).toBe(2); // two callIds = two rounds; three reviewer children
+    expect(caps.tasksStarted).toBe(4);
+  });
+
+  it('S14.5: the THIRD reviewer group refuses whole, naming the real exits (triage / accept confirm)', async () => {
+    const deps: SubagentDeps = {
+      layout,
+      workspaceRoot: repo,
+      model: 'mock',
+      maxTokens: 100,
+      provider: new MockProvider([{ say: 'never runs' }]),
+      map: MAP,
+    };
+    const tool = createDelegateTool(deps, 'parent-x', undefined, { caps: { tasksStarted: 4, childOutputTokens: 0, reviewRoundsStarted: 2 } });
+    for (const tasks of [
+      [{ role: 'reviewer', task: 'lens A' }],
+      [{ role: 'reviewer', task: 'lens A' }, { role: 'explorer', task: 'mixed group' }], // group-atomic
+    ]) {
+      const r = await tool.execute({ tasks } as never, { workspaceRoot: repo, stateDir: layout.projectDir });
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain('review round cap reached');
+      expect(r.error).toContain('review tool');
+      expect(r.error).toContain('/accept confirm');
+    }
   });
 
   it('a resumed session with 11 started tasks refuses a group of 2 whole (group-atomic)', async () => {
@@ -260,7 +291,7 @@ describe('delegateCapsFromEvents — resume keeps counting', () => {
       provider: new MockProvider([{ say: 'never runs' }]),
       map: MAP,
     };
-    const tool = createDelegateTool(deps, 'parent-x', undefined, { caps: { tasksStarted: 11, childOutputTokens: 0 } });
+    const tool = createDelegateTool(deps, 'parent-x', undefined, { caps: { tasksStarted: 11, childOutputTokens: 0, reviewRoundsStarted: 0 } });
     const r = await tool.execute(
       { tasks: [{ role: 'explorer', task: 'a' }, { role: 'explorer', task: 'b' }] } as never,
       { workspaceRoot: repo, stateDir: layout.projectDir },
@@ -412,7 +443,7 @@ describe.skipIf(!hasGit)('task-graph execution end to end (real git)', () => {
       return { state, graphState: g !== null ? foldGraphState(g, parent.log.events) : null };
     };
     parent.tools = [
-      createDelegateTool(deps, parent.id, executorDeps, { planContext, caps: { tasksStarted: 0, childOutputTokens: 0 } }) as Tool,
+      createDelegateTool(deps, parent.id, executorDeps, { planContext, caps: { tasksStarted: 0, childOutputTokens: 0, reviewRoundsStarted: 0 } }) as Tool,
       createApplyChangesTool(registry, parent.snapshots) as Tool,
     ];
 

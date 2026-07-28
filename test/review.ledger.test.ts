@@ -112,13 +112,68 @@ describe('round qualification (rule 2)', () => {
     expect(st.satisfied).toBe(false);
   });
 
-  it('an integration AFTER the round makes it stale (reviewers observed pre-integration state)', () => {
+  it('S14.5 RULE CHANGE: an integration AFTER the round no longer de-qualifies it — the changes-after caveat carries the honesty', () => {
+    // The S14 whole-log rule punished exactly the harness-recommended fix path: a post-review
+    // executor fix (integrated via apply) retroactively voided the round and forced another,
+    // while the same fix as a parent edit only caveated. Findings never expire (rule 3), and
+    // the completion gates cover the current state — the caveat is the honest surface.
     reset();
     const st = foldReview(graphOf(), [mutated(), ...round('r1', [{ id: 'rev-aaaa', findings: [] }]), applied('ch1')]);
+    expect(st.rounds[0]!.qualifying).toBe(true);
+    expect(st.satisfied).toBe(true);
+    expect(st.caveats.join(' ')).toContain('after the last review round');
+  });
+
+  it('S14.5: an integration landing DURING the round voids it — the reviewers observed mixed state', () => {
+    reset();
+    const startedEv = ev({ type: 'task.started', callId: 'r1', role: 'reviewer', childSessionId: 'rev-aaaa', budget: {} });
+    const midApply = ev({ type: 'task.applied', callId: 'c-mid', childSessionId: 'chx', applied: ['src/a.ts'], refused: [] });
+    const endedEv = ev({
+      type: 'task.ended', callId: 'r1', childSessionId: 'rev-aaaa', status: 'completed', steps: 1,
+      usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1,
+    });
+    const capturedEv = ev({ type: 'review.findings', callId: 'r1', childSessionId: 'rev-aaaa', lens: 'correctness', findings: [] });
+    const st = foldReview(graphOf(), [mutated(), startedEv, midApply, endedEv, capturedEv]);
     expect(st.rounds[0]!.qualifying).toBe(false);
-    expect(st.rounds[0]!.note).toContain('last integration postdates');
+    expect(st.rounds[0]!.note).toContain('DURING this round');
     expect(st.satisfied).toBe(false);
     expect(st.openBlockers.join(' ')).toContain('no round qualifies');
+  });
+
+  it('S14.5: an executor capture is real work — a zero-net-change session can still qualify a round', () => {
+    // An executor that ran and concluded nothing needed changing produces task.changes with no
+    // files and no apply; under the change-only anchor such a genuinely-complete session could
+    // NEVER satisfy the gate (only /accept confirm), which punished honest no-op outcomes.
+    reset();
+    const capture = ev({ type: 'task.changes', callId: 'c-ch1', childSessionId: 'ch1', baseOid: 'o'.repeat(40), files: [], omittedCount: 0 });
+    const st = foldReview(graphOf(), [capture, ...round('r1', [{ id: 'rev-aaaa', findings: [] }])]);
+    expect(st.rounds[0]!.qualifying).toBe(true);
+    expect(st.satisfied).toBe(true);
+  });
+
+  it('S14.5: a budget-exhausted lens leaves the round non-qualifying but the note NAMES the exit; its findings still block', () => {
+    reset();
+    const st = foldReview(graphOf(), [
+      mutated(),
+      ...round('r1', [{ id: 'rev-aaaa', findings: [finding('rev-aaaa#1', 'critical')], status: 'budget-steps' }]),
+    ]);
+    expect(st.rounds[0]!.qualifying).toBe(false);
+    expect(st.rounds[0]!.note).toContain("ended 'budget-steps'");
+    expect(st.rounds[0]!.note).toContain('narrower lens scopes');
+    // Capture is unconditional evidence: the critical from the dead lens still blocks.
+    expect(st.findings).toHaveLength(1);
+    expect(st.findings[0]!.blocking).toBe(true);
+    expect(st.openBlockers.some((b) => b.includes('rev-aaaa#1'))).toBe(true);
+  });
+
+  it('S14.5: a round in which EVERY lens died is a caveat even with no requirement in force', () => {
+    // Previously the dead-lens caveat required captured > 0, so a review that ENTIRELY failed
+    // read identically to a session that never ran one when no requirement was active.
+    reset();
+    const st = foldReview(null, [mutated(), ...round('r1', [{ id: 'rev-aaaa', findings: [], status: 'error', captured: false }])]);
+    expect(st.requirement.kind).toBe('none');
+    expect(st.openBlockers).toEqual([]);
+    expect(st.caveats.join(' ')).toContain('died without qualifying evidence');
   });
 
   it('a completed reviewer with NO capture does not qualify a round (the executor-F1 mirror)', () => {

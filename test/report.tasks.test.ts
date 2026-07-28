@@ -336,10 +336,28 @@ describe('report: Session 14 surfaces (adversarial review, harness checkpoint li
     expect(json.harnessCheckpoints).toHaveLength(2);
     expect(md).toContain('## Git recovery and audit state (hidden refs, harness-created)');
     expect(md).toContain('pre-integration (whole-workspace point before an apply');
-    expect(md).toContain('DELIVERY (the accepted state; survives the session');
+    expect(md).toContain('DELIVERY (the accepted state; intended to survive the session)');
     expect(md).toContain('`agent checkpoint list` is live truth');
     // Never misattributed to the user-commanded section.
     expect(json.gitCheckpoints).toHaveLength(0);
+  });
+
+  it('S14.5: a delivery ref a LATER pruned event names must not render as surviving', () => {
+    // The old line asserted liveness ("survives the session until superseded or pruned") for
+    // every delivery creation — including refs this very log records as pruned/superseded.
+    const events = [
+      ...baseEvents(),
+      evt({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/agent-cli/checkpoints/p-1/3', oid: 'b'.repeat(40) }),
+      evt({ type: 'git.checkpoint.pruned', kind: 'delivery', refs: ['refs/agent-cli/checkpoints/p-1/3'], failed: [] }),
+      evt({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/agent-cli/checkpoints/p-1/4', oid: 'c'.repeat(40) }),
+    ];
+    const { json, md } = buildReport({ events });
+    const lines = md.split('\n').filter((l) => l.includes('DELIVERY'));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('[later pruned/superseded in this log]');
+    expect(lines[1]).not.toContain('[later pruned');
+    expect(json.harnessCheckpoints![0]!.pruned).toBe(true);
+    expect(json.harnessCheckpoints![1]!.pruned).toBeUndefined();
   });
 
   it('sessions without review or harness checkpoints omit both sections (additive-optional)', () => {

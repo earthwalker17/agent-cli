@@ -26,7 +26,7 @@ import { createApprovalForwarder } from '../runtime/approval-forwarder.js';
 import { registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../runtime/worktrees.js';
 import { loadPreviewRegistry, previewsFile, sweepOrphanedPreviews, type PreviewSweepResult } from '../preview/registry.js';
 import { isPidAlive } from '../store/event-log.js';
-import { readPlanState } from '../plan/canonical.js';
+import { approvedCurrentGraph, readPlanState } from '../plan/canonical.js';
 import type { PlanGraph } from '../plan/schema.js';
 import { foldGraphState, integrationGateState } from '../plan/graph-state.js';
 import { availableKinds } from '../checks/recipes.js';
@@ -520,10 +520,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     // derivations of one gate must never disagree about whether a round is required.
     createReviewTool({
       events: () => session.log.events,
-      planGraph: () => {
-        const st = readPlanState(layout, session.id, session.log.events);
-        return st.kind === 'canonical' && st.status === 'approved' && st.approvedAndCurrent ? (st.canonical?.graph ?? null) : null;
-      },
+      planGraph: () => approvedCurrentGraph(readPlanState(layout, session.id, session.log.events)),
     }),
   ];
 

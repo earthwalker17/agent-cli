@@ -21,12 +21,18 @@ import type { ReviewFinding, SessionEvent } from '../types.js';
  *    every plan-less session. What is NOT optional: findings recorded by a round that DID run
  *    block regardless of requirement or plan (see the blockers below).
  *
- * 2. A ROUND QUALIFIES ONLY AGAINST REAL WORK. A qualifying round must START after the last
- *    effective integration (`task.applied` with applied files) AND at least one workspace
- *    change must PRECEDE its start — otherwise a review run before any work (or before the
- *    work landed) would satisfy the gate vacuously. Post-round parent fix-ups do NOT
- *    re-require review (that would loop forever: fix → stale → re-review → fix …); they
- *    surface as a caveat, and the deterministic completion gates still cover correctness.
+ * 2. A ROUND QUALIFIES ONLY AGAINST REAL WORK. No effective integration (`task.applied` with
+ *    applied files) may land INSIDE the round's window — reviewers that observed mid-apply
+ *    state reviewed neither the before nor the after. And at least one unit of real work must
+ *    PRECEDE the round's start: a workspace change, or an executor capture (`task.changes`) —
+ *    the capture covers the legitimate zero-net-change case, where an executor ran, concluded
+ *    nothing needed to change, and the session is genuinely complete (S14.5: the old
+ *    change-only anchor made such a session's gate unsatisfiable). Otherwise a review run
+ *    before any work would satisfy the gate vacuously. POST-ROUND fixes — parent edits AND
+ *    integrated executor re-runs alike — do NOT de-qualify the round (that would loop forever:
+ *    fix → stale → re-review → fix …, and the S14 whole-log rule punished exactly the
+ *    harness-recommended fix path); they surface as the changes-after caveat, findings never
+ *    expire (rule 3), and the deterministic completion gates still cover the current state.
  *
  * 3. FINDINGS NEVER EXPIRE; TRIAGE ANNOTATES. A later round does not supersede earlier
  *    findings — that would let a weak round 2 launder round 1's criticals. Every critical/high
@@ -131,6 +137,8 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
     reviewerChildren: Set<string>;
     completedChildren: Set<string>;
     capturedChildren: Set<string>;
+    /** Terminal status per reviewer child — lets a non-qualifying note NAME a budget exit. */
+    endStatuses: Map<string, string>;
     findings: { f: ReviewFinding; child: string; lens?: string }[];
   }
   const roundByCall = new Map<string, RoundAcc>();
@@ -151,6 +159,7 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
         reviewerChildren: new Set(),
         completedChildren: new Set(),
         capturedChildren: new Set(),
+        endStatuses: new Map(),
         findings: [],
       };
       roundByCall.set(e.callId, acc);
@@ -160,7 +169,10 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
       acc.startSeq = Math.min(acc.startSeq, e.seq);
       if (e.role === 'reviewer') acc.reviewerChildren.add(e.childSessionId);
     } else if (e.type === 'task.ended') {
-      if (acc.reviewerChildren.has(e.childSessionId) && e.status === 'completed') acc.completedChildren.add(e.childSessionId);
+      if (acc.reviewerChildren.has(e.childSessionId)) {
+        acc.endStatuses.set(e.childSessionId, e.status);
+        if (e.status === 'completed') acc.completedChildren.add(e.childSessionId);
+      }
     } else {
       acc.capturedChildren.add(e.childSessionId);
       for (const f of e.findings) {
@@ -169,13 +181,16 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
     }
   }
 
-  // Rule 2's anchors: the last effective integration, and whether any change precedes a seq.
-  let lastEffectiveApply = 0;
+  // Rule 2's anchors: every effective integration seq (the in-window test), and the "real
+  // work" seqs — workspace changes plus executor captures (`task.changes`, S14.5: an executor
+  // that ran and concluded nothing needed changing is still real work a round can review).
+  const effectiveApplySeqs: number[] = [];
   for (const e of events) {
-    if (e.type === 'task.applied' && e.applied.length > 0) lastEffectiveApply = Math.max(lastEffectiveApply, e.seq);
+    if (e.type === 'task.applied' && e.applied.length > 0) effectiveApplySeqs.push(e.seq);
   }
   const changeSeqs = events.filter(isWorkspaceChange).map((e) => e.seq);
-  const anyChangeBefore = (seq: number): boolean => changeSeqs.some((s) => s < seq);
+  const workSeqs = [...changeSeqs, ...events.filter((e) => e.type === 'task.changes').map((e) => e.seq)];
+  const anyWorkBefore = (seq: number): boolean => workSeqs.some((s) => s < seq);
 
   const rounds: ReviewRound[] = [...roundByCall.values()]
     .sort((a, b) => a.startSeq - b.startSeq)
@@ -189,12 +204,18 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
       if (effective.length === 0) {
         qualifying = false;
         note = 'no reviewer lens completed with a recorded findings capture';
-      } else if (acc.startSeq <= lastEffectiveApply) {
+        // Name a budget/timeout exit so the parent knows the honest next move (S14.5: the
+        // generic note plus per-finding blockers read as a dead end; it is a scoping problem).
+        const spent = [...acc.endStatuses.entries()].filter(([, s]) => s === 'budget-steps' || s === 'budget-tokens' || s === 'timeout');
+        if (spent.length > 0) {
+          note += ` (${spent.map(([c, s]) => `lens ${c.slice(-4)} ended '${s}'`).join(', ')} — re-run ONE round with narrower lens scopes; findings it recorded are already counted)`;
+        }
+      } else if (effectiveApplySeqs.some((s) => s >= acc.startSeq && s <= acc.endSeq)) {
         qualifying = false;
-        note = 'the last integration postdates this round — the reviewers observed pre-integration state';
-      } else if (!anyChangeBefore(acc.startSeq)) {
+        note = 'an integration landed DURING this round — the reviewers observed mixed state; re-run the round against the settled workspace';
+      } else if (!anyWorkBefore(acc.startSeq)) {
         qualifying = false;
-        note = 'no workspace change preceded this round — a review of nothing satisfies nothing';
+        note = 'no workspace change or executor capture preceded this round — a review of nothing satisfies nothing';
       }
       return {
         callId: acc.callId,
@@ -324,9 +345,15 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
   }
 
   for (const r of rounds) {
-    if (r.deadLenses.length > 0 && r.captured > 0) {
-      caveats.push(`review round ${roundIndexByCall.get(r.callId)}: lens(es) ${r.deadLenses.join(', ')} did not complete — their scope went unreviewed`);
-    }
+    if (r.deadLenses.length === 0) continue;
+    // S14.5: the `captured > 0` guard hid the WORST case — a round in which every lens died
+    // emitted no caveat at all when no requirement was in force, so a review that entirely
+    // failed read identically to a session that never ran one.
+    caveats.push(
+      r.captured > 0
+        ? `review round ${roundIndexByCall.get(r.callId)}: lens(es) ${r.deadLenses.join(', ')} did not complete — their scope went unreviewed`
+        : `review round ${roundIndexByCall.get(r.callId)}: ALL ${r.lenses} lens(es) (${r.deadLenses.join(', ')}) died without qualifying evidence — the round proved nothing`,
+    );
   }
   for (const st of findings) {
     if (st.status === 'accepted') {

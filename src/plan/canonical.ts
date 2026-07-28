@@ -196,6 +196,17 @@ export interface PlanState {
   legacy: PlanDoc | null;
 }
 
+/**
+ * The review/acceptance gate's graph filter, spelled ONCE (S14.5 — three call sites wrote the
+ * same triple predicate independently, each carrying a comment that the derivations must never
+ * disagree): only an APPROVED-AND-CURRENT canonical plan's graph may drive requirement
+ * derivation. A diverged file must not drive it — a hand-inserted `review: {mode:'waived'}`
+ * would otherwise render "WAIVED by the approved plan" for content the user never approved.
+ */
+export function approvedCurrentGraph(state: PlanState): PlanGraph | null {
+  return state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent ? (state.canonical?.graph ?? null) : null;
+}
+
 export function readPlanState(layout: ProjectLayout, planId: string, events: readonly SessionEvent[]): PlanState {
   const approvedSha = planApprovalSha(events);
   const canonical = readCanonicalPlan(layout, planId);

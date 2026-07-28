@@ -1,5 +1,5 @@
 import type { SessionEvent, TaskChangeFile } from '../types.js';
-import type { PlanState } from '../plan/canonical.js';
+import { approvedCurrentGraph, type PlanState } from '../plan/canonical.js';
 import { completionGateState, type GraphState } from '../plan/graph-state.js';
 import { foldRepairs, openRepairBlockers } from '../recovery/ledger.js';
 import { foldReview } from '../review/ledger.js';
@@ -191,14 +191,9 @@ export function computeAcceptance(
   // unplanned work) — but the fold runs even without one, because recorded critical/high
   // findings block regardless of how the round came to run: evidence cannot be unseen. The
   // blockers and caveats arrive pre-rendered from the one fold /review also shows.
-  // approvedAndCurrent, not merely 'approved' (review): a plan file that DIVERGED after
-  // approval must not drive the requirement — a hand-inserted `review: {mode:'waived'}` would
-  // otherwise render "WAIVED by the approved plan" for content the user never approved (and
-  // bypass validatePlanGraph's reason rule, which only runs on update_plan writes). Divergence
-  // is already its own blocker; this keeps the ATTRIBUTION honest too.
-  const reviewGraph =
-    planState.kind === 'canonical' && planState.status === 'approved' && planState.approvedAndCurrent ? (planState.canonical?.graph ?? null) : null;
-  const review = foldReview(reviewGraph, events);
+  // approvedCurrentGraph, not merely 'approved' (review): divergence is already its own
+  // blocker; the shared filter keeps the ATTRIBUTION honest too (see its doc in canonical.ts).
+  const review = foldReview(approvedCurrentGraph(planState), events);
   for (const blocker of review.openBlockers) unfinished.push(blocker);
   for (const caveat of review.caveats) caveats.push(caveat);
 

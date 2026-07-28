@@ -57,6 +57,14 @@ const READ_ONLY_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 're
 const REVIEWER_TOOLS = [...READ_ONLY_TOOLS, 'report_finding'] as const;
 const EXECUTOR_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 'write_file', 'edit_file'] as const;
 const READ_ONLY_BUDGET: TaskBudget = { maxSteps: 15, timeoutMs: 300_000, maxOutputTokens: 30_000 };
+/**
+ * The reviewer budget is deliberately larger than the other read-only roles (S14.5): its brief
+ * DEMANDS interleaved work — read the code, record a finding through report_finding AS YOU
+ * CONFIRM IT, read on — so a thorough lens spends roughly two steps per finding plus
+ * orientation and the final report. 15 steps starved exactly the diligent lenses: they ended
+ * 'budget-steps', and a round whose every lens died cannot qualify no matter what it recorded.
+ */
+const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 480_000, maxOutputTokens: 30_000 };
 
 /**
  * Executor budget is larger: mutating work takes more steps, and time spent WAITING on a
@@ -85,7 +93,7 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
     name: 'reviewer',
     access: 'read-only',
     toolNames: REVIEWER_TOOLS,
-    budget: READ_ONLY_BUDGET,
+    budget: REVIEWER_BUDGET,
     approvals: 'auto-deny',
     buildPrompt: (a) => buildReviewerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve),
   },

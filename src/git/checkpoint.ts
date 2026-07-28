@@ -216,16 +216,15 @@ export async function deleteCheckpointRefs(
   return { deleted, failed };
 }
 
-/** Delete checkpoint refs (all sessions when sessionId is undefined) so gc can reclaim them. */
+/**
+ * Delete checkpoint refs (all sessions when sessionId is undefined) so gc can reclaim them.
+ * S14.5: shares deleteCheckpointRefs' missing-ref rule (already-gone counts as deleted) — the
+ * two prune paths previously disagreed, and under the event-before-ref phantom window a ref
+ * that vanished between the list and the delete must converge, not report a failure.
+ */
 export async function pruneCheckpoints(cctx: CheckpointContext, sessionId?: string): Promise<{ deleted: string[]; failed: string[] }> {
   const refs = await listCheckpoints(cctx, sessionId);
-  const deleted: string[] = [];
-  const failed: string[] = [];
-  for (const c of refs) {
-    const r = await runGit({ gitPath: cctx.gitPath, argv: ['update-ref', '-d', c.ref], cwd: cctx.repoRoot });
-    (r.ok ? deleted : failed).push(c.ref);
-  }
-  return { deleted, failed };
+  return deleteCheckpointRefs(cctx.gitPath, cctx.repoRoot, refs.map((c) => c.ref));
 }
 
 function firstLine(s: string): string {

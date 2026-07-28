@@ -121,7 +121,18 @@ export interface PlanGateInfo {
 export interface DelegateCaps {
   tasksStarted: number;
   childOutputTokens: number;
+  /** Distinct delegate calls that spawned reviewer tasks — the same round identity foldReview
+   *  uses (one call = one round). S14.5: the prompt's "at most 2 rounds" becomes a harness cap. */
+  reviewRoundsStarted: number;
 }
+
+/**
+ * Review rounds allowed per session (S14.5, implements the deferred-pool follow-up recorded
+ * post-S14). Matches the prompt guidance ("≤2 rounds"). The refusal is NOT a trap: clearing
+ * findings needs the review TRIAGE tool, not another fan-out, and a post-fix re-review is a
+ * caveat, never a blocker — the exits stay open with the cap in force.
+ */
+export const MAX_REVIEW_ROUNDS = 2;
 
 /**
  * R10 (Session 11.5): the per-task retry ceiling — genuine failure outcomes (error, timeout,
@@ -133,11 +144,17 @@ export interface DelegateCaps {
 export const MAX_TASK_ATTEMPTS = 3;
 
 export function delegateCapsFromEvents(events: readonly SessionEvent[]): DelegateCaps {
-  const caps: DelegateCaps = { tasksStarted: 0, childOutputTokens: 0 };
+  const caps: DelegateCaps = { tasksStarted: 0, childOutputTokens: 0, reviewRoundsStarted: 0 };
+  const reviewerCalls = new Set<string>();
   for (const e of events) {
-    if (e.type === 'task.started') caps.tasksStarted++;
-    else if (e.type === 'task.ended') caps.childOutputTokens += e.usage.outputTokens;
+    if (e.type === 'task.started') {
+      caps.tasksStarted++;
+      if (e.role === 'reviewer') reviewerCalls.add(e.callId);
+    } else if (e.type === 'task.ended') {
+      caps.childOutputTokens += e.usage.outputTokens;
+    }
   }
+  caps.reviewRoundsStarted = reviewerCalls.size;
   return caps;
 }
 
@@ -490,7 +507,7 @@ export function createDelegateTool(
   executor?: ExecutorDeps,
   opts?: DelegateOptions,
 ): Tool<DelegateInputT> {
-  const caps: DelegateCaps = opts?.caps ?? { tasksStarted: 0, childOutputTokens: 0 };
+  const caps: DelegateCaps = opts?.caps ?? { tasksStarted: 0, childOutputTokens: 0, reviewRoundsStarted: 0 };
   return {
     name: 'delegate_task',
     description:
@@ -541,6 +558,15 @@ export function createDelegateTool(
       if (caps.childOutputTokens >= SESSION_CHILD_OUTPUT_TOKEN_CAP) {
         return refuse(
           `delegation output-token budget exhausted (${caps.childOutputTokens} of ${SESSION_CHILD_OUTPUT_TOKEN_CAP} output tokens across child tasks); finish the work directly with your own tools`,
+        );
+      }
+      // The review-round cap (S14.5): group-atomic like every cap — a mixed group containing
+      // any reviewer refuses whole. The exits the refusal names are real: triage clears
+      // findings without a new round, and /accept confirm remains the user's override.
+      if (input.tasks.some((t) => t.role === 'reviewer') && caps.reviewRoundsStarted >= MAX_REVIEW_ROUNDS) {
+        return refuse(
+          `review round cap reached (${caps.reviewRoundsStarted} of ${MAX_REVIEW_ROUNDS} rounds have run this session): a third fan-out is not the exit — ` +
+            'hand-verify and triage the recorded findings with the review tool, or the user records /accept confirm',
         );
       }
 
@@ -620,6 +646,7 @@ export function createDelegateTool(
         baseOid = base.oid;
       }
       caps.tasksStarted += input.tasks.length;
+      if (input.tasks.some((t) => t.role === 'reviewer')) caps.reviewRoundsStarted++;
 
       // Plan-informed effective tasks: a bound task with no explicit focus inherits its plan
       // task's declared touches as the focus brief (sibling coverage then sees it too).
@@ -684,6 +711,10 @@ export function createDelegateTool(
             const acc = createFindingAccumulator();
             const result = await runSubagentTask({ ...taskDeps, reportFindingTool: createReportFindingTool(acc) }, spec, ctx.signal);
             let findings: ReviewFinding[] = [];
+            // S14.5: `captureLanded` keeps the head-digest line honest — with the evidence
+            // channel unwired (a regression, never the production path) the old text still
+            // claimed "RECORDED" while nothing reached the parent log.
+            const captureLanded = result.childSessionId !== '' && ctx.reportTask !== undefined;
             if (result.childSessionId !== '') {
               findings = acc.items.map((it, i) => ({ ...it, findingId: `${result.childSessionId}#${i + 1}` }));
               ctx.reportTask?.({
@@ -700,9 +731,11 @@ export function createDelegateTool(
               .map((s) => `${bySev.get(s)} ${s}`)
               .join(', ');
             const notes: string[] = [
-              findings.length > 0
-                ? `[harness] ${findings.length} finding(s) RECORDED via report_finding (${counts}): ${findings.map((f) => `${f.findingId} (${f.severity}) ${f.title}`).join(' · ')}`
-                : '[harness] ZERO findings recorded via report_finding — the gate reads only recorded findings',
+              !captureLanded && findings.length > 0
+                ? `[harness] WIRING ERROR: ${findings.length} finding(s) could NOT be recorded (evidence channel missing) — the round cannot qualify and the gate saw nothing`
+                : findings.length > 0
+                  ? `[harness] ${findings.length} finding(s) RECORDED via report_finding (${counts}): ${findings.map((f) => `${f.findingId} (${f.severity}) ${f.title}`).join(' · ')}`
+                  : '[harness] ZERO findings recorded via report_finding — the gate reads only recorded findings',
               // The explorer-section-check precedent: informational, never a manufactured failure.
               ...(findings.length === 0 && /\b(critical|high)\b/i.test(result.finalText)
                 ? ['[harness] NOTE: the prose below mentions critical/high but nothing was recorded — treat prose findings as narration; they do not exist for the gate']

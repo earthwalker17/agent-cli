@@ -117,7 +117,7 @@ describe('the live task table', () => {
     table.update({ childSessionId: 'child-session-bbbb', phase: 'approval-wait' });
 
     now = 65_000;
-    const lines = table.statusLines({ tasksStarted: 3, childOutputTokens: 40_000 });
+    const lines = table.statusLines({ tasksStarted: 3, childOutputTokens: 40_000, reviewRoundsStarted: 0 });
     expect(lines[0]).toContain('2 agent(s) running');
     expect(lines[0]).toContain('tasks 3/12');
     const a = lines.find((l) => l.includes('aaaa'))!;

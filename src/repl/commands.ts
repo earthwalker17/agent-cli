@@ -7,7 +7,7 @@ import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { renderRepoMap } from '../retrieval/render.js';
 import type { RetrievalHandle } from '../retrieval/rank.js';
 import { readPlan, setPlanStatus } from '../plan/store.js';
-import { readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
+import { approvedCurrentGraph, readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
 import { completionGateState, foldGraphState, integrationGateState, type PlanTaskState } from '../plan/graph-state.js';
 import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
 import { foldReview, type ReviewState } from '../review/ledger.js';
@@ -107,9 +107,7 @@ export function sessionAcceptance(ctx: Pick<CommandContext, 'session' | 'layout'
 export function sessionReview(ctx: Pick<CommandContext, 'session' | 'layout'>): ReviewState {
   const events = ctx.session.log.events;
   const state = readPlanState(ctx.layout, ctx.session.id, events);
-  const graph =
-    state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent ? (state.canonical?.graph ?? null) : null;
-  return foldReview(graph, events);
+  return foldReview(approvedCurrentGraph(state), events);
 }
 
 /** The one-line completion summary used by /status and the quit path. */
@@ -666,7 +664,10 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'report': {
-      const { md } = buildReport({ events: ctx.session.log.events });
+      const { md } = buildReport({
+        events: ctx.session.log.events,
+        approvedGraph: approvedCurrentGraph(readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events)),
+      });
       ctx.renderer.flush();
       ctx.modelOut.write(md + '\n');
       return 'continue';

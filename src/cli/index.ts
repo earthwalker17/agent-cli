@@ -14,7 +14,7 @@ import { endReasonForTurn, endSession, runTurn, type Session } from '../runtime/
 import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
-import { readPlanState } from '../plan/canonical.js';
+import { approvedCurrentGraph, readPlanState } from '../plan/canonical.js';
 import { renderUserPlanView } from '../plan/views.js';
 import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
@@ -292,7 +292,15 @@ function cmdReport(values: CliValues, id?: string): number {
     return 1;
   }
   const read = EventLog.readLenient(layout.sessionFile(sessionId));
-  const report = buildReport(read.corruptAt ? { events: read.events, truncatedTail: read.truncatedTail, corruptAt: read.corruptAt } : { events: read.events, truncatedTail: read.truncatedTail });
+  // The approved graph is an INPUT (S14.5): without it the review section could not state the
+  // gate's requirement or its open blockers for an unaccepted session.
+  const approvedGraph = approvedCurrentGraph(readPlanState(layout, sessionId, read.events));
+  const report = buildReport({
+    events: read.events,
+    truncatedTail: read.truncatedTail,
+    ...(read.corruptAt ? { corruptAt: read.corruptAt } : {}),
+    approvedGraph,
+  });
   process.stdout.write((values.json ? JSON.stringify(report.json, null, 2) : report.md) + '\n');
   return 0;
 }
