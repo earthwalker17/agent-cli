@@ -313,6 +313,21 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
       messages.push({ role: 'user', content: [{ type: 'text', text: e.text }] });
     } else if (e.type === 'assistant.message') {
       const content: ContentBlock[] = [];
+      // Reasoning blocks rebuild at the HEAD (Session 15): Anthropic thinking blocks always
+      // precede visible output in a response, chat-compat providers carry reasoning as an
+      // order-free message field, and the OpenAI adapter re-derives item order itself. Old
+      // logs have no `reasoning` field and rebuild exactly as before.
+      if (e.reasoning !== undefined) {
+        for (const r of e.reasoning) {
+          content.push({
+            type: 'reasoning',
+            providerName: r.providerName,
+            model: r.model,
+            payload: r.payload,
+            ...(r.text !== undefined ? { text: r.text } : {}),
+          });
+        }
+      }
       if (e.text) content.push({ type: 'text', text: e.text });
       for (const tc of e.toolCalls) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input });
       messages.push({ role: 'assistant', content });
@@ -468,6 +483,11 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
       .join('');
     if (text) finalText = text;
     const toolUses = turn.blocks.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use');
+    // Opaque reasoning blocks (Session 15) are persisted VERBATIM and in stream order: resume
+    // must replay them byte-faithfully (kimi/deepseek reject a tool-looping assistant message
+    // whose reasoning was altered or dropped mid-loop; Anthropic requires thinking blocks
+    // passed back unchanged). They ride into session.messages untouched via turn.blocks below.
+    const reasoningBlocks = turn.blocks.filter((b): b is Extract<ContentBlock, { type: 'reasoning' }> => b.type === 'reasoning');
 
     session.log.append({
       type: 'assistant.message',
@@ -475,6 +495,16 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
       toolCalls: toolUses.map((t) => ({ id: t.id, name: t.name, input: t.input })),
       stopReason: turn.stopReason,
       usage: turn.usage,
+      ...(reasoningBlocks.length > 0
+        ? {
+            reasoning: reasoningBlocks.map((b) => ({
+              providerName: b.providerName,
+              model: b.model,
+              payload: b.payload,
+              ...(b.text !== undefined ? { text: b.text } : {}),
+            })),
+          }
+        : {}),
     });
     session.messages.push({ role: 'assistant', content: turn.blocks });
 

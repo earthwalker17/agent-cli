@@ -15,6 +15,9 @@ export interface ScriptTurn {
   stopReason?: StopReason;
   usage?: Usage;
   hang?: boolean;
+  /** Emits an opaque reasoning block (Session 15) tagged mock+model — the offline backbone for
+   *  round-trip recording/reconstruct/drop-on-switch tests. Emitted BEFORE text (stream order). */
+  reasoning?: string;
 }
 
 // .strict(): a --script file with unknown keys (including `hang` — see above: a spawned Windows
@@ -27,6 +30,7 @@ const ScriptTurnSchema = z
       .optional(),
     stopReason: z.enum(['end_turn', 'tool_use', 'max_tokens', 'refusal', 'pause_turn', 'other']).optional(),
     usage: z.object({ inputTokens: z.number(), outputTokens: z.number() }).strict().optional(),
+    reasoning: z.string().optional(),
   })
   .strict();
 const ScriptSchema = z.array(ScriptTurnSchema);
@@ -48,7 +52,7 @@ export class MockProvider implements Provider {
 
   constructor(private readonly turns: ScriptTurn[]) {}
 
-  async complete(_req: ProviderRequest, onText?: (delta: string) => void, signal?: AbortSignal): Promise<ProviderTurn> {
+  async complete(req: ProviderRequest, onText?: (delta: string) => void, signal?: AbortSignal): Promise<ProviderTurn> {
     if (this.i >= this.turns.length) {
       throw new Error(`MockProvider script exhausted after ${this.turns.length} turn(s)`);
     }
@@ -67,6 +71,9 @@ export class MockProvider implements Provider {
       });
     }
     const blocks: ContentBlock[] = [];
+    if (turn.reasoning !== undefined) {
+      blocks.push({ type: 'reasoning', providerName: 'mock', model: req.model, payload: turn.reasoning, text: turn.reasoning });
+    }
     if (turn.say !== undefined) {
       blocks.push({ type: 'text', text: turn.say });
       onText?.(turn.say);

@@ -98,6 +98,11 @@ function blockChars(b: ContentBlock): number {
       return b.name.length + JSON.stringify(b.input ?? null).length;
     case 'tool_result':
       return contentChars(b.content);
+    case 'reasoning':
+      // Session 15: reasoning blocks are never REPLACED (elision rewrites only tool_result
+      // content, and reasoning lives on assistant messages), but their opaque payload must
+      // count toward the budget — it is resent within the provider's replay scope.
+      return JSON.stringify(b.payload ?? null).length + (b.text?.length ?? 0);
   }
 }
 

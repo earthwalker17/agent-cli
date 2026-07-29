@@ -759,7 +759,17 @@ export type ToolResultPart =
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; content: string | ToolResultPart[]; isError?: boolean };
+  | { type: 'tool_result'; toolUseId: string; content: string | ToolResultPart[]; isError?: boolean }
+  /**
+   * Opaque provider reasoning (Session 15). `payload` is the provider-NATIVE artifact, verbatim:
+   * an Anthropic thinking/redacted_thinking block, an OpenAI Responses reasoning item (incl.
+   * encrypted_content), or a reasoning_content string (deepseek/kimi/glm). Opaque BY CONTRACT —
+   * only the adapter that emitted it may interpret it. An adapter replays a block only when
+   * `providerName`+`model` match its own request (and within that provider's documented replay
+   * scope); otherwise the block is dropped — a deterministic, documented degrade. `text` is an
+   * optional display copy and is never re-sent as assistant text.
+   */
+  | { type: 'reasoning'; providerName: string; model: string; payload: unknown; text?: string };
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -789,6 +799,9 @@ export interface Usage {
   /** Prompt-cache accounting (V0.5, additive): absent on providers/logs without caching. */
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  /** Reasoning-token breakdown (Session 15, additive): absent on providers without one.
+   *  Reasoning tokens are INCLUDED in outputTokens everywhere they are billed as output. */
+  reasoningTokens?: number;
 }
 
 export interface ProviderTurn {
@@ -805,6 +818,12 @@ export interface Provider {
    * after a throw — never via provider-specific error classes).
    */
   complete(req: ProviderRequest, onText?: (delta: string) => void, signal?: AbortSignal): Promise<ProviderTurn>;
+  /**
+   * Credential-redacted description of the network path (e.g. "proxy …@host (via https_proxy)").
+   * Session 15: replaces the former `instanceof AnthropicProvider` banner checks. Optional —
+   * the mock provider has no network path.
+   */
+  describeTransport?(): string;
 }
 
 // ── Event log ──────────────────────────────────────────────────────────────────────────────
@@ -836,6 +855,23 @@ export type EventBody =
       orphanedCallIds: string[];
       unknownPostStateCallIds: string[];
     }
+  | {
+      /**
+       * The session's provider/model identity changed mid-lifecycle (Session 15, additive).
+       * Fresh-session identity stays on `session.started`; readers fold newest-wins. NEVER
+       * carries a credential: `keyEnv` is the env var NAME whose presence enabled the switch,
+       * `baseUrlHost` is the effective API host (visible so a *_BASE_URL override is auditable).
+       */
+      type: 'provider.changed';
+      from: { providerName: string; model: string };
+      to: { providerName: string; model: string };
+      source: 'user-command' | 'resume';
+      keyEnv?: string;
+      baseUrlHost?: string;
+      /** How the key was checked: a live models-list probe, key presence alone (no list
+       *  endpoint), or a probe that failed non-definitively (network) and proceeded. */
+      verification: 'models-list' | 'presence-only' | 'unverified-network';
+    }
   // Session 10 (additive): inventorySha256 digests the sorted file SET independent of the
   // rendered text (the CODEBASE staleness basis); sha256 stays "exactly the text the model saw".
   | {
@@ -855,6 +891,10 @@ export type EventBody =
       toolCalls: RecordedToolCall[];
       stopReason: StopReason;
       usage: Usage;
+      /** Opaque provider reasoning blocks in stream order (Session 15, additive). Persisted
+       *  VERBATIM: resume must be able to replay them byte-faithfully (kimi/deepseek 400 on a
+       *  tool-looping assistant message whose reasoning was altered or dropped mid-loop). */
+      reasoning?: { providerName: string; model: string; payload: unknown; text?: string }[];
     }
   | { type: 'tool.requested'; callId: string; tool: string; input: unknown }
   | {

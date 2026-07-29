@@ -9,9 +9,13 @@ import { createTransport, type Transport } from '../net/transport.js';
  * Networking (proxy detection, direct vs proxied) is delegated to the shared transport factory —
  * this class contains no proxy logic, so future providers can reuse the same infrastructure.
  *
- * Extended/adaptive thinking stays deliberately OFF (still true at V0.7): omitting the
- * `thinking` param avoids the thinking-block round-trip that a tool-use loop would otherwise
- * have to preserve. Enabling it (with block preservation) remains in the deferred pool.
+ * Thinking (Session 15): the `thinking` param stays OMITTED — which means each model's own
+ * default applies (claude-opus-5/sonnet-5: adaptive ON; claude-opus-4-8 and older: off;
+ * claude-fable-5: always on). Thinking/redacted_thinking response blocks are carried as opaque
+ * `reasoning` ContentBlocks (payload = the verbatim SDK block) and replayed byte-identically on
+ * the same model within the current tool loop — the API's documented round-trip requirement.
+ * Foreign-tagged or out-of-window reasoning is dropped before the wire (the API itself ignores
+ * other-model thinking; resending stale thinking would only re-bill cache-invalidating bytes).
  */
 export class AnthropicProvider implements Provider {
   readonly name = 'anthropic';
@@ -34,6 +38,11 @@ export class AnthropicProvider implements Provider {
     const msg = await stream.finalMessage();
     return toProviderTurn(msg);
   }
+
+  /** Credential-redacted network-path description (Session 15: the Provider-interface seam). */
+  describeTransport(): string {
+    return this.transport;
+  }
 }
 
 /**
@@ -46,11 +55,17 @@ export class AnthropicProvider implements Provider {
  * shorter prefix.
  */
 export function buildApiParams(req: ProviderRequest): Anthropic.MessageCreateParamsStreaming {
-  const messages = coalesceUserMessages(req.messages).map(toApiMessage);
+  const messages = coalesceUserMessages(scopeReasoning(req.messages, req.model)).map(toApiMessage);
   const last = messages[messages.length - 1];
-  const lastBlock = last?.content[last.content.length - 1];
-  if (lastBlock && typeof lastBlock === 'object') {
-    (lastBlock as { cache_control?: Anthropic.CacheControlEphemeral }).cache_control = { type: 'ephemeral' };
+  // The moving marker must land on a REAL content block: a replayed thinking block must go back
+  // byte-verbatim (adding cache_control to it would alter the round-tripped bytes), so walk past
+  // trailing thinking blocks. In tool loops the final message is a user message anyway.
+  for (let k = (last?.content.length ?? 0) - 1; k >= 0; k--) {
+    const blk = last!.content[k] as { type?: string; cache_control?: Anthropic.CacheControlEphemeral };
+    if (typeof blk !== 'object' || blk === null) break;
+    if (blk.type === 'thinking' || blk.type === 'redacted_thinking') continue;
+    blk.cache_control = { type: 'ephemeral' };
+    break;
   }
   return {
     model: req.model,
@@ -62,6 +77,30 @@ export function buildApiParams(req: ProviderRequest): Anthropic.MessageCreatePar
     messages,
     tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema as Anthropic.Tool.InputSchema })),
   };
+}
+
+/**
+ * Wire-side reasoning scope (Session 15) — pure, recomputed per request, elision-style. Keeps a
+ * reasoning block only when (a) it is OURS for THIS model (providerName 'anthropic' + matching
+ * model tag) and (b) it sits inside the current tool loop — i.e. after the last user message that
+ * carries anything other than tool_results (a tool_result-only user message is loop-internal).
+ * Everything else is dropped from the WIRE VIEW only; `session.messages` is never mutated.
+ */
+export function scopeReasoning(messages: readonly ChatMessage[], model: string): ChatMessage[] {
+  let lastRealUser = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role === 'user' && m.content.some((b) => b.type !== 'tool_result')) {
+      lastRealUser = i;
+      break;
+    }
+  }
+  return messages.map((m, i) => {
+    if (!m.content.some((b) => b.type === 'reasoning')) return m;
+    const keep = (b: ContentBlock): boolean =>
+      b.type !== 'reasoning' || (i > lastRealUser && b.providerName === 'anthropic' && b.model === model);
+    return { role: m.role, content: m.content.filter(keep) };
+  });
 }
 
 /**
@@ -109,6 +148,11 @@ export function toApiMessage(m: ChatMessage): { role: 'user' | 'assistant'; cont
           ? { type: 'tool_result', tool_use_id: b.toolUseId, content: c, is_error: true }
           : { type: 'tool_result', tool_use_id: b.toolUseId, content: c };
       }
+      case 'reasoning':
+        // Verbatim replay: the payload IS the SDK thinking/redacted_thinking block, unmodified —
+        // the API validates round-tripped thinking byte-identically (signatures included).
+        // Foreign/out-of-window blocks were already dropped by scopeReasoning.
+        return b.payload as Anthropic.ContentBlockParam;
     }
   });
   return { role: m.role, content };
@@ -119,7 +163,21 @@ export function toProviderTurn(msg: Anthropic.Message): ProviderTurn {
   for (const b of msg.content) {
     if (b.type === 'text') blocks.push({ type: 'text', text: b.text });
     else if (b.type === 'tool_use') blocks.push({ type: 'tool_use', id: b.id, name: b.name, input: b.input });
-    // thinking / other block types are not produced (thinking is off) and are ignored if present.
+    else if (b.type === 'thinking') {
+      // Session 15: carried opaquely, in stream order (thinking precedes visible output), tagged
+      // with the RESPONSE model so replay can bind to exactly the model that produced it. The
+      // `thinking` text is a display copy; `display` defaults to omitted on Claude 5 (empty text).
+      blocks.push({
+        type: 'reasoning',
+        providerName: 'anthropic',
+        model: msg.model,
+        payload: b,
+        ...(b.thinking ? { text: b.thinking } : {}),
+      });
+    } else if (b.type === 'redacted_thinking') {
+      blocks.push({ type: 'reasoning', providerName: 'anthropic', model: msg.model, payload: b });
+    }
+    // other/unknown block types are ignored.
   }
   return {
     blocks,

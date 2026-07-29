@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
-import { buildApiParams, toApiMessage, toProviderTurn, AnthropicProvider } from '../src/provider/anthropic.js';
-import type { ChatMessage, ProviderRequest } from '../src/types.js';
+import { buildApiParams, scopeReasoning, toApiMessage, toProviderTurn, AnthropicProvider } from '../src/provider/anthropic.js';
+import type { ChatMessage, ContentBlock, ProviderRequest } from '../src/types.js';
 
 describe('AnthropicProvider mapping', () => {
   it('maps harness messages to API content blocks', () => {
@@ -109,6 +109,103 @@ describe('buildApiParams prompt caching', () => {
   it('omits an empty system rather than sending an uncacheable empty block', () => {
     const p = buildApiParams(req([{ role: 'user', content: [{ type: 'text', text: 'q' }] }], ''));
     expect(p.system).toBeUndefined();
+  });
+});
+
+describe('thinking round-trip (Session 15)', () => {
+  const thinkingBlock = { type: 'thinking', thinking: 'chain of thought', signature: 'sig-abc' };
+  const redactedBlock = { type: 'redacted_thinking', data: 'opaque-bytes' };
+
+  it('maps thinking/redacted_thinking to reasoning blocks in stream order, tagged with the response model', () => {
+    const msg = {
+      model: 'claude-opus-5',
+      content: [thinkingBlock, { type: 'text', text: 'visible' }, redactedBlock],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    } as unknown as Anthropic.Message;
+    const turn = toProviderTurn(msg);
+    expect(turn.blocks).toEqual([
+      { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-5', payload: thinkingBlock, text: 'chain of thought' },
+      { type: 'text', text: 'visible' },
+      { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-5', payload: redactedBlock },
+    ]);
+  });
+
+  it('replays a reasoning payload VERBATIM as a wire content block', () => {
+    const m: ChatMessage = {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-5', payload: thinkingBlock, text: 'chain of thought' },
+        { type: 'tool_use', id: 't1', name: 'search', input: {} },
+      ],
+    };
+    expect(toApiMessage(m).content[0]).toBe(thinkingBlock); // same object — byte fidelity by construction
+  });
+
+  it('scopeReasoning keeps only same-provider+model blocks inside the current tool loop', () => {
+    const mine: ContentBlock = { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-5', payload: thinkingBlock };
+    const foreignProvider: ContentBlock = { type: 'reasoning', providerName: 'kimi', model: 'kimi-k3', payload: 'r' };
+    const foreignModel: ContentBlock = { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-4-8', payload: thinkingBlock };
+    const messages: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'earlier turn' }] },
+      // OUT of window: before the last real user message.
+      { role: 'assistant', content: [mine, { type: 'text', text: 'old answer' }] },
+      { role: 'user', content: [{ type: 'text', text: 'current turn' }] },
+      // IN window; tool_result-only user messages below must NOT reset the window.
+      { role: 'assistant', content: [mine, foreignProvider, foreignModel, { type: 'tool_use', id: 'x', name: 't', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', toolUseId: 'x', content: 'r' }] },
+      { role: 'assistant', content: [mine, { type: 'text', text: 'now' }] },
+    ];
+    const scoped = scopeReasoning(messages, 'claude-opus-5');
+    expect(scoped[1]!.content).toEqual([{ type: 'text', text: 'old answer' }]); // out-of-window mine dropped
+    expect(scoped[3]!.content).toEqual([mine, { type: 'tool_use', id: 'x', name: 't', input: {} }]); // foreign dropped, mine kept
+    expect(scoped[5]!.content[0]).toEqual(mine); // in-window after a tool_result-only user message
+  });
+
+  it('the moving cache marker never lands on a replayed thinking block', () => {
+    // Artificial shape (final message assistant, trailing thinking) purely to pin the guard.
+    const p = buildApiParams({
+      model: 'claude-opus-5',
+      system: 'sys',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'q' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'a' },
+            { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-5', payload: thinkingBlock },
+          ],
+        },
+      ],
+      tools: [],
+      maxTokens: 10,
+    });
+    const content = p.messages[1]!.content as Anthropic.ContentBlockParam[];
+    expect((content[1] as { cache_control?: unknown }).cache_control).toBeUndefined();
+    expect((content[0] as { cache_control?: unknown }).cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('end-to-end: an in-window reasoning block reaches the wire verbatim through buildApiParams', () => {
+    const p = buildApiParams({
+      model: 'claude-opus-5',
+      system: 'sys',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'task' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-5', payload: thinkingBlock },
+            { type: 'tool_use', id: 't1', name: 'search', input: {} },
+          ],
+        },
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 't1', content: 'found' }] },
+      ],
+      tools: [],
+      maxTokens: 10,
+    });
+    const assistantWire = p.messages[1]!.content as Anthropic.ContentBlockParam[];
+    expect(assistantWire[0]).toBe(thinkingBlock);
+    expect(assistantWire[1]).toMatchObject({ type: 'tool_use', id: 't1' });
   });
 });
 
