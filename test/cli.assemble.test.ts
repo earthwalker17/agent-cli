@@ -50,6 +50,8 @@ function makeDeps(overrides: Partial<AssembleDeps> = {}): AssembleDeps {
       model: 'mock-model',
       maxSteps: 5,
       maxTokens: 1000,
+      contextBudget: { triggerChars: 400_000, targetChars: 200_000 },
+      notes: [],
     },
     layout,
     sandbox: createNoneSandbox('test-injected'),

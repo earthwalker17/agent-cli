@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { resolveProxy, redactProxyUrl, createTransport, type Transport } from '../src/net/transport.js';
 import { AnthropicProvider } from '../src/provider/anthropic.js';
+import { DEFAULT_MODEL } from '../src/provider/catalog.js';
 
 const A = 'https://api.anthropic.com/v1/messages';
 
@@ -129,7 +130,7 @@ describe('AnthropicProvider transport integration', () => {
     expect(p.transport).toContain('***');
 
     await expect(
-      p.complete({ model: 'claude-opus-4-8', system: '', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], tools: [], maxTokens: 16 }),
+      p.complete({ model: DEFAULT_MODEL, system: '', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], tools: [], maxTokens: 16 }),
     ).rejects.toBeDefined();
 
     expect(spy).toHaveBeenCalled();

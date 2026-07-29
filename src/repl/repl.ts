@@ -2,7 +2,6 @@ import { resolveLayout, resolveStateRoot } from '../store/layout.js';
 import { endSession, runTurn, repairDanglingToolUses, type Session } from '../runtime/session.js';
 import type { SandboxBackend } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
-import { AnthropicProvider } from '../provider/anthropic.js';
 import { loadConfig } from '../config/config.js';
 import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from '../cli/context.js';
 import { checkTrust } from '../cli/trust-check.js';
@@ -121,9 +120,10 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     sessionId: session.id,
     resumed: opts.resumeId !== undefined,
     model: ctx.model,
+    provider: ctx.provider.name,
     workspaceRoot: ctx.ws,
     stateDir: layout.projectDir,
-    ...(ctx.provider instanceof AnthropicProvider ? { network: ctx.provider.transport } : {}),
+    ...(ctx.provider.describeTransport !== undefined ? { network: ctx.provider.describeTransport() } : {}),
     sandbox: { summary: sandboxFacts.summary, enforced: sandboxFacts.enforced },
     ...(gitFacts.isRepo || gitFacts.probeFailed ? { git: { summary: gitFacts.detail } } : {}),
     memory: {
@@ -133,6 +133,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     dangerous: values['dangerously-allow-all'] === true,
   });
 
+  for (const note of ctx.notes) renderer.chromeLine(style.dim(`  note: ${sanitizeLine(note)}`));
   if (assembled.mapNote !== undefined) {
     renderer.chromeLine(style.dim(`  map: ${assembled.mapNote}`));
   }

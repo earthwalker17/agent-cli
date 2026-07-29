@@ -209,6 +209,9 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     system,
     maxSteps: ctx.maxSteps,
     maxTokens: ctx.maxTokens,
+    // Session 15: production finally sets the elision budget, derived from the model's catalog
+    // entry (the seam existed since V0.5 but only tests narrowed it).
+    contextBudget: ctx.contextBudget,
     saltHex: randomSaltHex(),
     rules: deps.config.rules,
     sandbox,

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import { buildApiParams, scopeReasoning, toApiMessage, toProviderTurn, AnthropicProvider } from '../src/provider/anthropic.js';
+import { DEFAULT_MODEL } from '../src/provider/catalog.js';
 import type { ChatMessage, ContentBlock, ProviderRequest } from '../src/types.js';
 
 describe('AnthropicProvider mapping', () => {
@@ -212,10 +213,10 @@ describe('thinking round-trip (Session 15)', () => {
 // Opt-in live smoke: one real API call. Excluded from CI; run with AGENT_LIVE_TEST=1.
 const live = process.env['AGENT_LIVE_TEST'] ? it : it.skip;
 describe('AnthropicProvider live', () => {
-  live('completes a trivial request against the real API', async () => {
+  live('completes a trivial request against the real API (re-proving the DEFAULT model id)', async () => {
     const provider = new AnthropicProvider();
     const turn = await provider.complete({
-      model: 'claude-opus-4-8',
+      model: DEFAULT_MODEL,
       system: 'Reply with exactly the word: pong',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
       tools: [],

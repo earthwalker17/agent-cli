@@ -61,6 +61,16 @@ describe('config loading and merging', () => {
     expect(() => loadConfig(state, ws)).toThrow(ConfigError);
   });
 
+  it('user config accepts a provider preference; the workspace layer structurally cannot (Session 15)', () => {
+    writeUser({ provider: 'deepseek' });
+    expect(loadConfig(state, ws).provider).toBe('deepseek');
+    writeUser({ provider: 'not-a-provider' });
+    expect(() => loadConfig(state, ws)).toThrow(ConfigError); // enum, not free text
+    writeUser({});
+    writeWorkspace({ provider: 'deepseek' }); // a cloned repo must never choose the vendor
+    expect(() => loadConfig(state, ws)).toThrow(ConfigError);
+  });
+
   it('rejects invalid JSON and over-cap lists', () => {
     fs.writeFileSync(userConfigPath(state), '{oops');
     expect(() => loadConfig(state, ws)).toThrow(ConfigError);

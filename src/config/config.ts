@@ -3,6 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { sha256 } from '../shared/hash.js';
 import { ConfigError } from '../shared/errors.js';
+import { PROVIDER_NAMES } from '../provider/catalog.js';
 import type { PolicyRules } from '../types.js';
 
 /**
@@ -35,6 +36,9 @@ const narrowing = {
 
 const UserConfigSchema = z
   .object({
+    /** Provider preference (Session 15). USER layer only — the workspace schema structurally
+     *  cannot express it: a cloned repo must never choose which vendor receives the session. */
+    provider: z.enum(PROVIDER_NAMES).optional(),
     model: z.string().min(1).optional(),
     maxSteps: z.number().int().positive().max(200).optional(),
     /** End-of-session project-memory updates (default on). USER layer only — a workspace file
@@ -48,6 +52,7 @@ const WorkspaceConfigSchema = z.object({ ...narrowing }).strict();
 
 export interface ResolvedConfig {
   /** User-level preferences; CLI flags still win (applied by the caller). */
+  provider?: string;
   model?: string;
   maxSteps?: number;
   /** End-of-session project-memory updates (absent = on). User layer only. */
@@ -107,6 +112,7 @@ export function loadConfig(stateRoot: string, workspaceRoot: string): ResolvedCo
   if (ws) sources.push({ path: workspaceConfigPath(workspaceRoot), sha256: ws.sha256 });
 
   return {
+    ...(user?.data.provider !== undefined ? { provider: user.data.provider } : {}),
     ...(user?.data.model !== undefined ? { model: user.data.model } : {}),
     ...(user?.data.maxSteps !== undefined ? { maxSteps: user.data.maxSteps } : {}),
     ...(user?.data.memoryUpdates !== undefined ? { memoryUpdates: user.data.memoryUpdates } : {}),

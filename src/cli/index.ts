@@ -20,9 +20,8 @@ import { buildReport } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
 import { createCheckpoint, deleteCheckpointRefs, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
-import { AnthropicProvider } from '../provider/anthropic.js';
 import { sanitizeLine } from '../shared/text.js';
-import { buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
+import { DEFAULT_MODEL, buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
 import { assembleSession } from './assemble.js';
 import { memoryDir, parseFrontmatter, readDocCapped } from '../memory/store.js';
 import { runMemoryUpdate } from '../memory/update.js';
@@ -69,9 +68,11 @@ Usage:
 
 Options:
   -C <dir>                 Workspace root (default: current directory)
-  --provider anthropic|mock   Model provider (default: anthropic)
+  --provider <name>        anthropic|openai|deepseek|kimi|glm|mock (default: anthropic;
+                           credentials are env-only — see \`agent providers\`)
   --script <file>          Scripted turns (required with --provider mock)
-  --model <id>             Model id (default: claude-opus-4-8)
+  --model <id>             Model id (default: the provider's catalog default;
+                           anthropic: ${DEFAULT_MODEL})
   --no-input               Non-interactive: every approval auto-denies (also auto-detected off a TTY)
   --interactive            Force interactive mode on piped stdio (expect-style test driving)
   --max-steps <n>          Maximum agent steps per turn (default: 20; --max-turns is the
@@ -205,9 +206,10 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   if (values['dangerously-allow-all']) {
     process.stderr.write('⚠ --dangerously-allow-all: approvals are bypassed. No isolation whatsoever.\n');
   }
-  if (ctx.provider instanceof AnthropicProvider) {
-    process.stderr.write(`network: ${ctx.provider.transport}\n`);
-  }
+  for (const note of ctx.notes) process.stderr.write(`note: ${sanitizeLine(note)}\n`);
+  process.stderr.write(`provider: ${ctx.provider.name} · model: ${ctx.model}\n`);
+  const transport = ctx.provider.describeTransport?.();
+  if (transport !== undefined) process.stderr.write(`network: ${transport}\n`);
   process.stderr.write(`sandbox: ${sandboxFacts.summary}\n`);
   if (gitFacts.isRepo || gitFacts.probeFailed) process.stderr.write(`git: ${gitFacts.detail}\n`);
   process.stderr.write(`memory: ${memory.bannerLine}\n`);

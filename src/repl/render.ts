@@ -31,6 +31,8 @@ export interface BannerInfo {
   sessionId: string;
   resumed: boolean;
   model: string;
+  /** Provider name (Session 15) — shown beside the model so the banner names who serves the session. */
+  provider?: string;
   workspaceRoot: string;
   stateDir: string;
   network?: string;
@@ -420,7 +422,11 @@ export function createRenderer(opts: {
     banner(info) {
       chromeLine(style.bold(`agent ${info.resumed ? 'resumed' : 'session'} ${info.sessionId}`));
       chromeLine(style.dim(`  workspace: ${sanitizeLine(info.workspaceRoot)}`));
-      chromeLine(style.dim(`  model: ${info.model} · state: ${sanitizeLine(info.stateDir)}`));
+      chromeLine(
+        style.dim(
+          `  model: ${info.model}${info.provider !== undefined ? ` · provider: ${info.provider}` : ''} · state: ${sanitizeLine(info.stateDir)}`,
+        ),
+      );
       if (info.network) chromeLine(style.dim(`  network: ${info.network}`));
       if (info.sandbox) {
         const line = `  sandbox: ${info.sandbox.summary}`;

@@ -2,11 +2,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EventLog } from '../store/event-log.js';
 import { MockProvider, parseScript } from '../provider/mock.js';
-import { AnthropicProvider } from '../provider/anthropic.js';
 import { autoDenyApprover, dangerousApprover, createInteractiveApprover } from '../runtime/approvals.js';
 import { ConfigError } from '../shared/errors.js';
+import {
+  DEFAULT_MODEL,
+  PROVIDERS,
+  contextBudgetFor,
+  defaultMaxTokensFor,
+  providersOfModel,
+  type ProviderName,
+} from '../provider/catalog.js';
+import { createProviderRegistry, resolveProviderName, type ProviderRegistry } from '../provider/registry.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Approver, Provider, SessionMode } from '../types.js';
+
+export { DEFAULT_MODEL };
 
 /** The parsed CLI values shared across commands (kept in one place; index.ts owns parsing). */
 export interface CliValues {
@@ -34,8 +44,6 @@ export interface CliValues {
   yes?: boolean;
   'no-trailer'?: boolean;
 }
-
-export const DEFAULT_MODEL = 'claude-opus-4-8';
 
 /** A count-valued CLI flag must be a positive integer; anything else refuses loudly (never NaN). */
 export function parseCountFlag(flag: string, raw: string): number {
@@ -66,14 +74,32 @@ export function resolveMode(values: CliValues): SessionMode {
   return process.stdin.isTTY ? 'interactive' : 'non-interactive';
 }
 
-export function makeProvider(values: CliValues): Provider {
-  const kind = values.provider ?? 'anthropic';
+/**
+ * Resolve the provider name (Session 15): CLI flag > user config > 'anthropic'. Aliases
+ * (moonshot→kimi, zhipu/zai→glm) are accepted; an unknown name refuses loudly, listing the
+ * valid ids. 'mock' is flag-only — a config file cannot select it.
+ */
+export function resolveProvider(values: CliValues, config?: { provider?: string }): ProviderName {
+  const raw = values.provider ?? config?.provider ?? 'anthropic';
+  const name = resolveProviderName(raw);
+  if (name === undefined) {
+    throw new ConfigError(`unknown provider: ${raw} (valid: anthropic, openai, deepseek, kimi, glm, mock)`);
+  }
+  if (name === 'mock' && values.provider === undefined) {
+    throw new ConfigError(`provider 'mock' is flag-only (--provider mock --script <file>)`);
+  }
+  return name;
+}
+
+export function makeProvider(values: CliValues, config?: { provider?: string }, registry?: ProviderRegistry): Provider {
+  const kind = resolveProvider(values, config);
   if (kind === 'mock') {
     if (!values.script) throw new ConfigError('--provider mock requires --script <file>');
     return new MockProvider(parseScript(fs.readFileSync(values.script, 'utf8')));
   }
-  if (kind === 'anthropic') return new AnthropicProvider();
-  throw new ConfigError(`unknown provider: ${kind}`);
+  // Missing credentials refuse HERE — upfront and actionable (env var name + key URL, never a
+  // value) — instead of surfacing as a mid-turn SDK error after assembly already ran.
+  return (registry ?? createProviderRegistry()).create(kind);
 }
 
 export function makeApprover(
@@ -95,15 +121,65 @@ export interface RunContext {
   model: string;
   maxSteps: number;
   maxTokens: number;
+  /** Elision thresholds derived from the model's catalog budget (Session 15). */
+  contextBudget: { triggerChars: number; targetChars: number };
+  /** Startup notes the interface prints as chrome — e.g. a config model skipped for a
+   *  cross-provider mismatch, or an uncataloged model running on conservative defaults. */
+  notes: string[];
 }
 
 export interface RunContextOptions {
   /** Resolved config preferences (flags still win): from loadConfig, which runs post-trust. */
-  config?: { model?: string; maxSteps?: number };
+  config?: { provider?: string; model?: string; maxSteps?: number };
   /** REPL approval routing through its one persistent readline. */
   io?: { question: (q: string) => Promise<string> };
   /** One-shot turn-abort signal: Ctrl+C resolves a pending approval prompt as deny-stop (V0.7.1). */
   approvalSignal?: AbortSignal;
+  /** Injectable provider registry (hermetic tests; the REPL shares one instance with /provider). */
+  registry?: ProviderRegistry;
+}
+
+/**
+ * Resolve the model for a provider (Session 15). Precedence: --model > config model > the
+ * provider's catalog default. An EXPLICIT flag naming another provider's model refuses (a
+ * contradiction the user must resolve); a CONFIG model belonging to another provider is skipped
+ * with a note (the config was written for a different provider — refusing would make
+ * `--provider X` unusable); an id unknown to every catalog proceeds with conservative defaults
+ * and a note (catalogs go stale before harnesses do). Mock accepts anything.
+ */
+export function resolveModel(
+  providerName: ProviderName,
+  values: Pick<CliValues, 'model'>,
+  config?: { model?: string },
+): { model: string; notes: string[] } {
+  const notes: string[] = [];
+  const defaultFor = providerName === 'mock' ? DEFAULT_MODEL : PROVIDERS[providerName].defaultModel;
+  if (values.model !== undefined) {
+    const owners = providersOfModel(values.model);
+    if (providerName !== 'mock' && owners.length > 0 && !owners.includes(providerName)) {
+      throw new ConfigError(
+        `model '${values.model}' belongs to provider '${owners[0]}' — pass --provider ${owners[0]} (selected: ${providerName})`,
+      );
+    }
+    if (providerName !== 'mock' && owners.length === 0) {
+      notes.push(`model '${values.model}' is not in the shipped catalog — conservative defaults in effect`);
+    }
+    return { model: values.model, notes };
+  }
+  if (config?.model !== undefined) {
+    const owners = providersOfModel(config.model);
+    if (providerName === 'mock' || owners.length === 0 || owners.includes(providerName)) {
+      if (providerName !== 'mock' && owners.length === 0) {
+        notes.push(`config model '${config.model}' is not in the shipped catalog — conservative defaults in effect`);
+      }
+      return { model: config.model, notes };
+    }
+    notes.push(
+      `config model '${config.model}' belongs to provider '${owners[0]}' — using ${providerName}'s default '${defaultFor}'`,
+    );
+    return { model: defaultFor, notes };
+  }
+  return { model: defaultFor, notes };
 }
 
 /**
@@ -114,9 +190,10 @@ export interface RunContextOptions {
 export function buildRunContext(values: CliValues, opts: RunContextOptions = {}): RunContext {
   const ws = workspaceRoot(values);
   const mode = resolveMode(values);
-  const provider = makeProvider(values);
+  const provider = makeProvider(values, opts.config, opts.registry);
   const approver = makeApprover(values, mode, opts.io, opts.approvalSignal);
-  const model = values.model ?? opts.config?.model ?? DEFAULT_MODEL;
+  const providerName = provider.name as ProviderName;
+  const { model, notes } = resolveModel(providerName, values, opts.config);
   // --max-steps is the honest name (the value bounds model steps per turn, not turns);
   // --max-turns stays accepted as the legacy alias. A non-numeric value used to become NaN,
   // and `NaN > maxSteps` comparisons made every turn end after ZERO steps — refuse loudly.
@@ -125,8 +202,11 @@ export function buildRunContext(values: CliValues, opts: RunContextOptions = {})
   }
   const stepsRaw = values['max-steps'] ?? values['max-turns'];
   const maxSteps = stepsRaw !== undefined ? parseCountFlag(values['max-steps'] !== undefined ? 'max-steps' : 'max-turns', stepsRaw) : (opts.config?.maxSteps ?? 20);
-  const maxTokens = provider.name === 'anthropic' ? 64_000 : 16_000;
-  return { ws, mode, provider, approver, model, maxSteps, maxTokens };
+  // Output cap and elision budget come from the capability catalog — the former
+  // `name === 'anthropic' ? 64_000 : 16_000` branch, generalized into data.
+  const maxTokens = defaultMaxTokensFor(providerName, model);
+  const contextBudget = contextBudgetFor(providerName, model);
+  return { ws, mode, provider, approver, model, maxSteps, maxTokens, contextBudget, notes };
 }
 
 /**
