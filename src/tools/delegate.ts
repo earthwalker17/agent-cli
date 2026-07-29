@@ -723,9 +723,15 @@ export function createDelegateTool(
               ? { planTaskSha: planTaskDefinitionSha(planTaskById.get(t.plan_task)!) }
               : {}),
           };
-          const provider = deps.providerForTask?.(index, spec.role) ?? deps.provider;
+          // Session 15: the LIVE parent identity (a /provider or /model switch between calls
+          // must reach children); providerForTask still wins for per-child test scripting.
+          const rt = deps.currentRuntime?.();
+          const provider = deps.providerForTask?.(index, spec.role) ?? rt?.provider ?? deps.provider;
           const taskDeps: SubagentDeps = {
             ...deps,
+            ...(rt !== undefined
+              ? { model: rt.model, maxTokens: rt.maxTokens, ...(rt.contextBudget !== undefined ? { contextBudget: rt.contextBudget } : {}) }
+              : {}),
             provider,
             ...(ctx.reportTask !== undefined ? { reportTask: ctx.reportTask } : {}),
           };

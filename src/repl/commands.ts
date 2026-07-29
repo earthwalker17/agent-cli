@@ -17,6 +17,16 @@ import { CHECKS_PER_SESSION, describeProject, type CheckCaps, type RunCheckTool 
 import type { PreviewTool } from '../tools/preview.js';
 import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
 import { likelyBrowserAvailable } from '../browser/probe.js';
+import {
+  CATALOG_VERIFIED,
+  capsFor,
+  contextBudgetFor,
+  defaultMaxTokensFor,
+  modelsFor,
+  providersOfModel,
+  type ProviderName,
+} from '../provider/catalog.js';
+import { resolveProviderName, type ProviderRegistry } from '../provider/registry.js';
 import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
@@ -47,12 +57,21 @@ export interface CommandContext {
   checkCaps?: CheckCaps;
   /** Session 13: the managed-preview tool instance; /preview lists and stops its live handles. */
   previewTool?: PreviewTool;
+  /** Session 15: the provider registry (env-only key discovery, bounded validation, construction)
+   *  — the /provider and /model switching seam. Absent = switching unavailable in this context. */
+  registry?: ProviderRegistry;
 }
 
 export const HELP = [
   'commands:',
   '  /help           this help',
   '  /status         session, model, workspace, token usage',
+  '  /provider [name [model]]',
+  '                  list providers (key env NAMES + presence, defaults) or switch provider —',
+  '                  credentials are env-only; a switch validates the key (bounded) and records',
+  '                  provider.changed evidence. Between turns only.',
+  '  /model [id]     list the current provider\'s model catalog (capabilities, lifecycle) or',
+  '                  switch models within the provider. Between turns only.',
   '  /undo [all]     revert the last (or all) file-tool change(s) of this session',
   '  /diff           show what this session changed (unified diff vs the session pre-images)',
   '  /commit [-m "msg"] [--all] [--no-trailer]',
@@ -815,6 +834,12 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       return 'continue';
     }
 
+    case 'provider':
+      return await cmdProvider(arg, ctx);
+
+    case 'model':
+      return await cmdModel(arg, ctx);
+
     case 'cancel':
       ctx.renderer.chromeLine('nothing to cancel: /cancel works MID-TURN (on a TTY) while a delegated task group is running');
       return 'continue';
@@ -827,4 +852,232 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       ctx.renderer.chromeLine(`unknown command: /${cmd ?? ''} — try /help`);
       return 'continue';
   }
+}
+
+// ── /provider and /model (Session 15) ──────────────────────────────────────────────────────
+
+/** Never let anything key-shaped enter the session log via a command argument. */
+function looksLikeCredential(s: string): boolean {
+  return s.includes('=') || /^sk-/i.test(s) || s.length > 64;
+}
+
+function fmtTokens(n: number): string {
+  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : `${Math.round(n / 1024)}K`;
+}
+
+function capsLine(provider: ProviderName, model: string): string {
+  const caps = capsFor(provider, model);
+  const bits = [
+    `ctx ${fmtTokens(caps.contextTokens)}`,
+    `out ${fmtTokens(caps.maxOutputTokens)} (default ${fmtTokens(caps.defaultMaxTokens)})`,
+    caps.visionInput ? 'vision' : 'NO image input',
+    caps.reasoning.mode === 'none'
+      ? 'no reasoning'
+      : `reasoning ${caps.reasoning.mode}${caps.reasoning.replay !== 'none' ? ' (round-tripped)' : ''}`,
+    `caching ${caps.caching}`,
+    caps.lifecycle !== 'ga' ? caps.lifecycle.toUpperCase() : '',
+  ].filter((b) => b !== '');
+  return bits.join(' · ');
+}
+
+function safeHost(url: string): string | undefined {
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The one mutation path both commands share: session fields → event → model note → chrome. */
+function performSwitch(
+  ctx: CommandContext,
+  target: { providerName: ProviderName; provider: Session['provider']; model: string },
+  meta: { keyEnv?: string; baseUrlHost?: string; verification: 'models-list' | 'presence-only' | 'unverified-network' },
+): void {
+  const from = { providerName: ctx.session.provider.name, model: ctx.session.model };
+  ctx.session.provider = target.provider;
+  ctx.session.model = target.model;
+  ctx.session.maxTokens = defaultMaxTokensFor(target.providerName, target.model);
+  ctx.session.contextBudget = contextBudgetFor(target.providerName, target.model);
+  ctx.session.log.append({
+    type: 'provider.changed',
+    from,
+    to: { providerName: target.providerName, model: target.model },
+    source: 'user-command',
+    ...(meta.keyEnv !== undefined ? { keyEnv: meta.keyEnv } : {}),
+    ...(meta.baseUrlHost !== undefined ? { baseUrlHost: meta.baseUrlHost } : {}),
+    verification: meta.verification,
+  });
+  const caps = capsFor(target.providerName, target.model);
+  const caveats: string[] = [];
+  if (!caps.visionInput) caveats.push('this model has NO image input — screenshots are recorded as evidence but not shown to you');
+  if (caps.reasoning.mode === 'forced') caveats.push('thinking is always on for this model');
+  ctx.pendingNotes.push(
+    `the user switched the provider/model from ${from.providerName}·${from.model} to ` +
+      `${target.providerName}·${target.model}. Reasoning from other models does not carry across and the prompt cache resets.` +
+      (caveats.length > 0 ? ` ${caveats.join('; ')}.` : ''),
+  );
+  const transport = target.provider.describeTransport?.();
+  ctx.renderer.chromeLine(
+    `provider: ${from.providerName}·${from.model} → ${target.providerName}·${target.model}\n` +
+      `  ${capsLine(target.providerName, target.model)}\n` +
+      `  key check: ${meta.verification}${meta.baseUrlHost !== undefined ? ` · host: ${meta.baseUrlHost}` : ''}` +
+      `${transport !== undefined ? ` · network: ${transport}` : ''} · prompt cache resets — recorded as provider.changed`,
+  );
+}
+
+async function cmdProvider(arg: string, ctx: CommandContext): Promise<SlashOutcome> {
+  const tokens = arg.trim().split(/\s+/).filter((s) => s !== '');
+  if (tokens.some(looksLikeCredential)) {
+    ctx.renderer.chromeLine('refused: credentials are env-only — never paste a key into the session (set the provider\'s *_API_KEY env var instead)');
+    return 'continue';
+  }
+  if (ctx.registry === undefined) {
+    ctx.renderer.chromeLine('provider switching is unavailable in this context');
+    return 'continue';
+  }
+  const registry = ctx.registry;
+
+  if (tokens.length === 0) {
+    const cur = ctx.session.provider.name;
+    const lines = [`providers (current: ${cur} · ${ctx.session.model}; catalog verified ${CATALOG_VERIFIED}):`];
+    for (const name of registry.names()) {
+      const a = registry.availability(name);
+      const status = a.present ? `ready (${a.keyEnv} set)` : `no key — set ${a.info.keyEnvs.join(' or ')}`;
+      const base = a.baseUrlOverridden ? ` · base ${safeHost(a.baseUrl) ?? a.baseUrl} (via ${a.info.baseUrlEnv})` : '';
+      lines.push(`  ${name.padEnd(10)} ${status} · default ${a.info.defaultModel}${base}${name === cur ? '  ← current' : ''}`);
+    }
+    lines.push(`  ${'mock'.padEnd(10)} scripted test provider (start-time only: --provider mock --script <file>)`);
+    lines.push('switch: /provider <name> [model] · models: /model · key sources: `agent providers`');
+    ctx.renderer.chromeLine(lines.join('\n'));
+    return 'continue';
+  }
+
+  const name = resolveProviderName(tokens[0]!);
+  if (name === undefined) {
+    ctx.renderer.chromeLine(`unknown provider: ${sanitizeLine(tokens[0]!)} (valid: anthropic, openai, deepseek, kimi, glm)`);
+    return 'continue';
+  }
+  if (name === 'mock') {
+    ctx.renderer.chromeLine('the mock provider is start-time only (--provider mock --script <file>)');
+    return 'continue';
+  }
+  const modelArg = tokens[1];
+  if (name === ctx.session.provider.name && modelArg === undefined) {
+    ctx.renderer.chromeLine(`already on ${name} — use /model to change models`);
+    return 'continue';
+  }
+
+  const a = registry.availability(name);
+  if (!a.present) {
+    ctx.renderer.chromeLine(
+      `no key for ${name}: set ${a.info.keyEnvs.join(' or ')}${a.info.keyUrl !== undefined ? ` (get a key: ${a.info.keyUrl})` : ''}`,
+    );
+    return 'continue';
+  }
+
+  const model = modelArg ?? a.info.defaultModel;
+  const owners = providersOfModel(model);
+  if (owners.length > 0 && !owners.includes(name)) {
+    ctx.renderer.chromeLine(`model '${sanitizeLine(model)}' belongs to provider '${owners[0]!}' — use /provider ${owners[0]!} ${model}`);
+    return 'continue';
+  }
+
+  if (a.info.modelsPath !== undefined) {
+    ctx.renderer.chromeLine(`validating ${a.keyEnv} against ${safeHost(a.baseUrl) ?? a.baseUrl}${a.info.modelsPath} (bounded)…`);
+  }
+  const validation = await registry.validateKey(name);
+  if (!validation.ok) {
+    ctx.renderer.chromeLine(`switch refused: ${sanitizeLine(validation.detail)}`);
+    return 'continue';
+  }
+  if (validation.modelIds !== undefined && !validation.modelIds.includes(model)) {
+    if (ctx.question === undefined) {
+      ctx.renderer.chromeLine(`switch refused: model '${sanitizeLine(model)}' is not in the provider's live model list (${validation.modelIds.length} visible)`);
+      return 'continue';
+    }
+    const answer = await ctx.question(`  model '${model}' is not in the provider's live model list — switch anyway? [y/N] `);
+    if (answer === null || !/^y(es)?$/i.test(answer.trim())) {
+      ctx.renderer.chromeLine('switch declined — provider unchanged');
+      return 'continue';
+    }
+  }
+  if (owners.length === 0) {
+    ctx.renderer.chromeLine(`note: model '${sanitizeLine(model)}' is not in the shipped catalog — conservative defaults in effect`);
+  }
+
+  let provider: Session['provider'];
+  try {
+    provider = registry.create(name);
+  } catch (e) {
+    ctx.renderer.chromeLine(`switch failed: ${sanitizeLine((e as Error).message)}`);
+    return 'continue';
+  }
+  performSwitch(
+    ctx,
+    { providerName: name, provider, model },
+    {
+      ...(a.keyEnv !== undefined ? { keyEnv: a.keyEnv } : {}),
+      ...(safeHost(a.baseUrl) !== undefined ? { baseUrlHost: safeHost(a.baseUrl)! } : {}),
+      verification: validation.verification,
+    },
+  );
+  return 'continue';
+}
+
+async function cmdModel(arg: string, ctx: CommandContext): Promise<SlashOutcome> {
+  const id = arg.trim();
+  if (id !== '' && looksLikeCredential(id)) {
+    ctx.renderer.chromeLine('refused: that argument looks like a credential — /model takes a model id only');
+    return 'continue';
+  }
+  const providerName = ctx.session.provider.name as ProviderName;
+
+  if (id === '') {
+    if (providerName === 'mock') {
+      ctx.renderer.chromeLine(`current: ${ctx.session.model} (mock provider — any model id is accepted)`);
+      return 'continue';
+    }
+    const lines = [`models for ${providerName} (current: ${ctx.session.model}; catalog verified ${CATALOG_VERIFIED}):`];
+    for (const m of modelsFor(providerName)) {
+      lines.push(`  ${m.id.padEnd(26)} ${capsLine(providerName, m.id)}${m.id === ctx.session.model ? '  ← current' : ''}`);
+      for (const n of m.notes ?? []) lines.push(`  ${' '.repeat(26)}   ${n}`);
+    }
+    lines.push('switch: /model <id> · an id outside this list runs with conservative defaults after confirmation');
+    ctx.renderer.flush();
+    ctx.modelOut.write(lines.join('\n') + '\n');
+    return 'continue';
+  }
+
+  if (id === ctx.session.model) {
+    ctx.renderer.chromeLine(`already on ${id}`);
+    return 'continue';
+  }
+  const owners = providersOfModel(id);
+  if (providerName !== 'mock' && owners.length > 0 && !owners.includes(providerName)) {
+    ctx.renderer.chromeLine(`model '${sanitizeLine(id)}' belongs to provider '${owners[0]!}' — use /provider ${owners[0]!} ${id}`);
+    return 'continue';
+  }
+
+  let verification: 'models-list' | 'presence-only' | 'unverified-network' = 'presence-only';
+  if (providerName !== 'mock' && owners.length === 0 && ctx.registry !== undefined) {
+    // Uncataloged id: consult the live list where one exists before running blind.
+    const validation = await ctx.registry.validateKey(providerName);
+    verification = validation.verification;
+    if (validation.modelIds !== undefined && !validation.modelIds.includes(id)) {
+      if (ctx.question === undefined) {
+        ctx.renderer.chromeLine(`switch refused: '${sanitizeLine(id)}' is in neither the shipped catalog nor the provider's live model list`);
+        return 'continue';
+      }
+      const answer = await ctx.question(`  '${id}' is in neither the catalog nor the live model list — switch anyway? [y/N] `);
+      if (answer === null || !/^y(es)?$/i.test(answer.trim())) {
+        ctx.renderer.chromeLine('switch declined — model unchanged');
+        return 'continue';
+      }
+    }
+    ctx.renderer.chromeLine(`note: model '${sanitizeLine(id)}' is not in the shipped catalog — conservative defaults in effect`);
+  }
+
+  performSwitch(ctx, { providerName, provider: ctx.session.provider, model: id }, { verification });
+  return 'continue';
 }

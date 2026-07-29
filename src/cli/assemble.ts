@@ -15,6 +15,7 @@ import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type Previe
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
+import { effectiveIdentity } from '../report/report.js';
 import { likelyBrowserAvailable, probeBrowser, type BrowserAvailability } from '../browser/probe.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
@@ -115,6 +116,8 @@ export interface Assembled {
   stopAllPreviews: () => Promise<string | null>;
   /** Resume honesty (Session 13): what happened to previews a previous life left running. */
   previewResumeNote?: string;
+  /** Resume honesty (Session 15): the session resumed under a different provider/model. */
+  providerResumeNote?: string;
 }
 
 export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
@@ -231,6 +234,26 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   session.log.append({ type: 'config.loaded', sources: deps.config.sources });
   recordSandboxStatus(session, sandboxFacts);
   recordGitContext(session, gitFacts);
+
+  // Resume honesty (Session 15): resuming under a DIFFERENT provider/model used to switch
+  // silently — the report kept asserting the original identity for work the new model did.
+  // The mismatch is now recorded (newest-wins readers fold it) and surfaced as a note.
+  let providerResumeNote: string | undefined;
+  if (deps.resumeId !== undefined) {
+    const prior = effectiveIdentity(session.log.events).current;
+    if (prior !== null && (prior.providerName !== ctx.provider.name || prior.model !== ctx.model)) {
+      session.log.append({
+        type: 'provider.changed',
+        from: prior,
+        to: { providerName: ctx.provider.name, model: ctx.model },
+        source: 'resume',
+        verification: 'presence-only',
+      });
+      providerResumeNote =
+        `this session previously ran on ${prior.providerName}·${prior.model} and resumes on ` +
+        `${ctx.provider.name}·${ctx.model} — reasoning from the previous model does not carry across; recorded as provider.changed`;
+    }
+  }
   recordWorkspaceMap(session, map);
   session.log.append({
     type: 'memory.loaded',
@@ -484,6 +507,14 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         model: ctx.model,
         maxTokens: ctx.maxTokens,
         provider: ctx.provider,
+        // Session 15: children follow the LIVE session identity across /provider and /model
+        // switches (read per delegate call), so a child's session.started records the truth.
+        currentRuntime: () => ({
+          model: session.model,
+          maxTokens: session.maxTokens,
+          provider: session.provider,
+          ...(session.contextBudget !== undefined ? { contextBudget: session.contextBudget } : {}),
+        }),
         rules: deps.config.rules,
         sandbox,
         sandboxFacts,
@@ -558,6 +589,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     previewCaps,
     stopAllPreviews,
     ...(previewResumeNote !== undefined ? { previewResumeNote } : {}),
+    ...(providerResumeNote !== undefined ? { providerResumeNote } : {}),
     ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(previewSweep !== undefined ? { previewSweep } : {}),

@@ -110,6 +110,13 @@ export interface SubagentDeps {
    */
   providerForTask?: (index: number, role: SubagentRoleName) => Provider;
   /**
+   * Live parent runtime identity (Session 15): read once per delegate CALL, so a /provider or
+   * /model switch reaches later children — whose own session.started then records the truth.
+   * Absent (tests / older wiring) = the assembly-time snapshot fields above. providerForTask
+   * still wins for per-child test scripting.
+   */
+  currentRuntime?: () => { model: string; maxTokens: number; provider: Provider; contextBudget?: ElisionOptions };
+  /**
    * Session 10: the parent session's read-only retrieve tool instance, admitted into a child
    * ONLY when the role contract names it AND the instance is structurally free of
    * command/delegates/planDoc facts — a NAMED single-tool seam, deliberately not a generic

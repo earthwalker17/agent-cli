@@ -133,9 +133,12 @@ export interface ReportJson {
   session: {
     id: string;
     workspaceRoot: string;
+    /** The FINAL (newest-wins) identity; `modelsUsed` lists every identity when it changed. */
     model: string;
     mode: string;
     providerName: string;
+    /** Present only when more than one provider/model identity served the session (Session 15). */
+    modelsUsed?: { providerName: string; model: string }[];
     endedReason: string | null;
     resumes: number;
     usage: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number };
@@ -328,10 +331,37 @@ export function firstPassingEvidenceAfter(evidence: readonly PassingEvidenceEntr
   return evidence.find((cc) => cc.seq > seq && cc.exitCode === 0 && (cc.termination === undefined || cc.termination === 'exited'));
 }
 
+/**
+ * Newest-wins provider/model identity (Session 15): `session.started` seeds it and every
+ * `provider.changed` overlays it — the same correction the endedReason fold got in S14.5.
+ * `used` lists every distinct identity that served part of the session, in first-use order.
+ */
+export function effectiveIdentity(events: readonly SessionEvent[]): {
+  current: { providerName: string; model: string } | null;
+  used: { providerName: string; model: string }[];
+} {
+  let current: { providerName: string; model: string } | null = null;
+  const used: { providerName: string; model: string }[] = [];
+  const push = (id: { providerName: string; model: string }): void => {
+    if (!used.some((u) => u.providerName === id.providerName && u.model === id.model)) used.push(id);
+  };
+  for (const e of events) {
+    if (e.type === 'session.started') {
+      current = { providerName: e.providerName, model: e.model };
+      push(current);
+    } else if (e.type === 'provider.changed') {
+      current = { providerName: e.to.providerName, model: e.to.model };
+      push(current);
+    }
+  }
+  return { current, used };
+}
+
 export function buildReport(input: ReportInput): { json: ReportJson; md: string } {
   const { events } = input;
 
   const started = events.find((e) => e.type === 'session.started');
+  const identity = effectiveIdentity(events);
   // The NEWEST lifecycle event decides how this log ended (S14.5 review finding): `find` took
   // the FIRST session.ended, so a session that quit cleanly, was resumed, and then CRASHED
   // reported "ended: user-quit" — and the preview section chose its benign wording — while the
@@ -779,9 +809,12 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     session: {
       id: started?.type === 'session.started' ? started.sessionId : 'unknown',
       workspaceRoot: started?.type === 'session.started' ? started.workspaceRoot : 'unknown',
-      model: started?.type === 'session.started' ? started.model : 'unknown',
+      // Newest-wins (Session 15): a mid-session /provider or /model switch — or a resume under a
+      // different identity — must not let the report assert the original model for later work.
+      model: identity.current?.model ?? 'unknown',
       mode: started?.type === 'session.started' ? started.mode : 'unknown',
-      providerName: started?.type === 'session.started' ? started.providerName : 'unknown',
+      providerName: identity.current?.providerName ?? 'unknown',
+      ...(identity.used.length > 1 ? { modelsUsed: identity.used } : {}),
       endedReason: ended?.type === 'session.ended' ? ended.reason : null,
       resumes,
       usage,
@@ -855,6 +888,9 @@ function renderMarkdown(r: ReportJson): string {
   L.push(`- session: ${r.session.id}`);
   L.push(`- workspace: ${r.session.workspaceRoot}`);
   L.push(`- model: ${r.session.model} (provider: ${r.session.providerName}, mode: ${r.session.mode})`);
+  if (r.session.modelsUsed !== undefined) {
+    L.push(`- models used (identity changed mid-session): ${r.session.modelsUsed.map((m) => `${m.providerName}·${m.model}`).join(' → ')}`);
+  }
   L.push(`- ended: ${r.session.endedReason ?? 'IN PROGRESS or CRASHED/UNKNOWN (no session.ended recorded)'}`);
   if (r.session.resumes > 0) L.push(`- resumed ${r.session.resumes} time(s)`);
   {

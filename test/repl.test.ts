@@ -18,6 +18,8 @@ import { createNoneSandbox } from '../src/sandbox/none.js';
 import type { SandboxBackend } from '../src/sandbox/index.js';
 import type { CliValues } from '../src/cli/context.js';
 import type { ScriptTurn } from '../src/provider/mock.js';
+import { DEFAULT_MODEL } from '../src/provider/catalog.js';
+import { createProviderRegistry, type ProviderRegistry } from '../src/provider/registry.js';
 import type { SessionEvent } from '../src/types.js';
 
 /** A fake backend that reports enforcement (so auto-run triggers) but wraps as identity: the command
@@ -65,6 +67,7 @@ async function drive(
   lines: string[],
   extraValues: Partial<CliValues> = {},
   sandbox: SandboxBackend = createNoneSandbox('test'),
+  registry?: ProviderRegistry,
 ): Promise<ReplRun> {
   const scriptFile = path.join(tmp, 'script.json');
   fs.writeFileSync(scriptFile, JSON.stringify(script));
@@ -88,7 +91,11 @@ async function drive(
   input.write(lines.join(''));
   input.end();
 
-  const code = await runRepl(values, { streams: { input, modelOut, chromeOut, isTTY: false }, sandbox });
+  const code = await runRepl(values, {
+    streams: { input, modelOut, chromeOut, isTTY: false },
+    sandbox,
+    ...(registry !== undefined ? { registry } : {}),
+  });
 
   const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: state } });
   let events: SessionEvent[] = [];
@@ -139,6 +146,76 @@ describe('REPL: conversation loop', () => {
     // The refusal is a recorded fact, not a rendering artifact.
     const ev = r.events.find((e) => e.type === 'assistant.message');
     expect(ev).toMatchObject({ stopReason: 'refusal' });
+  });
+});
+
+describe('REPL: /provider and /model (Session 15)', () => {
+  it('/provider lists availability with env NAMES only — a key value never reaches any stream', async () => {
+    const registry = createProviderRegistry({ env: { DEEPSEEK_API_KEY: 'sk-super-secret-value' } });
+    const r = await drive([], ['/provider\n', '/quit\n'], {}, createNoneSandbox('test'), registry);
+    expect(r.chromeOut).toContain('ready (DEEPSEEK_API_KEY set)');
+    expect(r.chromeOut).toContain('no key — set OPENAI_API_KEY');
+    expect(r.chromeOut).toContain('catalog verified');
+    expect(r.chromeOut).not.toContain('sk-super-secret-value');
+    expect(r.modelOut).not.toContain('sk-super-secret-value');
+  });
+
+  it('/provider refuses key-shaped arguments outright', async () => {
+    const r = await drive([], ['/provider deepseek sk-abcdef123456\n', '/quit\n']);
+    expect(r.chromeOut).toContain('credentials are env-only');
+    expect(r.events.some((e) => e.type === 'provider.changed')).toBe(false);
+  });
+
+  it('/provider switch: validates the key, mutates the session, records provider.changed', async () => {
+    const registry = createProviderRegistry({
+      env: { DEEPSEEK_API_KEY: 'k' },
+      fetchImpl: async () => new Response(JSON.stringify({ data: [{ id: 'deepseek-v4-pro' }] }), { status: 200 }),
+    });
+    const r = await drive([], ['/provider deepseek\n', '/status\n', '/quit\n'], {}, createNoneSandbox('test'), registry);
+    expect(r.chromeOut).toContain('validating DEEPSEEK_API_KEY against api.deepseek.com/models');
+    expect(r.chromeOut).toContain(`provider: mock·${DEFAULT_MODEL} → deepseek·deepseek-v4-pro`);
+    const ev = r.events.find((e) => e.type === 'provider.changed');
+    expect(ev).toMatchObject({
+      from: { providerName: 'mock', model: DEFAULT_MODEL },
+      to: { providerName: 'deepseek', model: 'deepseek-v4-pro' },
+      source: 'user-command',
+      keyEnv: 'DEEPSEEK_API_KEY',
+      verification: 'models-list',
+    });
+    // /status reads the LIVE session fields.
+    expect(r.chromeOut).toContain('model: deepseek-v4-pro · provider: deepseek');
+  });
+
+  it('/provider refuses a missing key (env NAME + key URL) and a definitive 401', async () => {
+    const noKey = await drive([], ['/provider deepseek\n', '/quit\n'], {}, createNoneSandbox('test'), createProviderRegistry({ env: {} }));
+    expect(noKey.chromeOut).toContain('no key for deepseek: set DEEPSEEK_API_KEY');
+    expect(noKey.events.some((e) => e.type === 'provider.changed')).toBe(false);
+
+    const rejected = await drive(
+      [],
+      ['/provider deepseek\n', '/quit\n'],
+      {},
+      createNoneSandbox('test'),
+      createProviderRegistry({ env: { DEEPSEEK_API_KEY: 'k' }, fetchImpl: async () => new Response('{}', { status: 401 }) }),
+    );
+    expect(rejected.chromeOut).toContain('switch refused');
+    expect(rejected.chromeOut).toContain('REJECTED');
+    expect(rejected.events.some((e) => e.type === 'provider.changed')).toBe(false);
+  });
+
+  it('/model switches within the provider and the model learns via the next harness note', async () => {
+    const r = await drive([{ say: 'hi' }], ['/model other-model\n', 'first task\n', '/quit\n']);
+    const ev = r.events.find((e) => e.type === 'provider.changed');
+    expect(ev).toMatchObject({
+      from: { providerName: 'mock', model: DEFAULT_MODEL },
+      to: { providerName: 'mock', model: 'other-model' },
+      source: 'user-command',
+    });
+    const user = r.events.find((e) => e.type === 'user.message');
+    if (user?.type !== 'user.message') throw new Error('unreachable');
+    expect(user.text).toContain('switched the provider/model');
+    expect(user.text).toContain('other-model');
+    expect(user.text).toContain('first task');
   });
 
   it('an untrusted workspace refuses with exit 3 before any session exists', async () => {

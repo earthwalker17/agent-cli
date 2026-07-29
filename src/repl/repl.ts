@@ -14,6 +14,7 @@ import { renderAgentPlanView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { createReplIO, type ReplIO } from './io.js';
+import { createProviderRegistry, type ProviderRegistry } from '../provider/registry.js';
 import { createRenderer, type Renderer } from './render.js';
 import { createStatusArea } from './status.js';
 import { createTaskTable } from './live-tasks.js';
@@ -44,6 +45,8 @@ export interface ReplOptions {
   sandbox?: SandboxBackend;
   /** Injectable git facts for deterministic tests; defaults to a real detectGitFacts probe. */
   gitFacts?: GitFacts;
+  /** Injectable provider registry (Session 15): ONE instance serves construction and /provider. */
+  registry?: ProviderRegistry;
 }
 
 export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promise<number> {
@@ -83,7 +86,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       statusArea.resume();
     }
   };
-  const ctx = buildRunContext(values, { config, io: { question: async (q) => (await question(q)) ?? 'q' } });
+  const registry = opts.registry ?? createProviderRegistry();
+  const ctx = buildRunContext(values, { config, io: { question: async (q) => (await question(q)) ?? 'q' }, registry });
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
@@ -156,6 +160,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     checkTool: assembled.checkTool,
     checkCaps: assembled.checkCaps,
     previewTool: assembled.previewTool,
+    registry,
     ...(assembled.pruneHarnessRefs !== undefined ? { pruneHarnessRefs: assembled.pruneHarnessRefs } : {}),
   };
   // Resume honesty (Session 13): previews from a previous life are dead or swept — never
@@ -163,6 +168,12 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   if (assembled.previewResumeNote !== undefined) {
     renderer.chromeLine(style.dim(`  note: ${assembled.previewResumeNote}`));
     pendingNotes.push(assembled.previewResumeNote);
+  }
+  // Resume honesty (Session 15): a resumed session running under a different provider/model
+  // says so — and tells the model, whose predecessor produced the earlier turns.
+  if (assembled.providerResumeNote !== undefined) {
+    renderer.chromeLine(style.dim(`  note: ${assembled.providerResumeNote}`));
+    pendingNotes.push(assembled.providerResumeNote);
   }
   // Resume-after-accept honesty (Session 11.5): a resumed session that was already accepted
   // says so up front — further work is allowed, but the boundary crossing is visible.

@@ -199,3 +199,39 @@ describe('buildReport determinism & honesty', () => {
     expect(buildReport({ events }).md).toContain('NOT undoable');
   });
 });
+
+describe('provider/model identity (Session 15)', () => {
+  it('newest-wins: a provider.changed overlays the session.started identity, with modelsUsed listed', () => {
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'user.message', text: 'work' }),
+      evt({
+        seq: 3,
+        type: 'provider.changed',
+        from: { providerName: 'mock', model: 'm' },
+        to: { providerName: 'deepseek', model: 'deepseek-v4-pro' },
+        source: 'user-command',
+        keyEnv: 'DEEPSEEK_API_KEY',
+        verification: 'models-list',
+      }),
+      evt({ seq: 4, type: 'session.ended', reason: 'completed' }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.session.model).toBe('deepseek-v4-pro');
+    expect(json.session.providerName).toBe('deepseek');
+    expect(json.session.modelsUsed).toEqual([
+      { providerName: 'mock', model: 'm' },
+      { providerName: 'deepseek', model: 'deepseek-v4-pro' },
+    ]);
+    expect(md).toContain('- model: deepseek-v4-pro (provider: deepseek, mode: interactive)');
+    expect(md).toContain('models used (identity changed mid-session): mock\u00b7m \u2192 deepseek\u00b7deepseek-v4-pro');
+  });
+
+  it('single-identity sessions are unchanged: no modelsUsed field, no extra md line', () => {
+    const events: SessionEvent[] = [started, evt({ seq: 2, type: 'session.ended', reason: 'completed' })];
+    const { json, md } = buildReport({ events });
+    expect(json.session.model).toBe('m');
+    expect('modelsUsed' in json.session).toBe(false);
+    expect(md).not.toContain('models used');
+  });
+});

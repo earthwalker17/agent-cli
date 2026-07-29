@@ -81,6 +81,7 @@ describe('journal entries', () => {
         '- files changed: 2 (+120/−8; 1 CHECKED, 1 UNCHECKED)',
         '- commands run: 2 (1 exited 0)',
         '- commits: abcdef01 "feat: widget"',
+        '- model: mock·mock',
         '- tokens: 10 in / 200 out (cache: 500 read / 50 written)',
         '- ended: user-quit',
         '- session log: C:\\state\\sessions\\20260720-100000-aaaa.jsonl',

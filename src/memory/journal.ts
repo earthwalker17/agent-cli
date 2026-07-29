@@ -164,6 +164,12 @@ function evidenceLines(report: ReportJson, endedReason: string, logPath: string)
     if (d !== undefined) lines.push(`- delivery checkpoint recorded (not consumed by an acceptance; verify with \`agent checkpoint list\`): ${d.oid.slice(0, 12)} (${d.ref})`);
   }
   const u = report.session.usage;
+  // Session 15: which model served the work — the identity list when it changed mid-session.
+  lines.push(
+    report.session.modelsUsed !== undefined
+      ? `- model: ${report.session.modelsUsed.map((m) => `${m.providerName}·${m.model}`).join(' → ')}`
+      : `- model: ${report.session.providerName}·${report.session.model}`,
+  );
   lines.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out (cache: ${u.cacheReadInputTokens ?? 0} read / ${u.cacheCreationInputTokens ?? 0} written)`);
   lines.push(`- ended: ${endedReason}`);
   lines.push(`- session log: ${logPath}`);

@@ -188,7 +188,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).
-  const { session, sandboxFacts, gitFacts, memory, pruneHarnessRefs, stopAllPreviews, previewResumeNote } = await assembleSession({
+  const { session, sandboxFacts, gitFacts, memory, pruneHarnessRefs, stopAllPreviews, previewResumeNote, providerResumeNote } = await assembleSession({
     trust,
     config,
     ctx,
@@ -215,6 +215,7 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   process.stderr.write(`memory: ${memory.bannerLine}\n`);
   if (memory.crashNote !== null) process.stderr.write(`note: ${memory.crashNote}\n`);
   if (previewResumeNote !== undefined) process.stderr.write(`note: ${previewResumeNote}\n`);
+  if (providerResumeNote !== undefined) process.stderr.write(`note: ${providerResumeNote}\n`);
 
   // Best-effort, bounded, closed-log-tolerant: previews are stopped on EVERY exit path — a
   // one-shot run has nobody left to manage a server after it returns (Session 13). Called
