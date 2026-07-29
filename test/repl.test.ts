@@ -133,6 +133,14 @@ describe('REPL: conversation loop', () => {
     expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
   });
 
+  it('a refusal turn ends with an honest chrome note (Session 15)', async () => {
+    const r = await drive([{ say: 'I cannot help with that', stopReason: 'refusal' }], ['task\n', '/quit\n']);
+    expect(r.chromeOut).toContain('declined this request (stop reason: refusal)');
+    // The refusal is a recorded fact, not a rendering artifact.
+    const ev = r.events.find((e) => e.type === 'assistant.message');
+    expect(ev).toMatchObject({ stopReason: 'refusal' });
+  });
+
   it('an untrusted workspace refuses with exit 3 before any session exists', async () => {
     const r = await drive([{ say: 'never' }], ['task\n'], { 'trust-this-workspace': false });
     expect(r.code).toBe(3);

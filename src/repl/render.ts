@@ -404,6 +404,10 @@ export function createRenderer(opts: {
       if (counters.denials > 0) bits.push(`${counters.denials} denied`);
       let status = '';
       if (result.aborted) status = ` ${g.warn} interrupted`;
+      else if (result.stopReason === 'refusal')
+        // Session 15: classifier declines (claude-opus-5/fable-5) are HTTP-200 turns that would
+        // otherwise end silently — say so honestly instead of looking like a finished answer.
+        status = ` ${g.warn} the model declined this request (stop reason: refusal) — rephrase or narrow the task`;
       else if (result.stopped && result.steps >= maxSteps) status = ` ${g.warn} step budget reached — continue with another instruction`;
       else if (result.stopped) status = ` ${g.warn} stopped`;
       chromeLine(style.dim(`${g.rule.repeat(2)} ${bits.join(' · ')}`) + (status ? style.yellow(status) : ''));

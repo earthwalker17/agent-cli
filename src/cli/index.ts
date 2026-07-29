@@ -236,6 +236,10 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
   });
   try {
     const result = await runTurn(session, task, { signal: controller.signal });
+    if (result.stopReason === 'refusal' && !result.aborted) {
+      // Session 15: a classifier decline is an HTTP-200 turn — surface it, never end silently.
+      process.stderr.write('note: the model declined this request (stop reason: refusal) — rephrase or narrow the task\n');
+    }
     const reason = endReasonForTurn(result, ctx.maxSteps);
     if (reason !== 'aborted') {
       // Session-end hygiene before endSession (the event must land in the open log).
