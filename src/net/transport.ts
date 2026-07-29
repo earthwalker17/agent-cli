@@ -120,6 +120,11 @@ export interface TransportOptions {
   env?: NodeJS.ProcessEnv;
   /** Base fetch to wrap (defaults to the global fetch). Injected in tests. */
   baseFetch?: FetchImpl;
+  /**
+   * Representative https URL for `describe()` (Session 15): the label should name the provider
+   * host it actually applies to, not a hardcoded one. Routing always resolves per request URL.
+   */
+  describeUrl?: string;
 }
 
 function urlOf(input: string | URL | Request): string {
@@ -145,6 +150,8 @@ export function createTransport(opts: TransportOptions = {}): Transport {
   const env = opts.env ?? process.env;
   const baseFetch: FetchImpl = opts.baseFetch ?? ((input, init) => globalThis.fetch(input as never, init as never));
 
+  const describeUrl = opts.describeUrl ?? 'https://api.anthropic.com';
+
   if (!anyProxyConfigured(opts, env)) {
     return { describe: () => 'direct (no proxy configured)' };
   }
@@ -166,7 +173,7 @@ export function createTransport(opts: TransportOptions = {}): Transport {
     fetch: fetchImpl,
     describe: () => {
       // Describe against a representative https target so the source label is meaningful.
-      const r = resolveProxy('https://api.anthropic.com', env, opts.proxy);
+      const r = resolveProxy(describeUrl, env, opts.proxy);
       if (r.proxyUrl) return `proxy ${redactProxyUrl(r.proxyUrl)} (via ${r.source})`;
       return r.bypassed ? `direct (NO_PROXY bypass, ${r.source} otherwise)` : 'direct (no proxy configured)';
     },
