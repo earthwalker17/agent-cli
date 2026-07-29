@@ -22,6 +22,8 @@ import { runCommitFlow } from '../git/commit.js';
 import { createCheckpoint, deleteCheckpointRefs, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { sanitizeLine } from '../shared/text.js';
 import { DEFAULT_MODEL, buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
+import { CATALOG_VERIFIED, modelsFor } from '../provider/catalog.js';
+import { createProviderRegistry } from '../provider/registry.js';
 import { assembleSession } from './assemble.js';
 import { memoryDir, parseFrontmatter, readDocCapped } from '../memory/store.js';
 import { runMemoryUpdate } from '../memory/update.js';
@@ -64,6 +66,8 @@ Usage:
   agent map [--budget <n>]       Print the workspace map the model would receive
   agent memory                   Show the project-memory documents (paths, status, provenance)
   agent trust [--revoke|--list]  Manage recorded workspace trust (consent, not a sandbox)
+  agent providers [--json]       List providers, models, key env vars (presence only — never
+                                 values), base URLs, and where to obtain keys. No network.
   agent version | help           Print the version / this help (never starts a session)
 
 Options:
@@ -96,7 +100,7 @@ recorded consent, not isolation. See README "Security model & honest limitations
 // 'version' and 'help' MUST be members: an unknown first positional falls through to a REAL
 // one-shot model session, so before they were named here, `agent version` silently started a
 // paid agent run with the literal task string "version".
-const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust', 'version', 'help']);
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust', 'providers', 'version', 'help']);
 
 interface Args {
   values: CliValues;
@@ -279,6 +283,61 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
     // still stopped (their events are then swallowed by the closed-log tolerance — honest cost).
     void stopPreviews();
   }
+}
+
+/**
+ * `agent providers` (Session 15): a read-only listing of the provider/model catalog and key
+ * discovery state. NO network, no session, no state creation; env var NAMES and presence only —
+ * never a value. `--json` emits the same data machine-readably.
+ */
+function cmdProviders(values: CliValues): number {
+  const registry = createProviderRegistry();
+  const rows = registry.names().map((name) => {
+    const a = registry.availability(name);
+    return {
+      name,
+      display: a.info.display,
+      protocol: a.info.protocol,
+      keyEnvs: a.info.keyEnvs,
+      keyPresent: a.present,
+      ...(a.keyEnv !== undefined ? { keyEnv: a.keyEnv } : {}),
+      baseUrl: a.baseUrl,
+      baseUrlOverridden: a.baseUrlOverridden,
+      ...(a.info.baseUrlEnv !== undefined ? { baseUrlEnv: a.info.baseUrlEnv } : {}),
+      defaultModel: a.info.defaultModel,
+      ...(a.info.keyUrl !== undefined ? { keyUrl: a.info.keyUrl } : {}),
+      models: modelsFor(name).map((m) => ({
+        id: m.id,
+        lifecycle: m.lifecycle,
+        contextTokens: m.contextTokens,
+        maxOutputTokens: m.maxOutputTokens,
+        vision: m.visionInput,
+        reasoning: m.reasoning.mode,
+      })),
+    };
+  });
+  if (values.json) {
+    process.stdout.write(JSON.stringify({ catalogVerified: CATALOG_VERIFIED, default: 'anthropic', providers: rows }, null, 2) + '\n');
+    return 0;
+  }
+  const fmt = (n: number): string => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : `${Math.round(n / 1024)}K`);
+  const L: string[] = [`providers (catalog verified ${CATALOG_VERIFIED}; default: anthropic · ${DEFAULT_MODEL}):`, ''];
+  for (const r of rows) {
+    L.push(`${r.name}  —  ${r.display} [${r.protocol}]`);
+    L.push(`  key: ${r.keyEnvs.join(' or ')} ${r.keyPresent ? `[${r.keyEnv} set]` : '[NOT SET]'}`);
+    if (r.keyUrl !== undefined) L.push(`  get a key: ${r.keyUrl}`);
+    L.push(`  base: ${r.baseUrl}${r.baseUrlOverridden ? ` (overridden via ${r.baseUrlEnv})` : r.baseUrlEnv !== undefined ? ` (override: ${r.baseUrlEnv})` : ''}`);
+    L.push(`  default model: ${r.defaultModel}`);
+    for (const m of r.models) {
+      L.push(
+        `    ${m.id.padEnd(26)} ${fmt(m.contextTokens)} ctx / ${fmt(m.maxOutputTokens)} out · ${m.vision ? 'vision' : 'no images'} · reasoning ${m.reasoning}${m.lifecycle !== 'ga' ? ` · ${m.lifecycle.toUpperCase()}` : ''}`,
+      );
+    }
+    L.push('');
+  }
+  L.push('credentials are env-only; keys never appear in logs, reports, or events.');
+  process.stdout.write(L.join('\n') + '\n');
+  return 0;
 }
 
 function printVerdict(layout: ProjectLayout, id: string): void {
@@ -734,6 +793,7 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === 'commit') return await cmdCommit(values);
     if (cmd === 'checkpoint') return await cmdCheckpoint(values, positionals[1], positionals[2]);
     if (cmd === 'sessions') return cmdSessions(values);
+    if (cmd === 'providers') return cmdProviders(values);
     if (cmd === 'map') return cmdMap(values);
     if (cmd === 'memory') return cmdMemory(values);
     if (cmd === 'undo') return await cmdUndo(values);

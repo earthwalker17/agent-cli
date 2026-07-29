@@ -135,6 +135,26 @@ d('CLI end-to-end via the built binary', () => {
     expect(res.stdout).toMatch(/fail closed/);
   });
 
+  it('`agent providers` lists the catalog with env NAMES only and NEVER starts a session (Session 15)', () => {
+    const res = run(['providers']);
+    expect(res.code).toBe(0);
+    for (const name of ['anthropic', 'openai', 'deepseek', 'kimi', 'glm']) expect(res.stdout).toContain(name);
+    expect(res.stdout).toContain('DEEPSEEK_API_KEY');
+    expect(res.stdout).toContain('get a key:');
+    expect(res.stdout).toContain('catalog verified');
+    // Env var NAMES and presence only — never a value.
+    const realKey = process.env['ANTHROPIC_API_KEY'];
+    if (realKey !== undefined && realKey.length > 8) expect(res.stdout).not.toContain(realKey);
+    expect(sessionEvents()).toEqual([]); // read-only: no session log was ever created
+
+    const asJson = run(['providers', '--json']);
+    expect(asJson.code).toBe(0);
+    const parsed = JSON.parse(asJson.stdout) as { providers: { name: string; models: unknown[] }[] };
+    expect(parsed.providers).toHaveLength(5);
+    expect(parsed.providers.every((p) => p.models.length > 0)).toBe(true);
+    expect(sessionEvents()).toEqual([]);
+  });
+
   it('--version and `agent version` print the package version and NEVER start a session', () => {
     // Regression pin: before 'version'/'help' joined KNOWN, the unknown-positional fallthrough
     // started a REAL one-shot agent session with the literal task string "version".
