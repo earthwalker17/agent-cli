@@ -14,6 +14,7 @@ import { checkCapsFromEvents, createRunCheckTool, type CheckCaps, type RunCheckT
 import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
+import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { likelyBrowserAvailable, probeBrowser, type BrowserAvailability } from '../browser/probe.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
@@ -418,6 +419,12 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const viewImageTool = createViewImageTool({
     getBlob: (sha) => session.snapshots.getBlob(sha),
     events: () => session.log.events,
+    // Read at CALL time (closure over the live session) so /provider and /model switches are
+    // honored: a text-only model refuses the LOOK, never the evidence (Session 15).
+    modelInfo: () => ({
+      model: session.model,
+      visionInput: capsFor(session.provider.name as ProviderName, session.model).visionInput,
+    }),
   });
 
   // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the

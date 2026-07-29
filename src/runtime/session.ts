@@ -39,6 +39,7 @@ import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
 import { elideHistory, type ElisionOptions } from './elision.js';
+import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { DIFF_MAX_BYTES, isProbablyBinary, lineDiffStat } from '../shared/diff.js';
 
 export interface Session {
@@ -1198,6 +1199,29 @@ async function runExecution<I>(
   // is being asked to actually look at (Session 13).
   const content = result.ok ? result.output : `${result.error ?? 'error'}${result.output ? `\n${result.output}` : ''}`;
   if (result.images !== undefined && result.images.length > 0) {
+    // Session 15 vision choke: a model without image input gets honest POINTERS, never pixels.
+    // The evidence is unchanged (blobs stored, image metadata on tool.completed) — only the
+    // wire view degrades, and the text says so. Nothing else (DOM assertions, gates, checks)
+    // is affected.
+    const caps = capsFor(session.provider.name as ProviderName, session.model);
+    if (!caps.visionInput) {
+      const pointers = result.images
+        .map(
+          (im) =>
+            `[screenshot${im.label !== undefined ? ` ${im.label}` : ''}: stored as evidence at objects/${im.sha256} — model '${session.model}' has no image input, pixels not sent]`,
+        )
+        .join('\n');
+      return {
+        toolResult: {
+          type: 'tool_result',
+          toolUseId: callId,
+          content: `${content}${content.length > 0 ? '\n' : ''}${pointers}`,
+          ...(result.ok ? {} : { isError: true }),
+        },
+        denied: false,
+        stop: false,
+      };
+    }
     const parts: ToolResultPart[] = [
       { type: 'text', text: content },
       ...result.images.map(

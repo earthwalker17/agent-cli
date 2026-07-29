@@ -32,6 +32,9 @@ export type ViewImageInputT = z.infer<typeof ViewImageInput>;
 export interface ViewImageDeps {
   getBlob: (sha256: string) => Buffer;
   events: () => readonly SessionEvent[];
+  /** Live model capability (Session 15): read at CALL time so /provider switches are honored.
+   *  Absent (older wiring/tests) = vision assumed available. */
+  modelInfo?: () => { model: string; visionInput: boolean };
 }
 
 export function createViewImageTool(deps: ViewImageDeps): Tool<ViewImageInputT> {
@@ -72,6 +75,20 @@ export function createViewImageTool(deps: ViewImageDeps): Tool<ViewImageInputT> 
         durationMs: Date.now() - startedAt,
         truncated: false,
       });
+
+      // Session 15 vision gate: a text-only model cannot LOOK at pixels. Only this visual-
+      // judgment step degrades — the screenshot stays in the evidence store, and deterministic
+      // browser assertions / DOM checks are untouched. Recorded honestly via the tool result.
+      const info = deps.modelInfo?.();
+      if (info !== undefined && !info.visionInput) {
+        return Promise.resolve(
+          refuse(
+            `model '${info.model}' has no image input — the screenshot remains at objects/${input.sha256} and ` +
+              'deterministic browser assertions are unaffected. Switch to a vision-capable model (/model) to view it.',
+            'unsupported: model has no image input',
+          ),
+        );
+      }
 
       let found: { label: string; mediaType: string; flowName: string; kind: 'screenshot' | 'trace' } | null = null;
       const available: string[] = [];
