@@ -42,12 +42,10 @@ acceptance contracts.
 Delivered: five providers over two protocols behind one runtime, a shipped capability catalog,
 opaque reasoning round-trip, `/provider` + `/model` + `agent providers`, env-only key discovery
 with bounded validation, `provider.changed` evidence, catalog-driven output/context budgets, and
-honest vision degradation. Live-proven on Anthropic (`claude-opus-5`, the new default) and OpenAI
-(`gpt-5.6-sol`) in one session with a live mid-session switch; DeepSeek/Kimi/GLM ship hermetically
-tested pending keys. Details and honest limits: `ROADMAP.md` Session 15, `ARCHITECTURE.md`
-"Providers".
-
-**Carried forward:** obtain DeepSeek/Kimi/GLM keys and run the three outstanding live smokes.
+honest vision degradation. **All five providers live-proven** through the real bounded tool loop
+(10/10 gated smokes + two multi-provider sessions, one of them switching through DeepSeek, Kimi and
+GLM with each writing its own file). Default model is now `claude-opus-5`. Details and honest
+limits: `ROADMAP.md` Session 15, `ARCHITECTURE.md` "Providers".
 
 ### Session 16 — Real Local Software Engineering
 
@@ -160,9 +158,9 @@ needed interactions cleanly.
 
 Before calling the next phase mature, Agent CLI should have demonstrated:
 
-- ~~at least two genuinely different provider protocols~~ **(met in S15: Anthropic Messages +
-  OpenAI Responses, live)** — with all named providers live-smoked through the same bounded tool
-  loop still outstanding for DeepSeek, Kimi and GLM;
+- ~~at least two genuinely different provider protocols and all named providers live-smoked through
+  the same bounded tool loop~~ **(MET in S15: Anthropic Messages + OpenAI Responses + a
+  Chat-Completions family, all five providers live)**;
 - a realistic dependency-bearing full-stack project built and verified locally;
 - a document/PDF workflow whose completion is based on artifact and visual evidence;
 - polyglot retrieval and checks over several different build ecosystems;

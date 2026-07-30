@@ -81,15 +81,29 @@ the construction seam**, the workspace-cannot-set-`provider` pin, `/provider` an
 flows incl. credential-shaped-argument refusal and no-key refusal, report newest-wins + modelsUsed,
 and `agent providers` creating no session and leaking no key value.
 
-**Live proof (real money, real APIs):** the gated smokes passed for anthropic and openai (4/4), and
-a piped-REPL E2E on the fixture at `C:\Users\A\Desktop\agent-cli-s15-live\` did the whole chain in
-ONE session — wrote `notes.md` on `claude-opus-5` (2 turns carrying round-tripped thinking blocks,
-prompt cache reads 12.8k/12.9k), then **`/provider openai` validated `OPENAI_API_KEY` live through
-the proxy** and switched, then `gpt-5.6-sol` appended the second line via the Responses API with
-`reasoningTokens: 13` and its own cache reads — final file exactly two lines, one per model. The
-report named the final identity with `modelsUsed: anthropic·claude-opus-5 → openai·gpt-5.6-sol`,
-the journal carried the model line, and **neither key value nor any `sk-` prefix appears anywhere
-in the log**.
+**Live proof (real money, real APIs) — ALL FIVE PROVIDERS.** Fixtures at
+`C:\Users\A\Desktop\agent-cli-s15-live\`.
+
+1. **Gated adapter smokes: 10/10** (`test/live-providers.test.ts`) — every provider did a streamed
+   completion plus a tool round-trip whose second request replays the first turn's blocks, which is
+   exactly the reasoning echo kimi/deepseek require and Anthropic validates byte-verbatim. First
+   contact for DeepSeek/Kimi/GLM: **no adapter fixes were needed** — the byte-level fixtures built
+   from first-party docs were accurate.
+2. **E2E #1 (`ws`):** `claude-opus-5` wrote `notes.md` (2 turns carrying round-tripped thinking
+   blocks, cache reads 12.8k/12.9k), then `/provider openai` validated `OPENAI_API_KEY` live through
+   the proxy and switched, then `gpt-5.6-sol` appended line two via the Responses API
+   (`reasoningTokens: 13`). Report: `modelsUsed: anthropic·claude-opus-5 → openai·gpt-5.6-sol`.
+3. **E2E #2 (`ws2`) — three switches in one session:** `claude-opus-5` → `deepseek-v4-pro` →
+   `kimi-k3` → `glm-5.2`, each writing its own file through the policy-gated `write_file` path
+   (`ds.txt`, `kimi.txt`, `glm.txt` — all correct). Per-provider evidence: deepseek reported
+   `reasoningTokens` 21/13 with 8832 cache reads; kimi-k3 accepted its mandatory complete-message
+   round-trip with 7680 cache reads; glm streamed `reasoning_content` with 8704 cache reads. All
+   three verification modes were exercised for real — `models-list` (deepseek, kimi) and
+   `presence-only` (glm, which genuinely has no list endpoint). **The documented cross-provider
+   history risk did not materialize:** every provider accepted a history containing another
+   model's tool calls.
+
+**In neither run does any key value, `sk-` prefix, or `Bearer` token appear anywhere in the log.**
 
 ### Decisions (and why)
 
@@ -115,10 +129,18 @@ in the log**.
 
 ### Open issues / boundaries (deliberate, documented)
 
-- **DeepSeek, Kimi and GLM are hermetically tested but NOT live-proven** — no keys on this machine
-  yet. Their smokes run automatically once a key appears; README/CHANGELOG/ROADMAP all say so.
-- GLM's international endpoint was unverifiable from this network at catalog time (China platform
-  docs were fully verified); its key check is presence-only because no model-list endpoint exists.
+- **Only each provider's DEFAULT model was live-tested.** The rest of the catalog is documented
+  from first-party sources, not individually exercised — the catalog is advisory and the wire
+  answer outranks it.
+- GLM's key check is presence-only because no model-list endpoint exists on either platform (its
+  international host `api.z.ai` was reached successfully in the live run).
+- **Credential-source boundary held under pressure.** The user initially placed the three new keys
+  in an external project's `.env`; the harness did not see them, because credentials come from
+  `process.env` alone. That is the designed behavior, not a bug — a file-based credential source is
+  exactly what the design excludes. For the verification run the values were injected into ONE test
+  child process (never printed, never persisted, never written into this repo). `.env` support was
+  deliberately NOT added: it would contradict the README's env-only claim and widen the credential
+  surface of a public security-sensitive tool without review.
 - Reasoning deltas are not rendered live, so an always-thinking model can appear to pause before
   text (deferred: a reasoning render channel).
 - OpenAI resume flattens interleaved reasoning order (reasoning→text→tool_use); live turns keep
@@ -129,8 +151,9 @@ in the log**.
 ### Recommended next step
 
 Session 16 per BLUEPRINT: real local software engineering (dependency-bearing full-stack projects).
-Before it, obtain DeepSeek/Kimi/GLM keys and run the three remaining live smokes — the adapters are
-written and pinned; only the live proof is outstanding.
+The provider layer needs no further work to proceed — all five are live-proven; the remaining
+provider items in the deferred pool (live reasoning render channel, strict-schema transformation,
+per-role model tiers) are optimizations, not gaps.
 
 ---
 

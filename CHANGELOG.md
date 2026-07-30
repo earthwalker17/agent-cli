@@ -70,16 +70,18 @@ semantics, with capability differences degrading honestly instead of silently.
 
 ### Honest limits
 
-- Live-proven this release: **Anthropic** (`claude-opus-5`) and **OpenAI** (`gpt-5.6-sol`), both
-  through the real bounded tool loop including reasoning round-trip, in one session with a live
-  mid-session provider switch. **DeepSeek, Kimi and GLM ship hermetically tested — adapters,
-  profiles, streaming, usage and error mapping are pinned by byte-level fixtures, but they have not
-  yet been exercised against the live services.** Their live smokes run automatically as soon as a
-  key is present.
-- GLM has no model-list endpoint on either platform, so its key check is presence-only and says so.
-  Its international endpoint could not be verified from the author's network at catalog time; the
-  China platform documentation was.
-- DeepSeek V4 models are vendor-labeled *preview*.
+- **All five providers are live-proven** through the real bounded tool loop on their default models:
+  10/10 gated adapter smokes (a streamed completion plus a tool round-trip that exercises each
+  provider's reasoning-echo requirement) and two full harness sessions — one switching
+  `claude-opus-5` → `gpt-5.6-sol`, one switching `claude-opus-5` → `deepseek-v4-pro` → `kimi-k3` →
+  `glm-5.2` with each model writing its own file through the policy-gated tool path. Cross-provider
+  history after a switch was accepted by every provider.
+- **Only the default model of each provider was live-tested.** The remaining catalog entries are
+  documented from first-party sources, not individually exercised; the catalog is advisory and the
+  wire answer always outranks it.
+- GLM has no model-list endpoint on either platform, so its key check is presence-only and says so
+  (its international endpoint `api.z.ai` was reached successfully in the live run).
+- DeepSeek V4 models are vendor-labeled *preview* by DeepSeek.
 - `undici` 8 and `diff` 9 majors are deliberately deferred: both change surfaces (proxy dispatcher,
   patch API) that deserve a session able to live-verify them.
 

@@ -41,16 +41,18 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.1.** 1155 hermetic tests across 84 files (real-OS sandbox, real-repository git,
+> **Status: v1.1.** 1156 hermetic tests across 84 files (real-OS sandbox, real-repository git,
 > real browser flows, adversarial-review suites) plus opt-in live smokes. Proven live end-to-end
-> across nine recorded runs: a full v1.0 demo (one natural-language request → plan → revision →
+> across ten recorded runs: a full v1.0 demo (one natural-language request → plan → revision →
 > sha-bound approval → parallel worktree executors → integration → typed checks → managed preview
-> → browser verification → adversarial review → crash → resume → acceptance → memory handoff),
-> and a v1.1 multi-provider run that wrote a file on `claude-opus-5`, switched providers **live**
-> mid-session, and finished the work on `gpt-5.6-sol` — with both models' reasoning blocks
-> round-tripped and no credential anywhere in the evidence. This is an open, build-in-public
-> engineering effort — see `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and
-> `ROADMAP.md` for what is done, deferred, and next.
+> → browser verification → adversarial review → crash → resume → acceptance → memory handoff), and
+> **all five providers exercised live through the real bounded tool loop** — 10/10 gated adapter
+> smokes plus two multi-provider sessions, one switching `claude-opus-5` → `gpt-5.6-sol`
+> mid-session and one switching `claude-opus-5` → `deepseek-v4-pro` → `kimi-k3` → `glm-5.2` with
+> each model writing its own file. Every provider's reasoning round-trip was accepted live, and no
+> credential appears anywhere in the evidence. This is an open, build-in-public engineering effort
+> — see `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what
+> is done, deferred, and next.
 
 ## Install
 
@@ -200,11 +202,12 @@ against first-party documentation. Consequences you will actually see:
   network failure proceeds and is recorded as unverified; GLM has no list endpoint, so it is
   presence-only and says so), then record `provider.changed`. The report names the final identity
   and lists every model that served the session.
-- **Honest limits.** DeepSeek V4 models are vendor-labeled *preview*; GLM's international
-  endpoint could not be verified from the author's network at catalog time (the China platform
-  was) — both are labeled in-product. Retired ids (`deepseek-chat`, `deepseek-reasoner`,
-  `kimi-k2-*` previews, `kimi-latest`, `glm-4.5-flash`) are deliberately absent from the catalog,
-  and invitation-only models are never advertised.
+- **Honest limits.** All five providers have been exercised live through the real tool loop, but
+  only on their default models — the other catalog entries are documented, not individually
+  live-tested. DeepSeek V4 models are vendor-labeled *preview* by DeepSeek. GLM has no model-list
+  endpoint on either platform, so its key check is presence-only and says so. Retired ids
+  (`deepseek-chat`, `deepseek-reasoner`, `kimi-k2-*` previews, `kimi-latest`, `glm-4.5-flash`) are
+  deliberately absent from the catalog, and invitation-only models are never advertised.
 
 ## Workspace trust
 
