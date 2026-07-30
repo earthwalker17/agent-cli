@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI **v1.0** is actually built. This describes the implemented system — its modules,
+How Agent CLI **v1.1** is actually built. This describes the implemented system — its modules,
 contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
 deferred; this file avoids session narration except where a decision's *reason* is the contract.
 
@@ -98,8 +98,15 @@ src/
                            back to the flat map.
   net/transport.ts         Proxy-aware transport factory (pure resolver + custom fetch).
   provider/
+    catalog.ts             The capability model as DATA (models, caps, provider metadata).
+    profiles.ts            Per-provider chat-compat wire deviations (deepseek/kimi/glm).
+    errors.ts              ProviderError taxonomy + bounded connection-phase retry.
+    sse.ts                 One incremental SSE parser for the fetch-based adapters.
+    registry.ts            The ONE construction seam: env-only keys + bounded key validation.
     mock.ts                Scripted offline provider (test backbone); `hang` turns for aborts.
-    anthropic.ts           Streaming SDK adapter + pure response mapping + coalesceUserMessages.
+    anthropic.ts           Streaming SDK adapter + pure mapping + thinking round-trip.
+    openai-responses.ts    OpenAI Responses API adapter (stateless, reasoning items replayed).
+    openai-compat.ts       ONE Chat-Completions adapter, profile-parameterized.
   memory/                  Capped never-throwing doc IO + JOURNAL rolling policy + CODEBASE
                            provenance/staleness + the session-start load and end-of-session
                            update (all pure except the IO edges).
@@ -149,8 +156,9 @@ workspace.mapped, memory.loaded) → per-session tool attachment (retrieve, dele
 executor bundle + forwarding queue, update_plan, run_check, preview, browser_flow, recover,
 review, apply_task_changes with the changes registry rebuilt from events on resume).
 
-Read-only commands (`report`/`sessions`/`undo`/`diff`/`map`/`plan`/`memory`/`version`/`help`) are
-ungated, never create state dirs, and never run git; `agent commit`/`agent checkpoint` ARE
+Read-only commands (`report`/`sessions`/`undo`/`diff`/`map`/`plan`/`memory`/`providers`/`version`/
+`help`) are ungated, never create state dirs, and never run git (`providers` also makes no network
+call); `agent commit`/`agent checkpoint` ARE
 trust-gated (they execute repo hooks / write `.git`); `map` reads workspace bytes but sends
 nothing to a model (documented exception) and keeps the pure walker pre-trust.
 
@@ -1110,8 +1118,9 @@ lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The a
 
 | Area | Events / additive fields |
 | --- | --- |
-| session/turn | `session.started` (+`lineage`), `session.resumed`, `session.ended` (+`reason`), `turn.aborted {phase}`, `user.message`, `assistant.message` (+cache usage) |
+| session/turn | `session.started` (+`lineage`), `session.resumed`, `session.ended` (+`reason`), `turn.aborted {phase}`, `user.message`, `assistant.message` (+cache usage, +`reasoning[]` opaque blocks, +`usage.reasoningTokens`) |
 | consent/config | `trust.verified {source}`, `config.loaded {sources}`, `policy.decision`, `approval.resolved` (+`source: 'task-aborted'`) |
+| provider | `provider.changed {from, to, source: 'user-command'\|'resume', keyEnv?, baseUrlHost?, verification}` — env var NAMES and hosts only, never credentials; readers fold newest-wins |
 | tools/files | `tool.requested`, `tool.completed` (+`fullOutputSaved`, `images`), `snapshot.created`, `snapshot.failed`, `file.mutated` (+`linesAdded/Removed`, `postStateUnverified/postStateError`), `undo.applied` |
 | execution | `command.started` (+`sandbox`), `command.ended` (typed termination), `sandbox.status` |
 | git | `git.context`, `git.commit`, `git.checkpoint`, `git.restore`, `git.checkpoint.pruned {kind}`, `harness.checkpoint {kind, ref, oid, callId?}` |
@@ -1195,23 +1204,97 @@ assistant narrative is not evidence; the footer is mode-aware. PowerShell invoca
 `-EncodedCommand` and append `; exit $LASTEXITCODE` so a failing inner command cannot masquerade as
 exit 0 → a false CHECKED.
 
-## Providers
+## Providers (`provider/`)
 
-`MockProvider` replays scripted turns offline and throws if exhausted — the entire loop, policy,
-snapshot, resume, and report behavior are proven through it. `hang: true` turns (in-process only)
-resolve only when the abort signal fires — the deterministic way to test mid-stream aborts.
-`AnthropicProvider` streams via the SDK (passing the abort signal through), maps
-messages/blocks/stop-reasons, applies `coalesceUserMessages` at the wire (aborted turns and
-crash-resumes legitimately leave consecutive user messages), and omits the `thinking` parameter to
-avoid the thinking-block round-trip a tool-use loop would have to preserve. It contains no
-networking logic — it obtains a `fetch` from the transport factory.
+Five real providers over **two genuinely different protocols**, plus the mock, behind the same
+`Provider` contract and the same `runTurn`. Everything provider-specific is either an adapter or
+DATA; the runtime has no provider name-checks (one exception, the vision choke, reads the CATALOG,
+not a name).
+
+```
+catalog.ts    Capability model as DATA: per-model context/output caps, defaultMaxTokens, vision +
+              `toolResultImages` ('native'|'rehomed'|'none'), reasoning {mode, replay}, caching
+              style, lifecycle, quirk notes, and `budgetTokens` (OUR cost cap, not the provider's
+              window) + PROVIDERS (key envs, base-URL env, key URL, default model, models path).
+              `CATALOG_VERIFIED` is rendered by every listing. Retired ids are ABSENT; invite-only
+              models are never listed. An uncataloged model gets conservative defaults + a note.
+profiles.ts   Per-provider wire deviations for the chat-compat adapter (param names, include_usage
+              policy, strict-flag policy, reasoning-replay policy, usage extraction, extra
+              finish_reasons, error envelopes).
+errors.ts     ProviderError taxonomy (auth|rate-limit|balance|context-window|bad-request|server|
+              network|aborted) + bounded CONNECTION-PHASE-ONLY retry (≤2, Retry-After aware).
+sse.ts        One incremental SSE parser: chunk splits mid-UTF-8, CRLF, comment keep-alives,
+              multi-line data, `[DONE]` yielded to callers.
+registry.ts   The ONE construction/discovery seam: env-only key discovery (NAMES + presence),
+              base-URL overrides, and a bounded models-list validation probe.
+```
+
+- **`AnthropicProvider`** streams via the SDK (abort signal passed through), maps
+  messages/blocks/stop-reasons, and applies `coalesceUserMessages` at the wire (aborted turns and
+  crash-resumes legitimately leave consecutive user messages). The `thinking` parameter is
+  deliberately OMITTED so each model's own default applies — which on `claude-opus-5` (the v1.1
+  default), `claude-sonnet-5` and `claude-fable-5` means adaptive thinking is ON. It contains no
+  networking logic — it obtains a `fetch` from the transport factory.
+- **`OpenAiResponsesProvider`** speaks the **Responses API**, not Chat Completions: since GPT-5.4
+  Chat Completions cannot tool-call with reasoning off, and reasoning-item replay is
+  Responses-only. `store:false` + `include:['reasoning.encrypted_content']` keeps the harness
+  stateless; the terminal `response.completed`/`incomplete` payload is authoritative (streamed
+  deltas drive live text only), `incomplete` maps to `max_tokens`/`refusal`, and `response.failed`
+  or a terminal-less stream throws rather than fabricating a turn.
+- **`OpenAiCompatProvider`** is ONE Chat-Completions adapter parameterized by a profile
+  (deepseek/kimi/glm). Load-bearing mappings: each tool_result becomes its own `role:'tool'`
+  message before same-message user text (kimi's pairing rule); `[DONE]` is the terminator; usage
+  is accepted from all three documented locations; error-shaped `finish_reason`s throw typed
+  errors; no sampling params, no `tool_choice`, no `thinking` are ever sent (provider defaults are
+  what the harness wants, and kimi locks sampling outright).
+- **`MockProvider`** replays scripted turns offline and throws if exhausted — the entire loop,
+  policy, snapshot, resume, and report behavior are proven through it. `hang: true` turns
+  (in-process only) resolve only when the abort signal fires — the deterministic way to test
+  mid-stream aborts. A `reasoning` field scripts opaque reasoning blocks offline.
+
+**Opaque reasoning round-trip.** `ContentBlock` has a `reasoning` variant carrying the
+provider-NATIVE artifact verbatim (an Anthropic thinking/redacted_thinking block, an OpenAI
+reasoning item incl. `encrypted_content`, a `reasoning_content` string), tagged with the producing
+`providerName` + `model`. `assistant.message.reasoning` persists it (additive; old logs have no
+field and rebuild exactly as before), `reconstruct` replays it at the head of assistant content,
+and elision WEIGHS it but never replaces it (only tool_result content is rewritten). Each adapter
+replays only its own blocks for its own model, within that provider's documented scope — kimi
+`all`, anthropic/deepseek/openai `current-loop`, glm never (its server strips prior thinking).
+Foreign or out-of-window blocks are dropped from the WIRE VIEW only; `session.messages` is never
+mutated. This is what makes always-thinking models (kimi-k3, claude-fable-5) and reasoning tool
+loops legal at all.
 
 **Prompt caching:** `buildApiParams` is a pure, unit-tested request builder with two ephemeral
 `cache_control` breakpoints — the system block (tools+system = the stable prefix) and a MOVING one
 on the final content block of the final wire message, attached AFTER coalescing (a pre-attached
-marker could land mid-merged-message and silently cache a shorter prefix). Each step re-reads the
-prior conversation from cache; the pipeline order is fixed as elide → coalesce → cache-mark. Cache
-accounting flows as additive Usage fields into events, `/status`, and the report.
+marker could land mid-merged-message and silently cache a shorter prefix) and never on a replayed
+thinking block, whose bytes must not change. Each step re-reads the prior conversation from cache;
+the pipeline order is fixed as elide → scope-reasoning → coalesce → cache-mark. The other
+providers cache automatically. Cache accounting (plus additive `reasoningTokens`) flows into
+events, `/status`, and the report.
+
+**Identity, selection, and honest degradation.**
+
+- Selection precedence is `--provider`/`--model` > user config (`provider`, `model`) > the
+  provider's catalog default; the WORKSPACE config layer structurally cannot express either.
+  Credentials are env-only: never a flag, never config, never a command argument (`/provider`
+  refuses key-shaped arguments), so they cannot reach argv, `user.message`, or any event.
+- `maxTokens` and the elision `contextBudget` come from the catalog — production finally sets
+  `Session.contextBudget` (the V0.5 seam that only tests used).
+- `/provider` and `/model` are between-turns user commands (never tools — the model cannot switch
+  itself). They mutate the live session, append `provider.changed` (from/to, source, env var
+  NAME, API host, and HOW the key was checked), push a harness note telling the model its
+  predecessor produced the earlier turns, and print the capability line. Children follow via a
+  live `currentRuntime()` getter read per delegate call, so a child's own `session.started`
+  records the truth. Resuming under a different identity records the same event with
+  `source:'resume'` — closing a silent-switch hole.
+- Readers fold identity **newest-wins** (the same correction `endedReason` got): the report names
+  the final identity and lists `modelsUsed` when it changed; the journal carries a model line.
+- **Vision degrades honestly at ONE choke:** when the catalog says the model has no image input,
+  `runExecution` replaces wire image parts with `[screenshot: stored as evidence at objects/<sha>
+  — model has no image input]` and `view_image` refuses with the same explanation. Blobs, image
+  metadata, DOM assertions, gates, checks and recovery are untouched — only the visual-judgment
+  step degrades, and it says so.
 
 ## Networking (`net/transport.ts`)
 
@@ -1222,8 +1305,12 @@ or go direct. Precedence: an explicit override wins; otherwise the protocol-spec
 `ALL_PROXY`; and `NO_PROXY` (exact host, domain-suffix, `*`, or `host:port`) overrides an
 environment-derived proxy but not an explicit override.
 
-`createTransport(opts)` returns `{ fetch?, describe() }`. When no proxy could ever apply it returns
-no custom `fetch`, so the client uses its own default. Otherwise `fetch` resolves the proxy **per
+`createTransport(opts)` returns `{ fetch?, describe() }`; `describeUrl` names the representative
+host so the label matches the provider actually in use (routing always resolves per request URL).
+**Every network path goes through it — including the registry's key-validation probe:** a bare
+global fetch ignores system proxy settings, and on a proxied machine that produced a 401/403 for a
+valid key, which would have made `/provider` refuse a working credential (live-found, S15). When no
+proxy could ever apply it returns no custom `fetch`, so the client uses its own default. Otherwise `fetch` resolves the proxy **per
 request URL** and attaches an undici `ProxyAgent` **dispatcher for that request only** — there are
 no global side effects (`setGlobalDispatcher` is never called); ProxyAgent instances are cached per
 proxy URL. `describe()` returns a credential-redacted summary. Proxy URLs (and any embedded

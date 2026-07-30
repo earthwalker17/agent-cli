@@ -104,6 +104,19 @@ Concretely:
 - Commit only when requested or when the current repository policy clearly authorizes it.
 - Before any commit, review the diff, run relevant checks, and use a specific message that explains intent.
 
+### Public release alignment
+
+This is a public project. Every substantial public-facing session must leave implementation,
+`README.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `CHANGELOG.md`, the `package.json` version, and
+release metadata (security-supported versions, issue templates) consistent with each other and
+with what is actually built.
+
+Publishing requires, in order: verified evidence, then explicit user authorization, then push,
+then an appropriate semantic version tag and a GitHub Release created with the GitHub CLI, then
+confirmation that the remote matches the verified local state. Never force-push, rewrite published
+history, expose credentials, or publish a capability claim that was not live-proven — a provider,
+model, platform, or feature that has only been tested hermetically must say so in the same breath.
+
 ## Documentation Hierarchy
 
 The repository uses four primary context documents with distinct responsibilities:

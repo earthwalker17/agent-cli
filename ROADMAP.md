@@ -6,6 +6,134 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 15 (2026-07-29/30) — V1.1: the multi-provider runtime
+
+### Objective
+
+Generalize the provider layer per BLUEPRINT S15: Anthropic, OpenAI, DeepSeek, Kimi and GLM behind
+one runtime with an explicit capability model, `/provider` + `/model` switching, env-only key
+discovery, and honest degradation — preserving streaming, tool calls, cancellation, usage
+accounting, resume and evidence semantics. Plus public-release hygiene (v1.1.0) and an enduring
+CLAUDE.md release-alignment rule.
+
+### Planning provenance
+
+Three Explore recon lenses (provider/runtime, REPL/config/evidence, tests/release) + a 5-agent
+first-party research workflow (Anthropic, OpenAI, DeepSeek, Moonshot/Kimi, Zhipu/GLM — official
+docs only, ~205 tool calls) + one Plan-agent design pass. **The research paid for itself
+immediately:** `deepseek-chat`/`deepseek-reasoner` had been RETIRED five days earlier
+(2026-07-24), the entire `kimi-k2-*` preview generation and `kimi-latest` were discontinued, the
+Moonshot docs had rebranded to kimi.ai (API hosts unchanged), and OpenAI's Chat Completions can no
+longer tool-call with reasoning off — every one of which would have shipped as a broken default
+from memory. User decisions: default model → `claude-opus-5`, full reasoning round-trip in scope,
+international endpoints as defaults, live keys to be configured during the session.
+
+### What was implemented (commits `1af04c6` … `7932fed`)
+
+1. **`feat(types,provider,runtime)`** — the reasoning core: an opaque `reasoning` ContentBlock
+   (provider-native payload, tagged provider+model), persisted additively on `assistant.message`,
+   replayed by `reconstruct` at the head of assistant content, weighed but never rewritten by
+   elision; `Usage.reasoningTokens`; `Provider.describeTransport()`; the `provider.changed` event;
+   the Anthropic adapter mapping thinking/redacted_thinking both ways with `scopeReasoning` as the
+   wire-view filter and a cache marker that walks past replayed thinking blocks.
+2. **`feat(repl,cli)`** — a refusal turn is stated instead of ending like a finished answer.
+3. **`feat(provider)`** — the data layer: `catalog.ts` (capabilities as DATA + `CATALOG_VERIFIED`),
+   `profiles.ts` (per-provider wire deviations), `errors.ts` (ProviderError taxonomy + bounded
+   connection-phase-only retry), `sse.ts` (one incremental parser).
+4. **`feat(provider)` ×2** — the two new adapters: one profile-parameterized Chat-Completions
+   adapter (deepseek/kimi/glm) and the OpenAI **Responses** adapter (`store:false` + encrypted
+   reasoning replay).
+5. **`feat(config,cli,provider)`** — the registry seam, `provider` as a user-config preference,
+   `DEFAULT_MODEL = 'claude-opus-5'` as ONE exported constant (ending a 5-site literal
+   duplication), catalog-driven `maxTokens` + `contextBudget` (production finally sets it), and
+   both `instanceof AnthropicProvider` checks replaced by the interface.
+6. **`feat(runtime,tools)`** — the vision choke: no image input ⇒ honest pointers, evidence intact.
+7. **`feat(repl,runtime,report)`** — `/provider` + `/model`, the live `currentRuntime()` getter so
+   children follow switches, resume-mismatch recording, newest-wins report identity + `modelsUsed`,
+   journal model line.
+8. **`feat(cli)`** — `agent providers` (+`--json`), joined to `KNOWN`.
+9. **`test(live)`** — per-provider live smokes double-gated on `AGENT_LIVE_TEST=1` + that
+   provider's key.
+10. **`chore(deps)`** — `@anthropic-ai/sdk` ^0.115.0; undici 8 / diff 9 deferred with reasons.
+11. **`fix(provider)`** — the live-found transport fix (below).
+
+### The live-found defect (the session's most valuable finding)
+
+`validateKey` used a bare global fetch, so the key-validation probe did **not** take the
+proxy-aware path every adapter uses. On this proxied machine that returned **401/403 for a key
+that works perfectly through the SDK** — meaning `/provider anthropic` would have refused a valid
+credential with "present but REJECTED", the most damaging possible false negative for a brand-new
+switch flow. Fixed by building `createTransport()` per provider inside the probe. Re-verified
+live: anthropic 11 models visible, openai 126. The same probe also **cross-checked the shipped
+catalog against reality**: `claude-opus-5`/`sonnet-5`/`fable-5` and `gpt-5.6-sol`/`terra`/`luna`
+are all genuinely callable.
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite **1072 → 1155 passed / 1 skipped
+across 84 files** (+83). New pins: reasoning recording/replay/old-log-validity/elision exemption,
+Anthropic thinking round-trip incl. scope + drop-on-switch + the cache-marker guard, the SSE parser
+at hostile chunk boundaries, the error taxonomy and retry policy, per-profile request goldens and
+SSE fixtures (usage from all three documented locations, glm `sensitive`→refusal,
+`model_context_window_exceeded`→throw, deepseek 402=balance, kimi type strings), the Responses
+request/replay/incomplete/error mapping, **`test/context.test.ts` closing the zero-coverage gap on
+the construction seam**, the workspace-cannot-set-`provider` pin, `/provider` and `/model` drive()
+flows incl. credential-shaped-argument refusal and no-key refusal, report newest-wins + modelsUsed,
+and `agent providers` creating no session and leaking no key value.
+
+**Live proof (real money, real APIs):** the gated smokes passed for anthropic and openai (4/4), and
+a piped-REPL E2E on the fixture at `C:\Users\A\Desktop\agent-cli-s15-live\` did the whole chain in
+ONE session — wrote `notes.md` on `claude-opus-5` (2 turns carrying round-tripped thinking blocks,
+prompt cache reads 12.8k/12.9k), then **`/provider openai` validated `OPENAI_API_KEY` live through
+the proxy** and switched, then `gpt-5.6-sol` appended the second line via the Responses API with
+`reasoningTokens: 13` and its own cache reads — final file exactly two lines, one per model. The
+report named the final identity with `modelsUsed: anthropic·claude-opus-5 → openai·gpt-5.6-sol`,
+the journal carried the model line, and **neither key value nor any `sk-` prefix appears anywhere
+in the log**.
+
+### Decisions (and why)
+
+- **Reasoning payloads are OPAQUE and provider+model-tagged.** Only the emitting adapter may
+  interpret one; replay is scoped per provider's documented rule (kimi `all`, anthropic/deepseek/
+  openai `current-loop`, glm never). Opacity is also the escape hatch: an adapter can widen its own
+  payload shape without touching the schema.
+- **Persist reasoning VERBATIM, uncapped.** Kimi and DeepSeek reject a tool-looping assistant
+  message whose reasoning was altered or dropped, so byte fidelity beats log-size thrift; a
+  spill-to-blob optimization is a deferred item, not a launch requirement.
+- **OpenAI means the Responses API.** Chat Completions cannot tool-call with reasoning off since
+  GPT-5.4, and reasoning replay is Responses-only — "OpenAI-compatible" would have been a false
+  equivalence at the exact point that matters.
+- **Capabilities are DATA with a verified date.** Only Anthropic and Kimi expose live capability
+  metadata; OpenAI and DeepSeek list ids only and GLM has no list endpoint at all, so the shipped
+  catalog is the honest source — advisory, cross-checked live where possible, and always outranked
+  by the wire answer.
+- **`budgetTokens` is OUR cost opinion, not the provider's window** — commented as such, so a
+  reader cannot mistake a 100k working budget for a 1M context limit.
+- **Availability is env presence; a switch validates, and every outcome is labeled.** models-list /
+  presence-only / unverified-network are three different words and the event records which.
+- **Every network path goes through the transport** — proven the hard way.
+
+### Open issues / boundaries (deliberate, documented)
+
+- **DeepSeek, Kimi and GLM are hermetically tested but NOT live-proven** — no keys on this machine
+  yet. Their smokes run automatically once a key appears; README/CHANGELOG/ROADMAP all say so.
+- GLM's international endpoint was unverifiable from this network at catalog time (China platform
+  docs were fully verified); its key check is presence-only because no model-list endpoint exists.
+- Reasoning deltas are not rendered live, so an always-thinking model can appear to pause before
+  text (deferred: a reasoning render channel).
+- OpenAI resume flattens interleaved reasoning order (reasoning→text→tool_use); live turns keep
+  exact order.
+- undici 8 / diff 9 majors deferred: both change surfaces (proxy dispatcher, patch API) that need a
+  session able to live-verify them.
+
+### Recommended next step
+
+Session 16 per BLUEPRINT: real local software engineering (dependency-bearing full-stack projects).
+Before it, obtain DeepSeek/Kimi/GLM keys and run the three remaining live smokes — the adapters are
+written and pinned; only the live proof is outstanding.
+
+---
+
 ## Session 14.5 (2026-07-28) — V1.0: consolidation, repo-wide adversarial review, live proof
 
 ### Objective
@@ -405,8 +533,16 @@ merely resolved state root (so a state dir inside the workspace could evade the 
 spelled as an 8.3 short path or through a symlink), and a test whose premise silently broke when
 cwd and TEMP sit on different drives.
 
-**Kernel/runtime:** adaptive thinking with block preservation (`pause_turn` is mapped but the loop
-would end the turn); per-action / `--to` / `--steps` undo; conversation rewind; session
+**Provider/model (new, S15):** live smokes for DeepSeek/Kimi/GLM once keys exist; a live reasoning
+render channel (deltas are captured for round-trip but never displayed, so an always-thinking model
+looks paused); reasoning-payload spill-to-blob if event logs grow uncomfortable; strict-schema
+transformation for OpenAI/Kimi strict tool mode (currently `strict:false` — zod-derived draft-7
+schemas are not strict-compatible); per-role model tiers (a cheap explorer model); exposing
+Anthropic `output_config.effort` / reasoning-effort controls per provider; `undici` 8 and `diff` 9
+majors (deferred deliberately — proxy dispatcher and patch API need live verification).
+
+**Kernel/runtime:** `pause_turn` is mapped but the loop would end the turn; per-action / `--to` /
+`--steps` undo; conversation rewind; session
 pruning/sanitized export; prompt-history persistence + line-editing niceties; PTY support (the
 supervised preview substrate deliberately stops at non-interactive servers); SQLite indexing of
 events and long-term memory topic retrieval.

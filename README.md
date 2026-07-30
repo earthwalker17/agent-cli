@@ -34,15 +34,23 @@ What that means concretely:
   verification (the model names KINDS, the harness names COMMANDS), managed preview servers,
   Playwright browser flows over the *system* browser, a typed recovery policy, a **structural
   review gate**, and an explicit `/accept` delivery boundary.
+- **Five model providers behind one runtime.** Anthropic, OpenAI, DeepSeek, Kimi (Moonshot) and
+  GLM (Z.AI/Zhipu) through two genuinely different protocols, with a shipped **capability
+  catalog** so differences degrade honestly instead of hiding behind a false
+  lowest-common-denominator: `/provider` and `/model` switch mid-session with recorded evidence,
+  credentials stay env-only, and a model without image input gets honest screenshot *pointers*
+  rather than silently dropped pixels.
 
-> **Status: v1.0.** 1072 tests across 78 files (real-OS sandbox, real-repository git, real
-> browser flows, adversarial-review suites) plus one opt-in live-API smoke. Proven live
-> end-to-end across eight recorded runs, most recently a full V1.0 demo: one natural-language
-> request → plan → revision → sha-bound approval → parallel worktree executors → integration →
-> typed checks → managed preview → browser verification → adversarial review → crash → resume →
-> acceptance → memory handoff. This is an open, build-in-public engineering effort — see
-> `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is
-> done, deferred, and next.
+> **Status: v1.1.** 1155 hermetic tests across 84 files (real-OS sandbox, real-repository git,
+> real browser flows, adversarial-review suites) plus opt-in live smokes. Proven live end-to-end
+> across nine recorded runs: a full v1.0 demo (one natural-language request → plan → revision →
+> sha-bound approval → parallel worktree executors → integration → typed checks → managed preview
+> → browser verification → adversarial review → crash → resume → acceptance → memory handoff),
+> and a v1.1 multi-provider run that wrote a file on `claude-opus-5`, switched providers **live**
+> mid-session, and finished the work on `gpt-5.6-sol` — with both models' reasoning blocks
+> round-tripped and no credential anywhere in the evidence. This is an open, build-in-public
+> engineering effort — see `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and
+> `ROADMAP.md` for what is done, deferred, and next.
 
 ## Install
 
@@ -58,13 +66,18 @@ sandbox backend exists **only** for Windows. The rest of the logic is cross-plat
 the suite on both Windows and Linux, but on non-Windows the sandbox suites skip and the agent
 runs with approval only (auto-run is disabled — fail closed).
 
-To actually run the agent you need an Anthropic API key:
+To actually run the agent you need an API key for at least one provider. Credentials are read
+**only** from the environment — never from a config file, a CLI flag, or a slash command, so they
+cannot end up in a log, a report, or an event:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...    # PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-**Running the agent costs money** (it calls the Anthropic API). The test suite does not — it is
+`agent providers` lists every provider, which env var it needs, whether that var is set, and
+where to get a key — without touching the network. See **Providers and models** below.
+
+**Running the agent costs money** (it calls a model API). The test suite does not — it is
 hermetic and needs no key.
 
 ## Interactive use
@@ -99,7 +112,9 @@ agent session 20260715-101730-5d56
   `/tasks` (the task graph + delegated subagents), `/cancel <ref>` (stop one task),
   `/checks` (what this project can verify and the latest evidence per kind),
   `/preview [stop <id>]` (managed dev servers), `/review` (the review gate's state),
-  `/accept [confirm]` (the completion boundary), `/report`, `/map`, `/quit`.
+  `/provider [name [model]]` and `/model [id]` (list or switch provider/model mid-session —
+  recorded, credential-free), `/accept [confirm]` (the completion boundary), `/report`, `/map`,
+  `/quit`.
 - **`@plan <request>`** forces plan mode: the model investigates read-only, writes a
   persistent plan document, and waits — executor tasks stay blocked until `/plan approve`.
   **`@direct <request>`** forces the direct path for a request that needs no ceremony.
@@ -130,21 +145,66 @@ agent plan [<id>]              # print a session's plan document and approval st
 agent memory                   # show the project-memory documents and their paths
 agent map [--budget <n>]       # print the workspace map the model would receive
 agent trust [--revoke|--list]  # manage recorded workspace trust
+agent providers [--json]       # providers, models, key env vars (presence only), key sources
 ```
 
-Key flags: `-C <dir>` (workspace root), `--provider anthropic|mock`, `--script <file>`
-(scripted turns for `mock`), `--model <id>`, `--no-input` (non-interactive; auto-detected off a
-TTY), `--interactive` (force interactive mode over piped stdio, e.g. expect-style drivers),
-`--max-steps <n>` (model steps per turn; `--max-turns` is the legacy alias for the same limit),
-`--trust-this-workspace` (one invocation, never recorded), `--dangerously-allow-all`,
-`--version`. `agent version` and `agent help` print and exit — they never start a session.
+Key flags: `-C <dir>` (workspace root), `--provider anthropic|openai|deepseek|kimi|glm|mock`,
+`--script <file>` (scripted turns for `mock`), `--model <id>`, `--no-input` (non-interactive;
+auto-detected off a TTY), `--interactive` (force interactive mode over piped stdio, e.g.
+expect-style drivers), `--max-steps <n>` (model steps per turn; `--max-turns` is the legacy alias
+for the same limit), `--trust-this-workspace` (one invocation, never recorded),
+`--dangerously-allow-all`, `--version`. `agent version`, `agent help` and `agent providers` print
+and exit — they never start a session.
 
 Exit codes: `0` ok · `1` error · `2` one-shot completed with denials or hit the step budget
 (the REPL reports these inline and exits 0 on a clean quit) · `3` workspace not trusted.
 
-The Anthropic provider reads `ANTHROPIC_API_KEY` from the environment, streams responses, and
-detects system proxies (`HTTPS_PROXY` etc.). The `mock` provider replays a scripted-turns JSON
-file and needs no network — it is how the whole loop is tested deterministically.
+## Providers and models
+
+One runtime, five providers, two protocols. Every adapter streams, passes cancellation through,
+maps its own usage/error shapes into the harness's, and detects system proxies (`HTTPS_PROXY`
+etc.) via the shared transport. The `mock` provider replays a scripted-turns JSON file and needs
+no network — it is how the whole loop is tested deterministically.
+
+| provider | env var (first present wins) | protocol | default model | where to get a key |
+| --- | --- | --- | --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` | Messages API | `claude-opus-5` | platform.claude.com/settings/keys |
+| `openai` | `OPENAI_API_KEY` | Responses API | `gpt-5.6-sol` | platform.openai.com/settings/organization/api-keys |
+| `deepseek` | `DEEPSEEK_API_KEY` | Chat Completions | `deepseek-v4-pro` | platform.deepseek.com/api_keys (prepaid) |
+| `kimi` | `MOONSHOT_API_KEY`, `KIMI_API_KEY` | Chat Completions | `kimi-k3` | platform.kimi.ai/console/api-keys |
+| `glm` | `ZAI_API_KEY`, `ZHIPU_API_KEY` | Chat Completions | `glm-5.2` | z.ai (international) / open.bigmodel.cn (China) |
+
+Base URLs default to the **international** endpoints and can be redirected per provider with
+`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL` (China:
+`https://api.moonshot.cn/v1`) and `ZAI_BASE_URL` (China: `https://open.bigmodel.cn/api/paas/v4`).
+An active override is named in the banner and recorded (host only) on any switch.
+
+**Capabilities are data, and differences are stated, not hidden.** A shipped catalog carries each
+model's context/output limits, vision support, reasoning mode and replay requirement, caching
+style, and lifecycle; `agent providers` and `/model` render it with the date it was last verified
+against first-party documentation. Consequences you will actually see:
+
+- **Reasoning is round-tripped opaquely.** Models whose tool loops require their own reasoning
+  echoed back (Kimi K3, DeepSeek thinking mode, OpenAI reasoning items under `store:false`,
+  Anthropic thinking blocks) get it back byte-verbatim, scoped to the same provider *and* model.
+  Reasoning from a different model is dropped, never forwarded.
+- **No image input ⇒ honest pointers.** On a text-only model (DeepSeek, GLM text tiers) a
+  screenshot is still captured, stored, and recorded — the model receives
+  `[screenshot: stored as evidence at objects/<sha> — model has no image input]`, and `view_image`
+  refuses with the same explanation. Deterministic browser assertions, DOM checks, planning,
+  coding, checks and recovery are untouched: only the visual-judgment step degrades.
+- **Credentials are env-only.** `/provider` refuses key-shaped arguments; events record the env
+  var *name*, the API *host*, and how the key was checked — never a value.
+- **Switching is evidence.** `/provider <name> [model]` and `/model <id>` validate the key with a
+  bounded model-list probe where the provider has one (a definitive 401/403 refuses the switch; a
+  network failure proceeds and is recorded as unverified; GLM has no list endpoint, so it is
+  presence-only and says so), then record `provider.changed`. The report names the final identity
+  and lists every model that served the session.
+- **Honest limits.** DeepSeek V4 models are vendor-labeled *preview*; GLM's international
+  endpoint could not be verified from the author's network at catalog time (the China platform
+  was) — both are labeled in-product. Retired ids (`deepseek-chat`, `deepseek-reasoner`,
+  `kimi-k2-*` previews, `kimi-latest`, `glm-4.5-flash`) are deliberately absent from the catalog,
+  and invitation-only models are never advertised.
 
 ## Workspace trust
 
@@ -159,9 +219,11 @@ not what a process *can technically* do. Untrusted + non-interactive runs refuse
 
 ## Configuration (narrowing-only)
 
-- `<state>/config.json` (user): `model`, `maxSteps`, `memoryUpdates`, plus the narrowing knobs.
+- `<state>/config.json` (user): `provider`, `model`, `maxSteps`, `memoryUpdates`, plus the
+  narrowing knobs.
 - `<workspace>/.agent-cli/config.json` (workspace): **narrowing knobs only** — a workspace
-  cannot choose your model or budgets, and the agent's file tools cannot write to `.agent-cli/`.
+  cannot choose your provider, model or budgets, and the agent's file tools cannot write to
+  `.agent-cli/`.
 
 Narrowing knobs: `protectedPaths` (extra write-deny roots), `secretPatterns` (literal lowercase
 basename substrings treated as secret-like), and `envExcludePatterns` (extra name substrings
@@ -195,11 +257,14 @@ workspace run automatically; in-workspace writes run automatically **and are sna
 can be undone**; reads outside the workspace or of secret-looking files require approval — and
 secret classification runs on the RESOLVED path, so a symlink or 8.3 alias cannot evade it.
 
-Long sessions stay affordable: requests use **prompt caching** (the conversation prefix is
-re-read from cache each step; `/status` and the report show cache read/write tokens), and when
-the history grows very large the oldest tool outputs are **deterministically elided** from the
-wire — replaced by a hash-stamped marker; the full output always remains in the evidence log,
-and a `context.compacted` event records exactly what the model can no longer see.
+Long sessions stay affordable: requests use **prompt caching wherever the provider offers it**
+(Anthropic explicit breakpoints; automatic prefix caching on the others; `/status` and the report
+show cache read/write tokens — a switch resets the cache and says so), and when the history grows
+very large the oldest tool outputs are **deterministically elided** from the wire — replaced by a
+hash-stamped marker; the full output always remains in the evidence log, and a
+`context.compacted` event records exactly what the model can no longer see. The elision budget is
+derived from the selected model's catalog entry, so a small-window model is not fed a
+large-window history.
 
 Shell commands go through **automatic review** (the single default — there is no permission
 "mode" to pick). A deterministic analyzer decides, over the command text alone (never the model's
@@ -322,17 +387,21 @@ npm test             # vitest
 npm run build        # emit dist/
 ```
 
-The suite is hermetic — no network, no API key, no billing. ONE test is opt-in: a single real
-Anthropic API call that also re-proves the default model id and the provider adapter. Run it
-deliberately (PowerShell):
+The suite is hermetic — no network, no API key, no billing. The live tests are opt-in and gated
+**twice**: they need `AGENT_LIVE_TEST=1` *and* the relevant provider's key env var, so a missing
+key skips cleanly instead of failing. Run them deliberately (PowerShell):
 
 ```powershell
-$env:AGENT_LIVE_TEST=1; npx vitest run test/anthropic.test.ts
+$env:AGENT_LIVE_TEST=1; npx vitest run test/anthropic.test.ts       # Anthropic adapter + default model id
+$env:AGENT_LIVE_TEST=1; npx vitest run test/live-providers.test.ts  # every provider whose key is set
 ```
 
-It is not wired into an npm script on purpose: a bare `AGENT_LIVE_TEST=1 vitest` prefix is not
-portable on Windows without adding a dependency, and a test that spends money should be typed
-out, not inherited.
+`test/live-providers.test.ts` proves two things per provider through the real adapter: a streamed
+completion, and one tool round-trip whose second request replays the first turn's blocks —
+including reasoning — which is exactly the echo Kimi and DeepSeek require and Anthropic validates
+byte-verbatim. They are not wired into an npm script on purpose: a bare `AGENT_LIVE_TEST=1 vitest`
+prefix is not portable on Windows without adding a dependency, and a test that spends money
+should be typed out, not inherited.
 
 Note that `npm test` needs `dist/` to exist for the CLI smoke suite to run rather than skip —
 `npm install` builds it for you, and CI verifies the entry point exists before testing.
@@ -359,4 +428,3 @@ public issue tracker.
 ## Licence
 
 [MIT](LICENSE) © Eric Mono
-- `BLUEPRINT.md` — the rolling near-term development horizon.
