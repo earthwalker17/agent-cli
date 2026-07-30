@@ -2,418 +2,192 @@
 
 ## 1. Purpose
 
-This is the rolling near-term direction guide for Agent CLI after **v1.0** (Session 14.5).
-
-It begins from the implemented and live-proven **v1.0** state described in `ARCHITECTURE.md` and
-`ROADMAP.md`. It does not replace the enduring thesis in `PROJECT.md`, and it should not become a
-detailed implementation checklist. Each session must still begin in plan mode, inspect the current
-repository, validate the assumptions below, and propose a session-sized design from evidence.
-
-The near-term decision, now that the coding flow is complete:
-
-> Build the first NON-CODING workflow pack on the contracts the coding flow established —
-> reusing context, tasks, verification, recovery, review, and delivery rather than copying them —
-> and let that reuse prove the kernel generalizes beyond code.
-
-This is not a reason to inflate `runTurn` into a workflow engine. The coding flow is the first
-optimized workflow layer built on the small kernel; the documents/PDF pack is the second, and the
-seam between them is what the next sessions are really testing.
-
-## 2. Current Starting Point (post-Session 14.5, **v1.0**)
-
-The foundation is substantial and has eight recorded live proofs — most recently the V1.0 demo
-(one natural-language request → plan → user-requested revision → sha-bound approval → parallel
-worktree executors → integration → typed checks → managed preview → browser verification →
-adversarial review → crash → resume → acceptance → memory handoff). The coding flow is complete
-and the kernel is clean; Session 15 begins the first non-coding workflow pack.
-
-- one shared `runTurn` for one-shot, REPL, parent, and child sessions;
-- a central fail-closed policy choke point, recorded approvals, and narrowing-only configuration;
-- append-only evidence, crash repair, deterministic reports, snapshots, undo, and project memory;
-- managed subprocess execution with typed termination and real cancellation;
-- a probed Windows Low-IL write/lifecycle sandbox, honestly separate from approval;
-- Git-aware diff, checkpoints, restore, and worktree-isolated executor groups;
-- ranked incremental repository retrieval, focused explorer briefs, and structured child reports;
-- one canonical structured plan per session with content-sha approval, amendment invalidation,
-  observable routing, and user/agent projections;
-- a dependency-aware task DAG gate (R1–R12) over bounded parallel executor groups, plan bindings
-  with per-definition identity, events-rebuilt budgets, bounded supervision, task-scoped
-  cancellation, and the live TTY task surface;
-- Session 12 — typed verification and recovery: project-aware check recipes with normalized
-  exit-code verdicts and named signals, a `check` policy fact with body-bound replay consent, the
-  task-graph verification gate (dependents unblock only on green) with integration/completion
-  boundary gates and honest waivers, and the eleven-class recovery catalogue with deterministic
-  classification, a derived-outcome repair ledger, and a bounded policy enforced at the scheduler;
-- Session 11.5 — the durable session: crash-covered task-base ref lifecycle (creation events +
-  resume-seeded pruning), truncation spill blobs (command/delegate output survives as
-  content-addressed evidence), per-attempt history with a bounded retry ceiling, completed-state
-  bound to the task definition that ran, and the explicit acceptance boundary (`/accept` →
-  recorded consent → plan retirement + cleanup → journal handoff with resume pointers).
-
-- Session 13 — managed previews + browser/visual verification: a preview server as an explicit
-  session resource (supervised fd-logged process, announced-port readiness, TTL/log caps,
-  identity-verified crash sweep, deterministic teardown, body-bound replay consent with honest
-  persistent-process wording); typed browser flows over playwright-core + the system browser
-  (declared readiness, typed failure taxonomy, origin lock, sha-addressed screenshots/traces,
-  check-kind 'browser' feeding the same gates/acceptance/recovery); wire images (the model sees
-  screenshots live, the log keeps pointers, elision ages pixels to markers); two new recovery
-  classes.
-
-- Session 14 — the delivery boundary: harness checkpoint lineage (event-before-ref, three kinds,
-  the covered-change rule, a delivery anchor keyed on the acceptance that consumed it) and the
-  structural review gate (typed findings recorded at the source, a pure fold deriving
-  requirement/qualification/triage worth, open critical/high blocking `/accept`).
-
-- Session 14.5 — v1.0 consolidation: a repo-wide 4-lens adversarial review (23 findings, all
-  hand-verified and fixed, including a replay-consent hole where a 200-char display cap was the
-  consent identity, a `max_tokens`-mid-tool-call wire bug that permanently invalidated a live
-  session, and an unreachable `aborted` classification branch that turned cancellations into
-  repairable defects); the executor-capture EOL pin; review-gate coherence (in-window
-  de-qualification, capture-as-work, a reviewer budget that fits its own brief, a harness round
-  cap); and honest-degrade fixes across the hygiene paths.
-
-What remains open on the coding axis is narrow and deliberate:
-
-- the review requirement is PLAN-scoped, so executor work delegated with no plan derives none
-  (recorded findings still block) — the user's explicit choice over "any mutating session";
-- executors cannot self-verify (a worktree has no gitignored dependencies, so `run_check` and
-  the preview/browser tools are parent-only) — acceptable because the parent verifies after
-  integration;
-- the EOL pin covers a uniformly-LF parent tree; a genuinely MIXED tree still refuses captured
-  files at apply, now with a diagnosis that names line-ending normalization and exits that work.
-
-## 3. Target Coding Workflow
-
-The desired default flow is:
-
-`Classify -> Retrieve / Explore -> Plan -> Revise -> Approve -> Schedule -> Execute -> Integrate -> Verify -> Recover -> Review -> Checkpoint / Deliver -> Record`
-
-This is one workflow with proportional stages, not one expensive ritual for every request.
-
-- A small, well-scoped task may classify directly into a short single-agent path.
-- A complex, ambiguous, cross-cutting, or high-risk task should enter focused exploration and plan
-  mode automatically.
-- Parallel exploration or execution should be selected only when scopes are genuinely separable.
-- Every mutating task should have explicit completion criteria and a verification path.
-- Every task reaches a completion gate, but the gate may range from a focused diff/check by the main
-  agent to a bounded multi-agent review panel.
-- No stage may claim success from narration alone.
-
-The workflow state should be explicit and event-backed so the REPL, reports, resume logic, and future
-workflow packs all observe the same truth.
-
-## 4. Indicative Session Sequence
+This is the rolling near-term direction guide for Agent CLI after the first public **v1.0** release.
+It begins from the implemented state recorded in `ARCHITECTURE.md` and `ROADMAP.md`, while
+`PROJECT.md` remains the enduring product thesis.
 
-Sessions 11 → 14 built the coding workflow and are COMPLETE; their full records live in
-`ROADMAP.md` and their contracts in `ARCHITECTURE.md`. In one line each:
+Each session must still begin in plan mode, inspect the live repository, validate the assumptions
+below, and propose a session-sized design from evidence. This file sets direction, not a fixed
+implementation checklist.
 
-- **11 — iterative planning, task graphs, parallel-first execution.** One canonical JSON plan
-  with content-sha approval, observable routing, the DAG gate, bounded supervision, `/cancel`,
-  the live task surface.
-- **11.5 — the durable session.** Crash-covered ref lifecycle, spill blobs, definition-bound
-  completed state, the retry ceiling, and the `/accept` boundary with cleanup and handoff.
-- **12 — unified verification gate + typed recovery.** The model names KINDS, the harness names
-  COMMANDS; exit-code-is-the-verdict; gates that block dependents; the failure-class catalogue
-  with derived repair outcomes and a bounded policy.
-- **13 — managed previews + browser/visual verification.** A preview is a RESOURCE, not a check
-  kind; typed flows over the system browser emit check evidence of kind 'browser'.
-- **14 — the delivery boundary.** Harness checkpoint lineage (event-before-ref, delivery keyed on
-  the acceptance that CONSUMED it) and the structural review gate.
+The next phase should broaden Agent CLI without weakening the qualities already proved in v1.0:
 
-### Session 14.5 — v1.0 consolidation: COMPLETE
+> Keep one small, trustworthy runtime; make it portable across model providers, capable of handling
+> realistic local software projects and more languages, able to reach selected external services
+> under explicit authority, and ready to generalize into high-quality non-coding workflows.
 
-Landed as designed; full record in `ROADMAP.md`. A repo-wide bounded adversarial review (4
-lenses, 23 findings, 48 invariants held, every finding hand-verified before fixing), the
-executor-capture EOL pin that closed the last live-found S14 gap, review-gate coherence, the
-deferred-pool items worth doing now, the V1.0 stamp, and a documentation consolidation pass.
-Suite 1029→1072+1. The skipped live-API test was reviewed and RUN live: the guard stays (CI must
-be hermetic), and the run re-proved the default model id and the provider adapter.
+Do not postpone workflow generalization indefinitely while expanding the coding surface. The first
+non-coding pack remains a near-term test of whether the existing contracts are genuinely reusable.
 
-### Session 15 (next horizon) — First Non-Coding Workflow Pack
+## 2. Current Starting Point
 
-The coding flow is complete and live-proven; begin the documents/PDF pack originally planned
-for Session 10.
+Agent CLI v1.0 already provides a live-proven coding workflow:
 
-Its likely shape remains:
+`Understand -> Plan -> Approve -> Execute -> Integrate -> Verify -> Recover -> Review -> Accept -> Resume`
 
-`request -> structured document model -> deterministic renderer -> artifact evidence -> pagination /
-heading / table checks -> visual inspection -> targeted revision`
+The implemented foundation includes one shared runtime, one fail-closed policy choke point,
+append-only evidence, snapshots and undo, crash-safe resume, Windows Low-Integrity sandboxing for
+eligible automatic commands, Git checkpoints and worktree isolation, repository indexing and
+targeted retrieval, bounded agent teams, a sha-approved task graph, typed verification and recovery,
+managed previews, browser evidence, structural adversarial review, and an explicit delivery boundary.
 
-The pack should reuse the context, task, verification, recovery, browser/artifact evidence, and
-delivery contracts established above without moving domain logic into `runTurn`, policy, or the REPL.
+The next work is therefore not a replacement runtime. It is a set of carefully bounded extensions
+that should reuse the existing state, policy, evidence, task, verification, recovery, review, and
+acceptance contracts.
 
-## 5. Design Decisions to Preserve
-
-### One canonical plan, multiple views
-
-The user-facing and agent-facing plans should be projections of one structured source of truth.
-Maintaining two independent plan documents would create approval drift and contradictory state.
+## 3. Indicative Session Sequence
 
-### Targeted retrieval before delegation
+### Session 15 — Multi-Provider Runtime and Model Selection — **DONE (v1.1.0)**
 
-A larger agent count is not a retrieval strategy. First identify the questions and likely code
-regions; then delegate bounded scopes. Detect and avoid redundant explorer assignments.
+Delivered: five providers over two protocols behind one runtime, a shipped capability catalog,
+opaque reasoning round-trip, `/provider` + `/model` + `agent providers`, env-only key discovery
+with bounded validation, `provider.changed` evidence, catalog-driven output/context budgets, and
+honest vision degradation. Live-proven on Anthropic (`claude-opus-5`, the new default) and OpenAI
+(`gpt-5.6-sol`) in one session with a live mid-session switch; DeepSeek/Kimi/GLM ship hermetically
+tested pending keys. Details and honest limits: `ROADMAP.md` Session 15, `ARCHITECTURE.md`
+"Providers".
 
-### Main-agent ownership of critical context
-
-The main agent owns user intent, the critical path, integration, final verification, and final
-claims. Subagents provide compressed evidence and implementation candidates, not authority.
+**Carried forward:** obtain DeepSeek/Kimi/GLM keys and run the three outstanding live smokes.
 
-### Parallelism is earned by independence
+### Session 16 — Real Local Software Engineering
 
-The scheduler should consider dependencies, expected touch sets, shared generated files, migrations,
-configuration, and verification coupling. Parallel-first means actively looking for safe concurrency,
-not forcing every plan into multiple worktrees.
-
-### Deterministic evidence before model judgment
-
-Test results, type checks, DOM assertions, process health, diffs, and structured events outrank model
-review. Model judgment adds value where the success criterion is semantic or visual, but cannot erase
-failed deterministic evidence.
-
-### Recovery is a policy, not “try again”
-
-Every automatic repair needs a typed failure, bounded eligibility, a checkpoint, a materially changed
-hypothesis, and a stopping condition. Unknown or repeated failures become an honest escalation.
-
-### Automatic Git safety without hidden history pollution
-
-Use automatic harness-owned recovery state by default. User-visible commits require an explicit
-standing repository policy or a clear delivery boundary; they should never be a side effect of merely
-running Agent CLI.
-
-### Workflow orchestration stays outside the kernel
-
-`runTurn`, the central policy gate, the event log, and the managed executor remain reusable
-primitives. Coding-specific routing, recipes, verification matrices, browser flows, and review gates
-belong in a workflow/orchestration layer attached through explicit contracts.
-
-## 6. Additional Cross-Cutting Upgrades
-
-Fold these in only where they are directly required by the sessions above:
-
-- explicit workflow-phase and verification events that support report, resume, and later indexing;
-- idempotency keys for resumable task, integration, verification, and repair steps;
-- command-output spill-to-file with bounded model summaries;
-- capability/dependency declarations so unsupported checks refuse honestly;
-- incremental caches keyed by file hashes, repository HEAD, tool versions, and configuration;
-- a small benchmark/evaluation set covering repository retrieval, plan quality, parallel conflict
-  avoidance, recovery convergence, browser verification, and review recall;
-- cost and latency budgets by workflow phase, not only by session or child task;
-- sanitization and provenance labels on explorer, test, browser, and reviewer reports;
-- structured completion reasons such as success, partial, blocked, user-stopped, budget-exhausted,
-  unsupported, and failed-unrecovered.
-
-Do not pull in SQLite, a general graph runtime, MCP, deep inter-agent messaging, or a plugin framework
-only because they appear relevant. Adopt them only when the implemented workflow state can no longer
-remain clear and correct with the current modular-monolith contracts.
-
-## 7. Patterns to Borrow (References, Not Templates)
-
-Research current implementations again when each session begins.
-
-- **Aider:** tree-sitter-backed repository maps, dependency-graph ranking, token-budgeted selective
-  context, diff-centered editing, and Git review ergonomics.
-- **Claude Code:** focused subagents with separate context/tool permissions, editable plan approval,
-  worktree-based parallel sessions, task/background-process visibility, and deterministic lifecycle
-  hooks.
-- **OpenAI Codex:** plan mode for difficult or ambiguous tasks, explicit sandbox/approval separation,
-  specialized parallel subagents, task goals, and inspectable commands/diffs.
-- **OpenCode:** explicit per-agent allow/ask/deny permissions, task and to-do surfaces, and stuck-loop
-  controls.
-- **Playwright:** assertions before screenshots, managed web servers, traces containing DOM/network
-  evidence, and visual comparisons where stable baselines exist.
-- **LangGraph:** durable checkpoints, resumable human interrupts, retry policies, and the idempotency
-  lessons created when a resumed node restarts. Borrow the semantics without adopting a graph
-  framework prematurely.
-
-## 8. Architectural Guardrails
-
-1. One runtime — no second agent loop, browser loop, recovery loop, or interface-specific executor.
-2. One policy choke point — workflows, subagents, checks, browsers, and Git delivery get no side
-   doors.
-3. Capability is not authorization; a detected tool or recipe is not automatically allowed.
-4. Preserve inherited-or-narrower authority for every child and workflow stage.
-5. Keep task, process, browser, approval, verification, and recovery lifecycle explicit.
-6. New state transitions must be attributable, crash-repairable, reportable, and resumable.
-7. Plans, memories, explorer reports, reviewer findings, and visual judgments are context or
-   evidence, never authority.
-8. Keep shell authority visible; typed adapters may wrap commands but must declare their real effects.
-9. Do not trade honest failure for automatic completion.
-10. No unbounded fan-out, retry, repair, review, or background process.
-11. Do not pollute user Git history or overwrite unrelated work.
-12. Preserve simple-task latency: the standard workflow must scale down as well as up.
-13. Add abstractions only after a real implementation pressure reveals the boundary.
-14. Require tests, adversarial review, and a realistic live E2E for every substantial increment.
-
-## 9. Readiness Gates
-
-### Before automatic parallel execution becomes the default consideration — ALL LANDED
-
-- targeted explorer briefs and non-overlapping scopes — LANDED (Session 10);
-- structured explorer evidence — LANDED (Session 10: six-section contract + harness check);
-- canonical approved plan state — LANDED (Session 11: content-sha binding, strict gate);
-- explicit task dependency and expected-touch metadata — LANDED (Session 11: the plan graph);
-- task-scoped cancellation and visible status — LANDED (Session 11: /cancel + the live surface);
-- conflict-aware integration and deterministic cleanup — LANDED (V0.7 drift-refusing apply +
-  Session 11 R7/declared-vs-actual divergence in the digest).
-
-### Before automatic recovery — ALL LANDED (Session 12)
-
-- normalized verification results — LANDED (`CheckResult`, exit-code-is-the-verdict);
-- typed failure classification — LANDED (eleven classes, deterministic, event-derivable);
-- bounded eligibility and stopping rules — LANDED (`recovery/policy.ts`, typed stop reasons);
-- checkpoints before each repair — LANDED by REUSE, not by new machinery: parent edits are
-  snapshot-backed by construction and an executor re-run creates a fresh group base checkpoint,
-  so a second recovery mechanism would have added crash windows to buy nothing;
-- regression checks after repair — LANDED (an attempt is proven only by the checks it declared,
-  which must include the kind that actually failed);
-- honest escalation for unknown or repeated failures — LANDED (`recover escalate`, an acceptance
-  blocker; `unknown` is a first-class stop, never a shrug).
-
-### Before browser / visual claims — ALL LANDED (Session 13)
-
-- managed preview lifecycle — LANDED (supervised runner, registry, identity-verified sweep);
-- deterministic DOM, console, network, and process evidence — LANDED (typed step taxonomy,
-  bounded records, preview lifecycle events);
-- attributable screenshots/traces — LANDED (sha-addressed blobs, budgeted, report pointers);
-- visual judgment labeled as judgment — LANDED (view_image + the prompt/report/tool wording;
-  a screenshot can never discharge a gate);
-- cleanup and recovery integrated with the same runtime contracts — LANDED (session-end
-  stop-all on every path, two catalogue classes, the shared bounded repair loop).
-
-### Before declaring the coding flow mature — ALL LANDED (Session 14)
-
-- a structural review gate — LANDED (`review/ledger.ts`: typed findings recorded at the source,
-  derived requirement + round qualification, triage whose worth is derived, open critical/high
-  blocking `/accept`);
-- Git/recovery state that survives crash and supports rollback — LANDED (event-before-ref
-  creation, the seq/kind-aware owed fold re-folded from live events, phantom convergence);
-- no hidden user-branch commits — LANDED (hidden refs only; `/accept` suggests `/commit`,
-  never performs it);
-- a realistic live end-to-end run with an induced failure and successful bounded recovery —
-  LANDED (see ROADMAP S14; the run record is a local evidence dir, not published);
-- resume proof from persisted task/workflow state — LANDED (the review fold rebuilds from
-  events across a mid-arc SIGKILL);
-- reports that reconstruct the full chain without relying on assistant narration — LANDED
-  (`## Adversarial review`, `## Git recovery and audit state`, both derived purely from events).
-
-## 10. Recently Completed
-
-- **Session 14.5 — v1.0: consolidation, repo-wide adversarial review, live proof: COMPLETE.**
-  4 read-only lenses over the whole repo → 23 findings, all hand-verified and fixed, headlined by
-  a replay-consent hole (a 200-char DISPLAY cap was serving as the consent identity, so an append
-  past it rode the earlier `[s]`), a `max_tokens`-mid-tool-call wire bug that permanently
-  invalidated a live session, an unguarded post-write readback that discarded all mutation
-  evidence, an unreachable `aborted` classification branch, a report that claimed a clean end for
-  resumed-then-crashed sessions, secret classification on the unresolved path, and prompt-fence
-  spoofing through memory docs and plan notes. Plus the executor-capture EOL pin, review-gate
-  coherence (in-window de-qualification, capture-as-work, a reviewer budget that fits its brief,
-  a harness round cap), `agent version/help` no longer starting real sessions, and the docs
-  compression. Suite 1029→1072+1.
-
-- **Session 14 — the delivery boundary: Git audit lineage + the structural review gate:
-  COMPLETE.** `onRefReady` (event-before-ref: the creation-instant leak closed structurally,
-  phantoms honest and self-converging) + `harness.checkpoint`/`HarnessRefKind` + the seq/kind
-  aware `owedHarnessRefsFromEvents` (delivery survival keyed on the ref the latest acceptance
-  CONSUMED) + the pre-integration checkpoint under the spawn-only covered-change rule
-  (skip-never-refuse) + the `/accept` delivery anchor (idempotent across the crash window,
-  never hostage to git, `/commit` suggested not performed); `src/review/` + `report_finding`
-  (per-task accumulator, second named admission, ingestion-time neutralization) + the `review`
-  triage tool (every rule enforced twice) + the acceptance axis + the plan `review` field
-  (sha-neutral) + `## Adversarial review` / `## Git recovery and audit state` / `/review`.
-  Suite 972→1029+1; 4-lens hand-verified review (16 findings, 8 fixed, 32 invariants HELD; the
-  phantom-delivery defect found independently by all four lenses).
-- **Session 13 — managed previews + browser/visual verification: COMPLETE.** `src/preview/`
-  (startSupervised — a live handle over an fd-logged, TTL/log-capped, unref'd process; preview
-  recipes over the fixed dev/preview/serve/start allowlist; announced-port readiness; the
-  identity-verified crash sweep with no age hatch on kills) + `src/browser/` (playwright-core
-  channel probe; the zod FlowSpec with REQUIRED app-meaningful readiness; the deterministic
-  executor with the typed timeout/assertion/navigation/runtime/protocol taxonomy and a real
-  origin comparison) + wire images (transient pixels, pointer-only logs, aging elision) +
-  `preview`/`browser_flow`/`view_image` tools behind explicit fail-closed policy branches +
-  kind 'browser' through the existing gates/acceptance/CHECKED/recovery machinery + two new
-  failure classes. Suite 868→972+1; 4-lens review (~39 findings, all hand-verified); live
-  two-life E2E 44/44 (see ROADMAP; run record kept locally, not published).
-- **Session 12 — unified verification gate and typed recovery: COMPLETE.** `src/checks/`
-  (bounded project detection, a declarative recipe table where a project's own script beats a
-  guessed tool, `toCommand` as the single composer, and normalization whose one rule is the exit
-  code is the verdict); the `check` policy fact + fail-closed branch + replay consent keyed on
-  `(recipeId, command, bodySha)` in a store separate from `Grants`; `run_check` (parent-only,
-  snapshot-held, three refusals that spawn nothing) with `check.started` emitted only on a real
-  spawn; `PlanTask.checks`/`PlanGraph.gates` (sha-neutral when absent) with the `verification`
-  field and the single `depSatisfied` predicate that blocks dependents, plus integration- and
-  completion-boundary gates and honest waivers surfaced as acceptance caveats; `src/recovery/`
-  (eleven-class DATA catalogue, deterministic classification, derived-outcome ledger, bounded
-  policy, `recover` tool, R11/R12). Suite 689→868+1; 4-lens hand-verified review, 21 findings
-  fixed — including the critical one where replay consent bound the command string and not the
-  script body, so rewriting `package.json` turned one `[s]` into standing execution consent.
-  Live four-life E2E on a fresh dependency-free Node project with four real seeded defects:
-  39/40 evidence checks, 0 failures (see ROADMAP; run record kept locally, not published).
-- **Session 11.5 — the durable session (consolidation): COMPLETE.** Crash-covered task-base ref
-  lifecycle (`task.base-checkpoint` creation events, resume-seeded pruning, missing-ref-tolerant
-  deletion); truncation spill blobs for command/delegate output (redaction-guarded, size-capped,
-  "captured" never "full"); per-attempt history + definition-bound completed state (an amendment
-  re-opens changed completed tasks; R10 caps genuine failures at 3 per definition, user stops and
-  crashes excluded); the `/accept` boundary (recorded consent, plan retirement via supersede,
-  immediate ref pruning, staleness-aware surfaces, deterministic journal Handoff with resume
-  pointers, one-shot parity). Suite 645→688+1; 3-lens hand-verified review (6 findings fixed);
-  live three-life E2E: SIGKILL mid-wave → resume → attempt-2 re-run → integrate → verify →
-  /accept → crash-leaked ref pruned → a second unplanned kill absorbed → resume → journal
-  handoff → clean quit, 30/30 evidence checks (see ROADMAP).
-- **Session 11 — iterative planning, task graphs, parallel-first execution: COMPLETE (V0.9).**
-  Canonical `<id>.plan.json` task graph with `planContentSha` approval binding (amendment →
-  draft + invalidation, structurally; approve-refuses-invalid; legacy md fallback); structured
-  `update_plan` whose validation errors return complete with nothing written; observable
-  routing (`plan.route`, `@plan`/`@direct`); the delegate DAG gate R1–R9 (strict status gate:
-  diverged/superseded/vanished-approved now BLOCK) with plan bindings (`task.started.planTaskId`),
-  plan-informed briefs, and events-rebuilt DelegateCaps; bounded supervision (loop 3/5,
-  budget-pressure 80%, stall) dual-surfaced as `task.supervision` events + the head-of-result
-  group digest; task-scoped `/cancel` (idempotent registry seam) + statuses cancelled/stalled;
-  the TTY-only sticky status area (all chrome through one status-aware writer; zero escapes
-  off-TTY) + the live task table + mid-turn `/tasks`. Suite 574→645+1; 3-lens hand-verified
-  review (kernel lens: zero findings; fixes: capture-loss false-completed, vanished-plan gate,
-  display honesty); two-phase live E2E with a deliberate mid-wave SIGKILL and resume (see
-  ROADMAP for the evidence).
-- **Session 10 — repository intelligence and focused exploration: COMPLETE (V0.8).** Ranked
-  incremental repository index (regex ts/js+py extraction, import-graph centrality, honest
-  partial states, assembly-only writes) rendering a hard-budget tiered map whose complete
-  directory tree is the recall backstop; the read-only `retrieve` tool (signal-attributed
-  hits, live-read excerpts) for the parent and read-only roles via a named structural
-  admission seam; explorer focus/avoid briefs with sibling coverage and overlap warnings;
-  the six-section explorer report contract with a non-blocking harness check; delimiter
-  hardening. Suite 515→574+1; 3-lens hand-verified adversarial review (all invariants HOLD);
-  live proof on a 3,064-file vitest clone: flat map showed 0/14 packages, ranked map 14/14
-  in ≤16k chars; two disjoint-focus explorers with zero shared reads; parent re-verified all
-  load-bearing claims; 16 uncached input tokens. Evidence:
-  ROADMAP + `test/retrieval.*` (the live run dir was local and has since been cleaned up).
-- **Session 9 — consolidation and live V0.7 proof: COMPLETE.** Fixed concurrent-session worktree
-  safety, surfaced plan-consent state at executor spawn, pruned task-base refs with provenance,
-  hardened approval/render/apply/cost paths, fixed command-grant keying from the live run, and
-  proved the complete V0.7 loop against the real API. Final suite: 515 passed / 1 skipped.
-- **Session 8 — coordinated parallelism and minimal agent teams: COMPLETE.** Added explicit role
-  contracts, persistent sha-approved plan mode, bounded parallel groups, worktree-isolated
-  executors, approval forwarding, captured/replayable task changes, drift-refusing integration,
-  and the first bounded review-stage rule.
-- Earlier sessions established the single runtime, REPL, managed execution, enforced Windows sandbox,
-  automatic command review, GitOps/context efficiency, project memory, and initial delegated tasks.
-  Full evidence remains in `ROADMAP.md` and implemented contracts in `ARCHITECTURE.md`.
-
-## 11. Deferred Beyond This Sequence
-
-Keep these visible, but do not let them distract from the coding-flow acceptance path:
-
-- network-egress control and a read/confidentiality sandbox boundary;
-- macOS/Linux enforced sandbox backends and a cached Windows sandbox host;
-- attribution of arbitrary approved shell-command file effects;
-- full PTY/general interactive-process support (the supervised preview substrate deliberately
-  stops at non-interactive servers; stdin stays disconnected);
-- deep inter-agent messaging and task continuation conversations;
-- broad web research, MCP, SaaS connectors, deployment, and push/PR automation;
-- SQLite indexing of events and long-term memory topic retrieval;
-- multi-repository/submodule orchestration;
-- general plugin marketplace or remotely distributed execution;
-- simultaneous work on multiple non-coding workflow packs.
-
-The first non-coding pack should begin only after the coding workflow is coherent enough that it can
-be reused rather than copied.
+Move beyond dependency-free demo projects. Make the coding workflow dependable for realistic local
+applications that install dependencies, use lockfiles, build frontend and backend components, run
+multiple local processes, load environment configuration, perform migrations or local data setup,
+and verify the integrated result.
+
+Dependency installation and other consequential commands must remain visible and approval-gated.
+Add only the project detection, lifecycle management, verification recipes, and recovery support
+required by a realistic full-stack local acceptance run. External deployment platforms remain out of
+scope for now.
+
+### Session 17 — First Non-Coding Workflow Pack: Documents and PDF
+
+Build the first optimized non-coding workflow on the existing kernel rather than creating a second
+agent or execution loop.
+
+A likely shape is:
+
+`request -> structured document model -> deterministic render -> artifact evidence -> structural /
+pagination checks -> visual inspection -> targeted revision -> delivery`
+
+Support useful DOCX/PDF production with repeatable styles, headings, tables, pagination, artifact
+metadata, visual review, bounded recovery, and explicit acceptance. The purpose is to prove that the
+coding workflow contracts generalize beyond source code.
+
+### Session 18 — Polyglot Repository Intelligence and Verification
+
+Expand repository understanding and verification beyond the current Node/TypeScript and Python bias.
+Prioritize Rust, Go, C/C++, and representative embedded projects.
+
+Treat support as a combination of language, build system, and available toolchain—not merely file
+extensions. Improve indexing, symbol/import relationships, entry-point detection, project maps, and
+typed check recipes. Unsupported compilers, boards, targets, or hardware-dependent tests must refuse
+or downgrade claims honestly rather than simulating coverage.
+
+### Session 19 — Source-Backed Web Research
+
+Add a bounded research path that can be triggered explicitly with `@research` and naturally from a
+user request. Use a dedicated read-only research role and a search/extraction provider such as Tavily
+to gather current external information, select high-value sources, and return concise findings with
+provenance to the main agent.
+
+Network access must remain an explicit capability with domain, result, content, cost, and time bounds.
+Research output is evidence or context, never authority. Introduce `RESEARCH.md` only as a bounded,
+curated project memory surface for information with continuing value; ephemeral search results stay
+in session evidence.
+
+### Session 20 — Remote Git and GitHub Delivery
+
+Extend the existing local Git boundary to deliberate remote delivery. Support user-requested
+`git push` and selected GitHub CLI operations for an explicitly identified repository, account,
+remote, branch, and change set.
+
+Remote reads and remote mutations must remain distinct. Every mutation should show its exact target
+and effect before confirmation, use existing user authentication without exposing credentials, emit
+attributable evidence, and stop on ambiguity. Agent CLI must never create, push, force, publish, or
+modify GitHub state merely because local work completed.
+
+### Session 21 — Bounded Memory and Initialization
+
+Strengthen memory without turning startup into prompt dumping.
+
+Add explicit size and token budgets, staleness rules, provenance, and deterministic or reviewable
+compaction for harness-managed project memory. Introduce `LESSONS.md` for reusable failure patterns
+and practical project knowledge. Keep startup context small and retrieve older detail only when it is
+relevant.
+
+Add an optional `/init` or first-run onboarding flow for a transparent global profile in the normal
+Agent CLI user-state directory, plus project initialization for a missing `AGENT.md`. Ask only a few
+skippable questions, keep answers inspectable and editable, and separate preferences from secrets,
+permissions, and authority. User-owned instruction files must never be silently rewritten or
+compressed; the system may offer a reviewed update when they become too large.
+
+### Session 22 — Terminal UX Consolidation
+
+Polish the terminal surface after the new states are real. Explore bounded folding and expansion of
+long outputs, clearer color and hierarchy, compact provider/model/task/check/research/remote status,
+and better navigation through evidence without losing the clean non-TTY contract.
+
+UI state must remain a projection of the event-backed runtime, not a second source of truth. Avoid a
+large TUI rewrite unless real usage proves the current rendering architecture cannot support the
+needed interactions cleanly.
+
+## 4. Design Rules for the Next Phase
+
+1. **One runtime and one policy boundary.** Providers, languages, research, artifacts, and remote
+   delivery must not create side loops or side doors.
+2. **Compatibility is not equivalence.** OpenAI-compatible endpoints still need provider-specific
+   capability declarations, normalization, tests, and honest limitations.
+3. **External read and external write are different authorities.** Search may be bounded and
+   read-only; push, repository creation, releases, and other mutations require exact-target consent.
+4. **Dependencies are real side effects.** Installs, scripts, migrations, and service startup remain
+   visible, attributable, cancellable where possible, and verified from actual outcomes.
+5. **Language support must be evidence-backed.** A language is not supported until retrieval,
+   project detection, checks, failure handling, and a realistic live proof all work together.
+6. **Memory is context, never authority.** Current user intent and observable repository state outrank
+   global preferences, project memory, research notes, and lessons.
+7. **User-owned and harness-owned memory stay distinct.** Automatic compaction belongs primarily to
+   harness-managed documents; user-authored constitutions require review and consent.
+8. **Provenance before persistence.** Research and lessons should retain source or event pointers,
+   confidence, date, and scope, and should be removable when stale.
+9. **Workflow packs stay outside the kernel.** Document/PDF quality belongs in structured models,
+   renderers, validators, and recovery recipes attached through existing contracts.
+10. **Claims remain proportional.** No provider, platform, language, research, GitHub, or artifact
+    capability is advertised beyond what has been live-proven.
+
+## 5. Readiness Gates
+
+Before calling the next phase mature, Agent CLI should have demonstrated:
+
+- ~~at least two genuinely different provider protocols~~ **(met in S15: Anthropic Messages +
+  OpenAI Responses, live)** — with all named providers live-smoked through the same bounded tool
+  loop still outstanding for DeepSeek, Kimi and GLM;
+- a realistic dependency-bearing full-stack project built and verified locally;
+- a document/PDF workflow whose completion is based on artifact and visual evidence;
+- polyglot retrieval and checks over several different build ecosystems;
+- source-backed research with bounded network authority and durable provenance;
+- explicit, previewed, user-approved remote Git/GitHub delivery;
+- bounded project/global memory that can be inspected, edited, compacted, and removed;
+- terminal presentation that scales to these states without changing runtime truth.
+
+Each substantial session still requires tests, differentiated adversarial review, documentation
+updates, and a realistic live E2E. New provider names, model names, APIs, toolchains, and external
+service behavior must be researched again at the start of the relevant session.
+
+## 6. Deferred Beyond This Horizon
+
+Keep these visible, but do not pull them forward without direct implementation pressure:
+
+- broad SaaS deployment orchestration and autonomous production operations;
+- network-egress enforcement and a true read/confidentiality sandbox;
+- macOS/Linux sandbox parity;
+- unrestricted computer use, deep inter-agent messaging, or remote distributed execution;
+- MCP/plugin marketplaces or many shallow integrations;
+- multi-repository orchestration and hardware-in-the-loop embedded execution;
+- a database-backed memory/index layer before Markdown plus bounded retrieval is no longer adequate;
+- simultaneous first-class development of several non-coding workflow packs.
+
+The objective remains quality before capability count: broaden Agent CLI only when each new surface
+inherits the same explicit authority, evidence, reversibility, recovery, and completion semantics
+that made v1.0 credible.
