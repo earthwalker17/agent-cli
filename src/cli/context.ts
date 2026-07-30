@@ -190,10 +190,9 @@ export function resolveModel(
 export function buildRunContext(values: CliValues, opts: RunContextOptions = {}): RunContext {
   const ws = workspaceRoot(values);
   const mode = resolveMode(values);
-  const provider = makeProvider(values, opts.config, opts.registry);
-  const approver = makeApprover(values, mode, opts.io, opts.approvalSignal);
-  const providerName = provider.name as ProviderName;
-  const { model, notes } = resolveModel(providerName, values, opts.config);
+  // ORDER IS LOAD-BEARING (found by CI on a keyless runner): argument validation is local and
+  // free, so it must run BEFORE provider construction, which can refuse for a missing credential.
+  // Otherwise a user who typo'd a flag AND has no key is told about the key — the wrong problem.
   // --max-steps is the honest name (the value bounds model steps per turn, not turns);
   // --max-turns stays accepted as the legacy alias. A non-numeric value used to become NaN,
   // and `NaN > maxSteps` comparisons made every turn end after ZERO steps — refuse loudly.
@@ -202,6 +201,11 @@ export function buildRunContext(values: CliValues, opts: RunContextOptions = {})
   }
   const stepsRaw = values['max-steps'] ?? values['max-turns'];
   const maxSteps = stepsRaw !== undefined ? parseCountFlag(values['max-steps'] !== undefined ? 'max-steps' : 'max-turns', stepsRaw) : (opts.config?.maxSteps ?? 20);
+
+  const provider = makeProvider(values, opts.config, opts.registry);
+  const approver = makeApprover(values, mode, opts.io, opts.approvalSignal);
+  const providerName = provider.name as ProviderName;
+  const { model, notes } = resolveModel(providerName, values, opts.config);
   // Output cap and elision budget come from the capability catalog — the former
   // `name === 'anthropic' ? 64_000 : 16_000` branch, generalized into data.
   const maxTokens = defaultMaxTokensFor(providerName, model);

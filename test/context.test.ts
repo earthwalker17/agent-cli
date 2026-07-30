@@ -143,6 +143,15 @@ describe('buildRunContext (catalog-driven budgets)', () => {
     expect(ctx.notes).toEqual([]);
   });
 
+  it('validates flags BEFORE constructing the provider (a keyless machine must still see the flag error)', () => {
+    // CI-found: the upfront credential refusal ran first, so a typo'd flag on a keyless runner
+    // reported "needs a credential" — the wrong problem, and a behavior change for existing users.
+    const registry = createProviderRegistry({ env: {} }); // no keys at all
+    expect(() => buildRunContext({ C: tmp, 'max-turns': 'lots' }, { registry })).toThrow(/--max-turns requires a positive integer/);
+    // With valid flags, the credential refusal is still the next thing to fire.
+    expect(() => buildRunContext({ C: tmp, 'max-turns': '5' }, { registry })).toThrow(/needs a credential/);
+  });
+
   it('maxSteps precedence: flag > config > 20; non-numeric refuses loudly', () => {
     expect(buildRunContext(mockValues({ 'max-steps': '7' })).maxSteps).toBe(7);
     expect(buildRunContext(mockValues(), { config: { maxSteps: 11 } }).maxSteps).toBe(11);

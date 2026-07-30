@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.1.1] — 2026-07-30
+
+### Fixed
+
+- **Argument validation runs before provider construction.** v1.1.0 moved the missing-credential
+  refusal upfront, which placed it ahead of CLI flag validation: on a machine with no API key, a
+  typo'd `--max-steps`/`--max-turns` reported "provider needs a credential" instead of the flag
+  error. Local validation is free and now runs first. Found by CI on a keyless runner — the
+  author's machine had keys, so the whole 1163-test suite passed locally while the required
+  Windows job failed on the v1.1.0 commit. The suite is now also run keyless before release.
+
 ## [1.1.0] — 2026-07-30
 
 Multi-provider runtime. The provider layer is no longer an Anthropic special case: five providers
@@ -187,5 +198,6 @@ likely to matter:
 - Non-Node/Python projects report check kinds as `unsupported` with a reason rather than guessing.
 - Single-user assumption on the session lock.
 
+[1.1.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.1.1
 [1.1.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.1.0
 [1.0.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.0.0
