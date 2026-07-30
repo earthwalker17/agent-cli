@@ -1,5 +1,6 @@
 import type { Provider } from '../types.js';
 import { ConfigError } from '../shared/errors.js';
+import { createTransport } from '../net/transport.js';
 import { AnthropicProvider } from './anthropic.js';
 import { OpenAiCompatProvider } from './openai-compat.js';
 import { OpenAiResponsesProvider } from './openai-responses.js';
@@ -62,7 +63,17 @@ export interface RegistryOptions {
 
 export function createProviderRegistry(opts: RegistryOptions = {}): ProviderRegistry {
   const env = opts.env ?? process.env;
-  const fetchImpl = opts.fetchImpl ?? ((input: string | URL, init?: RequestInit) => globalThis.fetch(input as never, init as never));
+  /**
+   * Key validation MUST take the same network path as the adapters (live-found, Session 15): with
+   * a system proxy configured, a bare global fetch either fails or — worse, observed on a proxied
+   * machine — answers 401/403, which made `/provider` REFUSE a perfectly good key. The transport
+   * is built per provider so the proxy resolves against that provider's own host.
+   */
+  const probeFetch = (baseUrl: string): ((input: string | URL, init?: RequestInit) => Promise<Response>) => {
+    if (opts.fetchImpl !== undefined) return opts.fetchImpl;
+    const transport = createTransport({ env, describeUrl: baseUrl });
+    return (input, init) => (transport.fetch ?? (globalThis.fetch as typeof fetch))(input as never, init as never);
+  };
 
   const availability = (name: RealProviderName): ProviderAvailability => {
     const info = PROVIDERS[name];
@@ -127,7 +138,7 @@ export function createProviderRegistry(opts: RegistryOptions = {}): ProviderRegi
           : { authorization: `Bearer ${keyOf(a)}` };
       const url = `${a.baseUrl}${a.info.modelsPath}`;
       try {
-        const res = await fetchImpl(url, { method: 'GET', headers, signal });
+        const res = await probeFetch(a.baseUrl)(url, { method: 'GET', headers, signal });
         if (res.status === 401 || res.status === 403) {
           return { verification: 'models-list', ok: false, detail: `${a.keyEnv} present but REJECTED (HTTP ${res.status})` };
         }

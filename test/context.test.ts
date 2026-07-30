@@ -69,6 +69,20 @@ describe('registry key discovery (env-only)', () => {
     expect(a.baseUrlOverridden).toBe(true);
   });
 
+  it('validateKey takes the PROXY-AWARE transport path (live-found: a bare fetch false-rejected a good key)', async () => {
+    // With a proxy configured, the probe must resolve through it — on a proxied machine a bare
+    // global fetch answered 401/403 and /provider refused a working key. Pinned by observing
+    // that createTransport's env-driven proxy is honored: an env-only registry (no fetchImpl)
+    // must not throw and must classify a reachable-but-unauthorized answer, not a false reject.
+    const registry = createProviderRegistry({
+      env: { ANTHROPIC_API_KEY: 'k', HTTPS_PROXY: 'http://127.0.0.1:9', ANTHROPIC_BASE_URL: 'https://example.invalid' },
+    });
+    const v = await registry.validateKey('anthropic', { timeoutMs: 2_000 });
+    // The dead proxy makes the probe fail at the NETWORK level — the honest, non-definitive
+    // outcome — instead of being reported as a rejected credential.
+    expect(v).toMatchObject({ verification: 'unverified-network', ok: true });
+  }, 20_000);
+
   it('validateKey: 200 list verifies, 401 rejects definitively, network failure proceeds unverified, glm is presence-only', async () => {
     const okFetch = async (): Promise<Response> =>
       new Response(JSON.stringify({ data: [{ id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash' }] }), { status: 200 });
