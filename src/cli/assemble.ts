@@ -242,12 +242,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   if (deps.resumeId !== undefined) {
     const prior = effectiveIdentity(session.log.events).current;
     if (prior !== null && (prior.providerName !== ctx.provider.name || prior.model !== ctx.model)) {
+      // 'presence-only' means "a key was found but no list endpoint exists" — claiming it for the
+      // mock provider (which has no credential concept at all) would be a fabricated verification
+      // label, so the no-credential case is recorded as unverified (S15 review finding).
       session.log.append({
         type: 'provider.changed',
         from: prior,
         to: { providerName: ctx.provider.name, model: ctx.model },
         source: 'resume',
-        verification: 'presence-only',
+        verification: ctx.provider.name === 'mock' ? 'unverified-network' : 'presence-only',
       });
       providerResumeNote =
         `this session previously ran on ${prior.providerName}·${prior.model} and resumes on ` +

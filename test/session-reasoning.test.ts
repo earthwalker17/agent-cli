@@ -173,6 +173,64 @@ describe('elision and reasoning', () => {
   });
 });
 
+describe('elision monotonicity across a provider switch (Session 15 regression)', () => {
+  it('a switch to a LARGER budget does not un-elide what the log already recorded as elided', () => {
+    const big = 'y'.repeat(9_000);
+    const messages: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'q' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'search', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', toolUseId: 't1', content: big }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a1' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n1' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a2' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n2' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a3' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n3' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a4' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n4' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a5' }] },
+    ];
+    // Small budget (e.g. glm-4.6v): the old output is elided and the runtime records it.
+    const tight = elideHistory(messages, { triggerChars: 8_000, targetChars: 4_000, keepLastSteps: 4 });
+    expect(tight.elidedCallIds).toContain('t1');
+
+    // Now the user switches to a BIG-budget model: raw size is far below the new trigger, so the
+    // char walk does not run — but the sticky set must still hold, or the model would suddenly see
+    // text that `context.compacted` already claimed it could not.
+    const loose = elideHistory(messages, {
+      triggerChars: 400_000,
+      targetChars: 200_000,
+      keepLastSteps: 4,
+      alreadyElided: tight.elidedCallIds,
+    });
+    const restored = loose.messages[2]!.content[0]!;
+    if (restored.type !== 'tool_result') throw new Error('unreachable');
+    expect(restored.content).toContain('[elided to save context:');
+    expect(loose.elidedCallIds).toContain('t1');
+  });
+
+  it('below the trigger with NO sticky set, nothing is elided (hysteresis preserved)', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'q' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'search', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', toolUseId: 't1', content: 'z'.repeat(5_000) }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a1' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n1' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a2' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n2' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a3' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n3' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a4' }] },
+      { role: 'user', content: [{ type: 'text', text: 'n4' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'a5' }] },
+    ];
+    // Raw is ~5k, well under a 400k trigger but over a 200k target — the walk must NOT run.
+    const out = elideHistory(messages, { triggerChars: 400_000, targetChars: 200_000, keepLastSteps: 4 });
+    expect(out.elidedCallIds).toEqual([]);
+    expect(out.exhausted).toBe(false);
+  });
+});
+
 describe('mock script schema', () => {
   it('parseScript accepts a reasoning turn and still rejects unknown keys', () => {
     const parsed = parseScript(JSON.stringify([{ reasoning: 'r', say: 'ok' }]));

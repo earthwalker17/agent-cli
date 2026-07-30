@@ -179,7 +179,8 @@ no network — it is how the whole loop is tested deterministically.
 Base URLs default to the **international** endpoints and can be redirected per provider with
 `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL` (China:
 `https://api.moonshot.cn/v1`) and `ZAI_BASE_URL` (China: `https://open.bigmodel.cn/api/paas/v4`).
-An active override is named in the banner and recorded (host only) on any switch.
+An active override redirects your credential to that host, so it is announced as a startup note
+naming the env var, and recorded (host only) on any `/provider` switch.
 
 **Capabilities are data, and differences are stated, not hidden.** A shipped catalog carries each
 model's context/output limits, vision support, reasoning mode and replay requirement, caching

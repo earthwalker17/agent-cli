@@ -120,6 +120,21 @@ describe('buildCompatRequest goldens', () => {
     }
   });
 
+  it('REGRESSION: a thinking-only assistant turn is DROPPED, never sent as {content:null} with no tool_calls', () => {
+    // This family requires content or tool_calls; a bare {content:null} would 400 every later
+    // request in the session.
+    const history: ChatMessage[] = [
+      userText('go'),
+      { role: 'assistant', content: [{ type: 'reasoning', providerName: 'deepseek', model: 'deepseek-v4-pro', payload: 'thought only' }] },
+      userText('again'),
+    ];
+    const body = buildCompatRequest(COMPAT_PROFILES.deepseek, mkReq('deepseek-v4-pro', history), capsFor('deepseek', 'deepseek-v4-pro'));
+    expect(body.messages.some((m) => m.role === 'assistant')).toBe(false);
+    for (const m of body.messages) {
+      if (m.role === 'assistant') expect(m.content !== null || m.tool_calls !== undefined).toBe(true);
+    }
+  });
+
   it('foreign-tagged reasoning (other provider or model) is never replayed', () => {
     const history: ChatMessage[] = [
       userText('t'),

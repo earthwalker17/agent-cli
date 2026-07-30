@@ -186,10 +186,6 @@ export function elideHistory(messages: readonly ChatMessage[], opts: ElisionOpti
     }
   }
 
-  if (rawChars <= trigger) {
-    return { messages: out, elidedCallIds: [], imageElidedCallIds, rawChars, sentChars, exhausted: false };
-  }
-
   // ── Pass 2: the V0.5 char-budget walk, over the image-elided view.
   const protectFrom = protectionBoundary(messages, keep);
   const elidedCallIds: string[] = [];
@@ -199,6 +195,11 @@ export function elideHistory(messages: readonly ChatMessage[], opts: ElisionOpti
   // invalidated the moving cache breakpoint (the whole suffix re-billed) and left
   // `context.compacted` claiming the model could not see text it could. The module's own
   // monotonicity promise is only true with this carry-over, since the trigger is not.
+  // The sticky pass runs BEFORE the trigger check (S15 review finding): `contextBudget` became
+  // mutable mid-session with /provider and /model, so a switch to a LARGER-budget model can raise
+  // the trigger above the current raw size — and an early return here would have restored, verbatim,
+  // outputs the log already recorded as elided in `context.compacted`. Monotonicity is a property
+  // of the SET, not of the threshold.
   const sticky = new Set(opts.alreadyElided ?? []);
   if (sticky.size > 0) {
     for (let i = 0; i < protectFrom; i++) {
@@ -216,6 +217,12 @@ export function elideHistory(messages: readonly ChatMessage[], opts: ElisionOpti
       }
     }
   }
+  // The trigger gates only the CHAR WALK, preserving the hysteresis (trigger >> target): below it
+  // the sticky set has still been re-applied above, so nothing previously elided comes back.
+  if (rawChars <= trigger) {
+    return { messages: out, elidedCallIds, imageElidedCallIds, rawChars, sentChars, exhausted: false };
+  }
+
   outer: for (let i = 0; i < protectFrom; i++) {
     const m = out[i]!;
     if (m.role !== 'user') continue;

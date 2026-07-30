@@ -1270,8 +1270,9 @@ on the final content block of the final wire message, attached AFTER coalescing 
 marker could land mid-merged-message and silently cache a shorter prefix) and never on a replayed
 thinking block, whose bytes must not change. Each step re-reads the prior conversation from cache;
 the pipeline order is fixed as elide → scope-reasoning → coalesce → cache-mark. The other
-providers cache automatically. Cache accounting (plus additive `reasoningTokens`) flows into
-events, `/status`, and the report.
+providers cache automatically. Cache accounting flows into events, `/status`, and the report;
+`reasoningTokens` is recorded on `assistant.message.usage` only — no reader surfaces it yet
+(deferred: fold it into the report/`/status` token lines).
 
 **Identity, selection, and honest degradation.**
 

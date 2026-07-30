@@ -1176,6 +1176,11 @@ async function runExecution<I>(
   }
 
   const persisted = redactedForLog(session, tool, result, decision);
+  const hasImages = result.images !== undefined && result.images.length > 0;
+  // Session 15: whether the pixels actually reached the model is decided by the CATALOG, and the
+  // answer has to be durable — the wire-side pointer text is ephemeral, so a log without this
+  // could not distinguish a visually-judged flow from one the model never saw.
+  const imagesWithheld = hasImages && !capsFor(session.provider.name as ProviderName, session.model).visionInput;
   session.log.append({
     type: 'tool.completed',
     callId,
@@ -1189,9 +1194,10 @@ async function runExecution<I>(
     // Image METADATA only (Session 13): the pixels are content-addressed blobs the tool already
     // stored; a log line must never carry base64. Resume rebuilds from outputPreview, whose text
     // carries the objects/<sha> pointer per image (the ToolResult.images contract).
-    ...(result.images !== undefined && result.images.length > 0
-      ? { images: result.images.map((im) => ({ sha256: im.sha256, mediaType: im.mediaType, bytes: Buffer.byteLength(im.dataBase64, 'base64'), label: im.label })) }
+    ...(hasImages
+      ? { images: result.images!.map((im) => ({ sha256: im.sha256, mediaType: im.mediaType, bytes: Buffer.byteLength(im.dataBase64, 'base64'), label: im.label })) }
       : {}),
+    ...(imagesWithheld ? { imagesWithheld: true as const } : {}),
   });
 
   // The model sees the REAL output; only the persisted log is redacted. With images attached,
@@ -1203,8 +1209,7 @@ async function runExecution<I>(
     // The evidence is unchanged (blobs stored, image metadata on tool.completed) — only the
     // wire view degrades, and the text says so. Nothing else (DOM assertions, gates, checks)
     // is affected.
-    const caps = capsFor(session.provider.name as ProviderName, session.model);
-    if (!caps.visionInput) {
+    if (imagesWithheld) {
       const pointers = result.images
         .map(
           (im) =>

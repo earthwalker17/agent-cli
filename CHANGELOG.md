@@ -68,6 +68,28 @@ semantics, with capability differences degrading honestly instead of silently.
   recorded; the model is told where it is and why it cannot see it, and `view_image` refuses with
   the same explanation. Browser assertions, DOM checks, planning, checks and recovery are untouched.
 
+Found by this release's adversarial review and fixed before shipping:
+
+- **A thinking-only assistant turn could produce a wire-invalid history** (`content: []` on
+  Anthropic, a bare `{content:null}` on the Chat-Completions family) once it aged out of the replay
+  window — which would have 400'd every later request in that session.
+- **Elision monotonicity**, which mutable per-model context budgets broke: switching to a
+  larger-budget model could restore output the evidence log had already recorded as elided.
+- **`/model` accepted a pasted credential** whose shape the old blocklist missed (a GLM-style
+  `id.secret` key), and would have persisted it into the event log; model arguments are now
+  positively validated. `/model` also ignored a definitive 401/403 and recorded the strongest
+  verification word for a failed probe.
+- **A `*_BASE_URL` override was invisible at startup** even though it redirects your credential to
+  another host; it is now announced as a startup note naming the env var.
+- **The OpenAI adapter re-homed tool-result screenshots without consulting the capability catalog**,
+  so it could send pixels to a model the harness itself classifies as text-only.
+- **`tool.completed` could not distinguish a screenshot the model saw from one withheld** (new
+  additive `imagesWithheld`), and `agent sessions` neither folded provider/model identity nor used
+  the newest lifecycle event.
+- **The opt-in live tests gated on truthiness**, so `AGENT_LIVE_TEST=0` ran ten real, paid API
+  calls; and the `agent providers` credential-leak assertion was a silent no-op on a keyless CI
+  runner. Both are now deterministic.
+
 ### Honest limits
 
 - **All five providers are live-proven** through the real bounded tool loop on their default models:

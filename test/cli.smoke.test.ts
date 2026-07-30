@@ -142,9 +142,18 @@ d('CLI end-to-end via the built binary', () => {
     expect(res.stdout).toContain('DEEPSEEK_API_KEY');
     expect(res.stdout).toContain('get a key:');
     expect(res.stdout).toContain('catalog verified');
-    // Env var NAMES and presence only — never a value.
-    const realKey = process.env['ANTHROPIC_API_KEY'];
-    if (realKey !== undefined && realKey.length > 8) expect(res.stdout).not.toContain(realKey);
+    // Env var NAMES and presence only — never a value. Deterministic canary (S15 review
+    // finding): the old assertion was conditional on the DEV MACHINE having a real key, so on a
+    // keyless CI runner — the release gate — it silently checked nothing.
+    const canary = 'sk-canary-DO-NOT-PRINT-0123456789abcdef';
+    const withKey = spawnSync(process.execPath, [CLI, 'providers'], {
+      cwd: ws,
+      env: { ...process.env, AGENT_CLI_STATE_DIR: state, DEEPSEEK_API_KEY: canary },
+      encoding: 'utf8',
+    });
+    expect(withKey.status).toBe(0);
+    expect(withKey.stdout).toContain('DEEPSEEK_API_KEY'); // the NAME is shown…
+    expect(withKey.stdout).not.toContain(canary); // …the VALUE never is
     expect(sessionEvents()).toEqual([]); // read-only: no session log was ever created
 
     const asJson = run(['providers', '--json']);

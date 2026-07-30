@@ -342,8 +342,13 @@ export function effectiveIdentity(events: readonly SessionEvent[]): {
 } {
   let current: { providerName: string; model: string } | null = null;
   const used: { providerName: string; model: string }[] = [];
+  // The TRANSITION SEQUENCE, not a set (S15 review finding): de-duplicating an A→B→A session to
+  // [A, B] and rendering it with an arrow claimed the work ended on B while `current` said A.
+  // Only a consecutive repeat is collapsed.
   const push = (id: { providerName: string; model: string }): void => {
-    if (!used.some((u) => u.providerName === id.providerName && u.model === id.model)) used.push(id);
+    const last = used[used.length - 1];
+    if (last !== undefined && last.providerName === id.providerName && last.model === id.model) return;
+    used.push(id);
   };
   for (const e of events) {
     if (e.type === 'session.started') {

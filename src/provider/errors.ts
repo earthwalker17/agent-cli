@@ -98,7 +98,11 @@ export async function withRetry<T>(attempt: () => Promise<T>, opts: RetryOptions
       if (pe === undefined || !pe.retryable || i === retries) throw err;
       const hinted = (pe as ProviderError & { retryAfterHint?: number }).retryAfterHint;
       const backoff = hinted ?? Math.min(500 * 2 ** i + Math.floor(Math.random() * 250), 8_000);
-      await sleep(backoff);
+      // Abort-aware wait (S15 review finding): a Retry-After hint can be up to 60s, and an
+      // unraceable sleep made Ctrl+C appear to hang for that long — the turn could not be
+      // interrupted until the timer expired.
+      await raceAbort(sleep(backoff), opts.signal);
+      if (opts.signal?.aborted) throw lastErr;
     }
   }
   throw lastErr;
@@ -108,4 +112,14 @@ function abortError(): Error {
   const e = new Error('request aborted');
   e.name = 'AbortError';
   return e;
+}
+
+/** Resolve as soon as either the wait finishes or the signal fires (never rejects). */
+async function raceAbort(wait: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (signal === undefined) return wait;
+  if (signal.aborted) return;
+  await Promise.race([
+    wait,
+    new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })),
+  ]);
 }

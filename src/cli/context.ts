@@ -206,6 +206,15 @@ export function buildRunContext(values: CliValues, opts: RunContextOptions = {})
   // `name === 'anthropic' ? 64_000 : 16_000` branch, generalized into data.
   const maxTokens = defaultMaxTokensFor(providerName, model);
   const contextBudget = contextBudgetFor(providerName, model);
+  // A *_BASE_URL override redirects the credential and the whole conversation to another host, so
+  // it must be VISIBLE at startup, not only on a mid-session switch (S15 review finding: the
+  // README claimed the banner names it, and it did not).
+  if (providerName !== 'mock') {
+    const a = (opts.registry ?? createProviderRegistry()).availability(providerName);
+    if (a.baseUrlOverridden) {
+      notes.push(`API host overridden via ${a.info.baseUrlEnv}: ${a.baseUrl}`);
+    }
+  }
   return { ws, mode, provider, approver, model, maxSteps, maxTokens, contextBudget, notes };
 }
 

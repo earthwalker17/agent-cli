@@ -16,7 +16,7 @@ import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
 import { approvedCurrentGraph, readPlanState } from '../plan/canonical.js';
 import { renderUserPlanView } from '../plan/views.js';
-import { buildReport } from '../report/report.js';
+import { buildReport, effectiveIdentity } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
 import { createCheckpoint, deleteCheckpointRefs, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
@@ -705,11 +705,23 @@ function cmdSessions(values: CliValues): number {
     const id = f.slice(0, -'.jsonl'.length);
     const { events } = EventLog.readLenient(layout.sessionFile(id));
     const started = events.find((e) => e.type === 'session.started');
-    const ended = events.find((e) => e.type === 'session.ended');
+    // NEWEST lifecycle event decides the status, and identity FOLDS newest-wins — the two
+    // corrections report.ts already carries. A `find` here reported the first clean end of a
+    // resumed-then-crashed log, and the starting model of a session that switched providers
+    // (S14.5 + S15 review findings); effectiveIdentity is the shared derivation.
+    const lifecycle = events.filter((e) => e.type === 'session.started' || e.type === 'session.resumed' || e.type === 'session.ended');
+    const lastLifecycle = lifecycle[lifecycle.length - 1];
+    const ended = lastLifecycle?.type === 'session.ended' ? lastLifecycle : undefined;
     const task = events.find((e) => e.type === 'user.message');
-    const status = ended?.type === 'session.ended' ? ended.reason : 'CRASHED/UNKNOWN';
+    const status = ended !== undefined ? ended.reason : 'CRASHED/UNKNOWN';
     const first = task?.type === 'user.message' ? task.text.split('\n')[0]!.slice(0, 60) : '(no task)';
-    const model = started?.type === 'session.started' ? started.model : '?';
+    const identity = effectiveIdentity(events);
+    const model =
+      identity.current === null
+        ? '?'
+        : identity.used.length > 1
+          ? `${identity.current.model} (switched ${identity.used.length - 1}x)`
+          : identity.current.model;
     const lineage =
       started?.type === 'session.started' && started.lineage !== undefined
         ? `  [task:${started.lineage.role} of ${started.lineage.parentSessionId}]`

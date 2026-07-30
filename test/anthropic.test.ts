@@ -163,6 +163,28 @@ describe('thinking round-trip (Session 15)', () => {
     expect(scoped[5]!.content[0]).toEqual(mine); // in-window after a tool_result-only user message
   });
 
+  it('REGRESSION: a message left EMPTY by scoping is DROPPED, never sent as content: []', () => {
+    // A thinking-only assistant turn is reachable once adaptive thinking is on (e.g. a max_tokens
+    // cut before any text). Once it ages out of the window the filter empties it, and the
+    // Messages API rejects an empty content array — poisoning every later request in the session.
+    const stale: ContentBlock = { type: 'reasoning', providerName: 'anthropic', model: 'claude-opus-5', payload: thinkingBlock };
+    const messages: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'first request' }] },
+      { role: 'assistant', content: [stale] }, // thinking-only, will fall out of the window
+      { role: 'user', content: [{ type: 'text', text: 'second request' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    ];
+    const scoped = scopeReasoning(messages, 'claude-opus-5');
+    expect(scoped).toHaveLength(3);
+    for (const m of scoped) expect(m.content.length).toBeGreaterThan(0);
+    // End to end: no empty-content message reaches the wire, and the two user messages left
+    // adjacent by the drop are merged by coalescing — so roles still alternate.
+    const p = buildApiParams({ model: 'claude-opus-5', system: 'sys', messages, tools: [], maxTokens: 10 });
+    for (const m of p.messages) expect((m.content as unknown[]).length).toBeGreaterThan(0);
+    expect(p.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect((p.messages[0]!.content as { text?: string }[]).map((b) => b.text)).toEqual(['first request', 'second request']);
+  });
+
   it('the moving cache marker never lands on a replayed thinking block', () => {
     // Artificial shape (final message assistant, trailing thinking) purely to pin the guard.
     const p = buildApiParams({
@@ -211,7 +233,9 @@ describe('thinking round-trip (Session 15)', () => {
 });
 
 // Opt-in live smoke: one real API call. Excluded from CI; run with AGENT_LIVE_TEST=1.
-const live = process.env['AGENT_LIVE_TEST'] ? it : it.skip;
+// Gate on the VALUE — '0' is truthy in JS, so truthiness would run a paid call on
+// AGENT_LIVE_TEST=0 (S15 review finding).
+const live = (process.env['AGENT_LIVE_TEST'] ?? '').trim() === '1' ? it : it.skip;
 describe('AnthropicProvider live', () => {
   live('completes a trivial request against the real API (re-proving the DEFAULT model id)', async () => {
     const provider = new AnthropicProvider();

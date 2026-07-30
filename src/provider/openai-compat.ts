@@ -108,6 +108,11 @@ export function buildCompatRequest(profile: CompatProfile, req: ProviderRequest,
         }
         // tool_result blocks never appear on assistant messages.
       }
+      // An assistant turn with neither text nor tool calls (a thinking-only turn — reachable once
+      // reasoning is on by default, e.g. a length cut before any text) is DROPPED rather than sent
+      // as `{content: null}` with nothing else: this family requires content or tool_calls, and a
+      // wire-invalid history would 400 every later request in the session (S15 review finding).
+      if (texts.length === 0 && toolCalls.length === 0) return;
       const msg: WireMessage = {
         role: 'assistant',
         content: texts.length > 0 ? texts.join('') : null,
@@ -127,6 +132,7 @@ export function buildCompatRequest(profile: CompatProfile, req: ProviderRequest,
         const { text, images } = textOfParts(b.content);
         let content = text;
         if (images.length > 0) {
+          // Vision is gated by the CATALOG, never by provider name — mirrors the runtime choke.
           if (caps.toolResultImages === 'rehomed' && caps.visionInput) {
             content = `${text}${text.length > 0 ? '\n' : ''}[${images.length} screenshot(s) attached in the next message]`;
             pendingImages.push({ label: b.toolUseId, images });

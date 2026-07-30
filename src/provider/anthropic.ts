@@ -85,6 +85,13 @@ export function buildApiParams(req: ProviderRequest): Anthropic.MessageCreatePar
  * model tag) and (b) it sits inside the current tool loop — i.e. after the last user message that
  * carries anything other than tool_results (a tool_result-only user message is loop-internal).
  * Everything else is dropped from the WIRE VIEW only; `session.messages` is never mutated.
+ *
+ * A message left EMPTY by that filter is dropped entirely (S15 review finding): the API rejects
+ * `content: []`, and a thinking-only assistant turn — which adaptive thinking makes reachable,
+ * e.g. a `max_tokens` cut before any text — would otherwise poison every later request in the
+ * session, the same failure class as the S14.5 unanswered-tool_use bug. Dropping is safe: a
+ * reasoning-only message carries no tool_use, so no pairing can be orphaned, and the resulting
+ * consecutive user messages are merged by coalesceUserMessages downstream.
  */
 export function scopeReasoning(messages: readonly ChatMessage[], model: string): ChatMessage[] {
   let lastRealUser = -1;
@@ -95,12 +102,18 @@ export function scopeReasoning(messages: readonly ChatMessage[], model: string):
       break;
     }
   }
-  return messages.map((m, i) => {
-    if (!m.content.some((b) => b.type === 'reasoning')) return m;
+  const out: ChatMessage[] = [];
+  messages.forEach((m, i) => {
+    if (!m.content.some((b) => b.type === 'reasoning')) {
+      out.push(m);
+      return;
+    }
     const keep = (b: ContentBlock): boolean =>
       b.type !== 'reasoning' || (i > lastRealUser && b.providerName === 'anthropic' && b.model === model);
-    return { role: m.role, content: m.content.filter(keep) };
+    const content = m.content.filter(keep);
+    if (content.length > 0) out.push({ role: m.role, content });
   });
+  return out;
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { ChatMessage, ContentBlock, Provider, ProviderRequest, ProviderTurn, StopReason, ToolResultPart } from '../types.js';
 import { createTransport, type Transport } from '../net/transport.js';
+import { capsFor } from './catalog.js';
 import { ProviderError, classifyHttpStatus, retryAfterMs, withRetry } from './errors.js';
 import { sseEvents, SSE_DONE } from './sse.js';
 
@@ -45,8 +46,13 @@ function splitToolResult(content: string | ToolResultPart[]): { text: string; im
   return { text: texts.join('\n'), images };
 }
 
-/** Pure request builder — exported for golden tests. */
-export function buildResponsesRequest(req: ProviderRequest): Rec {
+/**
+ * Pure request builder — exported for golden tests. `visionInput` comes from the CATALOG so the
+ * same single rule governs pixels everywhere (S15 review finding: this path re-homed images
+ * unconditionally, which could send pixels to a model the harness itself classified as text-only —
+ * reachable via `/model <uncataloged-id>` while image parts are still inside the elision window).
+ */
+export function buildResponsesRequest(req: ProviderRequest, visionInput = true): Rec {
   const input: Rec[] = [];
   const loopStart = lastRealUserIndex(req.messages);
 
@@ -84,8 +90,18 @@ export function buildResponsesRequest(req: ProviderRequest): Rec {
         const { text, images } = splitToolResult(b.content);
         let output = text;
         if (images.length > 0) {
-          output = `${text}${text.length > 0 ? '\n' : ''}[${images.length} screenshot(s) attached in the next message]`;
-          pendingImages.push({ label: b.toolUseId, images });
+          if (visionInput) {
+            output = `${text}${text.length > 0 ? '\n' : ''}[${images.length} screenshot(s) attached in the next message]`;
+            pendingImages.push({ label: b.toolUseId, images });
+          } else {
+            const pointers = images
+              .map(
+                (img) =>
+                  `[screenshot${img.label !== undefined ? ` ${img.label}` : ''}: stored as evidence${img.sha256 !== undefined ? ` at objects/${img.sha256}` : ''}; this model has no image input]`,
+              )
+              .join('\n');
+            output = `${text}${text.length > 0 ? '\n' : ''}${pointers}`;
+          }
         }
         input.push({ type: 'function_call_output', call_id: b.toolUseId, output });
       } else if (b.type === 'text') {
@@ -226,7 +242,7 @@ export class OpenAiResponsesProvider implements Provider {
   }
 
   async complete(req: ProviderRequest, onText?: (delta: string) => void, signal?: AbortSignal): Promise<ProviderTurn> {
-    const body = JSON.stringify(buildResponsesRequest(req));
+    const body = JSON.stringify(buildResponsesRequest(req, capsFor('openai', req.model).visionInput));
     const url = `${this.baseUrl}/responses`;
 
     const res = await withRetry(

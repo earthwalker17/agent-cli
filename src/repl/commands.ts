@@ -856,9 +856,16 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
 
 // ── /provider and /model (Session 15) ──────────────────────────────────────────────────────
 
-/** Never let anything key-shaped enter the session log via a command argument. */
+/**
+ * Never let anything key-shaped enter the session log via a command argument. Positive validation
+ * (S15 review finding): the earlier blocklist (`=`, `sk-` prefix, len > 64) missed real formats —
+ * a GLM key is a 49-char `id.secret` pair with no `sk-` prefix — and on the /model path a missed
+ * value would be persisted verbatim into `provider.changed`. Provider and model ids are short and
+ * conservative (the longest shipped id is 26 chars), so ANYTHING that does not look like one is
+ * refused; that is the safe direction for a value the user may have pasted by mistake.
+ */
 function looksLikeCredential(s: string): boolean {
-  return s.includes('=') || /^sk-/i.test(s) || s.length > 64;
+  return !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,39}$/.test(s) || /^sk-/i.test(s) || s.length > 40;
 }
 
 function fmtTokens(n: number): string {
@@ -1063,6 +1070,13 @@ async function cmdModel(arg: string, ctx: CommandContext): Promise<SlashOutcome>
   if (providerName !== 'mock' && owners.length === 0 && ctx.registry !== undefined) {
     // Uncataloged id: consult the live list where one exists before running blind.
     const validation = await ctx.registry.validateKey(providerName);
+    // A definitive credential rejection refuses the switch here exactly as it does in /provider,
+    // and a FAILED probe must never be recorded as 'models-list' — that is the strongest of the
+    // three verification words standing for the weakest outcome (S15 review finding).
+    if (!validation.ok) {
+      ctx.renderer.chromeLine(`switch refused: ${sanitizeLine(validation.detail)}`);
+      return 'continue';
+    }
     verification = validation.verification;
     if (validation.modelIds !== undefined && !validation.modelIds.includes(id)) {
       if (ctx.question === undefined) {

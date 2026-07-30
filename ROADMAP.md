@@ -105,6 +105,64 @@ and `agent providers` creating no session and leaking no key value.
 
 **In neither run does any key value, `sk-` prefix, or `Bearer` token appear anywhere in the log.**
 
+### The adversarial review — 4 lenses, 17 findings, 11 fixed
+
+One bounded batch of four differentiated read-only lenses (provider wire correctness, evidence/log
+contract, credentials/consent, integration/test quality) over the session diff before release; every
+finding hand-verified against the code first. The lenses also returned a long list of invariants
+verified as HOLDING (tool_use/tool_result pairing across every history path, reasoning-scope
+correctness in all three adapters, SSE edge cases, retry-never-replays-a-consumed-stream, the
+old-log/new-binary compatibility matrix, credentials confined to headers).
+
+The two that mattered most were the same failure CLASS as S14.5's unanswered-tool_use bug — a
+wire-invalid history that poisons every later request:
+
+- **`scopeReasoning` could emit `{role:'assistant', content: []}`.** A thinking-only assistant turn
+  (reachable now that adaptive thinking is the default — e.g. a `max_tokens` cut before any text)
+  that ages out of the replay window was filtered to nothing, and the Messages API rejects an empty
+  content array. Empty messages are now DROPPED (safe: such a turn holds no tool_use, and
+  coalescing merges the adjacent user messages). The same hole existed in the compat adapter, where
+  a bare `{content:null}` with no tool_calls would 400.
+- **Elision monotonicity broke the moment `contextBudget` became mutable.** The sticky
+  `alreadyElided` pass sat AFTER the trigger early-return, so switching to a larger-budget model
+  could restore, verbatim, outputs `context.compacted` had already recorded as elided. The sticky
+  pass now runs unconditionally; the trigger still gates only the char walk, preserving hysteresis.
+
+Also fixed: `looksLikeCredential` was a blocklist that missed a GLM-style 49-char `id.secret` key
+(now positive validation against a conservative model-id shape, so a pasted secret cannot be
+persisted by `/model`); `/model` ignored a definitive 401/403 and recorded `verification:
+'models-list'` for a FAILED probe; a `*_BASE_URL` override — which redirects the credential to
+another host — was invisible at startup while the README claimed the banner named it; the OpenAI
+adapter re-homed tool-result images without consulting the catalog, so it could send pixels to a
+model the harness classifies as text-only; `tool.completed` recorded images identically whether the
+model saw them or not (new additive `imagesWithheld`); `agent sessions` was a third,
+non-folding identity derivation that also still took the FIRST `session.ended`; a `Retry-After`
+sleep of up to 60s ignored the abort signal; the resume-mismatch event claimed
+`presence-only` for the credential-less mock; and the report's `modelsUsed` de-duplicated an
+A→B→A session to "A → B", implying it ended on B.
+
+**Two findings were test-quality defects that would have shipped a false green:** the live smokes
+gated on the TRUTHINESS of `AGENT_LIVE_TEST`, so `AGENT_LIVE_TEST=0` ran all ten paid calls (now
+gated on `=== '1'`, verified: 10 skipped with keys present), and the `agent providers` no-leak
+assertion was conditional on the dev machine having a real key — a silent no-op on CI (now a
+deterministic injected canary). The review also correctly named the least test-supported claim of
+the session: the `currentRuntime()` getter behind "children follow switches" had ZERO coverage, as
+did the resume-mismatch recording. Both now have pins.
+
+**One finding was rejected as a false positive after hand-verification** (the cache marker "can
+mark nothing": reachable only for a final wire message made solely of thinking blocks, which
+neither `runTurn` nor the narrative call can produce — both end with a user message), and one is
+recorded as an accepted pre-existing limitation rather than fixed: a reasoning block can restate
+bytes from a `redactOutput` tool read, which the log then persists in cleartext. That property
+already existed for `assistant.message.text`; S15 widens it, and the honest response is that the
+approval prompt's redaction promise covers the tool RESULT, not the model's own restatements.
+
+**A test assertion added during the review then caught an inaccuracy in the catalog's own
+semantics:** requiring a reasoning block whenever the catalog says `on-by-default` failed live on
+claude-opus-5 and gpt-5.6-sol, because *adaptive* thinking legitimately skips thinking on a trivial
+request. Only `forced` is a guarantee — the assertion now says so, which is both correct and
+non-flaky.
+
 ### Decisions (and why)
 
 - **Reasoning payloads are OPAQUE and provider+model-tagged.** Only the emitting adapter may
@@ -556,7 +614,8 @@ merely resolved state root (so a state dir inside the workspace could evade the 
 spelled as an 8.3 short path or through a symlink), and a test whose premise silently broke when
 cwd and TEMP sit on different drives.
 
-**Provider/model (new, S15):** live smokes for DeepSeek/Kimi/GLM once keys exist; a live reasoning
+**Provider/model (new, S15):** surface `Usage.reasoningTokens` in the report and `/status` (it is
+recorded on `assistant.message` but no reader folds it yet); a live reasoning
 render channel (deltas are captured for round-trip but never displayed, so an always-thinking model
 looks paused); reasoning-payload spill-to-blob if event logs grow uncomfortable; strict-schema
 transformation for OpenAI/Kimi strict tool mode (currently `strict:false` — zod-derived draft-7

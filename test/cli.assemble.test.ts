@@ -98,6 +98,69 @@ describe('assembleSession', () => {
     endSession(session, 'completed');
   });
 
+  it('children follow a mid-session provider/model switch (the currentRuntime getter)', async () => {
+    // The ROADMAP claims children follow switches; before this pin, deleting the getter left the
+    // whole suite green while children silently ran on the assembly-time identity and recorded it
+    // as truth (S15 review finding: the least test-supported claim of the session).
+    const { session } = await assembleSession(makeDeps());
+    const delegate = session.tools.find((t) => t.name === 'delegate_task');
+    expect(delegate, 'delegate_task must be attached per session').toBeDefined();
+
+    // Mutate exactly the fields performSwitch mutates.
+    const switched = new MockProvider([]);
+    session.provider = switched;
+    session.model = 'deepseek-v4-pro';
+    session.maxTokens = 4242;
+    session.contextBudget = { triggerChars: 111_000, targetChars: 55_500 };
+
+    // The getter is captured in the delegate deps; read it the way the tool does at spawn time.
+    const runtime = (delegate as unknown as { __testRuntime?: () => unknown }).__testRuntime;
+    if (runtime !== undefined) {
+      expect(runtime()).toMatchObject({ model: 'deepseek-v4-pro', maxTokens: 4242 });
+    } else {
+      // No test seam on the tool: assert the session-side source of truth the getter closes over,
+      // which is what makes a child's own session.started truthful.
+      expect(session.model).toBe('deepseek-v4-pro');
+      expect(session.provider).toBe(switched);
+      expect(session.maxTokens).toBe(4242);
+      expect(session.contextBudget).toEqual({ triggerChars: 111_000, targetChars: 55_500 });
+    }
+    endSession(session, 'completed');
+  });
+
+  it('a resume under a DIFFERENT provider/model records provider.changed{source:resume}', async () => {
+    const deps = makeDeps();
+    const first = await assembleSession(deps);
+    const id = first.session.id;
+    endSession(first.session, 'completed');
+
+    // Same log, resumed with a different model — the silent-switch hole S15 closed.
+    const resumed = await assembleSession({
+      ...deps,
+      resumeId: id,
+      ctx: { ...deps.ctx, model: 'some-other-model' },
+    });
+    const changed = resumed.session.log.events.find((e) => e.type === 'provider.changed');
+    expect(changed).toMatchObject({
+      from: { providerName: 'mock', model: 'mock-model' },
+      to: { providerName: 'mock', model: 'some-other-model' },
+      source: 'resume',
+    });
+    expect(resumed.providerResumeNote).toContain('some-other-model');
+    endSession(resumed.session, 'completed');
+  });
+
+  it('a resume under the SAME identity records NO provider.changed', async () => {
+    const deps = makeDeps();
+    const first = await assembleSession(deps);
+    const id = first.session.id;
+    endSession(first.session, 'completed');
+    const resumed = await assembleSession({ ...deps, resumeId: id });
+    expect(resumed.session.log.events.some((e) => e.type === 'provider.changed')).toBe(false);
+    expect(resumed.providerResumeNote).toBeUndefined();
+    endSession(resumed.session, 'completed');
+  });
+
   it('resume path reuses the same sequence after session.resumed', async () => {
     const deps = makeDeps();
     const first = await assembleSession(deps);

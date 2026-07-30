@@ -957,13 +957,22 @@ export type EventBody =
        */
       fullOutputSaved?: true;
       /**
-       * Image parts the model saw LIVE in this result (Session 13, additive) — METADATA ONLY.
-       * The pixel bytes live as content-addressed blobs (objects/<sha256>); a session log line
-       * never contains base64, and resume rebuilds from outputPreview, so a resumed model gets
-       * the text pointer instead of the pixels (it saw them live; replaying them would resend
-       * what the original turn already consumed).
+       * Image parts CAPTURED in this result (Session 13, additive) — METADATA ONLY. The pixel
+       * bytes live as content-addressed blobs (objects/<sha256>); a session log line never
+       * contains base64, and resume rebuilds from outputPreview, so a resumed model gets the text
+       * pointer instead of the pixels (it saw them live; replaying them would resend what the
+       * original turn already consumed).
+       *
+       * Whether the model actually SAW them is `imagesWithheld` (Session 15) — do not read this
+       * field alone as "the model looked at these".
        */
       images?: { sha256: string; mediaType: string; bytes: number; label: string }[];
+      /**
+       * The captured images were deliberately NOT sent to the model because the selected model has
+       * no image input (Session 15, additive). The blobs and metadata above are unchanged — only
+       * the wire view degraded, and this is the durable record of that honest degradation.
+       */
+      imagesWithheld?: true;
     }
   | {
       /** A shell command actually spawned (post-approval). Distinct from tool.requested: this is execution. */

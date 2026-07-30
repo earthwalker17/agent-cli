@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createProviderRegistry } from '../src/provider/registry.js';
-import { PROVIDERS, PROVIDER_NAMES } from '../src/provider/catalog.js';
+import { PROVIDERS, PROVIDER_NAMES, capsFor } from '../src/provider/catalog.js';
 import type { ChatMessage, ProviderRequest } from '../src/types.js';
 
 /**
@@ -20,10 +20,14 @@ import type { ChatMessage, ProviderRequest } from '../src/types.js';
 const TRIVIAL_TIMEOUT = 120_000;
 const LOOP_TIMEOUT = 300_000;
 
+// Gate on the VALUE, not truthiness: '0' is truthy in JS, so the natural way to disable live
+// tests (`AGENT_LIVE_TEST=0`) used to RUN all ten paid calls (S15 review finding).
+const liveEnabled = (process.env['AGENT_LIVE_TEST'] ?? '').trim() === '1';
+
 for (const name of PROVIDER_NAMES) {
   const info = PROVIDERS[name];
   const keyPresent = info.keyEnvs.some((k) => (process.env[k] ?? '').trim() !== '');
-  const live = process.env['AGENT_LIVE_TEST'] && keyPresent ? it : it.skip;
+  const live = liveEnabled && keyPresent ? it : it.skip;
 
   describe(`${name} live (${info.keyEnvs[0]})`, () => {
     live(
@@ -73,6 +77,19 @@ for (const name of PROVIDER_NAMES) {
         const call = first.blocks.find((b) => b.type === 'tool_use');
         expect(call, `expected a tool_use block, got: ${JSON.stringify(first.blocks.map((b) => b.type))}`).toBeDefined();
         if (call?.type !== 'tool_use') throw new Error('unreachable');
+        // Non-vacuous where the provider GUARANTEES reasoning (S15 review finding): a regression
+        // that dropped reasoning blocks entirely would otherwise still pass this test while
+        // reading as proof of the round-trip.
+        //
+        // Only 'forced' is a guarantee. 'on-by-default' means ADAPTIVE — verified live: claude
+        // -opus-5 and gpt-5.6-sol both legitimately skip thinking on a request this trivial, so
+        // requiring a block there would make the suite flaky on a correct implementation. When
+        // blocks ARE present, the replay is proven by the second call succeeding at all.
+        const caps = capsFor(name, info.defaultModel);
+        const hadReasoning = first.blocks.some((b) => b.type === 'reasoning');
+        if (caps.reasoning.mode === 'forced') {
+          expect(hadReasoning, `${name}/${info.defaultModel}: catalog says thinking is FORCED, but the turn carried none`).toBe(true);
+        }
 
         const history: ChatMessage[] = [
           ...req.messages,
