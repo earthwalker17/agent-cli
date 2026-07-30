@@ -45,7 +45,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.111.0",
+    "@anthropic-ai/sdk": "^0.115.0",
     "diff": "^8.0.4",
     "ignore": "^7.0.6",
     "playwright-core": "^1.62.0",
