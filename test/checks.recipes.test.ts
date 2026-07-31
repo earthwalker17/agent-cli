@@ -7,6 +7,7 @@ function project(over: Partial<DetectedProject> = {}): DetectedProject {
   const scripts = over.scripts ?? {};
   return {
     root: 'C:/ws',
+    id: '.',
     kinds: ['node'],
     packageManager: 'npm',
     scripts: {},
@@ -19,6 +20,8 @@ function project(over: Partial<DetectedProject> = {}): DetectedProject {
     hasTsconfig: false,
     hasEslintConfig: false,
     hasPrettierConfig: false,
+    lockfile: null,
+    envFiles: { examples: [], present: [] },
     evidence: [],
     stamps: [],
     ...over,

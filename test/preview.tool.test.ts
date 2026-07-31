@@ -115,6 +115,7 @@ const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
 describe('resolvePreview', () => {
   const project = (scripts: Record<string, string>, over: Partial<DetectedProject> = {}): DetectedProject => ({
     root: ws,
+    id: '.',
     kinds: ['node'],
     packageManager: 'npm',
     scripts,
@@ -127,6 +128,8 @@ describe('resolvePreview', () => {
     hasTsconfig: false,
     hasEslintConfig: false,
     hasPrettierConfig: false,
+    lockfile: null,
+    envFiles: { examples: [], present: [] },
     evidence: [],
     stamps: [],
     ...over,

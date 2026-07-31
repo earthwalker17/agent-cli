@@ -13,7 +13,7 @@ import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/a
 import { foldReview, type ReviewState } from '../review/ledger.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
-import { CHECKS_PER_SESSION, describeProject, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
+import { CHECKS_PER_SESSION, describeWorkspace, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import type { PreviewTool } from '../tools/preview.js';
 import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
 import { likelyBrowserAvailable } from '../browser/probe.js';
@@ -749,7 +749,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       ctx.renderer.flush();
       const lines: string[] = [];
       if (ctx.checkTool !== undefined) {
-        lines.push(...describeProject(ctx.checkTool.refresh()));
+        lines.push(...describeWorkspace(ctx.checkTool.refresh()));
       } else {
         lines.push('typed checks are unavailable in this session');
       }
@@ -758,26 +758,33 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       // while /report over the same log said "STARTED but never completed; no verdict". Two
       // surfaces, one log, opposite answers — and this one read stronger (S14.5 review).
       type Completed = Extract<(typeof ctx.session.log.events)[number], { type: 'check.completed' }>;
-      const latest = new Map<string, { seq: number; done: Completed | null }>();
-      const openRuns = new Map<string, number>(); // `${callId}::${kind}` → seq
+      // Keyed by (project, kind), not kind alone (Session 16): in a workspace holding `web/` and
+      // `api/`, a green `test` in one is not a result for the other, and showing it as "the latest
+      // test result" would be this surface asserting something the log never said.
+      const latest = new Map<string, { seq: number; done: Completed | null; label: string }>();
+      const openRuns = new Map<string, { seq: number; label: string }>();
+      const labelOf = (projectId: string | undefined, kind: string): string =>
+        projectId === undefined || projectId === '.' ? kind : `${kind} [${projectId}]`;
       for (const e of ctx.session.log.events) {
-        if (e.type === 'check.started') openRuns.set(`${e.callId}::${e.check}`, e.seq);
-        else if (e.type === 'check.completed') {
-          openRuns.delete(`${e.callId}::${e.check}`);
-          latest.set(e.check, { seq: e.seq, done: e });
+        if (e.type === 'check.started') {
+          openRuns.set(`${e.callId}::${e.projectId ?? '.'}::${e.check}`, { seq: e.seq, label: labelOf(e.projectId, e.check) });
+        } else if (e.type === 'check.completed') {
+          const k = `${e.projectId ?? '.'}::${e.check}`;
+          openRuns.delete(`${e.callId}::${k}`);
+          latest.set(k, { seq: e.seq, done: e, label: labelOf(e.projectId, e.check) });
         }
       }
-      for (const [key, seq] of openRuns) {
-        const kind = key.slice(key.indexOf('::') + 2);
-        const prior = latest.get(kind);
-        if (prior === undefined || seq > prior.seq) latest.set(kind, { seq, done: null });
+      for (const [key, run] of openRuns) {
+        const k = key.slice(key.indexOf('::') + 2);
+        const prior = latest.get(k);
+        if (prior === undefined || run.seq > prior.seq) latest.set(k, { seq: run.seq, done: null, label: run.label });
       }
       lines.push('', latest.size > 0 ? 'latest result per kind:' : 'no checks have run in this session yet');
-      for (const [kind, entry] of latest) {
+      for (const entry of latest.values()) {
         lines.push(
           entry.done === null
-            ? `  ${kind}: NO VERDICT — started but never completed (the session ended while it ran); effects unknown, re-run it`
-            : `  ${kind}: ${entry.done.status} — ${sanitizeLine(entry.done.summary)}`,
+            ? `  ${entry.label}: NO VERDICT — started but never completed (the session ended while it ran); effects unknown, re-run it`
+            : `  ${entry.label}: ${entry.done.status} — ${sanitizeLine(entry.done.summary)}`,
         );
       }
       lines.push(

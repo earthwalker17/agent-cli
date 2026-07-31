@@ -22,6 +22,8 @@ const resolved: ResolvedCheck = {
   kind: 'typecheck',
   recipeId: 'node.script.typecheck',
   command: 'npm run typecheck',
+  projectId: '.',
+  cwd: 'C:/ws',
   timeoutMs: 300_000,
   effects: { writesOutputs: false, network: false, workspaceAuthored: false },
   scopePaths: [],

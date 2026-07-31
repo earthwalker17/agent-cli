@@ -70,9 +70,15 @@ export class Grants {
  * mutation branch. Keying on the command alone would let one `[s]` become standing consent to
  * execute whatever that script is later changed to say — exactly the standing shell authority
  * `run_command` is denied by design. Binding the body means a rewritten script re-asks.
+ *
+ * The project unit (Session 16) is the same argument one level out: in a workspace holding `web/`
+ * and `api/`, `npm run test` names two different scripts running two different bodies at full
+ * user privilege. Recipe ids are already unit-qualified, so this component is redundant TODAY —
+ * and it is included anyway, because "provably disjoint somewhere else" is exactly the kind of
+ * coupling that quietly stops being true.
  */
-export function checkReplayKey(recipeId: string, command: string, bodySha?: string): string {
-  return sha256(`${recipeId}\n${command}\n${bodySha ?? ''}`);
+export function checkReplayKey(recipeId: string, command: string, bodySha?: string, projectId?: string): string {
+  return sha256(`${recipeId}\n${command}\n${bodySha ?? ''}\n${projectId ?? ''}`);
 }
 
 export function isSecretName(p: string, extraPatterns?: readonly string[]): boolean {
@@ -295,7 +301,7 @@ export function decide<I>(
       }
       return decision('observe', 'allow', 'check.nothing-to-run', 'the call resolves no command to run (nothing to consent to)');
     }
-    const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command, r.bodySha));
+    const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command, r.bodySha, r.projectId));
     const summary = fact.resolved.map((r) => `${r.kind} → ${r.recipeId}`).join('; ');
     // A PREVIEW row (kind 'preview', Session 13) is the same trust shape — a harness-resolved
     // command with body-bound replay consent — but a materially different CONSEQUENCE: the

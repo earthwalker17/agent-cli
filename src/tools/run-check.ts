@@ -3,11 +3,12 @@ import { truncateForModel } from '../shared/hash.js';
 import { buildChildEnv } from '../exec/env.js';
 import { runManaged, type ExecSpec } from '../exec/run.js';
 import { shellInvocation } from '../exec/shell.js';
-import { detectProject, probeStamps, stampsEqual } from '../checks/detect.js';
+import { stampsEqual } from '../checks/detect.js';
+import { detectWorkspace, probeWorkspaceStamps, selectUnit } from '../checks/workspace.js';
 import { availableKinds, resolveChecks } from '../checks/recipes.js';
 import { normalizeCheckOutcome, unsupportedResult } from '../checks/normalize.js';
-import type { CheckResult, DetectedProject, ManifestStamp, ResolvedCheck } from '../checks/types.js';
-import type { CheckKind, ResolvedCheckFact, SessionEvent, Tool, ToolContext, ToolResult } from '../types.js';
+import type { CheckResult, DetectedProject, DetectedWorkspace, ManifestStamp, ResolvedCheck } from '../checks/types.js';
+import { CHECK_KINDS, type CheckKind, type ResolvedCheckFact, type SessionEvent, type Tool, type ToolContext, type ToolResult } from '../types.js';
 
 /**
  * run_check — typed project verification (Session 12). A per-session factory like retrieve and
@@ -42,6 +43,15 @@ const RunCheckInput = z
       .max(4)
       .describe(
         'Verification kinds to run. The harness resolves each to a project-appropriate command; you do not supply commands.',
+      ),
+    project: z
+      .string()
+      .min(1)
+      .max(260)
+      .optional()
+      .describe(
+        'Which detected project to verify (its workspace-relative directory, e.g. "api"; "." is the workspace root). ' +
+          'Optional in a single-project workspace; REQUIRED when several projects exist — the harness refuses to guess.',
       ),
     scope_paths: z
       .array(z.string().min(1).max(260))
@@ -82,8 +92,8 @@ export function checkCapsFromEvents(events: readonly SessionEvent[]): CheckCaps 
 export interface CheckToolDeps {
   workspaceRoot: string;
   caps: CheckCaps;
-  /** Injectable for deterministic tests; defaults to the real detector. */
-  detect?: (root: string) => DetectedProject;
+  /** Injectable for deterministic tests; defaults to the real workspace detector. */
+  detect?: (root: string) => DetectedWorkspace;
   probe?: (root: string) => ManifestStamp[];
   /**
    * S14.5 (E): the bound plan task's declared `touches`, for defaulting a test-targeted scope
@@ -96,10 +106,10 @@ export interface CheckToolDeps {
 }
 
 export interface RunCheckTool extends Tool<RunCheckInputT> {
-  /** The current project snapshot — what /checks renders and what the policy fact resolves from. */
-  projectSnapshot(): DetectedProject;
-  /** Force a re-detect (used by /checks so the surface never shows a stale project). */
-  refresh(): DetectedProject;
+  /** The current workspace snapshot — what /checks renders and what the policy fact resolves from. */
+  workspaceSnapshot(): DetectedWorkspace;
+  /** Force a re-detect (used by /checks so the surface never shows a stale project set). */
+  refresh(): DetectedWorkspace;
 }
 
 /** Excerpt of a failing check's output shown to the model; the full text spills to a blob. */
@@ -111,15 +121,29 @@ function toFact(r: ResolvedCheck): ResolvedCheckFact {
     kind: r.kind,
     command: r.command,
     ...(r.bodySha !== undefined ? { bodySha: r.bodySha } : {}),
+    projectId: r.projectId,
+    cwd: r.cwd,
     timeoutMs: r.timeoutMs,
     effects: r.effects,
   };
 }
 
-/** Identity for the TOCTOU comparison: the command AND the script body it invokes. */
+/**
+ * Identity for the TOCTOU comparison: the command, the script body it invokes, AND where it runs.
+ * This must stay the same tuple `checkReplayKey` hashes — one answers "may this re-run without
+ * asking", the other "is this still what was approved". A component in one and not the other is
+ * a hole, so they move together.
+ */
 function sameCommands(a: readonly ResolvedCheck[], b: readonly ResolvedCheck[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((x, i) => x.recipeId === b[i]!.recipeId && x.command === b[i]!.command && x.bodySha === b[i]!.bodySha);
+  return a.every(
+    (x, i) =>
+      x.recipeId === b[i]!.recipeId &&
+      x.command === b[i]!.command &&
+      x.bodySha === b[i]!.bodySha &&
+      x.projectId === b[i]!.projectId &&
+      x.cwd === b[i]!.cwd,
+  );
 }
 
 function renderResult(r: CheckResult): string {
@@ -133,9 +157,9 @@ function renderResult(r: CheckResult): string {
 }
 
 export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
-  const detect = deps.detect ?? detectProject;
-  const probe = deps.probe ?? probeStamps;
-  let project = detect(deps.workspaceRoot);
+  const detect = deps.detect ?? detectWorkspace;
+  const probe = deps.probe ?? probeWorkspaceStamps;
+  let workspace = detect(deps.workspaceRoot);
 
   // S14.5 (E): an omitted test-targeted scope defaults from the BOUND plan task's touches.
   // Explicit scope always wins; without a binding (or plan context) nothing changes and the
@@ -150,8 +174,18 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
     if (touches === null || touches.length === 0) return { scope: explicit };
     return { scope: touches, defaultedFrom: input.plan_task };
   };
-  const resolveFor = (input: RunCheckInputT): ReturnType<typeof resolveChecks> =>
-    resolveChecks(project, input.checks, scopeFor(input).scope);
+  /**
+   * Which unit this call means. Selection is PURE over the snapshot (the `check()` fact contract),
+   * and ambiguity refuses: in a workspace holding several real projects, guessing which one a
+   * build belongs to is not a convenience, it is a wrong command run at full user privilege.
+   */
+  const unitFor = (input: RunCheckInputT): ReturnType<typeof selectUnit> => selectUnit(workspace, input.project);
+
+  const resolveFor = (input: RunCheckInputT): ReturnType<typeof resolveChecks> => {
+    const sel = unitFor(input);
+    if (sel.unit === null) return { resolved: [], unsupported: [] };
+    return resolveChecks(sel.unit, input.checks, scopeFor(input).scope);
+  };
 
   return {
     name: 'run_check',
@@ -174,11 +208,29 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       const planTaskId = input.plan_task;
       const gated = resolveFor(input).resolved;
 
+      // A project that could not be selected is a CALLER mistake, not a project capability: it
+      // refuses the call with the real unit ids and records NOTHING, exactly as a malformed
+      // test-targeted scope does. An `unsupported` event here would let "you did not say which
+      // project" quietly waive a gate the user approved.
+      const selected = unitFor(input);
+      if (selected.unit === null) {
+        return {
+          ok: false,
+          output:
+            `refused: ${selected.reason}\n` +
+            'Nothing ran and nothing was recorded: a call the harness cannot attribute to a project must never be ' +
+            'mistaken for "this project cannot verify that".',
+          error: 'no project selected',
+          durationMs: Date.now() - startedAt,
+          truncated: false,
+        };
+      }
+
       // TOCTOU: the human approved the commands resolved from the snapshot above. Re-probe; only
       // if a manifest actually changed do we re-detect, and only if that changes a COMMAND do we
       // refuse. The snapshot is updated either way, so the next call is gated on current truth.
-      if (!stampsEqual(project.stamps, probe(deps.workspaceRoot))) {
-        project = detect(deps.workspaceRoot);
+      if (!stampsEqual(workspace.stamps, probe(deps.workspaceRoot))) {
+        workspace = detect(deps.workspaceRoot);
         const now = resolveFor(input).resolved;
         if (!sameCommands(gated, now)) {
           const describe = (rs: readonly ResolvedCheck[]): string =>
@@ -238,6 +290,7 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
           recipeId: r.recipeId,
           status: 'unsupported',
           unsupportedReason: u.why,
+          projectId: selected.unit.id,
           exitCode: null,
           durationMs: 0,
           summary: r.summary,
@@ -250,7 +303,9 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
         const baseSpec: ExecSpec = {
           file,
           args,
-          cwd: ctx.workspaceRoot,
+          // The UNIT's directory, not the workspace root: `npm run test` in `api/` must run in
+          // `api/`. The event records the same value, so the evidence names where it really ran.
+          cwd: rc.cwd,
           env: buildChildEnv(
             process.env,
             ctx.rules && ctx.rules.envExcludePatterns.length > 0 ? { extraExcludeSubstrings: ctx.rules.envExcludePatterns } : {},
@@ -266,8 +321,9 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
               check: rc.kind,
               recipeId: rc.recipeId,
               command: rc.command,
-              cwd: ctx.workspaceRoot,
+              cwd: rc.cwd,
               timeoutMs: rc.timeoutMs,
+              projectId: rc.projectId,
               ...(planTaskId !== undefined ? { planTaskId } : {}),
               ...(rc.scopePaths.length > 0 ? { scopePaths: rc.scopePaths } : {}),
             }),
@@ -288,6 +344,7 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
           check: result.kind,
           recipeId: result.recipeId,
           status: result.status,
+          projectId: rc.projectId,
           exitCode: result.exitCode,
           ...(result.termination !== null ? { termination: result.termination } : {}),
           durationMs: result.durationMs,
@@ -313,7 +370,7 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       const failed = results.filter((r) => r.status === 'fail' || r.status === 'error');
       const scoped = scopeFor(input);
       const head =
-        `run_check — ${results.length} kind(s): ${results.map((r) => `${r.kind}=${r.status}`).join(', ')}` +
+        `run_check [project ${selected.unit.id}] — ${results.length} kind(s): ${results.map((r) => `${r.kind}=${r.status}`).join(', ')}` +
         (scoped.defaultedFrom !== undefined
           ? `\n(test-targeted scope defaulted from plan task '${scoped.defaultedFrom}' touches: ${scoped.scope.join(', ')})`
           : '');
@@ -352,15 +409,15 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       };
     },
 
-    projectSnapshot: () => project,
+    workspaceSnapshot: () => workspace,
     refresh: () => {
-      project = detect(deps.workspaceRoot);
-      return project;
+      workspace = detect(deps.workspaceRoot);
+      return workspace;
     },
   };
 }
 
-/** One human line describing what this workspace can be verified with — the /checks surface. */
+/** What one project unit can be verified with — the per-unit block of the /checks surface. */
 export function describeProject(project: DetectedProject): string[] {
   const lines: string[] = [];
   lines.push(project.kinds.length > 0 ? `project: ${project.kinds.join(', ')}` : 'project: no supported manifest detected (Node/TS and Python are supported)');
@@ -369,4 +426,28 @@ export function describeProject(project: DetectedProject): string[] {
   const kinds = availableKinds(project);
   lines.push(kinds.length > 0 ? `runnable checks: ${kinds.join(', ')}` : 'runnable checks: none');
   return lines;
+}
+
+/**
+ * Every project the workspace holds — the /checks surface and the system-prompt facts. A
+ * single-project workspace renders exactly as it did before Session 16 (one unqualified block);
+ * the `[project …]` heading appears only where there is genuinely more than one thing to name.
+ */
+export function describeWorkspace(ws: DetectedWorkspace): string[] {
+  if (ws.units.length === 0) return describeProject(ws.rootUnit);
+  const single = ws.units.length === 1 && ws.units[0]!.id === '.';
+  const lines: string[] = [];
+  for (const u of ws.units) {
+    if (!single) lines.push(`[project ${u.id}]`);
+    for (const l of describeProject(u)) lines.push(single ? l : `  ${l}`);
+  }
+  for (const n of ws.notes) lines.push(`note: ${n}`);
+  return lines;
+}
+
+/** The union of every unit's runnable kinds — the plan-time "can this project run that gate" warning. */
+export function workspaceAvailableKinds(ws: DetectedWorkspace): CheckKind[] {
+  const seen = new Set<CheckKind>();
+  for (const u of ws.units) for (const k of availableKinds(u)) seen.add(k);
+  return CHECK_KINDS.filter((k) => seen.has(k));
 }

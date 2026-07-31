@@ -853,6 +853,7 @@ function recordCheckEvidence(session: Session, callId: string, e: CheckEvidence)
       command: e.command,
       cwd: e.cwd,
       timeoutMs: e.timeoutMs,
+      ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
       ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
       ...(e.scopePaths !== undefined ? { scopePaths: e.scopePaths } : {}),
     });
@@ -864,6 +865,7 @@ function recordCheckEvidence(session: Session, callId: string, e: CheckEvidence)
     check: e.check,
     recipeId: e.recipeId,
     status: e.status,
+    ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
     ...(e.unsupportedReason !== undefined ? { unsupportedReason: e.unsupportedReason } : {}),
     exitCode: e.exitCode,
     ...(e.termination !== undefined ? { termination: e.termination } : {}),

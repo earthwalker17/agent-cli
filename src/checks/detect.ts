@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { sha256 } from '../shared/hash.js';
-import type { DetectedProject, ManifestStamp, PackageManager, ProjectKind } from './types.js';
+import type { DetectedLockfile, DetectedProject, ManifestStamp, PackageManager, ProjectKind } from './types.js';
 
 /**
  * Project detection for typed checks (Session 12): bounded, never-throwing, stat-first.
@@ -18,6 +18,14 @@ const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_SCRIPTS = 40;
 const MAX_SCRIPT_NAME = 64;
 const MAX_SCRIPT_VALUE = 200;
+/**
+ * Lockfiles are legitimately large (a real `package-lock.json` runs to megabytes, well past the
+ * manifest cap), and install consent binds their CONTENT — so they get their own generous bound.
+ * Past it the sha is null: the install still runs after an approval, it just cannot earn replay
+ * consent. Refusing to hash is honest; hashing a prefix and calling it the lockfile identity is
+ * the display-cap mistake of S14.5 wearing a different hat.
+ */
+const MAX_LOCKFILE_BYTES = 32 * 1024 * 1024;
 
 /** Script/dependency names accepted from workspace bytes. Anything else is dropped, not escaped. */
 const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9:_.\-]{0,63}$/;
@@ -52,15 +60,32 @@ const PRETTIER_CONFIGS = [
   'prettier.config.mjs',
 ] as const;
 
+/** Lockfile names, preference-ordered; the FIRST present one names the install pinning. */
+export const LOCKFILES: readonly { name: string; pm: PackageManager }[] = [
+  { name: 'package-lock.json', pm: 'npm' },
+  { name: 'pnpm-lock.yaml', pm: 'pnpm' },
+  { name: 'yarn.lock', pm: 'yarn' },
+];
+
+/** Files that DECLARE expected environment configuration, and files that PROVIDE it. Names only. */
+const ENV_EXAMPLES = ['.env.example', '.env.sample', '.env.template', '.env.defaults'] as const;
+const ENV_PRESENT = ['.env', '.env.local', '.env.development', '.env.development.local', '.env.production'] as const;
+
 /**
  * The FIXED candidate list. Fixed matters: `probeStamps` must be able to notice a manifest that
  * did not exist before (a newly added tsconfig.json changes what typecheck resolves to), which a
  * "re-stat what we read last time" list could not.
+ *
+ * Session 16 additions: `pnpm-workspace.yaml` (it decides which UNITS exist) and the env-file
+ * names (they decide whether a unit reads as configured). Both only ever change what the harness
+ * DESCRIBES; a re-detect refuses a call solely when the resolved COMMAND changed, so widening the
+ * fingerprint costs a cheap re-detect and buys a surface that is never stale.
  */
 const CANDIDATES: readonly string[] = [
   'package.json',
   'package-lock.json',
   'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
   'yarn.lock',
   'tsconfig.json',
   'pyproject.toml',
@@ -68,6 +93,8 @@ const CANDIDATES: readonly string[] = [
   'node_modules',
   ...ESLINT_CONFIGS,
   ...PRETTIER_CONFIGS,
+  ...ENV_EXAMPLES,
+  ...ENV_PRESENT,
 ];
 
 /** Stat-only fingerprint of every candidate that exists. Cheap enough to run per check call. */
@@ -124,11 +151,37 @@ function detectPackageManager(root: string, pkg: Record<string, unknown> | null)
   return pkg !== null ? 'npm' : null;
 }
 
+/** The lockfile this unit is pinned by, hashed for install consent. Never throws. */
+function detectLockfile(root: string): DetectedLockfile | null {
+  for (const { name } of LOCKFILES) {
+    let size: number;
+    try {
+      const st = fs.statSync(path.join(root, name));
+      if (!st.isFile()) continue;
+      size = st.size;
+    } catch {
+      continue;
+    }
+    if (size > MAX_LOCKFILE_BYTES) return { name, sha256: null, size };
+    try {
+      return { name, sha256: sha256(fs.readFileSync(path.join(root, name))), size };
+    } catch {
+      // Unreadable (locked by a concurrent install, permissions): the lockfile EXISTS, so the
+      // install command it implies is still correct — only its consent identity is unavailable.
+      return { name, sha256: null, size };
+    }
+  }
+  return null;
+}
+
 /**
- * Detect what this workspace can be checked with. Pure with respect to the harness: it reads
- * workspace files and returns a snapshot — it writes nothing, spawns nothing, and never throws.
+ * Detect what one project unit can be checked with. Pure with respect to the harness: it reads
+ * files under `root` and returns a snapshot — it writes nothing, spawns nothing, and never throws.
+ *
+ * `id` is this unit's workspace-relative identity (`'.'` for the workspace root). It defaults to
+ * `'.'` so every pre-Session-16 caller keeps its exact meaning: one project, at the root.
  */
-export function detectProject(root: string): DetectedProject {
+export function detectProject(root: string, id = '.'): DetectedProject {
   const stamps = probeStamps(root);
   const kinds: ProjectKind[] = [];
   const evidence: string[] = [];
@@ -203,11 +256,22 @@ export function detectProject(root: string): DetectedProject {
   const hasEslintConfig = ESLINT_CONFIGS.some((c) => exists(root, c));
   const hasPrettierConfig = PRETTIER_CONFIGS.some((c) => exists(root, c)) || pkg?.['prettier'] !== undefined;
 
+  const lockfile = detectLockfile(root);
+  const envFiles = {
+    examples: ENV_EXAMPLES.filter((c) => exists(root, c)),
+    present: ENV_PRESENT.filter((c) => exists(root, c)),
+  };
+
   if (hasTsconfig) evidence.push('tsconfig.json');
+  if (lockfile !== null) evidence.push(`lockfile ${lockfile.name}`);
   if (hasDependencies && !hasNodeModules) evidence.push('dependencies are declared but node_modules is ABSENT');
+  if (envFiles.examples.length > 0 && envFiles.present.length === 0) {
+    evidence.push(`expects environment configuration (${envFiles.examples.join(', ')}) but none is present`);
+  }
 
   return {
     root,
+    id,
     kinds,
     packageManager: detectPackageManager(root, pkg),
     scripts,
@@ -219,6 +283,8 @@ export function detectProject(root: string): DetectedProject {
     hasTsconfig,
     hasEslintConfig,
     hasPrettierConfig,
+    lockfile,
+    envFiles,
     evidence,
     stamps,
   };

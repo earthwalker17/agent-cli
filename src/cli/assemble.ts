@@ -10,7 +10,7 @@ import { loadMemory, type LoadedMemory } from '../memory/load.js';
 import { createDelegateTool, delegateCapsFromEvents, type DelegateCaps, type ExecutorDeps, type PlanGateInfo } from '../tools/delegate.js';
 import type { ChildStatusUpdate } from '../runtime/subagent.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
-import { checkCapsFromEvents, createRunCheckTool, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
+import { checkCapsFromEvents, createRunCheckTool, workspaceAvailableKinds, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
@@ -31,7 +31,6 @@ import { isPidAlive } from '../store/event-log.js';
 import { approvedCurrentGraph, readPlanState } from '../plan/canonical.js';
 import type { PlanGraph } from '../plan/schema.js';
 import { foldGraphState, integrationGateState } from '../plan/graph-state.js';
-import { availableKinds } from '../checks/recipes.js';
 import { deleteCheckpointRefs } from '../git/checkpoint.js';
 import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
@@ -546,7 +545,10 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       // warning in the revision loop, long before the user approves an unsatisfiable graph.
       // 'browser' merges from the CHEAP existence guess (Session 13) — plan validation is a
       // non-blocking warning surface; the real launch probe is the runtime truth.
-      availableChecks: () => [...availableKinds(checkTool.projectSnapshot()), ...(likelyBrowserAvailable() ? (['browser'] as const) : [])],
+      // The UNION across every detected project: plan validation only warns, and warning that a
+      // gate is unrunnable because the ROOT cannot run it would be wrong in exactly the
+      // multi-project workspaces this session exists to support.
+      availableChecks: () => [...workspaceAvailableKinds(checkTool.workspaceSnapshot()), ...(likelyBrowserAvailable() ? (['browser'] as const) : [])],
     }),
     createApplyChangesTool(
       changesRegistry,

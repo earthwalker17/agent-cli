@@ -131,6 +131,8 @@ export type CheckEvidence =
       command: string;
       cwd: string;
       timeoutMs: number;
+      /** Session 16: which project UNIT this ran in. Absent = the root/only project (pre-S16 reading). */
+      projectId?: string;
       planTaskId?: string;
       scopePaths?: string[];
     }
@@ -139,6 +141,8 @@ export type CheckEvidence =
       check: CheckKind;
       recipeId: string;
       status: CheckStatus;
+      /** Session 16: which project UNIT this verified — what a `project`-scoped plan gate matches on. */
+      projectId?: string;
       /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
       unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
       /** null unless the process genuinely exited (killed checks have no exit code). */
@@ -590,6 +594,14 @@ export interface ResolvedCheckFact {
   command: string;
   /** sha of the workspace-authored script body this command invokes; consent binds it too. */
   bodySha?: string;
+  /**
+   * Session 16: the project UNIT this runs in, and the ABSOLUTE directory it runs in. Both are
+   * part of what a human consents to — `npm run test` means two different things in `web/` and
+   * `api/` — so `projectId` is folded into the replay-consent identity and `cwd` is displayed
+   * verbatim in the prompt. Absent = the workspace root, the pre-Session-16 meaning.
+   */
+  projectId?: string;
+  cwd?: string;
   timeoutMs: number;
   effects: { writesOutputs: boolean; network: boolean; workspaceAuthored: boolean };
 }
@@ -1010,6 +1022,12 @@ export type EventBody =
       command: string;
       cwd: string;
       timeoutMs: number;
+      /**
+       * Session 16 (additive): the project UNIT this ran in. Absent in every pre-S16 log and in
+       * every single-project workspace, where it means exactly what it always meant — the one
+       * project at the workspace root.
+       */
+      projectId?: string;
       /** The plan task this run was declared against; a reporting LABEL, never the gate itself. */
       planTaskId?: string;
       scopePaths?: string[];
@@ -1020,6 +1038,8 @@ export type EventBody =
       check: CheckKind;
       recipeId: string;
       status: CheckStatus;
+      /** Session 16 (additive): the project UNIT verified — a `project`-scoped gate matches on it. */
+      projectId?: string;
       /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
       unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
       exitCode: number | null;

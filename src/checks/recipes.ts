@@ -237,6 +237,19 @@ export function kindTakesScope(kind: CheckKind): boolean {
 }
 
 /**
+ * Qualify a recipe id with its project unit (Session 16). A recipe id is a CONSENT identity —
+ * `node.script.test` in `web/` and in `api/` are different authorities — so a multi-unit
+ * workspace must never collapse them.
+ *
+ * The root unit is deliberately NOT qualified. A single-project workspace keeps byte-identical
+ * recipe ids, which means every pre-existing event log, report, replay grant and test keeps its
+ * exact meaning; the qualification appears only where the ambiguity it resolves actually exists.
+ */
+export function qualifyRecipeId(recipeId: string, projectId: string): string {
+  return projectId === '.' ? recipeId : `${recipeId}@${projectId}`;
+}
+
+/**
  * Resolve requested kinds against a detected project. Never throws for input reasons: an
  * unresolvable kind comes back in `unsupported` WITH the reason, because "we cannot check that
  * here" is an answer the model and the user both need to see, not an error to swallow.
@@ -293,9 +306,11 @@ export function resolveChecks(
     const bodySha = bodyName !== null ? (project.scriptShas[bodyName] ?? null) : null;
     resolved.push({
       kind,
-      recipeId: ready.id,
+      recipeId: qualifyRecipeId(ready.id, project.id),
       command: toCommand(argv),
       ...(bodySha !== null ? { bodySha } : {}),
+      projectId: project.id,
+      cwd: project.root,
       timeoutMs: ready.timeoutMs,
       effects: ready.effects,
       scopePaths: kindTakesScope(kind) ? paths : [],

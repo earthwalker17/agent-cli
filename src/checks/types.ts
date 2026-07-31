@@ -9,16 +9,30 @@ export type { CheckFinding, CheckKind, CheckStatus } from '../types.js';
  * preconditions, effects, a timeout, and a normalized result. The model names kinds; the harness
  * names commands. That split is what makes a check gate mean something in the task graph.
  *
- * Deliberate omission: there is no dependency-install kind. Installing dependencies executes
+ * Deliberate omission: there is no dependency-install CHECK KIND. Installing dependencies executes
  * third-party code with network access and is the one operation whose blast radius does not fit
- * "verify what we just built" — a missing toolchain is an honest `unsupported` precondition the
- * user resolves, never something the agent quietly performs.
+ * "verify what we just built". Session 16 gives installation its own typed tool (`project_setup`,
+ * `src/setup/`) with its own consent, its own events, and no ability to satisfy a verification
+ * gate — so the split survives: a check still means "we verified", never "we fetched".
  */
 
 /** Ecosystems with recipe rows. Everything else detects as no kinds and refuses honestly. */
 export type ProjectKind = 'node' | 'python';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn';
+
+/**
+ * The lockfile a unit's installs are pinned by. `sha256` is the CONSENT identity for an install:
+ * `npm ci` is a stable string whose meaning lives entirely in this file, exactly as `npm run test`
+ * lives in package.json (the S14.5 body-binding lesson, applied to dependencies). A lockfile past
+ * `MAX_LOCKFILE_BYTES` hashes to null, which costs replay consent rather than inventing an
+ * identity — that call is approved once, for that call.
+ */
+export interface DetectedLockfile {
+  name: string;
+  sha256: string | null;
+  size: number;
+}
 
 /**
  * A stat-only fingerprint of one manifest candidate. The recipe resolution the human APPROVES is
@@ -34,7 +48,15 @@ export interface ManifestStamp {
 }
 
 export interface DetectedProject {
+  /** The absolute directory this unit is rooted at (the workspace root for the root unit). */
   root: string;
+  /**
+   * Session 16: this unit's identity — its workspace-relative POSIX directory, or `'.'` for the
+   * workspace root itself. It is what the model names in `project`, what recipe ids are qualified
+   * with, and what `check.completed.projectId` records, so it must be derived structurally
+   * (`normalizeRelPrefix`) and never from a display string.
+   */
+  id: string;
   /** Ecosystems with usable evidence; empty ⇒ every check kind is unsupported. */
   kinds: ProjectKind[];
   packageManager: PackageManager | null;
@@ -56,9 +78,40 @@ export interface DetectedProject {
   hasTsconfig: boolean;
   hasEslintConfig: boolean;
   hasPrettierConfig: boolean;
+  /** The lockfile installs are pinned by, when this unit has one. */
+  lockfile: DetectedLockfile | null;
+  /**
+   * Environment-configuration FILE NAMES only — never contents. `.env` is secret-classified, so
+   * reading one is an ask-with-redaction; but "this project ships `.env.example` and has no
+   * `.env`" is a fact worth surfacing, because otherwise a missing config shows up only as a dev
+   * server that dies during startup for no visible reason.
+   */
+  envFiles: { examples: string[]; present: string[] };
   /** Human-readable provenance for /checks, prompts, and refusals. */
   evidence: string[];
   stamps: ManifestStamp[];
+}
+
+/**
+ * Session 16: the workspace as it actually is — one or more project UNITS, not one project rooted
+ * at the workspace root. Discovery is bounded and never-throwing (the `detect.ts` discipline); a
+ * unit exists only where a manifest exists, and `notes` records everything that was deliberately
+ * NOT interpreted, so an ignored workspace glob is visible rather than silently absent.
+ */
+export interface DetectedWorkspace {
+  root: string;
+  /**
+   * The workspace root, detected whether or not it qualifies as a unit. Kept because "there is no
+   * project here" must stay an ANSWER rather than a refusal: resolving a kind against an empty
+   * root yields the honest `no-recipe` unsupported that legitimately waives a declared gate, which
+   * a call-level refusal would silently take away.
+   */
+  rootUnit: DetectedProject;
+  /** Root unit first (when it has a manifest), then lexicographic by id. Deterministic — consent binds to it. */
+  units: DetectedProject[];
+  /** The UNION of every unit's stamps: the TOCTOU guard must notice a manifest appearing in ANY unit. */
+  stamps: ManifestStamp[];
+  notes: string[];
 }
 
 export interface CheckEffects {
@@ -111,6 +164,9 @@ export interface ResolvedCheck {
    * where the command string IS the behavior.
    */
   bodySha?: string;
+  /** The project unit this resolves for, and the absolute directory the command runs in. */
+  projectId: string;
+  cwd: string;
   timeoutMs: number;
   effects: CheckEffects;
   /** Workspace-relative scope prefixes folded into the command, when the kind takes them. */
