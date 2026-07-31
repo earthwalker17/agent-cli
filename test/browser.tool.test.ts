@@ -40,6 +40,7 @@ function fakePreview(alive = true): ActivePreview {
   return {
     previewId: 'pv-x',
     recipeId: 'preview.script.dev',
+    projectId: '.',
     command: 'npm run dev',
     startedAtMs: 0,
     readyObserved: true,

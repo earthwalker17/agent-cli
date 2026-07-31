@@ -22,7 +22,7 @@ import { EventLog } from '../src/store/event-log.js';
 import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
 import { fixedClock } from '../src/shared/clock.js';
 import { seededIdGen } from '../src/shared/ids.js';
-import { detectProject } from '../src/checks/detect.js';
+import { detectWorkspace } from '../src/checks/workspace.js';
 import { sha256 } from '../src/shared/hash.js';
 import type { DetectedProject } from '../src/checks/types.js';
 import type { PreviewStopReason, SupervisedExit, SupervisedHandle } from '../src/preview/types.js';
@@ -575,7 +575,7 @@ srv.listen(0, '127.0.0.1', () => { console.log('listening on http://127.0.0.1:' 
       sessionId: 'test-session-0001',
       caps: { previewsStarted: 0 },
       appendEnded: (e) => ended.push({ reason: e.reason }),
-      detect: detectProject,
+      detect: detectWorkspace,
     });
     const ctx: ToolContext = { workspaceRoot: ws, stateDir: layout.projectDir, reportPreview: (e) => evidence.push(e) };
     const r = await t.execute({ action: 'start', wait_ms: 45_000 }, ctx);

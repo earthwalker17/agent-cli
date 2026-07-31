@@ -3,12 +3,13 @@ import { z } from 'zod';
 import { randomBytes } from 'node:crypto';
 import { buildChildEnv } from '../exec/env.js';
 import { shellInvocation } from '../exec/shell.js';
-import { detectProject, probeStamps, stampsEqual } from '../checks/detect.js';
+import { stampsEqual } from '../checks/detect.js';
+import { detectWorkspace, probeWorkspaceStamps, selectUnit } from '../checks/workspace.js';
 import { previewFact, resolvePreview, type ResolvedPreview } from '../preview/recipes.js';
 import { DEFAULT_PREVIEW_TTL_MS, readTail, startSupervised } from '../preview/process.js';
 import { waitForReady, DEFAULT_READY_WAIT_MS, type ReadyOptions, type ReadyOutcome } from '../preview/ready.js';
 import { LOG_ENDED_MARKER, previewLogFile, previewsFile, registerPreview, unregisterPreview, loadPreviewRegistry } from '../preview/registry.js';
-import type { DetectedProject, ManifestStamp } from '../checks/types.js';
+import type { DetectedWorkspace, ManifestStamp } from '../checks/types.js';
 import type { PreviewRegistryEntry, SupervisedHandle, SupervisedSpec } from '../preview/types.js';
 import type { PreviewEndReason, SessionEvent, Tool, ToolContext, ToolResult } from '../types.js';
 
@@ -29,6 +30,15 @@ import type { PreviewEndReason, SessionEvent, Tool, ToolContext, ToolResult } fr
 const PreviewInput = z
   .object({
     action: z.enum(['start', 'stop', 'status']).describe('start a preview server, stop one, or list the current state'),
+    project: z
+      .string()
+      .min(1)
+      .max(260)
+      .optional()
+      .describe(
+        'Which detected project to serve (its workspace-relative directory, e.g. "web"; "." is the workspace root). ' +
+          'Optional in a single-project workspace; REQUIRED when several projects exist. Start each service as its own preview.',
+      ),
     script: z
       .string()
       .max(64)
@@ -66,6 +76,8 @@ export function previewCapsFromEvents(events: readonly SessionEvent[]): PreviewC
 export interface ActivePreview {
   previewId: string;
   recipeId: string;
+  /** The project unit this server belongs to — the label every multi-service surface needs. */
+  projectId: string;
   command: string;
   handle: SupervisedHandle;
   startedAtMs: number;
@@ -96,7 +108,7 @@ export interface PreviewToolDeps {
   ownerPid?: number;
   ttlMs?: number;
   /** Injectable seams (tests). */
-  detect?: (root: string) => DetectedProject;
+  detect?: (root: string) => DetectedWorkspace;
   probe?: (root: string) => ManifestStamp[];
   start?: (spec: SupervisedSpec) => Promise<SupervisedHandle>;
   readiness?: (handle: SupervisedHandle, opts: ReadyOptions) => Promise<ReadyOutcome>;
@@ -104,8 +116,8 @@ export interface PreviewToolDeps {
 }
 
 export interface PreviewTool extends Tool<PreviewInputT> {
-  projectSnapshot(): DetectedProject;
-  refresh(): DetectedProject;
+  workspaceSnapshot(): DetectedWorkspace;
+  refresh(): DetectedWorkspace;
   /** This session's previews (live handles; callers re-probe isAlive() at render time). */
   active(): readonly ActivePreview[];
   /** The one the browser layer binds to: a ready, still-alive preview by id (or the only one). */
@@ -118,18 +130,25 @@ export interface PreviewTool extends Tool<PreviewInputT> {
 const fmtUptime = (ms: number): string => (ms < 60_000 ? `${String(Math.round(ms / 1000))}s` : `${String(Math.round(ms / 60_000))}m`);
 
 export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
-  const detect = deps.detect ?? detectProject;
-  const probe = deps.probe ?? probeStamps;
+  const detect = deps.detect ?? detectWorkspace;
+  const probe = deps.probe ?? probeWorkspaceStamps;
   const start = deps.start ?? startSupervised;
   const readiness = deps.readiness ?? waitForReady;
   const ttlMs = deps.ttlMs ?? DEFAULT_PREVIEW_TTL_MS;
   const newId = deps.newPreviewId ?? ((): string => `pv-${randomBytes(3).toString('hex')}`);
   const registry = previewsFile(deps.projectDir);
 
-  let project = detect(deps.workspaceRoot);
+  let workspace = detect(deps.workspaceRoot);
   const active = new Map<string, ActivePreview>();
 
-  const resolveFor = (input: PreviewInputT): ReturnType<typeof resolvePreview> => resolvePreview(project, input.script);
+  /** Which unit to serve. Pure over the snapshot (the `check()` fact contract); ambiguity refuses. */
+  const unitFor = (input: PreviewInputT): ReturnType<typeof selectUnit> => selectUnit(workspace, input.project);
+
+  const resolveFor = (input: PreviewInputT): ReturnType<typeof resolvePreview> => {
+    const sel = unitFor(input);
+    if (sel.unit === null) return { candidates: [], resolved: null, reason: sel.reason, badRequest: true };
+    return resolvePreview(sel.unit, input.script);
+  };
 
   const aliveActive = (): ActivePreview[] => [...active.values()].filter((a) => a.handle.isAlive());
 
@@ -217,8 +236,8 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       const gated = resolveFor(input).resolved;
       // TOCTOU: the human approved the command resolved from the snapshot. Re-probe; refuse if
       // the resolved command/body changed; the snapshot advances so the next call re-asks.
-      if (!stampsEqual(project.stamps, probe(deps.workspaceRoot))) {
-        project = detect(deps.workspaceRoot);
+      if (!stampsEqual(workspace.stamps, probe(deps.workspaceRoot))) {
+        workspace = detect(deps.workspaceRoot);
         const now = resolveFor(input).resolved;
         if (!samePreview(gated, now)) {
           const d = (r: ResolvedPreview | null): string => (r === null ? '(nothing)' : `${r.command} (script body ${r.bodySha.slice(0, 8)})`);
@@ -254,7 +273,8 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
 
       let handle: SupervisedHandle;
       try {
-        handle = await start({ file: inv.file, args: inv.args, cwd: deps.workspaceRoot, env, logFile, ttlMs });
+        // The UNIT's directory: `npm run dev` for the frontend must run in the frontend.
+        handle = await start({ file: inv.file, args: inv.args, cwd: rc.cwd, env, logFile, ttlMs });
       } catch (err) {
         // Nothing spawned: no pid, no registry entry, no event — the house onSpawn rule.
         return refuse(`the preview process could not be spawned: ${(err as Error).message}`, 'spawn failed; nothing started', startedAt);
@@ -264,7 +284,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
         previewId,
         pid: handle.pid,
         command: rc.command,
-        cwd: deps.workspaceRoot,
+        cwd: rc.cwd,
         ...(input.port !== undefined ? { port: input.port } : {}),
         ownerSessionId: deps.sessionId,
         ownerPid: deps.ownerPid ?? process.pid,
@@ -274,6 +294,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       const ap: ActivePreview = {
         previewId,
         recipeId: rc.recipeId,
+        projectId: rc.projectId,
         command: rc.command,
         handle,
         startedAtMs: startedAt,
@@ -335,7 +356,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
         previewId,
         recipeId: rc.recipeId,
         command: rc.command,
-        cwd: deps.workspaceRoot,
+        cwd: rc.cwd,
         pid: handle.pid,
         ...(input.port !== undefined ? { expectedPort: input.port } : {}),
       });
@@ -363,8 +384,8 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
         return {
           ok: true,
           output:
-            `preview ${previewId} ready: ${ready.url ?? ''} (${ready.probeDetail}; waited ${String(ready.waitedMs)}ms)\n` +
-            `  command: ${rc.command}   [${rc.recipeId}; pid ${String(handle.pid)}]\n` +
+            `preview ${previewId} [project ${rc.projectId}] ready: ${ready.url ?? ''} (${ready.probeDetail}; waited ${String(ready.waitedMs)}ms)\n` +
+            `  command: ${rc.command}   [${rc.recipeId}; pid ${String(handle.pid)}; cwd ${rc.cwd}]\n` +
             `  lifetime: until stopped, session end, or ${String(Math.round(ttlMs / 60_000))}min TTL; log: ${logFile}\n` +
             `  note: an HTTP answer on the announced port proves A server is up (socket ownership is not verified) — ` +
             `application state is verified by browser flows, not this.`,
@@ -411,10 +432,10 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       };
     },
 
-    projectSnapshot: () => project,
+    workspaceSnapshot: () => workspace,
     refresh: () => {
-      project = detect(deps.workspaceRoot);
-      return project;
+      workspace = detect(deps.workspaceRoot);
+      return workspace;
     },
     active: () => [...active.values()],
     readyPreview: (previewId) => {
@@ -440,9 +461,10 @@ function refuse(output: string, error: string, startedAt: number): ToolResult {
   return { ok: false, output: `refused: ${output}`, error, durationMs: Date.now() - startedAt, truncated: false };
 }
 
+/** Same tuple `checkReplayKey` hashes for a preview fact — consent and TOCTOU move together. */
 function samePreview(a: ResolvedPreview | null, b: ResolvedPreview | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.recipeId === b.recipeId && a.command === b.command && a.bodySha === b.bodySha;
+  return a.recipeId === b.recipeId && a.command === b.command && a.bodySha === b.bodySha && a.projectId === b.projectId && a.cwd === b.cwd;
 }
 
 function statusResult(
@@ -456,7 +478,7 @@ function statusResult(
   if (alive.length === 0) lines.push('no preview is running in this session');
   for (const a of alive) {
     lines.push(
-      `${a.previewId}: ${a.readyObserved ? `ready at ${a.url ?? '?'}` : 'started, readiness never observed'} ` +
+      `${a.previewId} [project ${a.projectId}]: ${a.readyObserved ? `ready at ${a.url ?? '?'}` : 'started, readiness never observed'} ` +
         `(pid ${String(a.handle.pid)}, up ${fmtUptime(Date.now() - a.startedAtMs)}) — ${a.command}`,
     );
     const tail = a.handle

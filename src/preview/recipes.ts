@@ -1,5 +1,5 @@
 import { sha256 } from '../shared/hash.js';
-import { toCommand } from '../checks/recipes.js';
+import { qualifyRecipeId, toCommand } from '../checks/recipes.js';
 import type { DetectedProject } from '../checks/types.js';
 import type { ResolvedCheckFact } from '../types.js';
 
@@ -21,7 +21,12 @@ const NEEDS_NODE_MODULES =
   'dependencies are not installed (node_modules is absent) — install them, then start the preview again';
 
 export interface ResolvedPreview {
-  /** `preview.script.<name>` — the `preview.` prefix keeps replay keys disjoint from check consent. */
+  /**
+   * `preview.script.<name>` (`…@<unit>` outside the root) — the `preview.` prefix keeps replay
+   * keys disjoint from check consent, and the unit suffix keeps `web`'s dev server disjoint from
+   * `api`'s. Both are the same argument: a replay key is an authority, and two different servers
+   * must never share one.
+   */
   recipeId: string;
   scriptName: string;
   /** `<pm> run <name>` — composed by the harness, shown verbatim to the human. */
@@ -29,6 +34,9 @@ export interface ResolvedPreview {
   /** The script body consent binds (the command is stable; its behavior lives here). */
   body: string;
   bodySha: string;
+  /** The project unit this serves, and the directory the server actually runs in. */
+  projectId: string;
+  cwd: string;
 }
 
 export interface PreviewResolution {
@@ -75,10 +83,12 @@ export function resolvePreview(p: DetectedProject, requestedScript?: string): Pr
   return {
     candidates,
     resolved: {
-      recipeId: `preview.script.${name}`,
+      recipeId: qualifyRecipeId(`preview.script.${name}`, p.id),
       scriptName: name,
       command: toCommand([p.packageManager, 'run', name]),
       body,
+      projectId: p.id,
+      cwd: p.root,
       // Consent binds the UNTRUNCATED body (S14.5): `scripts` is display-capped at 200 chars,
       // so hashing it let an append past the cap ride the earlier `[s]` with no prompt — the
       // exact authority this prompt promises rewriting the script would revoke.
@@ -99,6 +109,8 @@ export function previewFact(r: ResolvedPreview, ttlMs: number, port?: number): R
     kind: 'preview',
     command: r.command,
     bodySha: r.bodySha,
+    projectId: r.projectId,
+    cwd: r.cwd,
     timeoutMs: ttlMs,
     effects: { writesOutputs: true, network: true, workspaceAuthored: true },
   };
