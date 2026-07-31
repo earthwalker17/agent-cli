@@ -328,6 +328,8 @@ export type RepairEvidence =
       scopePaths: string[];
       regressionChecks: CheckKind[];
       attempt: number;
+      /** The project the failure occurred in, when the evidence named one (Session 16). */
+      projectId?: string;
     }
   | {
       kind: 'escalated';
@@ -655,6 +657,12 @@ export interface ResolvedCheckFact {
    */
   projectId?: string;
   cwd?: string;
+  /**
+   * The resolver's own sentence about what THIS resolution does (Session 16), folded verbatim
+   * into the approval detail. The engine's reason is generic per rule; only the resolver knows
+   * that this particular install has no lockfile and will therefore resolve versions fresh.
+   */
+  consequence?: string;
   timeoutMs: number;
   /**
    * Whether a `session`-scope answer may store replay consent for this row (Session 16). Absent =
@@ -1176,6 +1184,13 @@ export type EventBody =
       scopePaths: string[];
       regressionChecks: CheckKind[];
       attempt: number;
+      /**
+       * Session 16 (additive): the project the FAILURE occurred in, when the evidence named one.
+       * The regression proof must come from that project — a green `build` in `web/` is not
+       * evidence that a failed install in `api/` is fixed. Absent = the root/only project, which
+       * is what every pre-Session-16 attempt means.
+       */
+      projectId?: string;
     }
   | {
       type: 'repair.escalated';

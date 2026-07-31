@@ -62,6 +62,8 @@ export interface UpdatePlanDeps {
    * a graph whose gates cannot be satisfied. Absent ⇒ the warning is simply not produced.
    */
   availableChecks?: () => readonly CheckKind[];
+  /** Project ids detection currently sees (Session 16) — enables the unknown-project warning. */
+  knownProjects?: () => readonly string[];
 }
 
 export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInputT> {
@@ -96,7 +98,16 @@ export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInput
         } catch {
           availableChecks = undefined; // a detection failure must never block writing a plan
         }
-        const v = validatePlanGraph(input.plan, availableChecks !== undefined ? { availableChecks } : {});
+        let knownProjects: readonly string[] | undefined;
+        try {
+          knownProjects = deps.knownProjects?.();
+        } catch {
+          knownProjects = undefined; // a detection failure must never block writing a plan
+        }
+        const v = validatePlanGraph(input.plan, {
+          ...(availableChecks !== undefined ? { availableChecks } : {}),
+          ...(knownProjects !== undefined ? { knownProjects } : {}),
+        });
         if (!v.ok || v.graph === undefined) {
           // The revision loop: every error, verbatim and complete — nothing was written. The
           // detail rides in `output` so the persisted outputPreview keeps it as evidence too.

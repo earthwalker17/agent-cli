@@ -175,6 +175,16 @@ export function planTaskDefinitionSha(task: PlanTask): string {
 export interface PlanValidationOptions {
   /** Check kinds this project can actually run right now (Session 12); enables the gate warning. */
   availableChecks?: readonly CheckKind[];
+  /**
+   * Project ids detection currently sees (Session 16); enables the unknown-project warning.
+   *
+   * Load-bearing for the same reason `availableChecks` is: a task scoped to a project that does
+   * not exist can NEVER be satisfied and can never be waived either, because the only way to
+   * record an `unsupported` for a project is to name it, and naming an unknown project refuses
+   * without recording. Its dependents stay blocked and `/accept` stays unfinished with no
+   * command that clears it. Caught here it is a warning in the revision loop instead.
+   */
+  knownProjects?: readonly string[];
 }
 
 export interface PlanValidation {
@@ -208,6 +218,21 @@ export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions 
   // boundary instead: a warning here reaches the model through update_plan's revision loop, long
   // before the user approves a graph whose gates are unsatisfiable. Deliberately non-blocking —
   // detection is a heuristic, and a check may become runnable later (an install, a new config).
+  const known = opts.knownProjects;
+  if (known !== undefined && known.length > 0) {
+    const named = new Set<string>();
+    for (const t of input.tasks) if (t.project !== undefined && (t.checks?.length ?? 0) > 0) named.add(t.project);
+    for (const p of input.gates?.projects ?? []) named.add(p);
+    for (const p of named) {
+      if (!known.includes(p)) {
+        warnings.push(
+          `plan scopes a gate to project '${p}', which detection does not currently see (detected: ${known.join(', ')}) — ` +
+            'a gate scoped to a project that does not exist can never pass AND can never be waived, so its dependents would stay blocked with no exit',
+        );
+      }
+    }
+  }
+
   const available = opts.availableChecks;
   if (available !== undefined) {
     const declared = new Set<CheckKind>();

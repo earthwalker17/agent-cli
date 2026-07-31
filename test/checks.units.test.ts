@@ -196,11 +196,15 @@ describe('ambiguity refuses; it never guesses', () => {
     expect(tool.check!({ checks: ['test'] }).resolved[0]!.projectId).toBe('api');
   });
 
-  it('prefers the ROOT project when the root itself has a manifest', () => {
+  it('a root manifest does NOT make an unnamed call unambiguous', () => {
+    // Root-wins would silently resolve against a container root that declares no test script,
+    // yielding `unsupported: no-recipe` — a reason that WAIVES a declared gate. Refusing is the
+    // only answer that cannot quietly retire verification the user asked for.
     nodeProject('.', { test: 'vitest run' });
     nodeProject('api', { test: 'vitest run' });
     const tool = createRunCheckTool({ workspaceRoot: ws, caps: { checksRun: 0 } });
-    expect(tool.check!({ checks: ['test'] }).resolved[0]!.projectId).toBe('.');
+    expect(tool.check!({ checks: ['test'] }).resolved).toEqual([]);
+    expect(tool.check!({ checks: ['test'], project: '.' }).resolved[0]!.projectId).toBe('.');
   });
 });
 

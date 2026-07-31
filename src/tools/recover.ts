@@ -194,6 +194,7 @@ export function createRecoverTool(deps: RecoverDeps): Tool<RecoverInputT> {
         scopePaths: scope,
         regressionChecks: [...input.regression_checks],
         attempt,
+        ...(classification.projectId !== undefined ? { projectId: classification.projectId } : {}),
       });
 
       return {

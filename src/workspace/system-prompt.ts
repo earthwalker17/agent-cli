@@ -56,7 +56,14 @@ function projectLines(ws?: DetectedWorkspace): string[] {
         ? [`expects env config (${u.envFiles.examples.join(', ')}) — none present`]
         : []),
     ];
-    return `  - ${u.id} (${kinds}; ${bits.join('; ')})${scripts.length > 0 ? ` scripts: ${scripts.join(', ')}` : ''}`;
+    // Unit ids come from DIRECTORY NAMES — workspace bytes a cloned repo controls, and the one
+    // value in this block that no charset filter has seen (script and dependency names are
+    // filtered at ingestion; a POSIX directory name may contain newlines or a harness fence).
+    // Neutralized here for the same reason AGENT.md is: a line mimicking a fence would close the
+    // region early and let the rest occupy space the model is told is harness-authored.
+    return neutralizeHarnessDelimiters(
+      `  - ${u.id} (${kinds}; ${bits.join('; ')})${scripts.length > 0 ? ` scripts: ${scripts.join(', ')}` : ''}`.replace(/[\r\n]+/g, ' '),
+    );
   });
   const multi = ws.units.length > 1;
   return [
@@ -74,8 +81,12 @@ function projectLines(ws?: DetectedWorkspace): string[] {
   ];
 }
 
-/** Bounded: a repository with many packages must not push the operating rules out of the prompt. */
-const MAX_PROMPT_PROJECTS = 12;
+/**
+ * Bounded: a repository with many packages must not push the operating rules out of the prompt.
+ * 13, matching `MAX_PROJECT_UNITS` non-root ids PLUS the root unit — at 12 a workspace at full
+ * capacity withheld one project id from a model that cannot name a project it was not told about.
+ */
+const MAX_PROMPT_PROJECTS = 13;
 
 export function buildSystemPrompt(
   workspaceRoot: string,

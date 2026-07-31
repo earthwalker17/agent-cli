@@ -88,6 +88,19 @@ export interface DetectedProject {
   /** The lockfile installs are pinned by, when this unit has one. */
   lockfile: DetectedLockfile | null;
   /**
+   * sha256 of the raw package.json bytes, and of `.npmrc` when present.
+   *
+   * These are part of an INSTALL's consent identity, not decoration. `npm ci` looks like a
+   * command whose whole meaning is the lockfile, and it is not: package.json's `preinstall` /
+   * `install` / `postinstall` / `prepare` entries are executed by every package manager during
+   * an install, and `.npmrc` decides which registry the code comes from and what shell runs
+   * those scripts. Binding the lockfile alone would let one `[s]` become standing consent to
+   * execute whatever those files are later changed to say — the S14.5 body-binding lesson,
+   * which for an install has three files in the "body", not one.
+   */
+  manifestSha256: string | null;
+  npmrcSha256: string | null;
+  /**
    * Environment-configuration FILE NAMES only — never contents. `.env` is secret-classified, so
    * reading one is an ask-with-redaction; but "this project ships `.env.example` and has no
    * `.env`" is a fact worth surfacing, because otherwise a missing config shows up only as a dev

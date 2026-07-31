@@ -700,7 +700,13 @@ async function executeCall(
     // a best-effort label over untrusted model text, never a stable fact to key standing
     // permission on (Grants.add also refuses 'run_command' by name — defense in depth; this
     // fact-based gate covers any future command-bearing tool, and the prompt hides [s] to match).
-    if (outcome.scope === 'session' && tool.command === undefined) {
+    // `tool.check === undefined` too (Session 16): a check-branch tool's consent lives in the
+    // replay store below, and its class is never consulted by `decide`. An install is classified
+    // `external`, which IS grantable — so without this a session answer stored
+    // `(project_setup, external)` that nothing ever reads. The prompt already hid `[s]` for these
+    // kinds; the STORAGE site had not been told, so a typed `s` still recorded a session grant
+    // the user was never offered and never received. Consent that does nothing is worse than none.
+    if (outcome.scope === 'session' && tool.command === undefined && tool.check === undefined) {
       session.grants.add(tool.name, decision.classification);
     }
     // Typed-check replay consent (Session 12): a session-scope approval on a check stores the
@@ -1000,6 +1006,7 @@ function recordRepairEvidence(session: Session, callId: string, e: RepairEvidenc
       scopePaths: e.scopePaths,
       regressionChecks: e.regressionChecks,
       attempt: e.attempt,
+      ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
     });
     return;
   }
@@ -1074,7 +1081,12 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
     if (setupRow !== undefined) {
       return {
         summary: `${tool.name}: ${setupRow.kind} ${setupRow.projectId !== undefined ? `[project ${setupRow.projectId}]` : ''}`.trimEnd(),
-        detail: `${setupRow.command}   [${setupRow.recipeId}]\n  in: ${setupRow.cwd ?? '(workspace root)'}`,
+        detail:
+          `${setupRow.command}   [${setupRow.recipeId}]\n  in: ${setupRow.cwd ?? '(workspace root)'}` +
+          // The resolver's own sentence about THIS resolution — "NO LOCKFILE is present … versions
+          // are NOT pinned" is a materially different authority from `npm ci`, and the generic
+          // engine reason cannot say it. It was computed and then never shown to anyone.
+          (setupRow.consequence !== undefined ? `\n  ${setupRow.consequence}` : ''),
       };
     }
     // Preview rows (Session 13): the consequence line is different in kind, not just degree —

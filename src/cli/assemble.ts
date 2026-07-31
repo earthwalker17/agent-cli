@@ -571,6 +571,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       // gate is unrunnable because the ROOT cannot run it would be wrong in exactly the
       // multi-project workspaces this session exists to support.
       availableChecks: () => [...workspaceAvailableKinds(checkTool.workspaceSnapshot()), ...(likelyBrowserAvailable() ? (['browser'] as const) : [])],
+      knownProjects: () => checkTool.workspaceSnapshot().units.map((u) => u.id),
     }),
     createApplyChangesTool(
       changesRegistry,

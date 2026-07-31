@@ -23,6 +23,8 @@ export type FailureEvidence =
       termination?: CommandTermination;
       signals: string[];
       summary: string;
+      /** Session 16: which project the check ran in. Absent = the root/only project. */
+      projectId?: string;
     }
   | {
       source: 'task';
@@ -76,6 +78,11 @@ export interface FailureClassification {
   signature: string;
   /** The subject the failure attaches to: a plan task id, a recipe id, or a child session. */
   subject: string;
+  /**
+   * The project the failure occurred in, when the evidence named one (Session 16). It is what a
+   * regression proof must match: a green check in another project proves nothing about this one.
+   */
+  projectId?: string;
   detail: string;
 }
 
@@ -174,7 +181,15 @@ function classifyCheck(e: Extract<FailureEvidence, { source: 'check' }>): Failur
     cls === 'unknown'
       ? `${e.check} check did not match any classification rule (${e.summary})`
       : `${e.check} check (${e.recipeId}) → ${e.status}${e.exitCode !== null ? ` exit ${e.exitCode}` : ''}`;
-  return { class: cls, confidence, signals: fired, signature: signatureOf(cls, e.recipeId, fired), subject: e.recipeId, detail };
+  return {
+    class: cls,
+    confidence,
+    signals: fired,
+    signature: signatureOf(cls, e.recipeId, fired),
+    subject: e.recipeId,
+    ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
+    detail,
+  };
 }
 
 function classifyTask(e: Extract<FailureEvidence, { source: 'task' }>): FailureClassification {
@@ -261,6 +276,7 @@ export function classifyFailure(e: FailureEvidence): FailureClassification {
         signals: fired,
         signature: signatureOf('dependency-setup', e.recipeId, fired),
         subject: e.recipeId,
+        projectId: e.projectId,
         detail: `project ${e.action} for '${e.projectId}' failed${e.exitCode !== null ? ` (exit ${e.exitCode})` : ''}: ${e.summary}`,
       };
     }
@@ -325,6 +341,7 @@ export function latestFailureEvidence(events: readonly SessionEvent[], target?: 
         ...(e.termination !== undefined ? { termination: e.termination } : {}),
         signals: e.signals ?? [],
         summary: e.summary,
+        ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
       });
     } else if (e.type === 'setup.completed' && (e.status === 'failed' || e.status === 'error')) {
       // Session-scoped only: a setup carries no plan-task binding, so a task-targeted query must

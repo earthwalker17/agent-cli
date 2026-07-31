@@ -30,7 +30,10 @@ const MAX_LOCKFILE_BYTES = 32 * 1024 * 1024;
 /** Script/dependency names accepted from workspace bytes. Anything else is dropped, not escaped. */
 const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9:_.\-]{0,63}$/;
 /** `packageManager` declarations, e.g. `yarn@4.5.0+sha224.abc`. Charset-filtered at ingestion. */
-const PM_SPEC_RE = /^[A-Za-z0-9][A-Za-z0-9@.+_\-]{0,99}$/;
+// 256, not 100: corepack's canonical form is `yarn@4.5.0+sha512.<128 hex>` (~146 chars), and a
+// cap below that silently nulled the field — after which the setup resolver told the user to
+// declare a `packageManager` the project had declared all along.
+const PM_SPEC_RE = /^[A-Za-z0-9][A-Za-z0-9@.+_\-]{0,255}$/;
 
 /** Node dependency names the recipe table knows how to use. */
 const NODE_TOOLS = ['typescript', 'vitest', 'jest', 'eslint', 'prettier'] as const;
@@ -97,6 +100,11 @@ const CANDIDATES: readonly string[] = [
   ...PRETTIER_CONFIGS,
   ...ENV_EXAMPLES,
   ...ENV_PRESENT,
+  // Part of an install's consent identity (see DetectedProject.npmrcSha256), so a write to one
+  // must invalidate the fingerprint and force a re-detect.
+  '.npmrc',
+  '.yarnrc.yml',
+  '.pnpmfile.cjs',
 ];
 
 /** Stat-only fingerprint of every candidate that exists. Cheap enough to run per check call. */
@@ -153,9 +161,19 @@ function detectPackageManager(root: string, pkg: Record<string, unknown> | null)
   return pkg !== null ? 'npm' : null;
 }
 
-/** The lockfile this unit is pinned by, hashed for install consent. Never throws. */
-function detectLockfile(root: string): DetectedLockfile | null {
-  for (const { name } of LOCKFILES) {
+/**
+ * The lockfile this unit is pinned by, hashed for install consent. Never throws.
+ *
+ * The DETECTED package manager wins over the file order. A repo that migrated to pnpm or yarn
+ * commonly still carries a stale `package-lock.json` — neither tool deletes it — and a plain
+ * first-match walk would compose `npm ci` for a project whose every other recipe already says
+ * `pnpm run …`. That installs the wrong tree from the wrong file while the prompt claims to
+ * install "exactly what package-lock.json pins", and binds consent to a lockfile the project
+ * does not use.
+ */
+function detectLockfile(root: string, pm: PackageManager | null): DetectedLockfile | null {
+  const ordered = pm !== null ? [...LOCKFILES].sort((a, b) => (a.pm === pm ? -1 : b.pm === pm ? 1 : 0)) : LOCKFILES;
+  for (const { name } of ordered) {
     let size: number;
     try {
       const st = fs.statSync(path.join(root, name));
@@ -258,14 +276,26 @@ export function detectProject(root: string, id = '.'): DetectedProject {
   const hasEslintConfig = ESLINT_CONFIGS.some((c) => exists(root, c));
   const hasPrettierConfig = PRETTIER_CONFIGS.some((c) => exists(root, c)) || pkg?.['prettier'] !== undefined;
 
-  const lockfile = detectLockfile(root);
+  // An install's consent identity spans THREE files, not one: the lockfile decides which
+  // versions, package.json's lifecycle scripts decide what runs during the install, and .npmrc
+  // decides which registry the code comes from and what shell runs those scripts. Binding only
+  // the lockfile let an ordinary auto-allowed package.json write turn one `[s]` into standing
+  // arbitrary-shell consent — the S14.5 body-binding hole, reopened one file over.
+  const lockfile = detectLockfile(root, detectPackageManager(root, pkg));
+  const manifestSha256 = pkgText !== null ? sha256(pkgText) : null;
+  const npmrcSha256 = readBounded(path.join(root, '.npmrc')) !== null ? sha256(readBounded(path.join(root, '.npmrc'))!) : null;
   const envFiles = {
     examples: ENV_EXAMPLES.filter((c) => exists(root, c)),
     present: ENV_PRESENT.filter((c) => exists(root, c)),
   };
 
   if (hasTsconfig) evidence.push('tsconfig.json');
-  if (lockfile !== null) evidence.push(`lockfile ${lockfile.name}`);
+  if (lockfile !== null) {
+    // Name every lockfile present, not just the chosen one: "this repo has two lockfiles" is the
+    // fact that explains an otherwise baffling install command, and it must not be invisible.
+    const others = LOCKFILES.filter((l) => l.name !== lockfile.name && exists(root, l.name)).map((l) => l.name);
+    evidence.push(`lockfile ${lockfile.name}` + (others.length > 0 ? ` (also present, NOT used: ${others.join(', ')})` : ''));
+  }
   if (hasDependencies && !hasNodeModules) evidence.push('dependencies are declared but node_modules is ABSENT');
   if (envFiles.examples.length > 0 && envFiles.present.length === 0) {
     evidence.push(`expects environment configuration (${envFiles.examples.join(', ')}) but none is present`);
@@ -290,6 +320,8 @@ export function detectProject(root: string, id = '.'): DetectedProject {
     hasEslintConfig,
     hasPrettierConfig,
     lockfile,
+    manifestSha256,
+    npmrcSha256,
     envFiles,
     evidence,
     stamps,

@@ -130,6 +130,8 @@ describe('resolvePreview', () => {
     hasEslintConfig: false,
     hasPrettierConfig: false,
     lockfile: null,
+    manifestSha256: null,
+    npmrcSha256: null,
     envFiles: { examples: [], present: [] },
     evidence: [],
     stamps: [],

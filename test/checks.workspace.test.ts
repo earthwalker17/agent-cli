@@ -198,11 +198,34 @@ describe('lockfile and env facts', () => {
     expect(detectWorkspace(ws).units.find((u) => u.id === 'api')!.lockfile?.sha256).not.toBe(api.lockfile?.sha256);
   });
 
-  it('prefers the npm lockfile deterministically when several are present', () => {
+  it('follows the DETECTED package manager when several lockfiles are present', () => {
+    // The realistic case: a repo migrated to pnpm and the stale package-lock.json was never
+    // deleted (neither tool deletes it). A first-match walk composed `npm ci` for a project whose
+    // every other recipe already said `pnpm run …` — installing the wrong tree from the wrong
+    // file, while the prompt claimed to install exactly what package-lock.json pins.
     pkg('package.json');
     write('package-lock.json', '{}');
     write('pnpm-lock.yaml', 'lockfileVersion: 9\n');
-    expect(detectProject(ws).lockfile?.name).toBe('package-lock.json');
+
+    const p = detectProject(ws);
+    expect(p.packageManager).toBe('pnpm');
+    expect(p.lockfile?.name).toBe('pnpm-lock.yaml');
+    // And the fact that explains it is visible, not buried.
+    expect(p.evidence.join(' ')).toContain('also present, NOT used: package-lock.json');
+  });
+
+  it('an explicit packageManager declaration outranks lockfile presence', () => {
+    pkg('package.json', { packageManager: 'yarn@4.5.0' });
+    write('package-lock.json', '{}');
+    write('yarn.lock', '__metadata:\n  version: 8\n');
+    expect(detectProject(ws).lockfile?.name).toBe('yarn.lock');
+  });
+
+  it('accepts a corepack packageManager spec long enough to carry a sha512 hash', () => {
+    // 100 chars silently nulled the field, after which the setup resolver told the user to
+    // declare a `packageManager` the project had declared all along.
+    pkg('package.json', { packageManager: `yarn@4.5.0+sha512.${'a'.repeat(128)}` });
+    expect(detectProject(ws).packageManagerSpec).not.toBeNull();
   });
 
   it('reports env files by NAME and flags an unconfigured project', () => {
@@ -226,11 +249,26 @@ describe('selectUnit', () => {
     pkg('api/package.json');
   };
 
-  it('defaults to the root unit when the root has a manifest', () => {
+  it('REFUSES a root-plus-subproject workspace — the standard monorepo shape', () => {
+    // Every npm/pnpm/yarn workspaces monorepo has a root package.json, so a "prefer the root"
+    // shortcut made this refusal dead code in exactly the shape it exists for — and worse than
+    // dead: the container root declares no test script, so an unnamed run_check resolved against
+    // it and came back `unsupported: no-recipe`, a reason that WAIVES a declared gate. A session
+    // could be accepted as complete with zero tests run, its evidence claiming the project
+    // cannot be tested.
+    pkg('package.json', { workspaces: ['packages/*'] });
+    pkg('packages/api/package.json', { scripts: { test: 'vitest run' } });
+    pkg('packages/web/package.json', { scripts: { test: 'vitest run' } });
+
+    const r = selectUnit(detectWorkspace(ws));
+    expect(r.unit).toBeNull();
+    expect((r as { reason: string }).reason).toContain('packages/api, packages/web');
+  });
+
+  it('the root is still selectable EXPLICITLY', () => {
     pkg('package.json');
     pkg('api/package.json');
-    const r = selectUnit(detectWorkspace(ws));
-    expect(r.unit?.id).toBe(ROOT_UNIT_ID);
+    expect(selectUnit(detectWorkspace(ws), '.').unit?.id).toBe(ROOT_UNIT_ID);
   });
 
   it('defaults to the only unit when there is exactly one', () => {

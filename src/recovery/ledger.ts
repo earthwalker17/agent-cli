@@ -22,6 +22,8 @@ export interface RepairAttemptState {
   scopePaths: string[];
   regressionChecks: CheckKind[];
   attempt: number;
+  /** The project the failure occurred in; a regression proof must come from it (Session 16). */
+  projectId?: string;
   outcome: 'succeeded' | 'superseded' | 'open';
   /** Regression kinds still unproven for this attempt. */
   pendingChecks: CheckKind[];
@@ -120,6 +122,7 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
         scopePaths: [...e.scopePaths],
         regressionChecks: [...e.regressionChecks],
         attempt: e.attempt,
+        ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
         outcome: 'open',
         pendingChecks: [...e.regressionChecks],
         outOfScope: [],
@@ -137,6 +140,19 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
     bySignature.set(a.signature, list);
   }
 
+  /**
+   * A repair proof must come from the PROJECT that failed (Session 16). Without this filter a
+   * green `build` in `web/` proved that a failed install in `api/` was fixed — the "unrelated
+   * green check proves a repair" hole closed in S14.5, reopened along the project axis by this
+   * very session, and not caught by the `scopePaths` guard beside it (`build` is not
+   * scope-bearing, so that guard passes unconditionally).
+   *
+   * An attempt with no recorded project is a root/single-project failure, or a pre-Session-16
+   * one: any project's pass counts, which is exactly the old reading.
+   */
+  const provesForProject = (attemptProject: string | undefined, runProject: string | undefined): boolean =>
+    attemptProject === undefined || attemptProject === (runProject ?? '.');
+
   // Resolve each attempt inside its OWN window: from the attempt to the next attempt for the same
   // signature (or the end of the log). A regression check that ran before a later attempt cannot
   // retroactively prove that later attempt, and vice versa.
@@ -148,7 +164,7 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
       const changed: string[] = [];
       for (const e of events) {
         if (e.seq <= a.seq || e.seq >= windowEnd) continue;
-        if (e.type === 'check.completed' && e.status === 'pass' && a.regressionChecks.includes(e.check)) {
+        if (e.type === 'check.completed' && e.status === 'pass' && a.regressionChecks.includes(e.check) && provesForProject(a.projectId, e.projectId)) {
           // A SCOPE-BEARING kind proves the repair only when the run actually covered the
           // failing scope: a green `test-targeted` over somebody else's paths said PROVEN while
           // the originally failing test was never re-run — the same "unrelated green check"

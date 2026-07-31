@@ -119,6 +119,32 @@ describe('stall and wall pressure (scaled thresholds; production constants at re
   });
 });
 
+describe('a command IN FLIGHT is working, not stalled (Session 16)', () => {
+  /**
+   * The chain fires on appended events, so a legitimate five-minute install inside an executor
+   * looked exactly like a hung child and recorded a `stall` the reader had to learn to ignore.
+   * Both directions matter: suppressed while a spawn is open, still recorded when genuinely idle.
+   */
+  const SLOW = { name: 'run_command', input: { command: 'node -e "setTimeout(()=>{},700)"', timeoutMs: 5000 } };
+
+  it('records NO stall while a real command is running', async () => {
+    const { deps } = makeDeps([{ say: 'installing', calls: [SLOW] }, { hang: true } as ScriptTurn], {
+      budget: { timeoutMs: 900 },
+      // An executor's asks FORWARD; without a forwarder it fails closed and the command never
+      // spawns — which is what made the first version of this test pass for the wrong reason.
+      forwardAsk: async () => ({ decision: 'allow', scope: 'once', source: 'user' }),
+    });
+    const r = await runSubagentTask(deps, { role: 'executor', task: 'install', parentSessionId: 'p' });
+    expect(r.supervision.filter((s) => s.what === 'stall')).toHaveLength(0);
+  }, 30_000);
+
+  it('still records a stall for a child that is genuinely idle', async () => {
+    const { deps } = makeDeps([{ hang: true } as ScriptTurn], { budget: { timeoutMs: 500 } });
+    const r = await runSubagentTask(deps, { role: 'explorer', task: 'inspect', parentSessionId: 'p' });
+    expect(r.supervision.filter((s) => s.what === 'stall')).toHaveLength(1);
+  }, 30_000);
+});
+
 describe('task-scoped cancellation (the registerCancel seam)', () => {
   it('/cancel-style invocation ends THIS child as cancelled, with evidence and cleanup', async () => {
     let handle: (() => void) | null = null;

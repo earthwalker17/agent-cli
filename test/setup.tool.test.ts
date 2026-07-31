@@ -114,13 +114,46 @@ describe('install resolution is lockfile-driven', () => {
     expect(r.reason).toContain('virtual environment');
   });
 
-  it('binds the lockfile CONTENT: editing it changes the consent identity', () => {
+  it('binds ALL THREE files an install actually obeys — lockfile, package.json, .npmrc', () => {
+    // `npm ci` looks like a command whose whole meaning is the lockfile. It is not: every package
+    // manager executes package.json's preinstall/install/postinstall/prepare during an install,
+    // and .npmrc chooses the registry and the shell those scripts run in. Binding the lockfile
+    // alone let an ordinary AUTO-ALLOWED package.json write turn one [s] into standing
+    // arbitrary-shell consent — the S14.5 body-binding hole, one file over.
     project('.', { lock: { name: 'package-lock.json', body: '{"lockfileVersion":3}' } });
-    const before = setupFact(resolveSetup(unit('.'), 'install').resolved!);
-    expect(before.bodySha).toBe(sha256(Buffer.from('{"lockfileVersion":3}')));
+    const identity = (): string | undefined => setupFact(resolveSetup(unit('.'), 'install').resolved!).bodySha;
+    const base = identity();
+    expect(base).toBeDefined();
 
     fs.writeFileSync(path.join(ws, 'package-lock.json'), '{"lockfileVersion":3,"packages":{}}');
-    expect(setupFact(resolveSetup(unit('.'), 'install').resolved!).bodySha).not.toBe(before.bodySha);
+    const afterLock = identity();
+    expect(afterLock).not.toBe(base);
+
+    // The attack the review found: add a preinstall script, leave dependencies (and therefore the
+    // lockfile) untouched, and replay the earlier approval.
+    const manifest = JSON.parse(fs.readFileSync(path.join(ws, 'package.json'), 'utf8')) as Record<string, unknown>;
+    manifest['scripts'] = { preinstall: 'node -e "require(\'child_process\').execSync(\'whoami\')"' };
+    fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify(manifest));
+    expect(identity()).not.toBe(afterLock);
+
+    const afterScript = identity();
+    fs.writeFileSync(path.join(ws, '.npmrc'), 'registry=http://example.invalid/\n');
+    expect(identity()).not.toBe(afterScript);
+  });
+
+  it('a package.json rewrite REVOKES an install [s] — no silent replay', () => {
+    project('.', { lock: { name: 'package-lock.json', body: '{"lockfileVersion":3}' } });
+    const grants = new Grants();
+    const t = createProjectSetupTool({ workspaceRoot: ws, caps: { setupsRun: 0 } });
+    for (const k of decide(t, { action: 'install' }, ctx(), grants).checkReplayKeys ?? []) grants.addCheckReplay(k);
+    expect(decide(t, { action: 'install' }, ctx(), grants).decision).toBe('allow');
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(ws, 'package.json'), 'utf8')) as Record<string, unknown>;
+    manifest['scripts'] = { preinstall: 'anything at all' };
+    fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify(manifest));
+
+    const fresh = createProjectSetupTool({ workspaceRoot: ws, caps: { setupsRun: 0 } });
+    expect(decide(fresh, { action: 'install' }, ctx(), grants).decision).toBe('ask');
   });
 });
 

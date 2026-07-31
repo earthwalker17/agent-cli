@@ -1,4 +1,5 @@
 import { qualifyRecipeId, toCommand } from '../checks/recipes.js';
+import { sha256 } from '../shared/hash.js';
 import type { DetectedLockfile, DetectedProject, PackageManager } from '../checks/types.js';
 import { SETUP_ACTIONS, type ResolvedCheckFact, type SetupAction } from '../types.js';
 
@@ -42,8 +43,13 @@ export interface ResolvedSetup {
   /** The workspace-authored script body consent binds, for the script-backed intents. */
   bodySha?: string;
   scriptName?: string;
-  /** The lockfile an install is pinned by; its sha is what consent binds. */
+  /** The lockfile an install is pinned by. Displayed; part of, but not all of, the identity. */
   lockfile?: DetectedLockfile;
+  /**
+   * The full consent identity of an install: lockfile + package.json + .npmrc, hashed together.
+   * null when any component is unhashable, which costs replay consent rather than inventing one.
+   */
+  installIdentity?: string | null;
   projectId: string;
   cwd: string;
   timeoutMs: number;
@@ -69,13 +75,14 @@ const NEEDS_NODE_MODULES =
   'dependencies are not installed (node_modules is absent) — run project_setup install for this project first';
 
 /** Yarn's install flag differs by major; the declaration is the only authoritative signal. */
-function yarnInstallArgs(spec: string | null): { args: string[]; note: string } | null {
+function yarnInstallArgs(spec: string | null): { args: string[]; note: string; how: string } | null {
   if (spec === null || !spec.startsWith('yarn@')) return null;
   const major = Number.parseInt(spec.slice('yarn@'.length), 10);
   if (!Number.isFinite(major) || major < 1) return null;
+  // Branch on the NUMBER. Deriving the label from the note's text read 'yarn 10 (Berry)' as v1.
   return major === 1
-    ? { args: ['install', '--frozen-lockfile'], note: 'yarn 1' }
-    : { args: ['install', '--immutable'], note: `yarn ${String(major)} (Berry)` };
+    ? { args: ['install', '--frozen-lockfile'], note: 'yarn 1', how: 'yarn.v1' }
+    : { args: ['install', '--immutable'], note: `yarn ${String(major)} (Berry)`, how: 'yarn.berry' };
 }
 
 /** The lockfile-driven install command. Pinned installs are the point; unpinned ones SAY SO. */
@@ -122,9 +129,17 @@ function resolveInstall(p: DetectedProject): SetupResolution {
       };
     }
     argv = ['yarn', ...yarn.args];
-    how = `yarn.${yarn.note.startsWith('yarn 1') ? 'v1' : 'berry'}`;
+    how = yarn.how;
     consequence = `Installs exactly what yarn.lock pins (${yarn.note}) and fails if it is out of date.`;
   }
+
+  // Every file that decides what an install fetches or executes, hashed together. A component
+  // the harness could not read has no stable identity, so the approval covers THIS call only —
+  // better to re-ask than to replay against a file nobody hashed.
+  const installIdentity =
+    lock !== null && lock.sha256 !== null && p.manifestSha256 !== null
+      ? sha256(`${lock.sha256}\n${p.manifestSha256}\n${p.npmrcSha256 ?? ''}`)
+      : null;
 
   return {
     resolved: {
@@ -132,12 +147,11 @@ function resolveInstall(p: DetectedProject): SetupResolution {
       recipeId: qualifyRecipeId(`setup.install.${how}`, p.id),
       command: toCommand(argv),
       ...(lock !== null ? { lockfile: lock } : {}),
+      installIdentity,
       projectId: p.id,
       cwd: p.root,
       timeoutMs: INSTALL_TIMEOUT_MS,
-      // A lockfile the harness could not hash has no stable identity to bind consent to, so the
-      // approval covers THIS call only. Better to re-ask than to replay against an unknown file.
-      replayable: lock !== null && lock.sha256 !== null,
+      replayable: installIdentity !== null,
       consequence:
         `${consequence} It DOWNLOADS AND EXECUTES third-party package code, including lifecycle ` +
         `scripts, at full user privilege with network access. Not sandboxed, not snapshotted, not undoable.`,
@@ -193,8 +207,14 @@ export function resolveSetup(p: DetectedProject, action: SetupAction): SetupReso
  */
 /** The sha consent binds for this intent, or null when there is nothing stable to bind. */
 function bindingSha(r: ResolvedSetup): string | null {
-  if (r.action === 'install') return r.lockfile?.sha256 ?? null;
-  return r.bodySha !== undefined && r.bodySha !== '' ? r.bodySha : null;
+  if (r.action !== 'install') return r.bodySha !== undefined && r.bodySha !== '' ? r.bodySha : null;
+  // THREE files, not one. `npm ci` looks like a command whose whole meaning is the lockfile and
+  // it is not: package.json's preinstall/install/postinstall/prepare entries are executed by
+  // every package manager during an install, and .npmrc chooses the registry and the shell those
+  // scripts run in. With only the lockfile bound, the agent could add a `preinstall` through an
+  // ordinary auto-allowed in-workspace write and replay the earlier `[s]` with no prompt — the
+  // standing shell authority `run_command` is denied by design.
+  return r.installIdentity ?? null;
 }
 
 export function setupFact(r: ResolvedSetup): ResolvedCheckFact {
@@ -208,6 +228,7 @@ export function setupFact(r: ResolvedSetup): ResolvedCheckFact {
     ...(bindingSha(r) !== null ? { bodySha: bindingSha(r)! } : {}),
     projectId: r.projectId,
     cwd: r.cwd,
+    consequence: r.consequence,
     timeoutMs: r.timeoutMs,
     replayable: r.replayable,
     effects: { writesOutputs: true, network: r.action === 'install', workspaceAuthored: r.action !== 'install' },
@@ -223,6 +244,7 @@ export function sameSetup(a: ResolvedSetup | null, b: ResolvedSetup | null): boo
     a.bodySha === b.bodySha &&
     a.projectId === b.projectId &&
     a.cwd === b.cwd &&
-    (a.lockfile?.sha256 ?? null) === (b.lockfile?.sha256 ?? null)
+    (a.lockfile?.sha256 ?? null) === (b.lockfile?.sha256 ?? null) &&
+    (a.installIdentity ?? null) === (b.installIdentity ?? null)
   );
 }

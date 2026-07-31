@@ -344,9 +344,10 @@ export function decide<I>(
         'destructive',
         'ask',
         'setup.state-change-approval-required',
-        `runs this project's ${setupRow.kind} script${where} (${summary}); it changes local database or application ` +
-          'state that the harness does NOT snapshot and CANNOT undo, it is not idempotent, and it therefore asks ' +
-          'EVERY time; NOT sandboxed',
+        `runs this project's ${setupRow.kind} script${where} (${summary}) — a script DEFINED BY THIS WORKSPACE, whose ` +
+          'real effects are whatever that script says; it changes local database or application state that the ' +
+          'harness does NOT snapshot and CANNOT undo, it is not idempotent, and it therefore asks EVERY time; ' +
+          'NOT sandboxed',
         { noUndo: true, execBoundary: 'unsandboxed' },
       );
     }

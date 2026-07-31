@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeRelPrefix } from '../shared/pathutil.js';
+import { caseFold, isInside, normalizeRelPrefix, realpathBoundary } from '../shared/pathutil.js';
 import { detectProject, probeStamps } from './detect.js';
 import type { DetectedProject, DetectedWorkspace, ManifestStamp } from './types.js';
 
@@ -87,13 +87,13 @@ function childDirs(dir: string): string[] {
   } catch {
     return [];
   }
-  const out: string[] = [];
-  for (const e of entries.slice(0, MAX_DIR_ENTRIES)) {
-    if (!e.isDirectory()) continue;
-    if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
-    out.push(e.name);
-  }
-  return out.sort();
+  // Filter FIRST, then sort, then cap. Capping raw dirents let files and dotfiles consume the
+  // budget and — because readdir returns OS order, not sorted order — made the surviving set a
+  // function of inode hashing rather than of the tree. Unit ids qualify consent keys and feed the
+  // TOCTOU fingerprint, so an unstable set produces spurious "the project changed" refusals.
+  const dirs = entries.filter((e) => e.isDirectory() && !SKIP_DIRS.has(e.name) && !e.name.startsWith('.')).map((e) => e.name);
+  dirs.sort();
+  return dirs.length > MAX_DIR_ENTRIES ? dirs.slice(0, MAX_DIR_ENTRIES) : dirs;
 }
 
 /**
@@ -182,7 +182,12 @@ function declaredPnpmWorkspaces(root: string): { patterns: string[]; note?: stri
       if (v !== '') patterns.push(v);
       continue;
     }
-    if (line.trim() !== '') inBlock = false; // a new top-level key ends the block
+    // A blank line or a comment — at ANY indentation, including column 0 — does not end the
+    // block. Treating a column-0 comment as a terminator silently truncated the list, and because
+    // some patterns HAD been read the "nothing could be read" note did not fire either: a wrong
+    // unit set with no note, which is the one outcome this module says is worse than an empty one.
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    inBlock = false; // a genuine new top-level key ends the block
   }
   return {
     patterns,
@@ -198,13 +203,22 @@ function declaredPnpmWorkspaces(root: string): { patterns: string[]; note?: stri
  */
 export function discoverUnitIds(root: string): { ids: string[]; notes: string[] } {
   const notes: string[] = [];
+  // Case-folded on Windows/macOS: `statSync` is case-insensitive there, so a declared `"Api"`
+  // beside an on-disk `api` produced TWO units for one directory — two project ids, two recipe
+  // ids, two consent identities, and a single-project repo that started refusing calls as
+  // ambiguous. `caseFold` is the same helper every other containment comparison uses.
   const seen = new Set<string>();
   const ids: string[] = [];
   const add = (id: string): void => {
-    if (seen.has(id) || id === ROOT_UNIT_ID) return;
+    const key = caseFold(id);
+    if (seen.has(key) || id === ROOT_UNIT_ID) return;
     if (id.split('/').length > MAX_UNIT_DEPTH) return;
     if (!hasManifest(path.join(root, id))) return;
-    seen.add(id);
+    // A unit's directory must be inside the workspace. A declared workspace entry can be a
+    // SYMLINK (statSync follows it), which would put the approval prompt's "in: <ws>/vendor" in
+    // front of a human while the install writes somewhere else entirely.
+    if (!isInside(root, realpathBoundary(path.join(root, id)))) return;
+    seen.add(key);
     ids.push(id);
   };
 
@@ -294,8 +308,13 @@ export function selectUnit(
     }
     return { unit: found };
   }
-  const rootUnit = ws.units.find((u) => u.id === ROOT_UNIT_ID);
-  if (rootUnit !== undefined) return { unit: rootUnit };
+  // Exactly one project, or none. Deliberately NOT "prefer the root when a root unit exists":
+  // every npm/pnpm/yarn workspaces monorepo HAS a root package.json, so a root-wins shortcut made
+  // the ambiguity refusal dead code in precisely the standard multi-project shape — and worse
+  // than dead. The root of a container repo declares no test script, so an unnamed `run_check`
+  // resolved against it, came back `unsupported: no-recipe`, and that reason WAIVES a declared
+  // gate: a session accepted as complete with zero tests run, its evidence claiming the project
+  // cannot be tested. Ambiguity refuses; `project: '.'` still selects the root explicitly.
   if (ws.units.length === 1) return { unit: ws.units[0]! };
   return {
     unit: null,
