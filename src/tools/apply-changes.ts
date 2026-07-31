@@ -184,7 +184,9 @@ export function needsPreIntegrationCheckpoint(events: readonly SessionEvent[]): 
   }
   for (const e of events) {
     if (e.seq <= lastHarness) continue;
-    if (e.type === 'command.started' || e.type === 'check.started' || e.type === 'preview.started') return true;
+    // `setup.started` joins the spawn set (Session 16): an install rewrites node_modules and a
+    // migration rewrites a database — both are un-snapshot-covered writers by any measure.
+    if (e.type === 'command.started' || e.type === 'check.started' || e.type === 'preview.started' || e.type === 'setup.started') return true;
   }
   return false;
 }

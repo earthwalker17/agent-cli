@@ -93,6 +93,25 @@ export interface ReportCheck {
   scopePaths?: string[];
   /** check.started with no completion: the session died while the check ran; NO verdict exists. */
   neverCompleted?: boolean;
+  /** Session 16: which project unit this verified. Absent = the root/only project. */
+  projectId?: string;
+}
+/** A dependency install, migration or seed (Session 16, additive). Never verification. */
+export interface ReportSetup {
+  action: string;
+  projectId: string;
+  recipeId: string;
+  command: string;
+  cwd: string;
+  status: string;
+  exitCode: number | null;
+  termination?: CommandTermination;
+  durationMs: number;
+  summary: string;
+  signals?: string[];
+  lockfile?: string;
+  /** setup.started with no completion: the session died mid-install; the state is UNKNOWN. */
+  neverCompleted?: boolean;
 }
 export interface ReportRepair {
   kind: 'attempt' | 'escalation';
@@ -176,6 +195,8 @@ export interface ReportJson {
   };
   /** Typed check runs (Session 12, additive), in order. `neverCompleted` = spawned, no verdict. */
   checks?: ReportCheck[];
+  /** Project setup (Session 16, additive): installs, migrations, seeds. Absent when none ran. */
+  setups?: ReportSetup[];
   /** Bounded repair attempts and escalations (Session 12, additive); outcomes are DERIVED. */
   repairs?: ReportRepair[];
   /** Managed preview processes (Session 13, additive), in start order. */
@@ -690,6 +711,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
         ...(e.findings !== undefined ? { findings: e.findings } : {}),
         ...(e.planTaskId !== undefined ? { planTaskId: e.planTaskId } : {}),
         ...(e.scopePaths !== undefined ? { scopePaths: e.scopePaths } : {}),
+        ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
       });
     }
   }
@@ -704,6 +726,51 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       durationMs: 0,
       summary: `${s.check} STARTED but never completed — no verdict; effects unknown`,
       ...(s.planTaskId !== undefined ? { planTaskId: s.planTaskId } : {}),
+      ...(s.projectId !== undefined ? { projectId: s.projectId } : {}),
+      neverCompleted: true,
+    });
+  }
+
+  // Project setup (Session 16). Deliberately a SEPARATE fold from the checks above and never fed
+  // into `collectPassingEvidence`: an install exiting 0 marks nothing CHECKED, because fetching
+  // dependencies is not evidence that any file is correct.
+  const setups: ReportSetup[] = [];
+  const startedSetups: Extract<SessionEvent, { type: 'setup.started' }>[] = [];
+  const completedSetupIds = new Set<string>();
+  for (const e of events) {
+    if (e.type === 'setup.started') startedSetups.push(e);
+    else if (e.type === 'setup.completed') {
+      completedSetupIds.add(e.callId);
+      const started = startedSetups.find((s) => s.callId === e.callId);
+      setups.push({
+        action: e.action,
+        projectId: e.projectId,
+        recipeId: e.recipeId,
+        command: started?.command ?? '',
+        cwd: started?.cwd ?? '',
+        status: e.status,
+        exitCode: e.exitCode,
+        ...(e.termination !== undefined ? { termination: e.termination } : {}),
+        durationMs: e.durationMs,
+        summary: e.summary,
+        ...(e.signals !== undefined ? { signals: e.signals } : {}),
+        ...(started?.lockfile !== undefined ? { lockfile: started.lockfile } : {}),
+      });
+    }
+  }
+  for (const s of startedSetups) {
+    if (completedSetupIds.has(s.callId)) continue;
+    setups.push({
+      action: s.action,
+      projectId: s.projectId,
+      recipeId: s.recipeId,
+      command: s.command,
+      cwd: s.cwd,
+      status: 'no-verdict',
+      exitCode: null,
+      durationMs: 0,
+      summary: `${s.action} STARTED but never completed — the dependency or local data state is UNKNOWN`,
+      ...(s.lockfile !== undefined ? { lockfile: s.lockfile } : {}),
       neverCompleted: true,
     });
   }
@@ -862,6 +929,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     plan: planState,
     ...(accepted !== undefined ? { accepted } : {}),
     ...(checkRuns.length > 0 ? { checks: checkRuns } : {}),
+    ...(setups.length > 0 ? { setups } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
     ...(previews.length > 0 ? { previews } : {}),
     ...(browserFlows.length > 0 ? { browserFlows } : {}),
@@ -974,10 +1042,37 @@ function renderMarkdown(r: ReportJson): string {
     L.push('');
   }
 
+  if (r.setups !== undefined && r.setups.length > 0) {
+    L.push(`## Project setup (dependencies, migrations, seed)`);
+    for (const s of r.setups) {
+      const verdict = s.neverCompleted
+        ? 'STARTED but never completed; the dependency or local data state is UNKNOWN'
+        : s.status === 'ok'
+          ? 'OK (exit 0)'
+          : s.status === 'failed'
+            ? `FAILED (exit ${s.exitCode ?? '—'})`
+            : s.status === 'unsupported'
+              ? 'UNSUPPORTED (never ran)'
+              : `ERROR (${s.termination ?? 'no exit'}; no exit code)`;
+      L.push(`- ${s.action} [project ${s.projectId}] → ${verdict} in ${s.durationMs} ms${s.command !== '' ? ` — \`${s.command}\`` : ''}`);
+      if (s.cwd !== '') L.push(`    in: ${s.cwd}${s.lockfile !== undefined ? `; lockfile: ${s.lockfile}` : ''}`);
+      if (s.status !== 'ok' && s.summary !== '') L.push(`    ${s.summary}`);
+      if (s.signals !== undefined && s.signals.length > 0) L.push(`    signals: ${s.signals.join(', ')}`);
+    }
+    L.push('');
+    L.push(
+      'Setup is WORK, not verification: an install exiting 0 means dependencies were fetched, and it never marks a ' +
+        'file CHECKED or satisfies a plan gate. Installs execute third-party package code; migrations and seeds change ' +
+        'local data the harness does not snapshot and cannot undo. Every one of these was individually approved.',
+    );
+    L.push('');
+  }
   if (r.checks !== undefined && r.checks.length > 0) {
     L.push(`## Verification (typed checks)`);
     for (const c of r.checks) {
-      const where = c.planTaskId !== undefined ? ` [plan task ${c.planTaskId}]` : '';
+      const where =
+        (c.projectId !== undefined && c.projectId !== '.' ? ` [project ${c.projectId}]` : '') +
+        (c.planTaskId !== undefined ? ` [plan task ${c.planTaskId}]` : '');
       const scope = c.scopePaths !== undefined && c.scopePaths.length > 0 ? ` [scope: ${c.scopePaths.join(', ')}]` : '';
       if (c.neverCompleted) {
         L.push(`- ${c.check} (${c.recipeId})${where} → STARTED but never completed; NO verdict, effects unknown`);

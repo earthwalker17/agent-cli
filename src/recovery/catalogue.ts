@@ -54,11 +54,16 @@ export const RECOVERY_CATALOGUE: Record<FailureClass, RecoveryEntry> = {
     diagnostics: [
       'read the manifest (package.json / pyproject.toml) and confirm whether the missing name is declared',
       'list the expected location (node_modules/.bin, the venv) with list_files rather than assuming',
+      '/checks names each detected project and whether its dependencies are installed — read it before assuming which project is missing them',
     ],
     actions: [
       'add the missing declaration to the manifest if the code genuinely needs it',
       'correct an import/require path that names something that never existed',
-      'ask the user to install dependencies — this harness deliberately has no install check kind, because installing runs third-party code with network access',
+      // Session 16: this class finally has a path forward inside the harness. It is still a
+      // HUMAN decision every time — project_setup asks, states that the install executes
+      // third-party code over the network, and is never auto-eligible below.
+      'run project_setup install for the project that is missing them (it names the project and asks for approval; installing executes third-party code with network access, so the user decides)',
+      'for Python, ask the user to install: the harness cannot verify which interpreter or virtualenv a command would install into',
     ],
     regressionChecks: ['build', 'typecheck'],
     autoEligible: false,

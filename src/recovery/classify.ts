@@ -1,5 +1,5 @@
 import { sha256 } from '../shared/hash.js';
-import type { CheckKind, CheckStatus, CommandTermination, FailureClass, SessionEvent, TaskStatus } from '../types.js';
+import type { CheckKind, CheckStatus, CommandTermination, FailureClass, SessionEvent, SetupAction, TaskStatus } from '../types.js';
 
 /**
  * Typed failure classification (Session 12) — deterministic, structural first, and DERIVABLE FROM
@@ -47,6 +47,19 @@ export type FailureEvidence =
       reason: 'crashed' | 'start-failed';
       exitCode: number | null;
       logTail?: string;
+    }
+  | {
+      /** A project setup that FAILED (Session 16). `unsupported` never spawned and is not one. */
+      source: 'setup';
+      seq: number;
+      action: SetupAction;
+      projectId: string;
+      recipeId: string;
+      status: 'failed' | 'error';
+      exitCode: number | null;
+      termination?: CommandTermination;
+      signals: string[];
+      summary: string;
     };
 
 export interface FailureClassification {
@@ -213,6 +226,44 @@ export function classifyFailure(e: FailureEvidence): FailureClassification {
         detail: `${e.tool} was refused (${e.rule})`,
       };
     }
+    case 'setup': {
+      // A failed setup IS the dependency-setup class, by construction rather than by inference —
+      // this is the one evidence source whose subject matter is exactly that class. The ordering
+      // rule the whole module lives by still wins first: a setup that was TIMED OUT or ABORTED
+      // produced no verdict, so it is `unknown` and cannot spend the repair budget. A user's
+      // Ctrl+C on a slow `npm ci` must never be read as a diagnosable defect.
+      if (e.termination === 'timeout') {
+        const fired = ['termination:timeout', `setup:${e.action}`];
+        return {
+          class: 'timeout-resource',
+          confidence: 'high',
+          signals: fired,
+          signature: signatureOf('timeout-resource', e.recipeId, fired),
+          subject: e.recipeId,
+          detail: `project ${e.action} for '${e.projectId}' timed out; its effects are unknown`,
+        };
+      }
+      if (e.termination === 'aborted') {
+        const fired = ['termination:aborted', `setup:${e.action}`];
+        return {
+          class: 'unknown',
+          confidence: 'high',
+          signals: fired,
+          signature: signatureOf('unknown', e.recipeId, fired),
+          subject: e.recipeId,
+          detail: `project ${e.action} for '${e.projectId}' was interrupted and produced no result — re-run it; there is nothing here to diagnose`,
+        };
+      }
+      const fired = [`setup:${e.action}`, ...e.signals];
+      return {
+        class: 'dependency-setup',
+        confidence: 'high',
+        signals: fired,
+        signature: signatureOf('dependency-setup', e.recipeId, fired),
+        subject: e.recipeId,
+        detail: `project ${e.action} for '${e.projectId}' failed${e.exitCode !== null ? ` (exit ${e.exitCode})` : ''}: ${e.summary}`,
+      };
+    }
     case 'preview': {
       // start-failed = the server never became a preview (boot bug, port conflict); crashed =
       // it was serving and died at runtime. EADDRINUSE is read from the log tail because a
@@ -275,6 +326,23 @@ export function latestFailureEvidence(events: readonly SessionEvent[], target?: 
         signals: e.signals ?? [],
         summary: e.summary,
       });
+    } else if (e.type === 'setup.completed' && (e.status === 'failed' || e.status === 'error')) {
+      // Session-scoped only: a setup carries no plan-task binding, so a task-targeted query must
+      // not pick one up and attribute a failed install to a task that never ran it.
+      if (target === undefined) {
+        take({
+          source: 'setup',
+          seq: e.seq,
+          action: e.action,
+          projectId: e.projectId,
+          recipeId: e.recipeId,
+          status: e.status,
+          exitCode: e.exitCode,
+          ...(e.termination !== undefined ? { termination: e.termination } : {}),
+          signals: e.signals ?? [],
+          summary: e.summary,
+        });
+      }
     } else if (e.type === 'task.ended' && isFailureTaskStatus(e.status)) {
       const planTaskId = childPlanTask.get(e.childSessionId);
       if (target !== undefined && planTaskId !== target) continue;

@@ -14,6 +14,7 @@ import { foldReview, type ReviewState } from '../review/ledger.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import { CHECKS_PER_SESSION, describeWorkspace, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
+import { SETUPS_PER_SESSION, type SetupCaps } from '../tools/project-setup.js';
 import type { PreviewTool } from '../tools/preview.js';
 import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
 import { likelyBrowserAvailable } from '../browser/probe.js';
@@ -55,6 +56,8 @@ export interface CommandContext {
   checkTool?: RunCheckTool;
   /** Session 12: the events-rebuilt check counters, for the /checks budget line. */
   checkCaps?: CheckCaps;
+  /** Session 16: the events-rebuilt project-setup counter, for the /checks budget line. */
+  setupCaps?: SetupCaps;
   /** Session 13: the managed-preview tool instance; /preview lists and stops its live handles. */
   previewTool?: PreviewTool;
   /** Session 15: the provider registry (env-only key discovery, bounded validation, construction)
@@ -790,7 +793,18 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       lines.push(
         `browser checks: ${likelyBrowserAvailable() ? 'likely available (a system browser or Playwright cache is present; proven at the first flow)' : 'unavailable (no system Edge/Chrome or Playwright cache found)'}`,
       );
+      // Setup evidence lives beside the checks it enables, but is labeled as a DIFFERENT thing:
+      // "dependencies were installed" is never a line in the verification story.
+      const setups = ctx.session.log.events.filter((e) => e.type === 'setup.completed');
+      if (setups.length > 0) {
+        lines.push('', 'project setup (not verification):');
+        for (const s of setups) {
+          if (s.type !== 'setup.completed') continue;
+          lines.push(`  ${s.action} [${s.projectId}]: ${s.status} — ${sanitizeLine(s.summary)}`);
+        }
+      }
       lines.push('', `checks run this session: ${ctx.checkCaps?.checksRun ?? 0}/${CHECKS_PER_SESSION}`);
+      if (ctx.setupCaps !== undefined) lines.push(`project setups this session: ${ctx.setupCaps.setupsRun}/${SETUPS_PER_SESSION}`);
       ctx.modelOut.write(lines.join('\n') + '\n');
       return 'continue';
     }

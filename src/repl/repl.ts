@@ -159,6 +159,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     retrieval: assembled.retrieval,
     checkTool: assembled.checkTool,
     checkCaps: assembled.checkCaps,
+    setupCaps: assembled.setupCaps,
     previewTool: assembled.previewTool,
     registry,
     ...(assembled.pruneHarnessRefs !== undefined ? { pruneHarnessRefs: assembled.pruneHarnessRefs } : {}),

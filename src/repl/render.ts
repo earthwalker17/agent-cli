@@ -231,6 +231,22 @@ export function createRenderer(opts: {
           }
           break;
         }
+        case 'setup.started': {
+          // Same live-output channel as a check: an install is a long real process, and watching
+          // it is exactly as useful — often more so, since it is the slowest thing in a session.
+          cmdBuf = '';
+          cmdShown = 0;
+          cmdSuppressed = false;
+          lastCmdFlush = Date.now();
+          chromeLine(style.dim(`  ${g.arrow} ${e.action} [${sanitizeLine(e.projectId)}] — ${sanitizeLine(e.command)}`));
+          break;
+        }
+        case 'setup.completed': {
+          flushCmdOutput(true);
+          const mark = e.status === 'ok' ? style.green(g.ok) : e.status === 'unsupported' ? style.yellow(g.warn) : style.red(g.fail);
+          chromeLine(`  ${mark} ${sanitizeLine(e.summary)}`);
+          break;
+        }
         case 'preview.started': {
           // No live output channel: a preview logs to a FILE (see preview/process.ts), so the
           // chrome shows lifecycle boundaries and /preview shows the tail.

@@ -71,6 +71,10 @@ const WORK_EVENT_TYPES = new Set([
   // A preview server is a spawned process that can write outputs — the `command.started` /
   // `check.started` class (Session 13). ready/ended are lifecycle echoes of the same unit.
   'preview.started',
+  // An install writes a whole dependency tree and a migration writes a database (Session 16):
+  // the same spawned-and-writes class again. Deliberately `setup.started` only, matching
+  // `check.started` — counting the completion too would double one unit of work.
+  'setup.started',
 ]);
 
 /**
