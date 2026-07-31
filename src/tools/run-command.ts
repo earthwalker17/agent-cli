@@ -1,13 +1,35 @@
+import fs from 'node:fs';
 import { z } from 'zod';
 import type { Tool, ToolResult } from '../types.js';
 import { truncateForModel } from '../shared/hash.js';
 import { buildChildEnv } from '../exec/env.js';
 import { runManaged, type ExecSpec } from '../exec/run.js';
 import { shellInvocation } from '../exec/shell.js';
+import { validatePath } from '../policy/paths.js';
+
+/** A cwd the harness will not run in: refused as a CALL, so nothing spawns and nothing is recorded. */
+function refuseCwd(detail: string, startedAt: number): ToolResult {
+  return {
+    ok: false,
+    output: `refused: ${detail}. Name a workspace-relative directory that exists, or omit cwd to run at the workspace root.`,
+    error: 'invalid cwd',
+    durationMs: Date.now() - startedAt,
+    truncated: false,
+  };
+}
 
 const RunInput = z
   .object({
-    command: z.string().describe('A shell command to run in the workspace root'),
+    command: z.string().describe('A shell command to run in the workspace (default: the workspace root)'),
+    cwd: z
+      .string()
+      .min(1)
+      .max(260)
+      .optional()
+      .describe(
+        'Workspace-relative directory to run in (e.g. "api"). Must exist and be inside the workspace. ' +
+          'Prefer this over `cd x && …`: the recorded evidence then names the directory the command really ran in.',
+      ),
     timeoutMs: z.number().int().positive().max(600_000).optional().describe('Kill after this many ms (default 120000)'),
   })
   .strict();
@@ -35,16 +57,47 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
   schema: RunInput,
   mutates: () => null,
   command: (i) => i.command,
+  // Display-only (never consulted by policy): the human approving a command in a multi-project
+  // workspace must see WHICH project it runs in. `npm ci` in `web/` and in `api/` are the same
+  // string and different acts.
+  approvalContext: (i) => (i.cwd !== undefined ? [`in: ${i.cwd}`] : []),
   async execute(input, ctx) {
+    const startedAt = Date.now();
     const { file, args } = shellInvocation(input.command);
     const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT;
+
+    // A declared cwd is validated with the SAME containment rule as every write target, and must
+    // be an existing directory. Refused here rather than in the policy engine because the command
+    // branch answers before any path branch is reached — and because a cwd that does not resolve
+    // would otherwise surface as an opaque spawn error.
+    let cwd = ctx.workspaceRoot;
+    if (input.cwd !== undefined) {
+      let resolved: string;
+      try {
+        const v = validatePath(ctx.workspaceRoot, input.cwd, ctx.stateDir !== undefined ? { stateDir: ctx.stateDir } : {});
+        if (!v.inWorkspace) {
+          return refuseCwd(`'${input.cwd}' is outside the workspace`, startedAt);
+        }
+        resolved = v.resolved;
+      } catch (e) {
+        return refuseCwd(`'${input.cwd}' is not a usable path: ${(e as Error).message}`, startedAt);
+      }
+      let isDir = false;
+      try {
+        isDir = fs.statSync(resolved).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      if (!isDir) return refuseCwd(`'${input.cwd}' is not an existing directory`, startedAt);
+      cwd = resolved;
+    }
     // 'active' means this specific call is auto-run and MUST be OS-confined; report the true boundary.
     const boundary = ctx.sandbox?.active ? ctx.sandbox.mode : 'none';
 
     const baseSpec: ExecSpec = {
       file,
       args,
-      cwd: ctx.workspaceRoot,
+      cwd,
       env: buildChildEnv(
         process.env,
         ctx.rules && ctx.rules.envExcludePatterns.length > 0 ? { extraExcludeSubstrings: ctx.rules.envExcludePatterns } : {},
@@ -52,7 +105,7 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
       timeoutMs,
       signal: ctx.signal,
       ...(ctx.onOutput ? { onOutput: ctx.onOutput } : {}),
-      onSpawn: (pid) => ctx.reportCommand?.({ kind: 'started', pid, shell: file, cwd: ctx.workspaceRoot, timeoutMs, sandbox: boundary }),
+      onSpawn: (pid) => ctx.reportCommand?.({ kind: 'started', pid, shell: file, cwd, timeoutMs, sandbox: boundary }),
     };
     // Transform-at-spawn: an auto-run call is rewritten to launch inside the enforced boundary; an
     // approved (unsandboxed) call gets the identity wrap. run_command never branches on policy.

@@ -3,7 +3,8 @@ import path from 'node:path';
 import type { SessionEvent, MutationKind } from '../types.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 import { sha256 } from '../shared/hash.js';
-import { DIFF_MAX_BYTES, isProbablyBinary, unifiedDiff } from '../shared/diff.js';
+import { DIFF_MAX_BYTES, isProbablyBinary, lineDiffStat, unifiedDiff } from '../shared/diff.js';
+import { isSecretName } from '../policy/engine.js';
 import { collectPassingEvidence, firstPassingEvidenceAfter } from './report.js';
 
 /**
@@ -58,7 +59,13 @@ export function sessionMutationState(events: readonly SessionEvent[]): {
   return { firstBefore, expectedNow };
 }
 
-export function buildSessionDiff(events: readonly SessionEvent[], snapshots: SnapshotStore, workspaceRoot: string): SessionDiffFile[] {
+export function buildSessionDiff(
+  events: readonly SessionEvent[],
+  snapshots: SnapshotStore,
+  workspaceRoot: string,
+  /** Config's extra secret-name substrings, so the diff withholds exactly what the gate redacts. */
+  secretPatterns?: readonly string[],
+): SessionDiffFile[] {
   const { firstBefore, expectedNow } = sessionMutationState(events);
   // CHECKED annotation (S14.5): the last CONTENT-CHANGE seq per path (tracked here, NOT in
   // sessionMutationState — /commit shares that fold and its contract stays byte-stable), fed
@@ -109,6 +116,24 @@ export function buildSessionDiff(events: readonly SessionEvent[], snapshots: Sna
     }
     if (isProbablyBinary(before) || isProbablyBinary(after)) {
       out.push({ path: p, relPath, kind, drifted, note: `binary change (${before.length} → ${after.length} bytes)`, ...checkedFields });
+      continue;
+    }
+    // A secret-named file's CONTENTS are withheld (Session 16). Reading one is an ask-with-
+    // redaction at the policy gate, and the log never persists the bytes — but the session diff
+    // reconstructs them from the snapshot blob and prints them to a terminal that is routinely
+    // pasted into issues and transcripts. Writing `.env` became a routine step this session, so
+    // the diff now reports the SHAPE of the change and withholds the body. The stat still comes
+    // from the real bytes, so "the agent changed 3 lines of .env" remains visible and reviewable.
+    if (isSecretName(relPath, secretPatterns) || isSecretName(p, secretPatterns)) {
+      const stat = lineDiffStat(before.toString('utf8'), after.toString('utf8'));
+      out.push({
+        path: p,
+        relPath,
+        kind,
+        drifted,
+        note: `contents withheld: secret-named file (+${String(stat.added)}/−${String(stat.removed)} lines)`,
+        ...checkedFields,
+      });
       continue;
     }
     out.push({ path: p, relPath, kind, drifted, patch: unifiedDiff(relPath, before.toString('utf8'), after.toString('utf8')), ...checkedFields });

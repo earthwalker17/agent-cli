@@ -107,6 +107,8 @@ export interface PreviewToolDeps {
   envExcludePatterns?: readonly string[];
   ownerPid?: number;
   ttlMs?: number;
+  /** The session's shared initial detection (see CheckToolDeps.initial). */
+  initial?: DetectedWorkspace;
   /** Injectable seams (tests). */
   detect?: (root: string) => DetectedWorkspace;
   probe?: (root: string) => ManifestStamp[];
@@ -138,7 +140,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
   const newId = deps.newPreviewId ?? ((): string => `pv-${randomBytes(3).toString('hex')}`);
   const registry = previewsFile(deps.projectDir);
 
-  let workspace = detect(deps.workspaceRoot);
+  let workspace = deps.initial ?? detect(deps.workspaceRoot);
   const active = new Map<string, ActivePreview>();
 
   /** Which unit to serve. Pure over the snapshot (the `check()` fact contract); ambiguity refuses. */

@@ -579,7 +579,12 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'diff': {
-      const files = buildSessionDiff(ctx.session.log.events, ctx.session.snapshots, ctx.session.workspaceRoot);
+      const files = buildSessionDiff(
+        ctx.session.log.events,
+        ctx.session.snapshots,
+        ctx.session.workspaceRoot,
+        ctx.session.rules?.secretPatterns,
+      );
       ctx.renderer.flush();
       // Diff lines are workspace bytes — untrusted content headed for a terminal; sanitize each line.
       ctx.modelOut.write(renderSessionDiff(files).split('\n').map(sanitizeLine).join('\n') + '\n');

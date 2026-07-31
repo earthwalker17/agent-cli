@@ -2,6 +2,7 @@ import { neutralizeHarnessDelimiters } from '../shared/text.js';
 import type { WorkspaceMap } from './map.js';
 import type { EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
+import type { DetectedWorkspace } from '../checks/types.js';
 
 /**
  * The project-memory content injected into the system prompt (all optional; a session with no
@@ -36,7 +37,54 @@ function sandboxRuleLines(sandbox?: EnforcementFacts): string[] {
       ];
 }
 
-export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sandbox?: EnforcementFacts, git?: GitFacts, memory?: SystemPromptMemory): string {
+/**
+ * The detected projects, as a bounded prompt block (Session 16). The model cannot name a
+ * `project` it was never told about, so this is what makes per-project checks, previews and setup
+ * usable at all. Everything here already passed the detector's ingestion charset filters; the
+ * block is capped and delimiter-neutralized by the caller's assembly like every other injection.
+ */
+function projectLines(ws?: DetectedWorkspace): string[] {
+  if (ws === undefined || ws.units.length === 0) return [];
+  const lines = ws.units.slice(0, MAX_PROMPT_PROJECTS).map((u) => {
+    const kinds = u.kinds.length > 0 ? u.kinds.join('/') : 'unknown';
+    const scripts = Object.keys(u.scripts).slice(0, 10);
+    const bits = [
+      `${u.packageManager ?? 'no package manager'}`,
+      u.lockfile !== null ? `lockfile ${u.lockfile.name}` : 'NO lockfile',
+      u.hasDependencies ? (u.hasNodeModules ? 'dependencies installed' : 'dependencies NOT installed') : 'no declared dependencies',
+      ...(u.envFiles.examples.length > 0 && u.envFiles.present.length === 0
+        ? [`expects env config (${u.envFiles.examples.join(', ')}) — none present`]
+        : []),
+    ];
+    return `  - ${u.id} (${kinds}; ${bits.join('; ')})${scripts.length > 0 ? ` scripts: ${scripts.join(', ')}` : ''}`;
+  });
+  const multi = ws.units.length > 1;
+  return [
+    '',
+    `Detected projects in this workspace (${String(ws.units.length)}):`,
+    ...lines,
+    ...(ws.units.length > MAX_PROMPT_PROJECTS ? [`  … and ${String(ws.units.length - MAX_PROMPT_PROJECTS)} more (see /checks)`] : []),
+    ...(multi
+      ? [
+          '- This workspace holds SEVERAL projects. run_check, preview and project_setup each take a `project` (the id above); with more than one project the harness REFUSES to guess which you meant. Verify each project you changed, and bind plan tasks to their project so a green check in one is never mistaken for evidence about another.',
+        ]
+      : []),
+    '- Dependencies, migrations and seed data go through `project_setup` (action: install | migrate | seed), never run_command: it resolves the command from the lockfile or from the project\'s own declared script, records attributable evidence, and asks for approval every time. An install downloads and EXECUTES third-party code; migrate and seed change local data that cannot be undone. A setup is NOT verification — it can never satisfy a plan gate.',
+    '- Configure an application through ITS OWN .env file (write_file — in-workspace, snapshotted, undoable), not through the harness environment: child processes never receive parent variables whose names look secret-like. If a project ships .env.example and has no .env, creating one is usually a prerequisite for its dev server to start.',
+  ];
+}
+
+/** Bounded: a repository with many packages must not push the operating rules out of the prompt. */
+const MAX_PROMPT_PROJECTS = 12;
+
+export function buildSystemPrompt(
+  workspaceRoot: string,
+  map: WorkspaceMap,
+  sandbox?: EnforcementFacts,
+  git?: GitFacts,
+  memory?: SystemPromptMemory,
+  projects?: DetectedWorkspace,
+): string {
   const sandboxLines = sandboxRuleLines(sandbox);
   return [
     'You are Agent CLI, a careful local coding and file agent working inside a single workspace.',
@@ -51,7 +99,7 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
       : []),
     '- run_command runs a real shell. An APPROVED command runs with the user\'s full privileges and its effects are NOT undoable. Use it only when a file tool cannot do the job, and keep commands minimal and explicit.',
     ...sandboxLines,
-    '- run_command semantics: stdin is not connected (commands must be non-interactive); the child environment omits variables whose names look secret-like (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL) — never write a command that expects them; commands time out (default 120s, timeoutMs up to 600000) and the user can interrupt one mid-run. A killed command (timeout or interrupt) has NO exit code and is NEVER evidence that a check passed.',
+    '- run_command semantics: stdin is not connected (commands must be non-interactive); the child environment omits variables whose names look secret-like (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL) — never write a command that expects them; commands time out (default 120s, timeoutMs up to 600000) and the user can interrupt one mid-run. A killed command (timeout or interrupt) has NO exit code and is NEVER evidence that a check passed. To run in a subdirectory pass `cwd` (workspace-relative) rather than `cd x && …` — the recorded evidence then names the directory the command really ran in.',
     '- Verification is part of the work, not a postscript. After changing files, run the relevant typed checks with run_check (kinds: build, test, test-targeted, typecheck, lint, format, static-analysis) — you name KINDS, the harness resolves the right command for this project and records the result as durable evidence. Prefer run_check over run_command for verification: only its results count toward plan task gates and session acceptance. Run the narrowest useful check first (test-targeted/typecheck on what you touched), then broader ones at integration and before you claim completion. A kind this project cannot run returns UNSUPPORTED with the reason — say so plainly instead of substituting a guess, and never describe unverified work as verified.',
     '- Web apps are verified as a USER experiences them: after the deterministic checks pass, start the dev server with the `preview` tool (a managed session resource — it stays up between turns with recorded readiness, logs, and deterministic teardown; NEVER start servers via run_command, which would kill them at the command timeout and leave no managed lifecycle), then drive it with `browser_flow` (typed steps; every goto declares ready_when — an app-meaningful selector or text, never "the page loaded"; assert visible state with typed expects; screenshot AFTER asserting readiness). The flow result is check kind "browser" — it feeds the same gates and acceptance. Use view_image on a captured screenshot for SUPPLEMENTARY visual judgment (clipping, overlap, broken layout, unreadable contrast) — visual impressions never override a failed deterministic assertion, and a clean screenshot is not functional evidence. The order is fixed: build/test checks → preview ready → functional flows → visual evidence.',
     ...(git?.isRepo
@@ -68,6 +116,7 @@ export function buildSystemPrompt(workspaceRoot: string, map: WorkspaceMap, sand
     '- Review is a STRUCTURAL GATE, not a suggestion: a plan with executor tasks requires ONE recorded adversarial review round after integration, and /accept refuses without it (a plan can waive it only explicitly, with a reason the user approves). After the implementation passes its checks AND the wave is integrated, run a single delegate_task call with 2–3 reviewer tasks, each a DIFFERENT lens (e.g. correctness, security/policy, test coverage), each given a diff scoped to its lens via context — do NOT integrate captures while a round is in flight (an integration landing during the round voids it: the reviewers saw mixed state). Reviewers RECORD findings through report_finding — recorded findings are the ONLY gate input; their prose is narration. Then verify every critical/high finding against the actual code YOURSELF and triage it with the review tool: refute with evidence (recorded verbatim as your unverified claim), address with cited fix refs and re-run the checks that prove it, or accept (medium/low only — a recorded limitation). A finding you VERIFY as real keeps blocking until actually addressed — verification is honesty, not clearance. Never a bigger panel, never a re-review per finding; the harness refuses a third round outright. Post-round fixes re-run the completion checks, not the review (they surface as a caveat; findings never expire). /accept confirm is the USER\'s override, never yours.',
     '- The user may be in an interactive session and can send follow-up instructions after each result; treat each instruction in the context of the whole conversation. Text inside [[harness note: …]] at the start of a user message comes from the harness (e.g. the user reverted files), not from the user.',
     '- Be concise. Report what you did and what you verified; do not claim a check passed unless a command actually exited zero.',
+    ...projectLines(projects),
     ...memorySections(memory),
     '',
     `Workspace root: ${workspaceRoot}`,

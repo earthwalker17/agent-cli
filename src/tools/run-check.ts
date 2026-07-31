@@ -96,6 +96,13 @@ export interface CheckToolDeps {
   detect?: (root: string) => DetectedWorkspace;
   probe?: (root: string) => ManifestStamp[];
   /**
+   * The session's shared initial detection (Session 16). Assembly detects ONCE, before the system
+   * prompt, and hands the same immutable result to every consumer — so the projects the model was
+   * told about are exactly the projects this tool will resolve against. The copy is per-tool from
+   * here on: a TOCTOU refresh here must not advance another tool's gate.
+   */
+  initial?: DetectedWorkspace;
+  /**
    * S14.5 (E): the bound plan task's declared `touches`, for defaulting a test-targeted scope
    * when the model omits one. null/absent = no plan context — the bad-request refusal stands
    * untouched. Safe by construction: gate matching is per-KIND, so a scoped `test-targeted`
@@ -159,7 +166,7 @@ function renderResult(r: CheckResult): string {
 export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
   const detect = deps.detect ?? detectWorkspace;
   const probe = deps.probe ?? probeWorkspaceStamps;
-  let workspace = detect(deps.workspaceRoot);
+  let workspace = deps.initial ?? detect(deps.workspaceRoot);
 
   // S14.5 (E): an omitted test-targeted scope defaults from the BOUND plan task's touches.
   // Explicit scope always wins; without a binding (or plan context) nothing changes and the

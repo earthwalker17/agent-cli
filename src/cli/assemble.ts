@@ -12,6 +12,7 @@ import type { ChildStatusUpdate } from '../runtime/subagent.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
 import { checkCapsFromEvents, createRunCheckTool, workspaceAvailableKinds, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { createProjectSetupTool, setupCapsFromEvents, type ProjectSetupTool, type SetupCaps } from '../tools/project-setup.js';
+import { detectWorkspace } from '../checks/workspace.js';
 import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
@@ -205,7 +206,13 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...(map.inventorySha256 !== undefined ? { currentInventorySha256: map.inventorySha256 } : {}),
     ...(deps.resumeId !== undefined ? { resumeId: deps.resumeId } : {}),
   });
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory));
+  // ONE detection per session (Session 16), before the prompt is built. Two things follow: the
+  // model learns which projects exist and what each can run — it cannot name a `project` it has
+  // never been told about — and the check and preview tools stop detecting independently, which
+  // was two snapshots of the same workspace that could already disagree. Each tool still keeps
+  // its OWN mutable copy for its own TOCTOU refresh, so no tool can advance another tool's gate.
+  const detectedWorkspace = detectWorkspace(ctx.ws);
+  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory), detectedWorkspace);
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -387,6 +394,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const checkTool = createRunCheckTool({
     workspaceRoot: ctx.ws,
     caps: checkCaps,
+    initial: detectedWorkspace,
     // S14.5 (E): a bound test-targeted run with no explicit scope defaults to the plan task's
     // declared touches — same approved-and-current filter as every other gate consumer.
     planTouches: (planTaskId) => {
@@ -401,7 +409,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // worktree is disposable, so an install there populates a directory about to be deleted, and a
   // migration there writes the REAL local database from what the user believes is isolation.
   const setupCaps = setupCapsFromEvents(session.log.events);
-  const setupTool = createProjectSetupTool({ workspaceRoot: ctx.ws, caps: setupCaps });
+  const setupTool = createProjectSetupTool({ workspaceRoot: ctx.ws, caps: setupCaps, initial: detectedWorkspace });
 
   // preview (Session 13): the managed preview-server tool — per-session for the same snapshot
   // reason as run_check, plus it owns this session's live process handles. `appendEnded` is the
@@ -413,6 +421,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     projectDir: layout.projectDir,
     sessionId: session.id,
     caps: previewCaps,
+    initial: detectedWorkspace,
     envExcludePatterns: deps.config.rules.envExcludePatterns,
     appendEnded: (e) => {
       try {

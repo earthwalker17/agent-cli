@@ -75,6 +75,8 @@ export interface SetupToolDeps {
   /** Injectable seams (tests); default to the real detector. */
   detect?: (root: string) => DetectedWorkspace;
   probe?: (root: string) => ManifestStamp[];
+  /** The session's shared initial detection (see CheckToolDeps.initial). */
+  initial?: DetectedWorkspace;
 }
 
 export interface ProjectSetupTool extends Tool<SetupInputT> {
@@ -91,7 +93,7 @@ function refuse(output: string, error: string, startedAt: number): ToolResult {
 export function createProjectSetupTool(deps: SetupToolDeps): ProjectSetupTool {
   const detect = deps.detect ?? detectWorkspace;
   const probe = deps.probe ?? probeWorkspaceStamps;
-  let workspace = detect(deps.workspaceRoot);
+  let workspace = deps.initial ?? detect(deps.workspaceRoot);
 
   const unitFor = (input: SetupInputT): ReturnType<typeof selectUnit> => selectUnit(workspace, input.project);
   const resolveFor = (input: SetupInputT): ResolvedSetup | null => {
