@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI **v1.1** is actually built. This describes the implemented system — its modules,
+How Agent CLI **v1.2** is actually built. This describes the implemented system — its modules,
 contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
 deferred; this file avoids session narration except where a decision's *reason* is the contract.
 
@@ -280,6 +280,90 @@ Large-repo understanding is selective and ranked, not a broad file dump. One in-
   `/map`; `workspace.mapped` fields; CODEBASE staleness. Executor children and pre-trust
   `agent map` deliberately stay on the flat map.
 
+## Project units (`checks/workspace.ts`)
+
+A workspace holds one or more project UNITS, not one project at its root. Before Session 16 a
+repository containing `web/` and `api/` detected nothing: every check kind `unsupported`, no
+preview-capable script, every declared gate warned unrunnable. It did not fail loudly; it went
+inert.
+
+- **Discovery** is bounded, stat-first and NEVER throwing (the `detect.ts` discipline): the root
+  when it has a manifest, whatever the root `package.json` `workspaces` / `pnpm-workspace.yaml`
+  `packages:` declare, every depth-1 directory holding a manifest, and the children of
+  conventional containers (`apps`/`packages`/`services`/`libs`/`modules`). Depth 1 is scanned
+  GENERALLY rather than against a name list — a Python service in `svc/` is a real project.
+  Caps: `MAX_PROJECT_UNITS = 12`, `MAX_UNIT_DEPTH = 2`, 200 directories per listing.
+- **Two rules are load-bearing.** A unit exists only where a MANIFEST exists (directory names are
+  candidates, never units). And everything NOT interpreted is RECORDED as a `note`: the glob
+  vocabulary is "a literal directory" or "a single trailing `/*`", and anything richer is refused
+  with a reason, because half-interpreting a glob silently yields a different unit set than the
+  package manager itself uses.
+- **Ordering is deterministic** (root first, then lexicographic; listings are filtered, then
+  sorted, then capped) because unit ids qualify recipe ids, and recipe ids are what consent binds
+  to. Ids are case-folded on case-insensitive filesystems, and a unit whose real path escapes the
+  workspace (a symlinked workspace entry) is dropped.
+- **`selectUnit` refuses ambiguity; it never picks.** With more than one unit a call must name its
+  `project` — deliberately including the workspaces-monorepo case where a root unit exists, since
+  a container root resolves most kinds to `unsupported`, and that reason WAIVES a declared gate.
+  A workspace with NO project resolves to its root, so "this project cannot run a build" stays a
+  capability answer rather than becoming a call refusal that could never be waived.
+- **Per-unit resolution:** `resolveChecks`/`resolvePreview`/`resolveSetup` all take a unit; the
+  command spawns with the unit's cwd; recipe ids are unit-qualified (`node.script.test@api`) —
+  but NOT for the root unit, so single-project workspaces keep byte-identical ids, grants,
+  evidence and tests. `check.started`/`check.completed` carry an additive `projectId`.
+- **`DetectedProject`** gains `id`, `lockfile` (name + content sha), `manifestSha256`,
+  `npmrcSha256`, `packageManagerSpec`, and `envFiles` (NAMES only — `.env` contents are a
+  secret-classified read, but "ships `.env.example`, has no `.env`" is a fact worth surfacing
+  rather than a dev server that dies during startup for no visible reason). The stamp union
+  qualifies every `relPath` by unit, so the TOCTOU guard notices a manifest appearing in ANY unit.
+- **One detection per session:** assembly detects once, before the system prompt, and hands the
+  same result to the prompt and to all three tools. The prompt block names each project so the
+  model can name one back; each tool then refreshes its own copy, so no tool advances another's
+  gate.
+
+## Project setup (`setup/`, `tools/project-setup.ts`) — install, migrate, seed
+
+The check inversion applied to the one operation the harness refused to perform until now. There
+is still no dependency-install CHECK KIND: setup has its own tool, its own consent, its own event
+stream, and no path to satisfying a verification gate. A check still means "we verified"; it never
+means "we fetched".
+
+- **The model names an INTENT and a UNIT; the harness names the command.** `install` resolves from
+  the LOCKFILE (`package-lock.json`→`npm ci`; `pnpm-lock.yaml`→`pnpm install --frozen-lockfile`;
+  `yarn.lock`→ v1 `--frozen-lockfile` or Berry `--immutable`, read from `packageManager`). When
+  yarn.lock exists and nothing declares the major, it REFUSES rather than guessing between two
+  incompatible flags. The lockfile chosen follows the DETECTED package manager, so a stale
+  `package-lock.json` in a migrated repo does not compose `npm ci` for a pnpm project; every other
+  lockfile present is named in the evidence. No lockfile still installs, saying the versions are
+  NOT pinned. Python is `unsupported` with the reason. `migrate`/`seed` resolve the project's OWN
+  script from a fixed per-intent allowlist, so neither can become "run any script".
+- **Consent, two different answers for two different consequences.** An install is `external` and
+  MAY replay under `[s]`, bound to `sha(lockfile + package.json + .npmrc)` — three files, because
+  every package manager executes package.json's lifecycle scripts during an install and `.npmrc`
+  chooses the registry and the shell they run in. Binding the lockfile alone let an ordinary
+  auto-allowed package.json write turn one `[s]` into standing arbitrary-shell consent (found by
+  the S16 review; the S14.5 body-binding lesson, one file over). `migrate`/`seed` are
+  `destructive` and ask EVERY time: a migration is not idempotent, so "you approved this once"
+  cannot honestly mean "you approved it again". They issue no replay keys, and `destructive` is
+  structurally non-grantable — two independent reasons for the same answer. Installs deliberately
+  DO run lifecycle scripts; `--ignore-scripts` would break esbuild/playwright/prebuilds and make
+  the capability a lie, so the prompt says so instead.
+- **Evidence:** `setup.started` (from `onSpawn` only) / `setup.completed` are NEW event types,
+  additive, schema still v1. Reusing `check.*` would have taught every existing reader a
+  falsehood — `collectPassingEvidence` marks a file CHECKED on a zero exit, gates count a passing
+  kind as verification, and the repair ledger accepts one as proof. The exit code is the verdict
+  (`ok`, never `pass`); `reconstruct` replays an interrupted setup as "dependency or local data
+  state is UNKNOWN — re-run it"; `setup.started` joins `WORK_EVENT_TYPES` and the pre-integration
+  spawn set. `SETUPS_PER_SESSION = 12`, events-rebuilt.
+- **Parent-only**, for a sharper reason than `run_check`'s: an executor worktree is disposable, so
+  an install there populates a directory about to be deleted, and a migration there writes the
+  REAL local database from what the user believes is isolation.
+- **Recovery:** `dependency-setup` finally has a path forward — its catalogue entry names
+  `project_setup install`, still human-gated and still `autoEligible: false`. A failed setup
+  classifies as that class by construction; a TIMED-OUT one is `timeout-resource` and an ABORTED
+  one is `unknown`, because a Ctrl+C on a slow `npm ci` produced no verdict. A repair proof must
+  come from the project that failed.
+
 ## Typed verification (`checks/`, `tools/run-check.ts`)
 
 **The model names KINDS; the harness names COMMANDS.** That inversion is the whole trust
@@ -315,7 +399,7 @@ argument, and everything else follows from it.
 - **Three refusals that spawn nothing:** the resolved command (or the script BODY it invokes)
   changed since the gate; a malformed request (`test-targeted` with no usable scope) — refused as
   a CALL, with no event, so a caller mistake can never become gate evidence; and the session
-  check budget (`CHECKS_PER_SESSION = 60`, events-rebuilt).
+  check budget (`CHECKS_PER_SESSION = 80`, events-rebuilt).
 - **Evidence:** `check.started` is emitted from `onSpawn` ONLY, so it means exactly what
   `command.started` means — a process really started. An `unsupported` kind records a completed
   event alone carrying `unsupportedReason` (`no-recipe` | `precondition` | `bad-request`), which
@@ -349,7 +433,7 @@ explicit SESSION resource with recorded start, readiness, health, logs, and dete
   (`pid, exited, isAlive, stop, tail`) instead of awaiting an outcome. Output goes to a
   per-preview LOG FILE via an inherited fd — no pipes, so an orphan surviving harness death can
   never wedge on a full pipe buffer half-serving requests — and the parent's fd copy closes at
-  spawn. The child is `unref()`ed. Lifetime bounds are typed stop reasons: TTL (30 min), log cap
+  spawn. The child is `unref()`ed. Lifetime bounds are typed stop reasons: TTL (60 min), log cap
   (16 MiB → `log-overflow`), explicit stop, session end. `stop()` bounds BOTH the kill helper and
   the wait for death, and re-checks OS liveness first so a crash coinciding with a timer is never
   relabeled. POSIX children get their own process group; on Windows detaching is NOT viable
@@ -395,7 +479,7 @@ the gate-waiving `unsupported/precondition`.
   DECLARED condition — a load event, networkidle, or a quiet spinner never count; expect/
   screenshot steps cannot precede the first goto (schema) and steps run strictly in order,
   stopping at the first failure. Caps: ≤20 steps, ≤4 declared screenshots, per-step timeouts
-  clamped to the 60s flow wall, bounded error/request records.
+  clamped to the 90s flow wall, bounded error/request records.
 - **Typed taxonomy**: `timeout` / `assertion` (last observed state recorded) / `navigation` (the
   origin lock: any off-origin TOP-LEVEL navigation aborts the flow; a REAL URL-origin comparison,
   not a string prefix) / `runtime` (uncaught page error) / `protocol` (browser/driver died — the
@@ -552,7 +636,7 @@ delegated task is a bounded, attributable unit beneath it.
   and approval mode (`auto-deny` | `forward`). A load-time check pins the two tables consistent.
   Budgets: read-only 15 steps / 5 min / 30k out; **reviewer 24 steps / 8 min / 30k out** (its
   brief demands interleaved read→record work, and 15 starved exactly the diligent lenses into
-  `budget-steps`, which cannot qualify a round); executor 30 / 12 min / 50k (approval wait counts
+  `budget-steps`, which cannot qualify a round); executor 40 / 20 min / 50k (approval wait counts
   against its wall clock).
 - **Named admission seams.** `retrieve` and `report_finding` exist only as per-session instances
   and reach children ONLY through named `SubagentDeps` fields; `childTools()` admits one iff the
@@ -582,8 +666,8 @@ delegated task is a bounded, attributable unit beneath it.
   AGENT.md injected (generated memory docs deliberately not). Read-only roles get
   `autoDenyApprover`; the executor's asks FORWARD to the parent's approver.
 - **Caps (harness-fixed, never model-controlled):** per-role budgets; group ≤ 3; `TASKS_PER_SESSION
-  = 12`, group-atomic (a group that does not fully fit is refused whole, spawning nothing); a
-  cumulative `SESSION_CHILD_OUTPUT_TOKEN_CAP = 150_000`; `MAX_REVIEW_ROUNDS = 2` (a third reviewer
+  = 16`, group-atomic (a group that does not fully fit is refused whole, spawning nothing); a
+  cumulative `SESSION_CHILD_OUTPUT_TOKEN_CAP = 200_000`; `MAX_REVIEW_ROUNDS = 2` (a third reviewer
   group refuses, naming the real exits — triage, or `/accept confirm`); no automatic retries.
   Cause-tracked cancellation maps parent-abort / wall-clock / token-cap / forwarded deny-stop onto
   distinct `TaskStatus` values and child end reasons. Progress lines carry `role·childId` identity
@@ -636,7 +720,7 @@ review → apply, every link evidenced.
 - **Capture:** at task end — for ANY status; partial work is evidence — `git status --porcelain=v2
   -z` in the worktree (detached HEAD IS the base), workspace-prefix filtered, base bytes
   materialized BINARY-SAFELY via read-tree + `checkout-index --prefix` staging, after + base bytes
-  stored as content-addressed blobs, bounded (`MAX_TASK_CHANGE_FILES = 200` /
+  stored as content-addressed blobs, bounded (`MAX_TASK_CHANGE_FILES = 400` /
   `MAX_TASK_CHANGE_FILE_BYTES = 5 MiB`; every omission counted). Rename PAIRS survive the cap
   atomically — keeping a delete whose partner create was dropped would half-apply a move. Recorded
   as callId-bound `task.changes`; the diff OUTLIVES the worktree. Overlapping write-sets between
@@ -1129,8 +1213,9 @@ lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The a
 | retrieval | `workspace.mapped` (+`inventorySha256`, `indexedFiles`, `indexState`) |
 | tasks | `task.started` (+`planTaskId`, `planTaskSha`), `task.ended`, `task.changes`, `task.applied`, `task.base-checkpoint`, `task.supervision`, `worktree.created`, `worktree.removed` |
 | plans | `plan.route {mode, source}`, `plan.updated` (+`graph`), `plan.approved {sha256}`, `plan.discarded` (+`reason: 'accepted'`) |
-| verification | `check.started` (a REAL spawn — a `WORK_EVENT_TYPES` member), `check.completed` (verdict + named signals + `scopePaths`) |
-| recovery | `repair.attempted`, `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash) |
+| verification | `check.started` (a REAL spawn — a `WORK_EVENT_TYPES` member), `check.completed` (verdict + named signals + `scopePaths`), both +`projectId` |
+| setup | `setup.started` (a REAL spawn; a `WORK_EVENT_TYPES` member), `setup.completed` (`ok`/`failed`/`error`/`unsupported` — never `pass`, and never readable as verification) |
+| recovery | `repair.attempted` (+`projectId` — a proof must come from the project that failed), `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash) |
 | preview/browser | `preview.started`, `preview.ready`, `preview.ended`, `preview.swept`, `browser.flow` |
 | review | `review.findings` (an EMPTY list is a recorded clean lens), `review.triage` (deliberately NO `review.completed` — a round is derived from its capture events) |
 | acceptance | `session.accepted {complete, summary, unfinished?, deliveryRef?, deliveryOid?}` |

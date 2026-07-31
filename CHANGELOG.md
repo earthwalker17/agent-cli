@@ -7,6 +7,83 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.2.0] — 2026-07-31
+
+Real local software engineering. A workspace is no longer assumed to hold one project at its root,
+and dependency installation is no longer something the harness refuses to do and tells you to go
+do yourself.
+
+### Added
+
+- **Project units.** `detectWorkspace` discovers every project in a workspace — declared npm/pnpm
+  workspaces, every depth-1 directory holding a manifest, and the children of conventional
+  containers — bounded (12 units, depth 2), never-throwing, and deterministically ordered.
+  Anything it declines to interpret (a glob richer than a trailing `/*`, a truncating cap) is
+  RECORDED as a note rather than silently dropped. Before this, a repository holding `web/` and
+  `api/` detected nothing at all: every check `unsupported`, no preview script, every declared
+  gate warned unrunnable. It did not fail loudly; it went inert.
+- **Per-unit checks and previews.** `run_check` and `preview` take a `project`; the command runs in
+  that unit's directory and the evidence says so. A frontend and a backend can run at once
+  (concurrent previews 2 → 4). Recipe ids are unit-qualified, so an `[s]` for `api` is not an `[s]`
+  for `web` — including when both resolve the byte-identical `npm run test`.
+- **`project_setup`** — `install`, `migrate`, `seed`. The model names an INTENT and a UNIT; the
+  harness resolves the command from the lockfile (`npm ci` / `pnpm install --frozen-lockfile` /
+  yarn v1 vs Berry, refusing to guess when the project declares neither) or from the project's own
+  declared script. An install is `external` and may replay under `[s]` bound to
+  `sha(lockfile + package.json + .npmrc)`; migrations and seeds are `destructive` and ask EVERY
+  time, because a migration is not idempotent.
+- **Per-project verification scoping.** `PlanTask.project` and `PlanGraph.gates.projects` — both
+  additive and sha-neutral when absent, so every existing plan keeps its exact approval binding. A
+  `completion: ['test']` gate over a full-stack workspace can now require BOTH halves instead of
+  going green on whichever ran first.
+- **`run_command` takes a `cwd`**, so the recorded evidence names the directory the command really
+  ran in rather than the workspace root.
+- The system prompt names the detected projects, their package managers, lockfiles, whether their
+  dependencies are installed, and whether they expect environment configuration they do not have.
+
+### Changed
+
+- **Limits, audited and raised where they would stop legitimate work** (`test/limits.test.ts` now
+  records the whole table): per-turn tool calls 20 → 40, run_command timeout ceiling 600 → 900s,
+  concurrent previews 2 → 4, preview TTL 30 → 60 min, readiness 30 → 60s, executor budget
+  30 steps/12 min → 40/20 min, captured change files 200 → 400, checks per session 60 → 80,
+  delegated tasks 12 → 16, child output tokens 150k → 200k, repair wall 20 → 30 min, exec capture
+  512 KiB → 1 MiB, browser flow wall 60 → 90s. **No repetition bound was raised** — attempts,
+  repairs and review rounds are unchanged, because a looser loop bound buys looping, not
+  capability.
+- The `dependency-setup` recovery class names a path forward (`project_setup install`) instead of
+  dead-ending at "ask the user". It remains human-gated and never auto-eligible.
+
+### Fixed
+
+- **The session diff no longer prints the contents of secret-named files.** Writing `.env` became a
+  routine step this session; `/diff` reconstructed it from the snapshot blob and printed it to a
+  terminal that routinely gets pasted into issues. It now reports the shape of the change
+  (`+1/−0 lines`) and withholds the body.
+- **A supervision stall is no longer reported for a child that is running a command.** A legitimate
+  five-minute install looked exactly like a hung child, which is how a signal stops meaning
+  anything.
+- Findings from a four-lens adversarial review, all verified by hand before fixing: an install
+  `[s]` that was standing arbitrary-shell consent (package.json's lifecycle scripts were outside
+  the consent identity); a workspaces-monorepo root that silently WAIVED declared gates; a repair
+  that could be "proven" by a green check in a different project; a plan that could be stranded
+  with no exit by a misnamed project; a session grant that was stored and never read;
+  non-deterministic project discovery; a stale lockfile composing the wrong install command; a
+  column-0 comment truncating a pnpm workspace list.
+
+### Honest limits
+
+- The **resolution layer** is live-proven against a real two-package project (Express +
+  `node:sqlite` and Vite + React, real lockfiles, real `npm install`): 21/21 assertions. The
+  **end-to-end agent workflow** on such a project — installs through real approvals, two
+  simultaneous dev servers, a browser flow over the integrated stack — has NOT yet been run live.
+- yarn support is implemented from documentation and unit-tested only; yarn is not installed on
+  the development machine. npm is live-exercised.
+- External database servers, Docker and container orchestration are out of scope: file-backed
+  local databases and project-declared migrate/seed scripts are what this supports.
+- Executor subagents still cannot verify their own work — worktrees materialise without
+  `node_modules`, so the parent verifies after integration.
+
 ## [1.1.1] — 2026-07-30
 
 ### Fixed

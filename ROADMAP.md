@@ -6,6 +6,140 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 16 (2026-07-31) — Real local software engineering: project units
+
+### Objective
+
+Per BLUEPRINT S16: make the coding workflow dependable for realistic local applications — several
+projects in one workspace, lockfile-aware dependency installation, environment configuration,
+migrations and seed data, multiple simultaneous services, and verification scoped to the project
+it actually verified. Plus an audit of every task, tool-call, token, time, output, verification,
+recovery and supervision limit, raising the ones that would stop legitimate work.
+
+### The gap, stated from repository evidence
+
+Every live proof through v1.1 (Pulse, QuickBoard, LedgerLite) was a single-package,
+dependency-free fixture. `detectProject(root)` read only root-level manifests, so a repository
+holding `web/` and `api/` with no root manifest detected `kinds: []`: every check kind
+`unsupported`, no preview-capable script, `availableKinds()` empty so every declared gate warned
+unrunnable. The workflow did not fail loudly on a realistic project — it went **inert**. Three
+spawn sites hardcoded the workspace root as cwd (the event schema already carried `cwd`; only the
+producers lied), `MAX_CONCURRENT_PREVIEWS = 2` made a frontend plus a backend impossible, and
+there was no install path at all — `recovery/catalogue.ts` could only say "ask the user".
+
+### What was implemented (commits `0b7aff1` … `6f2a55e`)
+
+1. **`feat(checks,tools,policy)`** — project UNITS: bounded, never-throwing discovery (declared
+   workspaces + a general depth-1 scan + conventional containers), deterministic ordering,
+   unit-qualified recipe ids, per-unit cwd, `projectId` on check events, ambiguity refusing.
+2. **`feat(preview,tools)`** — per-unit previews: a frontend and a backend at once.
+3. **`feat(setup,policy,types)`** — `project_setup` (install / migrate / seed): lockfile-driven
+   install resolution, two different consent answers, `setup.*` events.
+4. **`feat(report,repl,recovery,runtime)`** — setup evidence everywhere, as WORK and never as
+   verification.
+5. **`feat(plan)`** — `PlanTask.project` and `gates.projects`, both sha-neutral when absent.
+6. **`feat(tools,workspace,cli,report)`** — `run_command` cwd, ONE detection per session, project
+   facts in the system prompt, and secret-named file contents withheld from the session diff.
+7. **`chore(limits)`** — the audited bound increases, asserted as one visible contract.
+8. **`fix(setup,checks,plan,recovery)`** — the adversarial-review findings (below).
+
+### Decisions (and why)
+
+- **Setup is not verification, structurally.** New event types rather than a widened `check.*`,
+  because `collectPassingEvidence` marks a file CHECKED on a zero exit, plan gates count a passing
+  kind as verification, and the repair ledger accepts one as proof. An install exiting 0 means
+  dependencies were fetched. A paired test now asserts the asymmetry directly: same file, same
+  zero exit, same ordering — CHECKED via `check.completed`, UNCHECKED via `setup.completed`.
+- **An install's "body" is three files.** The lockfile decides versions, package.json's lifecycle
+  scripts decide what runs, `.npmrc` decides the registry and the shell. Binding only the first was
+  the session's critical review finding.
+- **Ambiguity refuses; it never picks** — including when a root unit exists, because a container
+  root resolves most kinds to `unsupported`, and that reason WAIVES a gate.
+- **The root unit is never qualified.** Single-project workspaces keep byte-identical recipe ids,
+  grants, evidence and tests; qualification appears only where the ambiguity it resolves exists.
+- **Scale bounds were raised; repetition bounds were not.** A looser loop bound buys more looping,
+  never more capability. `test/limits.test.ts` records both categories with the reasoning.
+
+### The adversarial review — 4 lenses, 4 critical/high findings, all fixed
+
+One bounded batch (detection determinism; consent and authority; evidence, resume and gates;
+integration and test quality), every finding hand-verified before any fix. The four that mattered
+were all a Session-16 change re-opening a hole an earlier session had closed, one axis over:
+
+- **An install `[s]` was standing arbitrary-shell consent.** Approve `npm ci` once; add a
+  `preinstall` to package.json through an ordinary auto-allowed write (dependencies untouched, so
+  the lockfile is unchanged); call install again — key matches, no prompt, arbitrary shell.
+- **A monorepo root silently WAIVED declared gates**, so a full-stack session could be accepted as
+  COMPLETE with zero tests run, its evidence claiming the project cannot be tested.
+- **A repair could be "proven" by a green check in another project** — the S14.5 unrelated-green-
+  check hole on the project axis, missed by the `scopePaths` guard because `build` is not
+  scope-bearing.
+- **A plan could be stranded with no exit**: a task scoped to a nonexistent project can never pass
+  AND can never be waived.
+
+Also fixed: a dead `(project_setup, external)` grant that was still being STORED (the prompt hid
+`[s]`, the storage site had not been told); the resolver's "NO LOCKFILE — versions are NOT pinned"
+sentence computed and never shown; discovery non-determinism (200 raw dirents capped over an
+unsorted readdir); a stale `package-lock.json` composing `npm ci` for a pnpm project; a column-0
+comment truncating a pnpm `packages:` block while suppressing its own note; duplicate units on
+case-insensitive filesystems; a symlinked workspace entry resolving outside the workspace.
+
+The review also named the session's least-tested claims, and all three are now pinned:
+`project_setup` was attached in exactly one line of `assemble.ts` and deleting it left every test
+green; the shared-detection wiring was unobservable; the supervision stall fix had no test at all.
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite **1164 → 1322 passed / 11 skipped
+across 94 files** (+158). New pins cover unit discovery and its refusals, per-unit consent
+disjointness (an `[s]` for `api` does not cover `web`, including two units with byte-identical
+lockfiles), the install identity revoking on a package.json rewrite, the whole install resolution
+table including both yarn dialects and the refusal to guess, plan-sha stability asserted against
+the literal pre-S16 canonical form, `gates.projects` EACH-of semantics, the setup/verification
+asymmetry, the assembly seam, and the limits table as a contract.
+
+**Live proof — PARTIAL, and stated as such.** A real two-package fixture ("Roster":
+`api/` Express + TypeScript + `node:sqlite` with migrate/seed scripts, `web/` Vite + React, three
+seeded defects) was generated at `C:\Users\A\Desktop\agent-cli-s16-live\`, installed for real
+(`npm install`, 136 packages in api), and its seeded unit-test defect confirmed failing. The BUILT
+harness was then driven against it: **21/21 assertions** — two units discovered in deterministic
+order, the root correctly not a unit, an unnamed call refusing, per-unit runnable kinds, unit-
+qualified recipe ids with per-unit cwd, the same `npm run test` string in both projects yielding
+DIFFERENT replay-consent identities, lockfile-driven `npm ci`, migrate/seed resolving each
+project's own script, migrate never replayable, and a package.json rewrite revoking an install's
+`[s]` — the critical review finding, verified against a real project.
+
+**What was NOT proven live, and must not be claimed:** the full agent loop against a live model on
+this fixture (no scripted piped-REPL session was run), a real `npm ci` executed *through*
+`project_setup` with a real approval, two dev servers running simultaneously under harness
+management, a browser flow catching the integrated date defect, and a review lens catching the
+seeded XSS. The resolution layer is live-proven; the end-to-end workflow on a dependency-bearing
+project is not yet.
+
+### Open issues / boundaries (deliberate, documented)
+
+- **yarn is implemented from documentation and unit-tested only** — yarn is not installed on this
+  machine. npm is live-exercised; pnpm 11.1.3 is present but its install path was not run.
+- **External database servers, Docker and container orchestration remain out of scope.** S16
+  supports file-backed local databases and project-declared migrate/seed scripts.
+- **Executors still cannot verify their own work** (worktrees materialise without `node_modules`);
+  parent-only verification after apply remains the contract.
+- A graph gate without `gates.projects` is satisfied by ANY project — the agent plan view says so
+  verbatim; the user-facing plan view does not yet (review finding #3, not fixed).
+- The report's CHECKED correlation is temporal and has no project axis, so in a multi-project
+  session a file can be marked CHECKED by another project's passing check. In-contract as written,
+  but the contract is weaker than it reads.
+- `/preview` in the REPL does not label previews with their project (the tool's own `status` does).
+
+### Recommended next step
+
+Run the full live E2E on the Roster fixture before advertising the workflow: a scripted piped-REPL
+session through install → `.env` → migrate → seed → executor wave → per-project checks → two
+simultaneous previews → browser flow → review round → `/accept`, plus a resume-after-kill life for
+the interrupted-setup replay. Then Session 17 (documents/PDF pack) per BLUEPRINT.
+
+---
+
 ## Session 15 (2026-07-29/30) — V1.1: the multi-provider runtime
 
 ### Objective

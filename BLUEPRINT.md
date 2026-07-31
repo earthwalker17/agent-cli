@@ -47,17 +47,23 @@ honest vision degradation. **All five providers live-proven** through the real b
 GLM with each writing its own file). Default model is now `claude-opus-5`. Details and honest
 limits: `ROADMAP.md` Session 15, `ARCHITECTURE.md` "Providers".
 
-### Session 16 — Real Local Software Engineering
+### Session 16 — Real Local Software Engineering — **DONE (implementation), live proof PARTIAL**
 
-Move beyond dependency-free demo projects. Make the coding workflow dependable for realistic local
-applications that install dependencies, use lockfiles, build frontend and backend components, run
-multiple local processes, load environment configuration, perform migrations or local data setup,
-and verify the integrated result.
+Delivered: project UNITS (bounded multi-project detection), per-unit typed checks and previews,
+`project_setup` (lockfile-driven install / migrate / seed) with its own consent and its own event
+stream that can never satisfy a verification gate, per-project plan scoping, `run_command` cwd,
+one shared detection feeding the system prompt, secret-named contents withheld from the session
+diff, and an audited limits table (scale bounds raised, repetition bounds deliberately not).
+Suite 1164 → 1322. A four-lens adversarial review found four critical/high holes — all of them a
+Session-16 change re-opening an earlier session's closed hole one axis over — and all are fixed.
 
-Dependency installation and other consequential commands must remain visible and approval-gated.
-Add only the project detection, lifecycle management, verification recipes, and recovery support
-required by a realistic full-stack local acceptance run. External deployment platforms remain out of
-scope for now.
+**The resolution layer is live-proven** against a real two-package fixture (21/21 assertions,
+including a package.json rewrite revoking an install's `[s]`). **The end-to-end workflow is not.**
+Before this session's capability is advertised as complete, run the full live E2E described in
+`ROADMAP.md` Session 16 "Recommended next step" — install through `project_setup` with real
+approvals, two simultaneous dev servers, a browser flow over the integrated stack, a review round,
+`/accept`, and a resume-after-kill life. Details and honest limits: `ROADMAP.md` Session 16,
+`ARCHITECTURE.md` "Project units" and "Project setup".
 
 ### Session 17 — First Non-Coding Workflow Pack: Documents and PDF
 
@@ -161,7 +167,9 @@ Before calling the next phase mature, Agent CLI should have demonstrated:
 - ~~at least two genuinely different provider protocols and all named providers live-smoked through
   the same bounded tool loop~~ **(MET in S15: Anthropic Messages + OpenAI Responses + a
   Chat-Completions family, all five providers live)**;
-- a realistic dependency-bearing full-stack project built and verified locally;
+- a realistic dependency-bearing full-stack project built and verified locally — **S16 built the
+  capability and live-proved the RESOLUTION layer against a real two-package project; the
+  end-to-end agent run on it is still outstanding and is the first thing S17 should clear**;
 - a document/PDF workflow whose completion is based on artifact and visual evidence;
 - polyglot retrieval and checks over several different build ecosystems;
 - source-backed research with bounded network authority and durable provenance;

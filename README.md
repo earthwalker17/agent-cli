@@ -249,12 +249,31 @@ per-session tools the main agent (and only the main agent) receives:
 | `delegate_task` | Bounded subagent groups (1–3 per call, run in parallel) |
 | `apply_task_changes` | Reviewed, drift-refusing integration of executor changes |
 | `run_check` | Typed verification — the model names kinds, the harness resolves commands |
+| `project_setup` | Dependency install / migrate / seed — the model names an intent, the harness resolves the command from the lockfile or the project's own script |
 | `preview` | A managed dev-server process with recorded readiness, logs, and teardown |
 | `browser_flow` | Typed browser steps against a running preview; screenshots + traces |
 | `view_image` | Re-read a screenshot this session actually captured |
 | `recover` | The bounded repair ledger (classify → attempt → prove, or escalate) |
 | `review` | Parent triage over findings reviewers recorded |
 | `report_finding` | The reviewer child's ONLY findings channel (child-only) |
+
+**A workspace may hold several projects.** Agent CLI discovers each one (declared npm/pnpm
+workspaces, any depth-1 directory with a manifest, the children of `apps`/`packages`/`services`),
+and `run_check`, `preview` and `project_setup` each take a `project`. Commands run in that
+project's own directory and the evidence records which project it was, so a green test in `web/`
+is never mistaken for evidence about `api/` — including in plan gates, which can require a kind to
+pass in *each* named project. When several projects exist and a call names none, the harness
+**refuses rather than guessing**.
+
+**Dependencies, migrations and seed data go through `project_setup`, never a raw shell command.**
+You name an intent; the harness resolves the command from the lockfile (`npm ci`,
+`pnpm install --frozen-lockfile`, yarn v1 vs Berry — and it refuses to guess when the project
+declares neither) or from the project's own declared script. An install asks for approval showing
+the exact command, the directory, and the lockfile it is pinned to, and states plainly that it
+downloads and **executes** third-party package code with network access; a session-scope answer
+covers re-runs only while the lockfile, `package.json` and `.npmrc` are all unchanged. Migrations
+and seeds are classified destructive and ask **every** time, because a migration is not idempotent
+and the harness cannot undo it. A setup is never verification: it can never satisfy a plan gate.
 
 Every call passes through the policy engine before it runs. Reads and searches inside the
 workspace run automatically; in-workspace writes run automatically **and are snapshotted so they
@@ -356,6 +375,22 @@ Read this before trusting the harness with anything sensitive.
   fails, the mode is `none` (no enforcement) and **auto-run is disabled — every command asks**.
   Agent CLI never auto-runs a command with nothing enforcing the boundary, and never claims
   cross-platform parity it doesn't have.
+- **An install executes third-party code, and a migration cannot be undone.** `project_setup`
+  never runs without an explicit approval showing the exact command and directory, and installs
+  deliberately DO run package lifecycle scripts (`--ignore-scripts` would break esbuild,
+  playwright and every prebuild download, so the prompt states the risk instead of pretending it
+  away). A session-scope answer covers re-runs only while the lockfile, `package.json` and
+  `.npmrc` are unchanged; migrations and seeds ask every single time.
+- **The multi-project workflow's resolution layer is live-proven; the full run is not (yet).**
+  Detection, per-project command resolution and per-project consent were verified against a real
+  two-package project (Express + `node:sqlite`, Vite + React, real lockfiles, real `npm install`).
+  An end-to-end agent session on such a project — installs through real approvals, two dev servers
+  at once, a browser flow over the integrated stack — has not been run live, and this README does
+  not claim it has.
+- **yarn is implemented from documentation, not live-proven.** npm is exercised; pnpm is
+  implemented and unit-tested; yarn is not installed on the development machine.
+- **External database servers, Docker and containers are out of scope.** What is supported is
+  file-backed local databases and the project's own declared migrate/seed scripts.
 - **Undo is file-only.** It reverts `write_file` / `edit_file` changes via content-addressed
   snapshots, and refuses to overwrite a file that drifted (external edit) rather than clobber it.
   It does **not** cover `run_command` side effects, out-of-workspace edits, or external changes.
