@@ -109,6 +109,7 @@ export function foldGraphState(
     status: CheckStatus;
     seq: number;
     scopePaths: string[];
+    projectId: string;
     capabilityUnsupported: boolean;
   }[] = [];
 
@@ -132,10 +133,9 @@ export function foldGraphState(
         status: e.status,
         seq: e.seq,
         scopePaths: e.scopePaths ?? [],
-        // Only a PROJECT-capability reason may waive a gate the user approved. A malformed
-        // request ('bad-request') must never discharge verification; legacy events without a
-        // reason keep the old permissive reading, since they predate the distinction.
-        capabilityUnsupported: e.unsupportedReason === undefined || e.unsupportedReason !== 'bad-request',
+        // Session 16: absent = the root/only project, which is what every pre-S16 event means.
+        projectId: e.projectId ?? '.',
+        capabilityUnsupported: waivesGate(e.unsupportedReason),
       });
     }
   }
@@ -146,7 +146,12 @@ export function foldGraphState(
    * have verified it. `unsupported` counts as satisfied-with-a-caveat — the `parent-owned`
    * precedent — because an unrunnable gate must never be able to strand a plan with no exit.
    */
-  const verificationFor = (required: readonly CheckKind[], anchorSeq: number, touches: readonly string[] = []): TaskVerification => {
+  const verificationFor = (
+    required: readonly CheckKind[],
+    anchorSeq: number,
+    touches: readonly string[] = [],
+    project?: string,
+  ): TaskVerification => {
     if (required.length === 0) return { required: [], satisfied: [], waived: [], missing: [], status: 'none' };
     const satisfied: CheckKind[] = [];
     const waived: CheckKind[] = [];
@@ -154,6 +159,9 @@ export function foldGraphState(
     for (const kind of required) {
       const after = checkRuns.filter((r) => {
         if (r.check !== kind || r.seq <= anchorSeq) return false;
+        // Session 16: when the task names a project, only that project's runs count. A green
+        // `test` in `web/` is not evidence about a task that owns `api/`.
+        if (project !== undefined && r.projectId !== project) return false;
         // For a TARGETED test the scope IS the check: a green run over somebody else's files
         // proves nothing about this task. When the task declares no touches there is nothing to
         // match against, so the permissive reading stands (and the plan validator warns about it).
@@ -202,7 +210,7 @@ export function foldGraphState(
       // Placeholder: only a task that reached a terminal completed state has an integration
       // anchor to measure a gate against. Every earlier state keeps the required list visible
       // (so /tasks and the plan view can show what WILL gate it) with nothing satisfied yet.
-      verification: verificationFor(task.checks ?? [], Number.MAX_SAFE_INTEGER, task.touches),
+      verification: verificationFor(task.checks ?? [], Number.MAX_SAFE_INTEGER, task.touches, task.project),
     };
 
     if (task.role === 'main') {
@@ -289,7 +297,7 @@ export function foldGraphState(
           (acc, b) => Math.max(acc, ended.get(b.childSessionId)?.seq ?? 0, appliedSeq.get(b.childSessionId) ?? 0),
           end.seq,
         );
-        const verification = verificationFor(task.checks ?? [], anchor, task.touches);
+        const verification = verificationFor(task.checks ?? [], anchor, task.touches, task.project);
         if (verification.status === 'pending') {
           notes.push(`required check(s) not passed since integration: ${verification.missing.join(', ')} — prove with ${proveWith(verification.missing)}`);
         } else if (verification.status === 'waived') {
@@ -349,15 +357,7 @@ export function integrationGateState(
   let lastApply = 0;
   for (const e of events) if (e.type === 'task.applied') lastApply = Math.max(lastApply, e.seq);
   if (lastApply === 0) return { required, pending: [], waived: [] };
-  const pending: CheckKind[] = [];
-  const waived: CheckKind[] = [];
-  for (const kind of required) {
-    const after = events.filter((e) => e.type === 'check.completed' && e.check === kind && e.seq > lastApply);
-    if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
-    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && e.unsupportedReason !== 'bad-request')) waived.push(kind);
-    else pending.push(kind);
-  }
-  return { required, pending, waived };
+  return boundaryGate(required, events, lastApply, graph.gates?.projects);
 }
 
 /**
@@ -382,15 +382,58 @@ export function completionGateState(
     else if (e.type === 'undo.applied' && e.restored.length > 0) lastChange = Math.max(lastChange, e.seq);
     else if (e.type === 'git.restore' && e.restored.length > 0) lastChange = Math.max(lastChange, e.seq);
   }
+  return boundaryGate(required, events, lastChange, graph.gates?.projects);
+}
+
+/**
+ * The one implementation both boundary gates share. It existed twice, byte-identical, and the
+ * `bad-request` waiver rule was spelled a third time in the per-task fold — three copies of a
+ * consent-bearing predicate that had to agree and nothing enforcing that they did.
+ *
+ * Session 16 adds the project dimension: when the graph names `gates.projects`, a kind is
+ * satisfied only when it passed (or was honestly waived) in EVERY named project. Without that, a
+ * `completion: ['test']` gate over a full-stack workspace goes green on whichever project
+ * happened to run a test — a session accepted as complete having verified half of itself.
+ */
+function boundaryGate(
+  required: readonly CheckKind[],
+  events: readonly SessionEvent[],
+  afterSeq: number,
+  projects?: readonly string[],
+): { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } {
   const pending: CheckKind[] = [];
   const waived: CheckKind[] = [];
+  const scopes = projects !== undefined && projects.length > 0 ? projects : [undefined];
   for (const kind of required) {
-    const after = events.filter((e) => e.type === 'check.completed' && e.check === kind && e.seq > lastChange);
-    if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
-    if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && e.unsupportedReason !== 'bad-request')) waived.push(kind);
-    else pending.push(kind);
+    let anyWaived = false;
+    let allSatisfied = true;
+    for (const scope of scopes) {
+      const after = events.filter(
+        (e) => e.type === 'check.completed' && e.check === kind && e.seq > afterSeq && (scope === undefined || (e.projectId ?? '.') === scope),
+      );
+      if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
+      if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && waivesGate(e.unsupportedReason))) {
+        anyWaived = true;
+        continue;
+      }
+      allSatisfied = false;
+    }
+    if (!allSatisfied) pending.push(kind);
+    else if (anyWaived) waived.push(kind);
   }
-  return { required, pending, waived };
+  return { required: [...required], pending, waived };
+}
+
+/**
+ * May an `unsupported` result WAIVE a gate the user approved? Only a PROJECT-capability reason
+ * ('no-recipe' / 'precondition'). A malformed request must never discharge verification, and a
+ * legacy event with no reason keeps the old permissive reading — it predates the distinction.
+ *
+ * ONE implementation: this predicate is consent-bearing and used to be spelled three times in
+ * this file, in three places that had to agree with nothing enforcing that they did.
+ */
+function waivesGate(reason: 'no-recipe' | 'precondition' | 'bad-request' | undefined): boolean {
+  return reason !== 'bad-request';
 }
 
 function summarize(tasks: readonly PlanTaskState[], ready: readonly string[]): string {

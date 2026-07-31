@@ -59,6 +59,19 @@ export const PlanTaskSchema = z
       .max(4)
       .optional()
       .describe('Typed checks that gate this task: dependents stay blocked until each has passed.'),
+    /**
+     * Session 16: which detected PROJECT this task's declared checks must pass in. Same
+     * sha-neutrality contract as `checks` — optional with NO default, so plans written before
+     * this field keep their exact content sha. Absent keeps the pre-Session-16 reading: a pass
+     * in ANY project satisfies the gate, which is right for a single-project workspace and is
+     * an honestly weaker guarantee everywhere else.
+     */
+    project: z
+      .string()
+      .min(1)
+      .max(260)
+      .optional()
+      .describe("Which detected project this task's checks must pass in (e.g. \"api\"). Omit in a single-project workspace."),
     risk: z.enum(['low', 'medium', 'high']).default('low'),
     serial: z.boolean().default(false).describe('Must run alone, never grouped with other tasks.'),
   })
@@ -76,6 +89,17 @@ export const PlanGatesSchema = z
       .max(4)
       .optional()
       .describe('Checks that must pass after the last change before the session can be accepted as complete.'),
+    /**
+     * Session 16: the projects these gates must pass in — EACH of them. Without it a
+     * `completion: ['test']` gate over a full-stack workspace is satisfied by a green test in
+     * whichever project happened to run one, which would let a session be accepted as complete
+     * having verified half of itself. Optional with no default; absent = the any-project reading.
+     */
+    projects: z
+      .array(z.string().min(1).max(260))
+      .max(12)
+      .optional()
+      .describe('Projects these gates must each pass in (e.g. ["web","api"]). Omit in a single-project workspace.'),
   })
   .strict();
 
@@ -268,9 +292,30 @@ export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions 
     // Drop an EMPTY checks array rather than storing it: `[]` and absent are semantically the
     // same gate (none), but canonicalJson would hash them differently — and the content sha is
     // the approval binding. Normalizing here keeps "no gate" one canonical form.
-    const { checks: rawChecks, ...rest } = t;
-    return { ...rest, touches, ...(rawChecks !== undefined && rawChecks.length > 0 ? { checks: rawChecks } : {}) };
+    const { checks: rawChecks, project: rawProject, ...rest } = t;
+    // Same rule for `project` (Session 16): a blank string and an absent field are the same
+    // "no project scoping", and canonicalJson would hash them differently.
+    const project = rawProject !== undefined ? normalizeRelPrefix(rawProject) ?? (rawProject.trim() === '.' ? '.' : null) : null;
+    if (rawProject !== undefined && project === null) {
+      errors.push(`task '${t.id}' project '${rawProject}' is not a contained workspace-relative directory`);
+    }
+    return {
+      ...rest,
+      touches,
+      ...(rawChecks !== undefined && rawChecks.length > 0 ? { checks: rawChecks } : {}),
+      ...(project !== null ? { project } : {}),
+    };
   });
+
+  // Gate project scoping (Session 16): normalized, deduped and SORTED, so the same declaration
+  // always yields the same content sha regardless of how the model happened to order it.
+  const gateProjects: string[] = [];
+  for (const raw of input.gates?.projects ?? []) {
+    const norm = raw.trim() === '.' ? '.' : normalizeRelPrefix(raw);
+    if (norm === null) errors.push(`gates.projects entry '${raw}' is not a contained workspace-relative directory`);
+    else if (!gateProjects.includes(norm)) gateProjects.push(norm);
+  }
+  gateProjects.sort();
 
   // Same normalization for the graph-level gates: empty lists are absent lists.
   const gates =
@@ -279,6 +324,12 @@ export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions 
       : {
           ...((input.gates.integration?.length ?? 0) > 0 ? { integration: input.gates.integration } : {}),
           ...((input.gates.completion?.length ?? 0) > 0 ? { completion: input.gates.completion } : {}),
+          // `projects` normalizes the same way (Session 16), and is dropped when there is no gate
+          // for it to scope — a projects list beside no kinds scopes nothing and would only
+          // perturb the content sha.
+          ...(gateProjects.length > 0 && ((input.gates.integration?.length ?? 0) > 0 || (input.gates.completion?.length ?? 0) > 0)
+            ? { projects: gateProjects }
+            : {}),
         };
   const normalizedGates = gates !== undefined && Object.keys(gates).length > 0 ? gates : undefined;
 

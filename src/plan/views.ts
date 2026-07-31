@@ -146,13 +146,21 @@ export function renderAgentPlanView(doc: CanonicalPlanDoc, graphState?: GraphSta
             : v.status === 'waived'
               ? ` — waived (unsupported): ${v.waived.join(', ')}`
               : ` — PENDING: ${v.missing.join(', ')}`;
-      lines.push(`  checks (gate dependents): ${t.checks.join(', ')}${live}`);
+      // Naming the project is load-bearing where it exists: "test passed" and "test passed IN
+      // THE PROJECT THIS TASK OWNS" are different claims. Silent when unscoped — most plans have
+      // one project, and annotating every line with "(unscoped)" would be noise, not honesty.
+      const where = t.project !== undefined ? ` in project '${t.project}'` : '';
+      lines.push(`  checks (gate dependents)${where}: ${t.checks.join(', ')}${live}`);
     }
     if (state?.note !== undefined) lines.push(`  note: ${state.note}`);
   }
   if (g.gates !== undefined) {
-    if ((g.gates.integration?.length ?? 0) > 0) lines.push(`Gate (integration): ${g.gates.integration!.join(', ')}`);
-    if ((g.gates.completion?.length ?? 0) > 0) lines.push(`Gate (completion): ${g.gates.completion!.join(', ')}`);
+    // Gates DO carry the unscoped wording: there are at most two of these lines, and the failure
+    // this names — a full-stack session accepted as complete on a green test in one half — is
+    // exactly the one worth a few extra words at the consent boundary.
+    const scope = (g.gates.projects?.length ?? 0) > 0 ? ` in EACH of: ${g.gates.projects!.join(', ')}` : ' in ANY project (unscoped)';
+    if ((g.gates.integration?.length ?? 0) > 0) lines.push(`Gate (integration)${scope}: ${g.gates.integration!.join(', ')}`);
+    if ((g.gates.completion?.length ?? 0) > 0) lines.push(`Gate (completion)${scope}: ${g.gates.completion!.join(', ')}`);
   }
   if (g.review?.mode === 'waived') {
     lines.push(`Review: WAIVED — ${g.review.reason ?? '(no reason)'} (acceptance will carry this as a caveat)`);
