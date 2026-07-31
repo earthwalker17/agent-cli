@@ -208,24 +208,6 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       const planTaskId = input.plan_task;
       const gated = resolveFor(input).resolved;
 
-      // A project that could not be selected is a CALLER mistake, not a project capability: it
-      // refuses the call with the real unit ids and records NOTHING, exactly as a malformed
-      // test-targeted scope does. An `unsupported` event here would let "you did not say which
-      // project" quietly waive a gate the user approved.
-      const selected = unitFor(input);
-      if (selected.unit === null) {
-        return {
-          ok: false,
-          output:
-            `refused: ${selected.reason}\n` +
-            'Nothing ran and nothing was recorded: a call the harness cannot attribute to a project must never be ' +
-            'mistaken for "this project cannot verify that".',
-          error: 'no project selected',
-          durationMs: Date.now() - startedAt,
-          truncated: false,
-        };
-      }
-
       // TOCTOU: the human approved the commands resolved from the snapshot above. Re-probe; only
       // if a manifest actually changed do we re-detect, and only if that changes a COMMAND do we
       // refuse. The snapshot is updated either way, so the next call is gated on current truth.
@@ -245,6 +227,25 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
             truncated: false,
           };
         }
+      }
+
+      // A project that could not be selected is a CALLER mistake, not a project capability: it
+      // refuses the call with the real unit ids and records NOTHING, exactly as a malformed
+      // test-targeted scope does. An `unsupported` event here would let "you did not say which
+      // project" quietly waive a gate the user approved. Selected AFTER the re-detect above, so
+      // the ids it names are the ones that exist now.
+      const selected = unitFor(input);
+      if (selected.unit === null) {
+        return {
+          ok: false,
+          output:
+            `refused: ${selected.reason}\n` +
+            'Nothing ran and nothing was recorded: a call the harness cannot attribute to a project must never be ' +
+            'mistaken for "this project cannot verify that".',
+          error: 'no project selected',
+          durationMs: Date.now() - startedAt,
+          truncated: false,
+        };
       }
 
       const resolution = resolveFor(input);

@@ -60,6 +60,13 @@ export interface DetectedProject {
   /** Ecosystems with usable evidence; empty ⇒ every check kind is unsupported. */
   kinds: ProjectKind[];
   packageManager: PackageManager | null;
+  /**
+   * The verbatim `packageManager` field from package.json (e.g. `yarn@4.5.0`), charset-filtered
+   * and capped. Yarn's own install flag differs between v1 (`--frozen-lockfile`) and Berry
+   * (`--immutable`), and this declaration is the only authoritative way to tell them apart —
+   * without it the setup resolver refuses rather than guessing which one the project meant.
+   */
+  packageManagerSpec: string | null;
   /** package.json scripts: name → command text (both bounded) — DISPLAY/precondition use only. */
   scripts: Record<string, string>;
   /**

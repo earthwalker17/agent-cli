@@ -73,6 +73,14 @@ export type CommandEvidence =
 export type CheckKind = 'build' | 'test' | 'test-targeted' | 'typecheck' | 'lint' | 'format' | 'static-analysis' | 'browser';
 
 /**
+ * Project-setup intents (Session 16). Deliberately NOT members of `CheckKind`: a plan must not be
+ * able to declare `checks: ['install']`, and an install must never reach a reader that treats a
+ * zero exit as verification. Setup and verification are different words for different promises.
+ */
+export const SETUP_ACTIONS = ['install', 'migrate', 'seed'] as const;
+export type SetupAction = (typeof SETUP_ACTIONS)[number];
+
+/**
  * Harness-owned checkpoint ref kinds (Session 14): the lifecycle each ref gets at prune time.
  * 'task-base' (executor-group base, Session 11.5) and 'pre-integration' (before an
  * apply_task_changes with un-snapshot-covered prior changes) are session-scoped recovery
@@ -156,6 +164,50 @@ export type CheckEvidence =
       planTaskId?: string;
       scopePaths?: string[];
     };
+
+/**
+ * Structured facts about a project-setup run (Session 16), reported through
+ * `ToolContext.reportSetup`. Same callId-binding contract as every other evidence channel, and
+ * the same `started`-means-a-real-spawn rule as checks: a resolution that never ran reports an
+ * `ended` alone.
+ *
+ * Deliberately its OWN channel rather than a widened `CheckEvidence`. An install that exits 0 is
+ * not verification, and sharing the check channel would put it in front of every reader that
+ * treats `check.completed` as a verdict — the report's CHECKED correlation, the plan gates, the
+ * repair ledger's regression proof.
+ */
+export type SetupEvidence =
+  | {
+      kind: 'started';
+      action: SetupAction;
+      projectId: string;
+      recipeId: string;
+      command: string;
+      cwd: string;
+      timeoutMs: number;
+      packageManager?: string;
+      /** The lockfile an install is pinned by, and the sha consent bound (null = unhashable). */
+      lockfile?: string;
+      lockfileSha?: string;
+    }
+  | {
+      kind: 'ended';
+      action: SetupAction;
+      projectId: string;
+      recipeId: string;
+      status: SetupStatus;
+      /** Why an `unsupported` action could not run — the check taxonomy, same meanings. */
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
+      /** null unless the process genuinely exited (a killed setup has no exit code). */
+      exitCode: number | null;
+      termination?: CommandTermination;
+      durationMs: number;
+      summary: string;
+      signals?: string[];
+    };
+
+/** The setup verdict vocabulary. `ok` deliberately is not `pass`: a setup verifies nothing. */
+export type SetupStatus = 'ok' | 'failed' | 'error' | 'unsupported';
 
 /**
  * Structured facts about a managed preview process, reported through `ToolContext.reportPreview`
@@ -518,6 +570,7 @@ export interface ToolContext {
   reportPlan?: (e: PlanEvidence) => void;
   /** Evidence channel for typed-check lifecycle facts (Session 12); persisted under this call's id. */
   reportCheck?: (e: CheckEvidence) => void;
+  reportSetup?: (e: SetupEvidence) => void;
   /** Evidence channel for bounded-repair ledger facts (Session 12); persisted under this call's id. */
   reportRepair?: (e: RepairEvidence) => void;
   /** Evidence channel for review-triage facts (Session 14); persisted under this call's id. */
@@ -603,6 +656,13 @@ export interface ResolvedCheckFact {
   projectId?: string;
   cwd?: string;
   timeoutMs: number;
+  /**
+   * Whether a `session`-scope answer may store replay consent for this row (Session 16). Absent =
+   * true, the pre-existing behaviour for checks and previews. `false` makes the engine issue no
+   * replay keys at all, which is also what hides `[s]` — a migration is not idempotent, so
+   * "you approved this once" must never come to mean "you approved it again".
+   */
+  replayable?: boolean;
   effects: { writesOutputs: boolean; network: boolean; workspaceAuthored: boolean };
 }
 
@@ -731,9 +791,12 @@ export interface ApprovalRequest {
    * class-scoped session grant. 'preview' = a harness-resolved preview server (Session 13):
    * same replay-consent shape as 'check', but the prompt must state the different CONSEQUENCE —
    * the process keeps running and binds a local port.
+   * 'setup' = a harness-resolved dependency install / migration / seed (Session 16): the prompt
+   * must state the third distinct consequence — third-party code and network for an install,
+   * un-undoable local data change for a migration — and offers `[s]` only for the install.
    */
-  kind?: 'command' | 'check' | 'preview';
-  /** kind 'check'/'preview': how many distinct commands a session-scope answer would consent to re-run. */
+  kind?: 'command' | 'check' | 'preview' | 'setup';
+  /** kind 'check'/'preview'/'setup': how many distinct commands a session-scope answer would consent to re-run. */
   checkCount?: number;
   /** One-line summary (command string or "edit src/x.ts"). */
   summary: string;
@@ -1051,6 +1114,47 @@ export type EventBody =
       findings?: CheckFinding[];
       planTaskId?: string;
       scopePaths?: string[];
+    }
+  /**
+   * Project setup (Session 16, additive): dependency installation, migrations and seeding.
+   *
+   * A NEW event type on purpose. Reusing `check.*` would have been one line shorter and would
+   * have taught every existing reader a falsehood: `collectPassingEvidence` marks a file CHECKED
+   * when a check exited 0, the plan gates count a passing kind as verification, and the repair
+   * ledger accepts one as proof a defect is fixed. An install exiting 0 means dependencies were
+   * fetched. It is work, and it is recorded as work — it is not evidence that anything is correct.
+   *
+   * `setup.started` is emitted from `onSpawn` ONLY, so it means exactly what `command.started`
+   * and `check.started` mean: a process really started.
+   */
+  | {
+      type: 'setup.started';
+      callId: string;
+      action: SetupAction;
+      projectId: string;
+      recipeId: string;
+      /** The exact harness-resolved command — what the human approved and what ran. */
+      command: string;
+      cwd: string;
+      timeoutMs: number;
+      packageManager?: string;
+      /** The lockfile name and the sha consent bound; absent when the project has no lockfile. */
+      lockfile?: string;
+      lockfileSha?: string;
+    }
+  | {
+      type: 'setup.completed';
+      callId: string;
+      action: SetupAction;
+      projectId: string;
+      recipeId: string;
+      status: SetupStatus;
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
+      exitCode: number | null;
+      termination?: CommandTermination;
+      durationMs: number;
+      summary: string;
+      signals?: string[];
     }
   /**
    * The bounded-repair ledger (Session 12, additive). `repair.attempted` records a CLASSIFIED

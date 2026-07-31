@@ -34,7 +34,8 @@ import { isInside } from '../shared/pathutil.js';
 import { systemClock, type Clock } from '../shared/clock.js';
 import { systemIdGen, type IdGen } from '../shared/ids.js';
 import type { ProjectLayout } from '../store/layout.js';
-import type { Approver, ExecSandbox, ResolvedCheckFact } from '../types.js';
+import { SETUP_ACTIONS } from '../types.js';
+import type { Approver, ExecSandbox, ResolvedCheckFact, SetupEvidence } from '../types.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
@@ -237,6 +238,7 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   const snapBy = new Set<string>();
   const commandStartedBy = new Set<string>();
   const checkStartedBy = new Map<string, string[]>();
+  const setupStartedBy = new Map<string, { action: string; projectId: string }>();
   // One delegate call may start a PARALLEL GROUP (V0.7) — keep every task.started per callId,
   // or a crash replay would name only the last child and orphan the other survivors' evidence.
   const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>[]>();
@@ -247,6 +249,7 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
     else if (e.type === 'command.started') commandStartedBy.add(e.callId);
     else if (e.type === 'check.started') (checkStartedBy.get(e.callId) ?? checkStartedBy.set(e.callId, []).get(e.callId)!).push(e.check);
+    else if (e.type === 'setup.started') setupStartedBy.set(e.callId, { action: e.action, projectId: e.projectId });
     else if (e.type === 'task.started') (taskStartedBy.get(e.callId) ?? taskStartedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'task.changes') taskChangesBy.add(e.callId);
   }
@@ -293,6 +296,18 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
       // The command had SPAWNED (command.started recorded) — its side effects are unknown and
       // the process may even have kept running past the crash.
       return toolResultBlock(id, 'interrupted: the command was executing when the session crashed; its effects are unknown', true);
+    }
+    const setup = setupStartedBy.get(id);
+    if (setup !== undefined) {
+      // A setup had SPAWNED (Session 16). An interrupted `npm ci` leaves a half-written
+      // node_modules and an interrupted migration leaves a database in an unknown shape — so the
+      // honest replay is the same one a killed check gets: no verdict, unknown effects, re-run.
+      return toolResultBlock(
+        id,
+        `interrupted: a project ${setup.action} for project ${setup.projectId} was executing when the session crashed; ` +
+          'it produced no result and the project\'s dependency or local data state is UNKNOWN — re-run it',
+        true,
+      );
     }
     const checks = checkStartedBy.get(id);
     if (checks !== undefined && checks.length > 0) {
@@ -878,6 +893,40 @@ function recordCheckEvidence(session: Session, callId: string, e: CheckEvidence)
   });
 }
 
+/** Persist a tool-reported project-setup fact under the runtime-bound callId (Session 16). */
+function recordSetupEvidence(session: Session, callId: string, e: SetupEvidence): void {
+  if (e.kind === 'started') {
+    session.log.append({
+      type: 'setup.started',
+      callId,
+      action: e.action,
+      projectId: e.projectId,
+      recipeId: e.recipeId,
+      command: e.command,
+      cwd: e.cwd,
+      timeoutMs: e.timeoutMs,
+      ...(e.packageManager !== undefined ? { packageManager: e.packageManager } : {}),
+      ...(e.lockfile !== undefined ? { lockfile: e.lockfile } : {}),
+      ...(e.lockfileSha !== undefined ? { lockfileSha: e.lockfileSha } : {}),
+    });
+    return;
+  }
+  session.log.append({
+    type: 'setup.completed',
+    callId,
+    action: e.action,
+    projectId: e.projectId,
+    recipeId: e.recipeId,
+    status: e.status,
+    ...(e.unsupportedReason !== undefined ? { unsupportedReason: e.unsupportedReason } : {}),
+    exitCode: e.exitCode,
+    ...(e.termination !== undefined ? { termination: e.termination } : {}),
+    durationMs: e.durationMs,
+    summary: e.summary,
+    ...(e.signals !== undefined ? { signals: e.signals } : {}),
+  });
+}
+
 /** Persist a tool-reported preview lifecycle fact under the runtime-bound callId (Session 13). */
 function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvidence): void {
   if (e.kind === 'started') {
@@ -970,10 +1019,17 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
       ? { kind: 'command' as const }
       : tool.check !== undefined
         ? // The KIND derives from the policy VERDICT, not by re-deriving the fact: the engine
-          // already decided whether these resolved rows are a preview (Session 13) or a check.
+          // already decided whether these resolved rows are a preview (Session 13), a project
+          // setup (Session 16) or a check.
           {
-            kind: decision.rule.startsWith('preview.') ? ('preview' as const) : ('check' as const),
-            checkCount: decision.checkReplayKeys?.length ?? 1,
+            kind: decision.rule.startsWith('preview.')
+              ? ('preview' as const)
+              : decision.rule.startsWith('setup.')
+                ? ('setup' as const)
+                : ('check' as const),
+            // Only count what a session answer would ACTUALLY store. A migration issues no replay
+            // keys, so it must not advertise an [s] that would silently do nothing.
+            ...(decision.checkReplayKeys !== undefined ? { checkCount: decision.checkReplayKeys.length } : {}),
           }
         : {}),
     summary,
@@ -996,6 +1052,16 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
       resolved = tool.check(input).resolved;
     } catch {
       resolved = [];
+    }
+    // Setup rows (Session 16): the human must see the command, the DIRECTORY it runs in, and —
+    // for an install — the lockfile whose sha the consent is bound to. Without the directory this
+    // prompt would be identical for `npm ci` in `web/` and in `api/`.
+    const setupRow = resolved.find((r) => (SETUP_ACTIONS as readonly string[]).includes(r.kind));
+    if (setupRow !== undefined) {
+      return {
+        summary: `${tool.name}: ${setupRow.kind} ${setupRow.projectId !== undefined ? `[project ${setupRow.projectId}]` : ''}`.trimEnd(),
+        detail: `${setupRow.command}   [${setupRow.recipeId}]\n  in: ${setupRow.cwd ?? '(workspace root)'}`,
+      };
     }
     // Preview rows (Session 13): the consequence line is different in kind, not just degree —
     // the human is consenting to a process that KEEPS RUNNING and binds a port.
@@ -1127,6 +1193,7 @@ async function runExecution<I>(
     reportTask: (e) => recordTaskEvidence(session, callId, e),
     reportPlan: (e) => recordPlanEvidence(session, callId, e),
     reportCheck: (e) => recordCheckEvidence(session, callId, e),
+    reportSetup: (e) => recordSetupEvidence(session, callId, e),
     reportRepair: (e) => recordRepairEvidence(session, callId, e),
     reportReview: (e) => recordReviewEvidence(session, callId, e),
     reportPreview: (e) => recordPreviewEvidence(session, callId, e),

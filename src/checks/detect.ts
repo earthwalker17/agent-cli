@@ -29,6 +29,8 @@ const MAX_LOCKFILE_BYTES = 32 * 1024 * 1024;
 
 /** Script/dependency names accepted from workspace bytes. Anything else is dropped, not escaped. */
 const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9:_.\-]{0,63}$/;
+/** `packageManager` declarations, e.g. `yarn@4.5.0+sha224.abc`. Charset-filtered at ingestion. */
+const PM_SPEC_RE = /^[A-Za-z0-9][A-Za-z0-9@.+_\-]{0,99}$/;
 
 /** Node dependency names the recipe table knows how to use. */
 const NODE_TOOLS = ['typescript', 'vitest', 'jest', 'eslint', 'prettier'] as const;
@@ -269,10 +271,14 @@ export function detectProject(root: string, id = '.'): DetectedProject {
     evidence.push(`expects environment configuration (${envFiles.examples.join(', ')}) but none is present`);
   }
 
+  const declaredPm = typeof pkg?.['packageManager'] === 'string' ? (pkg['packageManager'] as string) : '';
+  const packageManagerSpec = PM_SPEC_RE.test(declaredPm) ? declaredPm : null;
+
   return {
     root,
     id,
     kinds,
+    packageManagerSpec,
     packageManager: detectPackageManager(root, pkg),
     scripts,
     scriptShas,

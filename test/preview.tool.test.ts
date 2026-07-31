@@ -118,6 +118,7 @@ describe('resolvePreview', () => {
     id: '.',
     kinds: ['node'],
     packageManager: 'npm',
+    packageManagerSpec: null,
     scripts,
     // Mirror detectProject: consent binds the sha of the FULL script value.
     scriptShas: Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, sha256(v)])),

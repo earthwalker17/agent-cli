@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { subagentRoleAccess } from '../types.js';
+import { SETUP_ACTIONS, subagentRoleAccess } from '../types.js';
 import type { ActionClass, MutationPlan, PolicyDecision, ResolvedCheckFact, Tool, ToolContext } from '../types.js';
 import { validatePath } from './paths.js';
 import { PathError } from '../shared/errors.js';
@@ -303,6 +303,53 @@ export function decide<I>(
     }
     const keys = fact.resolved.map((r) => checkReplayKey(r.recipeId, r.command, r.bodySha, r.projectId));
     const summary = fact.resolved.map((r) => `${r.kind} → ${r.recipeId}`).join('; ');
+    // A row may opt OUT of replay consent entirely (Session 16: migrations and seeds, and an
+    // install whose lockfile could not be hashed). When any row does, the call issues NO keys —
+    // which is also what hides `[s]`, since the prompt offers it off the keys, not off the class.
+    const replayable = fact.resolved.every((r) => r.replayable !== false);
+
+    // ── Project setup (Session 16) ──────────────────────────────────────────────────────────
+    // The same trust shape as a check — a harness-resolved command with body-bound consent — and
+    // a materially different CONSEQUENCE, so it gets its own rule ids and its own words. An
+    // install fetches and EXECUTES third-party code over the network; a migration changes local
+    // data the harness cannot snapshot. Neither is verification and neither may ever read as it.
+    const setupRow = fact.resolved.find((r) => (SETUP_ACTIONS as readonly string[]).includes(r.kind));
+    if (setupRow !== undefined) {
+      const where = setupRow.cwd !== undefined ? ` in ${setupRow.cwd}` : '';
+      if (setupRow.kind === 'install') {
+        if (replayable && keys.every((k) => grants.hasCheckReplay(k))) {
+          return decision('external', 'allow', 'setup.install-replay-consent', `re-running an install already approved this session (${summary})`, {
+            noUndo: true,
+            execBoundary: 'unsandboxed',
+            checkReplayKeys: keys,
+          });
+        }
+        return decision(
+          'external',
+          'ask',
+          'setup.install-approval-required',
+          `installs dependencies${where} with a harness-resolved command (${summary}); this DOWNLOADS AND EXECUTES ` +
+            'third-party package code, including lifecycle scripts, at full user privilege with network access; ' +
+            'NOT sandboxed, NOT snapshotted, NOT undoable' +
+            (replayable
+              ? '; a session-scope answer covers re-runs only while the lockfile is unchanged'
+              : '; this approval covers THIS CALL ONLY (no lockfile identity to bind re-runs to)'),
+          { noUndo: true, execBoundary: 'unsandboxed', ...(replayable ? { checkReplayKeys: keys } : {}) },
+        );
+      }
+      // migrate / seed: `destructive` is the honest class — irreversible local state change — and
+      // it is structurally non-grantable, which agrees with issuing no replay keys. Two
+      // independent reasons for the same answer, so neither can drift into offering a silent [s].
+      return decision(
+        'destructive',
+        'ask',
+        'setup.state-change-approval-required',
+        `runs this project's ${setupRow.kind} script${where} (${summary}); it changes local database or application ` +
+          'state that the harness does NOT snapshot and CANNOT undo, it is not idempotent, and it therefore asks ' +
+          'EVERY time; NOT sandboxed',
+        { noUndo: true, execBoundary: 'unsandboxed' },
+      );
+    }
     // A PREVIEW row (kind 'preview', Session 13) is the same trust shape — a harness-resolved
     // command with body-bound replay consent — but a materially different CONSEQUENCE: the
     // process deliberately keeps running and binds a port. The persisted decision must say so
@@ -310,7 +357,7 @@ export function decide<I>(
     // hence distinct rule ids and reasons. Mixed rows take the preview wording: the strictest
     // consequence governs the whole call.
     const isPreview = fact.resolved.some((r) => r.kind === 'preview');
-    if (keys.every((k) => grants.hasCheckReplay(k))) {
+    if (replayable && keys.every((k) => grants.hasCheckReplay(k))) {
       return decision(
         'reversible',
         'allow',

@@ -11,6 +11,7 @@ import { createDelegateTool, delegateCapsFromEvents, type DelegateCaps, type Exe
 import type { ChildStatusUpdate } from '../runtime/subagent.js';
 import { createRetrieveTool } from '../tools/retrieve.js';
 import { checkCapsFromEvents, createRunCheckTool, workspaceAvailableKinds, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
+import { createProjectSetupTool, setupCapsFromEvents, type ProjectSetupTool, type SetupCaps } from '../tools/project-setup.js';
 import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
@@ -103,6 +104,10 @@ export interface Assembled {
   checkTool: RunCheckTool;
   /** The live check counters (Session 12, events-rebuilt). */
   checkCaps: CheckCaps;
+  /** The project-setup tool instance (Session 16) — /checks reads the same workspace snapshot. */
+  setupTool: ProjectSetupTool;
+  /** The live setup counter (Session 16, events-rebuilt). */
+  setupCaps: SetupCaps;
   /** The managed-preview tool instance (Session 13) — /preview reads its live handles. */
   previewTool: PreviewTool;
   /** The live preview-start counter (Session 13, events-rebuilt). */
@@ -391,6 +396,13 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     },
   });
 
+  // project_setup (Session 16): dependency installs, migrations and seeding. Per-session for the
+  // same snapshot reason, and parent-only for a sharper one than run_check's — an executor's
+  // worktree is disposable, so an install there populates a directory about to be deleted, and a
+  // migration there writes the REAL local database from what the user believes is isolation.
+  const setupCaps = setupCapsFromEvents(session.log.events);
+  const setupTool = createProjectSetupTool({ workspaceRoot: ctx.ws, caps: setupCaps });
+
   // preview (Session 13): the managed preview-server tool — per-session for the same snapshot
   // reason as run_check, plus it owns this session's live process handles. `appendEnded` is the
   // session-bound single writer of `preview.ended`; a process death can arrive after the session
@@ -499,6 +511,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...session.tools,
     ...(retrieveTool !== undefined ? [retrieveTool] : []),
     checkTool,
+    setupTool,
     previewTool,
     browserTool,
     viewImageTool,
@@ -590,6 +603,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     delegateCaps,
     checkTool,
     checkCaps,
+    setupTool,
+    setupCaps,
     previewTool,
     previewCaps,
     stopAllPreviews,

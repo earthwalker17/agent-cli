@@ -33,7 +33,12 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
         ? '[typed check — harness-resolved command]'
         : req.kind === 'preview'
           ? '[preview server — harness-resolved command; KEEPS RUNNING]'
-          : `[${req.classification}]`;
+          : req.kind === 'setup'
+            ? // The third distinct consequence: an install fetches and RUNS third-party code;
+              // a migration writes local data nothing here can undo. The class is real, not a
+              // best-effort label, so it belongs in the header beside the shape.
+              `[project setup — harness-resolved command; ${req.classification}]`
+            : `[${req.classification}]`;
   const lines = [
     '',
     `  ⚠ approval required  ${cls}  ${req.tool}`,
@@ -65,10 +70,20 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   // A typed check offers a DIFFERENT [s] (Session 12): consent to re-run those exact
   // harness-resolved commands, never a class-scoped session grant. Distinct wording matters —
   // the two consents cover different things and must not read as the same promise.
-  const grantable = isGrantable(req.classification) && req.kind !== 'command' && req.kind !== 'check' && req.kind !== 'preview';
+  // 'setup' joins the exclusion for the same reason as 'check'/'preview': its consent lives in the
+  // replay store, not in a class-scoped grant. Note an install IS classified `external`, which IS
+  // grantable — so without this exclusion a session grant keyed (project_setup, external) would be
+  // stored and then never read, standing authority won by a label. The [s] below is offered off
+  // the KEYS instead, which is what makes a migration (no keys) show no [s] at all.
+  const grantable =
+    isGrantable(req.classification) && req.kind !== 'command' && req.kind !== 'check' && req.kind !== 'preview' && req.kind !== 'setup';
   const forwarded = req.taskContext !== undefined;
   const sPart =
-    req.kind === 'check'
+    req.kind === 'setup'
+      ? req.checkCount === undefined
+        ? '' // migrate/seed, or an unhashable lockfile: nothing would be stored, so nothing is offered
+        : '   [s] allow re-runs of THIS EXACT install while the lockfile is unchanged'
+      : req.kind === 'check'
       ? // Count what it actually grants: one keystroke stores replay consent for EVERY command in
         // the batch, and a prompt that says "this command" while granting three is a lie.
         `   [s] allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'}`
