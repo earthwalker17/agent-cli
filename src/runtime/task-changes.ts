@@ -19,7 +19,8 @@ import type { TaskChangeFile } from '../types.js';
  * `git show`. Everything is bounded and every omission is counted, never silent.
  */
 
-export const MAX_TASK_CHANGE_FILES = 200;
+/** Session 16: 200 → 400. A full-stack scaffold (two packages, config, tests) passes 200 easily. */
+export const MAX_TASK_CHANGE_FILES = 400;
 export const MAX_TASK_CHANGE_FILE_BYTES = 5 * 1024 * 1024;
 
 export interface CaptureDeps {

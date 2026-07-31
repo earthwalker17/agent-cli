@@ -5,6 +5,7 @@ import path from 'node:path';
 import { DEFAULT_MODEL, buildRunContext, makeProvider, parseCountFlag, resolveModel, resolveProvider } from '../src/cli/context.js';
 import { createProviderRegistry, resolveProviderName } from '../src/provider/registry.js';
 import { ConfigError } from '../src/shared/errors.js';
+import { DEFAULT_MAX_STEPS } from '../src/runtime/session.js';
 import type { CliValues } from '../src/cli/context.js';
 
 /**
@@ -155,7 +156,7 @@ describe('buildRunContext (catalog-driven budgets)', () => {
   it('maxSteps precedence: flag > config > 20; non-numeric refuses loudly', () => {
     expect(buildRunContext(mockValues({ 'max-steps': '7' })).maxSteps).toBe(7);
     expect(buildRunContext(mockValues(), { config: { maxSteps: 11 } }).maxSteps).toBe(11);
-    expect(buildRunContext(mockValues()).maxSteps).toBe(20);
+    expect(buildRunContext(mockValues()).maxSteps).toBe(DEFAULT_MAX_STEPS);
     expect(() => buildRunContext(mockValues({ 'max-steps': 'lots' }))).toThrow(/positive integer/);
     expect(() => parseCountFlag('max-steps', '-3')).toThrow(/positive integer/);
   });

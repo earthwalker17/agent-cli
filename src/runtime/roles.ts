@@ -70,7 +70,9 @@ const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 480_000, maxOutpu
  * Executor budget is larger: mutating work takes more steps, and time spent WAITING on a
  * forwarded approval counts against the task's wall clock (documented limitation).
  */
-export const EXECUTOR_BUDGET: TaskBudget = { maxSteps: 30, timeoutMs: 720_000, maxOutputTokens: 50_000 };
+/** Session 16: 30 steps / 12 min → 40 / 20 min. Real multi-file work in a worktree on a project
+ *  with actual dependencies takes more reads and more edits than a demo fixture did. */
+export const EXECUTOR_BUDGET: TaskBudget = { maxSteps: 40, timeoutMs: 1_200_000, maxOutputTokens: 50_000 };
 
 export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
   explorer: {

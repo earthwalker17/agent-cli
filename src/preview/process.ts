@@ -5,7 +5,13 @@ import { isAlive, killTree } from '../exec/kill.js';
 import type { PreviewStopReason, StopResult, SupervisedExit, SupervisedHandle, SupervisedSpec } from './types.js';
 
 /** A session resource must not outlive the user's attention span by much; restart is cheap. */
-export const DEFAULT_PREVIEW_TTL_MS = 30 * 60 * 1000;
+/**
+ * Session 16: 30min → 60min. A dependency-bearing full-stack session routinely outlives half an
+ * hour — install, migrate, seed, build, review — and having the servers reaped mid-session turned
+ * a bound meant to stop leaks into an interruption of legitimate work. Still a hard TTL, still a
+ * typed stop reason, still recorded.
+ */
+export const DEFAULT_PREVIEW_TTL_MS = 60 * 60 * 1000;
 export const DEFAULT_MAX_LOG_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_TAIL_BYTES = 8 * 1024;
 /** How often the log-size cap is checked (a cap, not an exact limit — stated honestly). */

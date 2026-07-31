@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { PassThrough } from 'node:stream';
 import { createStatusArea } from '../src/repl/status.js';
 import { createTaskTable } from '../src/repl/live-tasks.js';
+import { TASKS_PER_SESSION } from '../src/runtime/subagent.js';
 
 /**
  * The sticky status area (Session 11): exact escape-byte behavior on a (fake) TTY — the
@@ -119,7 +120,7 @@ describe('the live task table', () => {
     now = 65_000;
     const lines = table.statusLines({ tasksStarted: 3, childOutputTokens: 40_000, reviewRoundsStarted: 0 });
     expect(lines[0]).toContain('2 agent(s) running');
-    expect(lines[0]).toContain('tasks 3/12');
+    expect(lines[0]).toContain(`tasks 3/${String(TASKS_PER_SESSION)}`);
     const a = lines.find((l) => l.includes('aaaa'))!;
     expect(a).toContain('(t1)');
     expect(a).toContain('edit_file');

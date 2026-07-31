@@ -24,7 +24,9 @@ import type { FailureClass } from '../types.js';
 /** Automatic repair attempts per failure signature before the gate stops and escalates. */
 export const MAX_REPAIR_ATTEMPTS = 3;
 /** Wall time one failure signature may absorb before it must be escalated. */
-export const REPAIR_WALL_MS = 20 * 60 * 1000;
+/** Session 16: 20 → 30 min. Installs and builds are slow; MAX_REPAIR_ATTEMPTS (3) is unchanged,
+ *  so this lengthens the window a bounded number of attempts may occupy, not the number. */
+export const REPAIR_WALL_MS = 30 * 60 * 1000;
 /** Session-wide repair attempts — no unbounded repair, ever. */
 export const REPAIRS_PER_SESSION = 8;
 /** Delegated child output tokens spendable on repairs after the first attempt. */

@@ -62,7 +62,8 @@ export interface ExecOutcome {
   spawnError?: string;
 }
 
-const DEFAULT_CAPTURE_BYTES = 512 * 1024;
+/** Session 16: 512 KiB → 1 MiB. Install and build logs are the noisiest output the harness sees. */
+const DEFAULT_CAPTURE_BYTES = 1024 * 1024;
 const DEFAULT_DRAIN_TIMEOUT_MS = 1500;
 const EXIT_AFTER_KILL_BOUND_MS = 5000;
 

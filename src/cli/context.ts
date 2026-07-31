@@ -3,6 +3,7 @@ import path from 'node:path';
 import { EventLog } from '../store/event-log.js';
 import { MockProvider, parseScript } from '../provider/mock.js';
 import { autoDenyApprover, dangerousApprover, createInteractiveApprover } from '../runtime/approvals.js';
+import { DEFAULT_MAX_STEPS } from '../runtime/session.js';
 import { ConfigError } from '../shared/errors.js';
 import {
   DEFAULT_MODEL,
@@ -200,7 +201,7 @@ export function buildRunContext(values: CliValues, opts: RunContextOptions = {})
     throw new Error(`--max-steps and --max-turns are aliases for the same limit; got conflicting values '${values['max-steps']}' and '${values['max-turns']}'`);
   }
   const stepsRaw = values['max-steps'] ?? values['max-turns'];
-  const maxSteps = stepsRaw !== undefined ? parseCountFlag(values['max-steps'] !== undefined ? 'max-steps' : 'max-turns', stepsRaw) : (opts.config?.maxSteps ?? 20);
+  const maxSteps = stepsRaw !== undefined ? parseCountFlag(values['max-steps'] !== undefined ? 'max-steps' : 'max-turns', stepsRaw) : (opts.config?.maxSteps ?? DEFAULT_MAX_STEPS);
 
   const provider = makeProvider(values, opts.config, opts.registry);
   const approver = makeApprover(values, mode, opts.io, opts.approvalSignal);

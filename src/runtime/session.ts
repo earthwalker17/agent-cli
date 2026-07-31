@@ -90,6 +90,20 @@ export interface TurnResult {
   aborted: boolean;
 }
 
+/**
+ * Tool calls one turn may make before the loop stops and reports `max-steps` (Session 16: 20→40).
+ *
+ * 20 was set when a task meant "edit a few files and run the tests". A dependency-bearing
+ * full-stack turn is detect → install ×2 → write .env → migrate → seed → build → start two
+ * previews → check each project → drive a browser flow, and it ran out of steps mid-work with an
+ * honest but useless "step budget reached". Doubling it buys legitimate depth; it is still a hard
+ * ceiling, still reported honestly, and still overridable with --max-steps.
+ *
+ * ONE exported constant: this default was written twice (here and in the CLI context builder),
+ * which is how the library and the CLI quietly come to disagree about what a turn is.
+ */
+export const DEFAULT_MAX_STEPS = 40;
+
 export interface StartOptions {
   workspaceRoot: string;
   layout: ProjectLayout;
@@ -161,7 +175,7 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
     model: opts.model,
     mode: opts.mode,
     maxTokens: opts.maxTokens ?? 16_000,
-    maxSteps: opts.maxSteps ?? 20,
+    maxSteps: opts.maxSteps ?? DEFAULT_MAX_STEPS,
     system: opts.system ?? '',
     provider: opts.provider,
     approver: opts.approver,

@@ -30,7 +30,9 @@ const RunInput = z
         'Workspace-relative directory to run in (e.g. "api"). Must exist and be inside the workspace. ' +
           'Prefer this over `cd x && …`: the recorded evidence then names the directory the command really ran in.',
       ),
-    timeoutMs: z.number().int().positive().max(600_000).optional().describe('Kill after this many ms (default 120000)'),
+    // Session 16: 600s → 900s. A cold dependency install or a full build on Windows can exceed
+    // ten minutes, and a timeout there produced no verdict about work that had actually run.
+    timeoutMs: z.number().int().positive().max(900_000).optional().describe('Kill after this many ms (default 120000)'),
   })
   .strict();
 
@@ -52,7 +54,7 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
     'stdin is not connected: commands must be non-interactive. The child environment omits ' +
     'variables whose names look secret-like (KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL) — do not ' +
     'write commands that expect them. Commands time out (default 120s; set timeoutMs up to ' +
-    '600000) and the user can interrupt a running command. A killed command reports how it ' +
+    '900000) and the user can interrupt a running command. A killed command reports how it ' +
     'terminated and has NO exit code — never treat a killed command as evidence a check passed.',
   schema: RunInput,
   mutates: () => null,

@@ -18,6 +18,7 @@ import { readPlanState, setCanonicalStatus, writeCanonicalPlan, type PlanState }
 import { foldGraphState } from '../src/plan/graph-state.js';
 import { SnapshotStore } from '../src/store/snapshots.js';
 import type { SessionEvent, SubagentRoleName, Tool } from '../src/types.js';
+import { TASKS_PER_SESSION } from '../src/runtime/subagent.js';
 import type { SubagentDeps } from '../src/runtime/subagent.js';
 import type { WorkspaceMap } from '../src/workspace/map.js';
 
@@ -291,13 +292,16 @@ describe('delegateCapsFromEvents — resume keeps counting', () => {
       provider: new MockProvider([{ say: 'never runs' }]),
       map: MAP,
     };
-    const tool = createDelegateTool(deps, 'parent-x', undefined, { caps: { tasksStarted: 11, childOutputTokens: 0, reviewRoundsStarted: 0 } });
+    const oneSlotLeft = TASKS_PER_SESSION - 1;
+    const tool = createDelegateTool(deps, 'parent-x', undefined, {
+      caps: { tasksStarted: oneSlotLeft, childOutputTokens: 0, reviewRoundsStarted: 0 },
+    });
     const r = await tool.execute(
       { tasks: [{ role: 'explorer', task: 'a' }, { role: 'explorer', task: 'b' }] } as never,
       { workspaceRoot: repo, stateDir: layout.projectDir },
     );
     expect(r.ok).toBe(false);
-    expect(r.error).toContain('already delegated 11 of 12');
+    expect(r.error).toContain(`already delegated ${String(oneSlotLeft)} of ${String(TASKS_PER_SESSION)}`);
   });
 });
 

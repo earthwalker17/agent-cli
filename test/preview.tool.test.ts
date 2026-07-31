@@ -341,13 +341,15 @@ describe('preview tool — lifecycle', () => {
 
     const h2 = harness();
     const t2 = createPreviewTool(h2.deps);
-    await t2.execute({ action: 'start' }, h2.ctx);
-    await t2.execute({ action: 'start' }, h2.ctx);
-    expect(MAX_CONCURRENT_PREVIEWS).toBe(2);
+    // Symbolic, so raising the cap never breaks this again: fill it exactly, then overflow by one.
+    for (let i = 0; i < MAX_CONCURRENT_PREVIEWS; i++) {
+      expect((await t2.execute({ action: 'start' }, h2.ctx)).ok, `start ${String(i)}`).toBe(true);
+    }
+    expect(MAX_CONCURRENT_PREVIEWS).toBe(4); // Session 16: a frontend + a backend + headroom
     const r3 = await t2.execute({ action: 'start' }, h2.ctx);
     expect(r3.ok).toBe(false);
     expect(r3.error).toContain('too many concurrent');
-    expect(h2.handles).toHaveLength(2);
+    expect(h2.handles).toHaveLength(MAX_CONCURRENT_PREVIEWS); // the refusal spawned nothing extra
   });
 
   it('TOCTOU: a script rewrite between gate and execute refuses with approved/now and spawns nothing', async () => {

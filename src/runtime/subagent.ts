@@ -39,8 +39,11 @@ import type {
  */
 
 /** Cumulative delegation caps per parent session (enforced by the delegate tool's closure). */
-export const TASKS_PER_SESSION = 12;
-export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 150_000;
+/** Session 16: 12 → 16 tasks, 150k → 200k child output tokens. Multi-project work legitimately
+ *  needs more units of delegated work; the per-task budgets and the group cap of 3 are unchanged,
+ *  so this buys breadth, not longer or less bounded children. */
+export const TASKS_PER_SESSION = 16;
+export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 200_000;
 
 /**
  * A child's tool registry (Session 10): the static TOOLS filtered by the role contract, plus —
@@ -366,9 +369,15 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   let lastActivity = clock.now();
   let stallNoted = false;
   let wallPressureNoted = false;
+  // Session 16: a child with a command IN FLIGHT is not idle, it is working. The chain only fires
+  // on appended events, so a legitimate five-minute install inside an executor looked exactly
+  // like a hung child and recorded a `stall` observation the reader had to learn to ignore —
+  // which is how a signal stops meaning anything. Commands in flight are counted, not timed:
+  // the command's own timeout and the task wall clock still enforce, unchanged.
+  let commandsInFlight = 0;
   const stallTimer = setInterval(() => {
     const idleMs = clock.now() - lastActivity;
-    if (idleMs >= stallAfterMs) {
+    if (idleMs >= stallAfterMs && commandsInFlight === 0) {
       deps.onProgress?.(`${spec.role}·${child.id.slice(-4)} no activity for ${Math.round(idleMs / 1000)}s (hard timeout at ${Math.round(budget.timeoutMs / 1000)}s)`);
       if (!stallNoted) {
         stallNoted = true;
@@ -394,6 +403,10 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   child.log.onAppend = (e): void => {
     try {
       lastActivity = clock.now();
+      if (e.type === 'command.started' || e.type === 'check.started' || e.type === 'setup.started') commandsInFlight++;
+      else if (e.type === 'command.ended' || e.type === 'check.completed' || e.type === 'setup.completed') {
+        commandsInFlight = Math.max(0, commandsInFlight - 1);
+      }
       if (e.type === 'assistant.message') {
         stepsSeen++;
         outputTokens += e.usage.outputTokens;

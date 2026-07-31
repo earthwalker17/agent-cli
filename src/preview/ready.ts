@@ -28,7 +28,8 @@ export interface ReadyOptions {
   probeHttp?: (url: string) => Promise<number | null>;
 }
 
-export const DEFAULT_READY_WAIT_MS = 30_000;
+/** Session 16: 30s → 60s. A first-run Vite/Next/tsx dev server compiles before it listens. */
+export const DEFAULT_READY_WAIT_MS = 60_000;
 const DEFAULT_POLL_MS = 300;
 const PROBE_REQUEST_TIMEOUT_MS = 2_000;
 

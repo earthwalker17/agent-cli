@@ -51,7 +51,7 @@ const PreviewInput = z
       .max(65535)
       .optional()
       .describe('Expected port (also exported to the server as PORT). Without it the harness parses the port from server output.'),
-    wait_ms: z.number().int().min(1000).max(120_000).optional().describe('Readiness wait bound for start (default 30000).'),
+    wait_ms: z.number().int().min(1000).max(180_000).optional().describe('Readiness wait bound for start (default 60000).'),
     preview_id: z.string().max(64).optional().describe('Which preview to stop (required for stop when more than one is running).'),
   })
   .strict();
@@ -62,8 +62,12 @@ export interface PreviewCaps {
   previewsStarted: number;
 }
 
-export const PREVIEWS_PER_SESSION = 8;
-export const MAX_CONCURRENT_PREVIEWS = 2;
+// Session 16: a full-stack session runs a frontend AND a backend, so 2 was exactly the number
+// that made the intended shape impossible. 4 leaves room for a worker or a second API without
+// becoming an invitation to leave processes lying around; the per-session start budget rises with
+// it, because restarts across three services legitimately cost more than restarts across one.
+export const PREVIEWS_PER_SESSION = 12;
+export const MAX_CONCURRENT_PREVIEWS = 4;
 /** Tail excerpt shown to the model when a start fails or a preview is inspected. */
 const TAIL_EXCERPT_BYTES = 2_048;
 
