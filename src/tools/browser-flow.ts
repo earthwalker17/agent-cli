@@ -46,7 +46,8 @@ export function artifactBytesFromEvents(events: readonly SessionEvent[]): number
 }
 
 export interface BrowserToolDeps {
-  preview: Pick<PreviewTool, 'readyPreview'>;
+  /** `active` is read for project attribution and for naming what is running in a denial. */
+  preview: Pick<PreviewTool, 'readyPreview' | 'active'>;
   putBlob: (bytes: Buffer) => string;
   /** The SAME live instance run_check refuses on — flows share the session check budget. */
   caps: CheckCaps;
@@ -78,6 +79,12 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
       flowName: input.flow.name,
       stepCount: input.flow.steps.length,
       previewBound: deps.preview.readyPreview(input.flow.preview_id) !== null,
+      ...(input.flow.preview_id !== undefined ? { requestedPreviewId: input.flow.preview_id } : {}),
+      // Ready == what `readyPreview` would consider bindable: alive AND readiness-observed.
+      readyPreviews: deps.preview
+        .active()
+        .filter((a) => a.readyObserved && a.handle.isAlive())
+        .map((a) => ({ previewId: a.previewId, projectId: a.projectId })),
     }),
 
     async execute(input, ctx): Promise<ToolResult> {
@@ -92,6 +99,25 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         durationMs: Date.now() - startedAt,
         truncated: false,
       });
+      /**
+       * The project this flow's evidence belongs to. Session 16 gave every check event a
+       * `projectId` and every gate consumer folds a missing one to the root `'.'` — so a browser
+       * flow that recorded none made a project-scoped `browser` gate permanently unsatisfiable
+       * AND unwaivable, with no other call able to produce that kind. The preview already knows
+       * which unit it serves; the flow just has to say so. Best-effort by design: attribution is
+       * for the gate, and a flow whose preview has vanished is an `error` that satisfies nothing
+       * either way.
+       */
+      const boundProject = (): string | undefined => {
+        const all = deps.preview.active();
+        const hit =
+          flow.preview_id !== undefined
+            ? all.find((a) => a.previewId === flow.preview_id)
+            : all.filter((a) => a.readyObserved)[0];
+        return hit?.projectId;
+      };
+      const projectId = boundProject();
+
       const completed = (r: {
         status: 'pass' | 'fail' | 'error' | 'unsupported';
         summary: string;
@@ -105,6 +131,7 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
           check: 'browser',
           recipeId: `browser.flow/${flow.name}`,
           status: r.status,
+          ...(projectId !== undefined ? { projectId } : {}),
           ...(r.unsupportedReason !== undefined ? { unsupportedReason: r.unsupportedReason } : {}),
           exitCode: null,
           durationMs: r.durationMs ?? 0,
@@ -184,6 +211,7 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
             command: NO_SHELL_COMMAND,
             cwd: ctx.workspaceRoot,
             timeoutMs: FLOW_WALL_MS,
+            ...(projectId !== undefined ? { projectId } : {}),
             ...(planTaskId !== undefined ? { planTaskId } : {}),
           }),
       });
@@ -227,7 +255,14 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         ...(traceOmittedBytes !== undefined ? { traceOmittedBytes } : {}),
       });
 
-      const lines: string[] = [result.summary];
+      // Name what was driven. An unbound flow binds to whatever single preview is ready — which
+      // in a full-stack session can legitimately be the API — so "the UI assertion failed" and
+      // "the flow was pointed at the backend" must be distinguishable from the result alone.
+      const lines: string[] = [
+        result.summary,
+        `  drove preview ${preview.previewId} [project ${preview.projectId}] at ${preview.url}` +
+          (flow.preview_id === undefined ? ' (no preview_id was given; this was the only ready preview)' : ''),
+      ];
       for (const s of result.steps) {
         lines.push(`  ${s.ok ? 'ok ' : 'FAIL'} ${String(s.n).padStart(2)}. ${s.kind} ${s.target}${s.failure !== undefined ? ` — [${s.failure.class}] ${s.failure.detail}` : ''}`);
       }

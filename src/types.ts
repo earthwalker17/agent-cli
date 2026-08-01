@@ -152,7 +152,7 @@ export type CheckEvidence =
       /** Session 16: which project UNIT this verified — what a `project`-scoped plan gate matches on. */
       projectId?: string;
       /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
       /** null unless the process genuinely exited (killed checks have no exit code). */
       exitCode: number | null;
       termination?: CommandTermination;
@@ -197,7 +197,7 @@ export type SetupEvidence =
       recipeId: string;
       status: SetupStatus;
       /** Why an `unsupported` action could not run — the check taxonomy, same meanings. */
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
       /** null unless the process genuinely exited (a killed setup has no exit code). */
       exitCode: number | null;
       termination?: CommandTermination;
@@ -734,7 +734,20 @@ export interface Tool<I = unknown> {
    * (the approval prompt said browser verification was included); anything else is denied —
    * there is deliberately no ask path for arbitrary-origin browsing this session.
    */
-  browser?(input: I): { flowName: string; stepCount: number; previewBound: boolean };
+  browser?(input: I): {
+    flowName: string;
+    stepCount: number;
+    previewBound: boolean;
+    /** The id the call asked for, when it named one — so a denial can distinguish "you named a
+     *  preview that is not ready" from "you named none and several are". */
+    requestedPreviewId?: string;
+    /**
+     * Every READY preview at decision time. A denial that cannot name what is running told a model
+     * with two live servers to "start one first", whose most plausible response is to start a
+     * third. Pure over tool-held state, like the rest of this fact.
+     */
+    readyPreviews?: readonly { previewId: string; projectId: string }[];
+  };
   /**
    * Declares that this tool re-reads EVIDENCE THIS SESSION RECORDED (Session 13: view_image).
    * A policy FACT so the decision log stays honest — the observe fall-through's "read-only
@@ -1112,7 +1125,7 @@ export type EventBody =
       /** Session 16 (additive): the project UNIT verified — a `project`-scoped gate matches on it. */
       projectId?: string;
       /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
       exitCode: number | null;
       termination?: CommandTermination;
       durationMs: number;
@@ -1157,7 +1170,7 @@ export type EventBody =
       projectId: string;
       recipeId: string;
       status: SetupStatus;
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
       exitCode: number | null;
       termination?: CommandTermination;
       durationMs: number;

@@ -1,3 +1,4 @@
+import { stripAnsi } from '../shared/text.js';
 import type { SupervisedHandle } from './types.js';
 
 /**
@@ -33,11 +34,20 @@ export const DEFAULT_READY_WAIT_MS = 60_000;
 const DEFAULT_POLL_MS = 300;
 const PROBE_REQUEST_TIMEOUT_MS = 2_000;
 
-/** Ports mentioned in server output, LAST occurrence first (servers print their final port last). */
+/**
+ * Ports mentioned in server output, LAST occurrence first (servers print their final port last).
+ *
+ * The tail is ANSI-stripped first. Vite prints its URL as
+ * `cyan(url.replace(/:(\d+)\//, ':' + bold(port) + '/'))`, and picocolors forces colour on win32
+ * even when stdout is a log file — so the raw bytes read `http://localhost:<ESC>[1m5173<ESC>[22m/`
+ * and a parser anchored on `localhost:` finds nothing. Measured, not theorised: without the strip
+ * this function returns `[]` for a real Vite banner on this platform, which made the frontend half
+ * of a full-stack session unstartable while its log visibly said the server was up.
+ */
 export function parsePortCandidates(tail: string): number[] {
-  const re = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})/g;
+  const re = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|\[::\]):(\d{2,5})/g;
   const seen: number[] = [];
-  for (const m of tail.matchAll(re)) {
+  for (const m of stripAnsi(tail).matchAll(re)) {
     const port = Number(m[1]);
     if (Number.isInteger(port) && port > 0 && port <= 65_535) seen.push(port);
   }
@@ -67,6 +77,22 @@ async function defaultProbeHttp(url: string): Promise<number | null> {
  *  turn one iteration into minutes of serial 2s probes). */
 const MAX_PORT_CANDIDATES = 4;
 
+/**
+ * Loopback addresses probed per candidate port, in order. BOTH families are required, not one.
+ *
+ * A server told to listen on the string `localhost` binds whatever the resolver returns first, and
+ * Node 22's default result order is `verbatim` — which on this platform means `::1`. A dev server
+ * bound to `[::1]:5173` refuses every connection to `127.0.0.1:5173`, so an IPv4-only probe waits
+ * out its entire deadline and then stops a healthy server as "failed to start". Measured on the
+ * development machine: `listen(0,'localhost')` bound `::1`, `http://127.0.0.1:<p>/` was
+ * ECONNREFUSED, `http://[::1]:<p>/` answered 200.
+ *
+ * Literals, never the name: `localhost` would put DNS ordering and Happy-Eyeballs behaviour
+ * between the harness and its own evidence, and the URL recorded here becomes the origin a browser
+ * flow is locked to. The address that actually answered is the address that gets recorded.
+ */
+const PROBE_HOSTS = ['127.0.0.1', '[::1]'] as const;
+
 export async function waitForReady(handle: SupervisedHandle, opts: ReadyOptions = {}): Promise<ReadyOutcome> {
   const waitMs = opts.waitMs ?? DEFAULT_READY_WAIT_MS;
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
@@ -85,7 +111,7 @@ export async function waitForReady(handle: SupervisedHandle, opts: ReadyOptions 
     waitedMs: Date.now() - startedAt,
     probeDetail:
       candidates.length > 0
-        ? `no HTTP answer on candidate port(s) ${candidates.join(', ')} within ${String(waitMs)}ms`
+        ? `no HTTP answer on candidate port(s) ${candidates.join(', ')} at ${PROBE_HOSTS.join(' or ')} within ${String(waitMs)}ms`
         : `no listening port appeared in the server output within ${String(waitMs)}ms`,
   });
 
@@ -101,13 +127,14 @@ export async function waitForReady(handle: SupervisedHandle, opts: ReadyOptions 
     const candidates =
       opts.expectedPort !== undefined ? (announced.includes(opts.expectedPort) ? [opts.expectedPort] : []) : announced.slice(0, MAX_PORT_CANDIDATES);
     for (const port of candidates) {
-      // The deadline and the abort are honored INSIDE the candidate walk: each probe can cost
-      // up to its request timeout, and a long candidate list must not outlive either bound.
-      if (opts.signal?.aborted) return aborted();
-      if (Date.now() - startedAt >= waitMs) return timedOut(candidates);
-      const url = `http://127.0.0.1:${String(port)}/`;
-      const status = await probeHttp(url);
-      if (status !== null) {
+      for (const host of PROBE_HOSTS) {
+        // The deadline and the abort are honored INSIDE the candidate walk: each probe can cost
+        // up to its request timeout, and a long candidate list must not outlive either bound.
+        if (opts.signal?.aborted) return aborted();
+        if (Date.now() - startedAt >= waitMs) return timedOut(candidates);
+        const url = `http://${host}:${String(port)}/`;
+        const status = await probeHttp(url);
+        if (status === null) continue;
         // A probe answer from a process that has DIED is somebody else's socket, never readiness.
         if (!handle.isAlive()) {
           return { ready: false, cause: 'died', waitedMs: Date.now() - startedAt, probeDetail: 'the process exited while the port was being probed' };
@@ -120,7 +147,7 @@ export async function waitForReady(handle: SupervisedHandle, opts: ReadyOptions 
           url,
           httpStatus: status,
           waitedMs: Date.now() - startedAt,
-          probeDetail: `HTTP ${String(status)} on ${source} ${String(port)}, announced in server output (socket ownership not verified)`,
+          probeDetail: `HTTP ${String(status)} on ${source} ${String(port)} at ${host}, announced in server output (socket ownership not verified)`,
         };
       }
     }

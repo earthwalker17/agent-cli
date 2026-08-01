@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { randomBytes } from 'node:crypto';
 import { buildChildEnv } from '../exec/env.js';
 import { shellInvocation } from '../exec/shell.js';
-import { stampsEqual } from '../checks/detect.js';
-import { detectWorkspace, probeWorkspaceStamps, selectUnit } from '../checks/workspace.js';
+import { selectUnit } from '../checks/workspace.js';
+import { createSharedWorkspace, type SharedWorkspace } from '../checks/session-workspace.js';
 import { previewFact, resolvePreview, type ResolvedPreview } from '../preview/recipes.js';
 import { DEFAULT_PREVIEW_TTL_MS, readTail, startSupervised } from '../preview/process.js';
 import { waitForReady, DEFAULT_READY_WAIT_MS, type ReadyOptions, type ReadyOutcome } from '../preview/ready.js';
@@ -113,6 +113,8 @@ export interface PreviewToolDeps {
   ttlMs?: number;
   /** The session's shared initial detection (see CheckToolDeps.initial). */
   initial?: DetectedWorkspace;
+  /** The session's ONE live detection (Session 16.5) — see CheckToolDeps.shared. */
+  shared?: SharedWorkspace;
   /** Injectable seams (tests). */
   detect?: (root: string) => DetectedWorkspace;
   probe?: (root: string) => ManifestStamp[];
@@ -136,19 +138,23 @@ export interface PreviewTool extends Tool<PreviewInputT> {
 const fmtUptime = (ms: number): string => (ms < 60_000 ? `${String(Math.round(ms / 1000))}s` : `${String(Math.round(ms / 60_000))}m`);
 
 export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
-  const detect = deps.detect ?? detectWorkspace;
-  const probe = deps.probe ?? probeWorkspaceStamps;
   const start = deps.start ?? startSupervised;
   const readiness = deps.readiness ?? waitForReady;
   const ttlMs = deps.ttlMs ?? DEFAULT_PREVIEW_TTL_MS;
   const newId = deps.newPreviewId ?? ((): string => `pv-${randomBytes(3).toString('hex')}`);
   const registry = previewsFile(deps.projectDir);
 
-  let workspace = deps.initial ?? detect(deps.workspaceRoot);
+  const shared =
+    deps.shared ??
+    createSharedWorkspace(deps.workspaceRoot, {
+      ...(deps.initial !== undefined ? { initial: deps.initial } : {}),
+      ...(deps.detect !== undefined ? { detect: deps.detect } : {}),
+      ...(deps.probe !== undefined ? { probe: deps.probe } : {}),
+    });
   const active = new Map<string, ActivePreview>();
 
   /** Which unit to serve. Pure over the snapshot (the `check()` fact contract); ambiguity refuses. */
-  const unitFor = (input: PreviewInputT): ReturnType<typeof selectUnit> => selectUnit(workspace, input.project);
+  const unitFor = (input: PreviewInputT): ReturnType<typeof selectUnit> => selectUnit(shared.current(), input.project);
 
   const resolveFor = (input: PreviewInputT): ReturnType<typeof resolvePreview> => {
     const sel = unitFor(input);
@@ -242,8 +248,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       const gated = resolveFor(input).resolved;
       // TOCTOU: the human approved the command resolved from the snapshot. Re-probe; refuse if
       // the resolved command/body changed; the snapshot advances so the next call re-asks.
-      if (!stampsEqual(workspace.stamps, probe(deps.workspaceRoot))) {
-        workspace = detect(deps.workspaceRoot);
+      if (shared.refreshIfStale()) {
         const now = resolveFor(input).resolved;
         if (!samePreview(gated, now)) {
           const d = (r: ResolvedPreview | null): string => (r === null ? '(nothing)' : `${r.command} (script body ${r.bodySha.slice(0, 8)})`);
@@ -438,11 +443,8 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       };
     },
 
-    workspaceSnapshot: () => workspace,
-    refresh: () => {
-      workspace = detect(deps.workspaceRoot);
-      return workspace;
-    },
+    workspaceSnapshot: () => shared.current(),
+    refresh: () => shared.refresh(),
     active: () => [...active.values()],
     readyPreview: (previewId) => {
       const alive = aliveActive().filter((a) => a.readyObserved);

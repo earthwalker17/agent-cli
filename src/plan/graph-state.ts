@@ -1,4 +1,5 @@
 import type { CheckKind, CheckStatus, SessionEvent, TaskChangeFile } from '../types.js';
+import type { UnsupportedReason } from '../checks/types.js';
 import { planTaskDefinitionSha, topoOrder, type PlanGraph, type PlanTaskRole } from './schema.js';
 import { relPrefixesOverlap } from '../shared/pathutil.js';
 import { proveWith } from '../recovery/catalogue.js';
@@ -426,14 +427,23 @@ function boundaryGate(
 
 /**
  * May an `unsupported` result WAIVE a gate the user approved? Only a PROJECT-capability reason
- * ('no-recipe' / 'precondition'). A malformed request must never discharge verification, and a
- * legacy event with no reason keeps the old permissive reading — it predates the distinction.
+ * ('no-recipe' / 'precondition'). Two reasons are excluded, for two different kinds of dishonesty:
+ *
+ * - 'bad-request' — the caller asked for something malformed. A routine mistake must never
+ *   discharge verification the user asked for.
+ * - 'precondition-curable' (S16.5) — the project simply has not been installed yet, and
+ *   `project_setup install` is the named cure. Waiving here let a full-stack session that
+ *   installed `api` and forgot `web` be accepted as COMPLETE, its caveat asserting that a project
+ *   shipping a build and a test suite "cannot" run them. An uninstalled project is unverified,
+ *   not unverifiable.
+ *
+ * A legacy event with no reason keeps the old permissive reading — it predates the distinction.
  *
  * ONE implementation: this predicate is consent-bearing and used to be spelled three times in
  * this file, in three places that had to agree with nothing enforcing that they did.
  */
-function waivesGate(reason: 'no-recipe' | 'precondition' | 'bad-request' | undefined): boolean {
-  return reason !== 'bad-request';
+function waivesGate(reason: UnsupportedReason | undefined): boolean {
+  return reason !== 'bad-request' && reason !== 'precondition-curable';
 }
 
 function summarize(tasks: readonly PlanTaskState[], ready: readonly string[]): string {

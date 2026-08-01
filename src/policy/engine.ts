@@ -407,7 +407,13 @@ export function decide<I>(
   //     top-level navigation aborts the flow as a typed failure). Anything not bound to a
   //     managed preview is DENIED, not asked: arbitrary-origin browsing is out of scope.
   if (tool.browser !== undefined) {
-    let fact: { flowName: string; stepCount: number; previewBound: boolean };
+    let fact: {
+      flowName: string;
+      stepCount: number;
+      previewBound: boolean;
+      requestedPreviewId?: string;
+      readyPreviews?: readonly { previewId: string; projectId: string }[];
+    };
     try {
       fact = tool.browser(input);
     } catch (e) {
@@ -422,18 +428,32 @@ export function decide<I>(
       );
     }
     if (!fact.previewBound) {
+      const ready = fact.readyPreviews ?? [];
+      // A denial that names nothing is what turned "two servers are running" into "start one
+      // first" — advice whose most plausible reading is to start a third. The three cases are
+      // genuinely different acts, so they get three different sentences.
+      const detail =
+        fact.requestedPreviewId !== undefined
+          ? `no READY preview with id '${fact.requestedPreviewId}' is running` +
+            (ready.length > 0 ? ` (ready now: ${ready.map((p) => `${p.previewId} [project ${p.projectId}]`).join(', ')})` : '')
+          : ready.length > 1
+            ? `${String(ready.length)} previews are running (${ready.map((p) => `${p.previewId} [project ${p.projectId}]`).join(', ')}) and the flow named none — ` +
+              'set `preview_id` to the one this flow means. Guessing which service a UI flow belongs to is not something the harness will do for you'
+            : 'no harness-managed preview is running and ready; start one with the preview tool first';
       return decision(
         'sensitive',
         'deny',
         'browser.no-preview',
-        'browser flows run only against a RUNNING harness-managed preview (whose approval included browser verification); start one with the preview tool first',
+        `browser flows run only against a RUNNING harness-managed preview (whose approval included browser verification): ${detail}`,
       );
     }
+    const bound = fact.readyPreviews?.find((p) => p.previewId === fact.requestedPreviewId) ?? fact.readyPreviews?.[0];
     return decision(
       'reversible',
       'allow',
       'browser.preview-bound',
-      `drives the running managed preview in a headless browser (flow '${fact.flowName}', ${fact.stepCount} step(s)); ` +
+      `drives the running managed preview${bound !== undefined ? ` ${bound.previewId} [project ${bound.projectId}]` : ''} in a headless browser ` +
+        `(flow '${fact.flowName}', ${fact.stepCount} step(s)); ` +
         'TOP-LEVEL navigation is locked to the preview origin (the page\'s own subresource/XHR requests to other ' +
         'origins are RECORDED, not blocked, and the lock binds the port, not the socket owner); app-side effects are ' +
         'the consented server code acting on its own state; not undoable',

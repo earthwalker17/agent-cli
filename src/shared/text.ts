@@ -24,6 +24,30 @@ export function sanitizeLine(s: string): string {
 }
 
 /**
+ * Remove ANSI escape sequences so a machine can PARSE what a terminal would render. Distinct from
+ * `sanitizeLine`, which escapes them so a human sees them literally: this one is for the harness
+ * reading a server's own output, where an escape sequence is noise between the characters that
+ * matter, not something to display.
+ *
+ * It is load-bearing rather than cosmetic. A dev server colourises its startup banner, and
+ * picocolors — which Vite and much of the Node ecosystem use — enables colour whenever
+ * `process.platform === 'win32'`, *regardless of whether stdout is a TTY*. A preview's stdio is a
+ * log file, and the announced URL still arrives as `http://localhost:<ESC>[1m5173<ESC>[22m/`: the
+ * port sits behind an escape sequence, so a port parser anchored on `localhost:` matches nothing
+ * and a perfectly healthy server is reported as never having announced a port.
+ *
+ * Covers CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ST`), and the general ECMA-48 escape form
+ * (`ESC` + optional intermediates + a final byte) — which is what catches charset designations
+ * like `ESC ( B` that some terminals interleave with colour.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_SEQ = /\x1b(?:\[[0-9;:?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[ -/]*[0-~])/g;
+
+export function stripAnsi(s: string): string {
+  return s.replace(ANSI_SEQ, '');
+}
+
+/**
  * Break any line that mimics a harness FENCE (`--- <label> begin|end ---`). Such a line inside
  * untrusted text would fake a provenance boundary the model trusts: closing a region early and
  * occupying space labeled harness-authored. A visible middle dot breaks the mimicry without

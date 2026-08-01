@@ -87,7 +87,7 @@ function harness(over: Partial<BrowserToolDeps> = {}): Harness {
   const flows: BrowserFlowEvidence[] = [];
   const blobs = new Map<string, Buffer>();
   const deps: BrowserToolDeps = {
-    preview: { readyPreview: () => fakePreview() },
+    preview: { readyPreview: () => fakePreview(), active: () => [fakePreview()] },
     putBlob: (b) => {
       const sha = sha256(b);
       blobs.set(sha, b);
@@ -125,7 +125,7 @@ describe('browser_flow policy', () => {
       noUndo: true,
     });
 
-    const none = createBrowserFlowTool(harness({ preview: { readyPreview: () => null } }).deps);
+    const none = createBrowserFlowTool(harness({ preview: { readyPreview: () => null, active: () => [] } }).deps);
     const d = decide(none, FLOW_INPUT, ctx, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'browser.no-preview' });
     expect(d.reason).toContain('RUNNING harness-managed preview');
@@ -175,7 +175,7 @@ describe('browser_flow evidence', () => {
   });
 
   it('a preview death between gate and execute is a typed ERROR with preview-died — never a pass, never a started', async () => {
-    const h = harness({ preview: { readyPreview: () => null } });
+    const h = harness({ preview: { readyPreview: () => null, active: () => [] } });
     const t = createBrowserFlowTool(h.deps);
     const r = await t.execute(FLOW_INPUT, h.ctx);
     expect(r.ok).toBe(false);

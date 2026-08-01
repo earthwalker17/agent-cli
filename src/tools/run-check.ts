@@ -3,8 +3,8 @@ import { truncateForModel } from '../shared/hash.js';
 import { buildChildEnv } from '../exec/env.js';
 import { runManaged, type ExecSpec } from '../exec/run.js';
 import { shellInvocation } from '../exec/shell.js';
-import { stampsEqual } from '../checks/detect.js';
-import { detectWorkspace, probeWorkspaceStamps, selectUnit } from '../checks/workspace.js';
+import { selectUnit } from '../checks/workspace.js';
+import { createSharedWorkspace, type SharedWorkspace } from '../checks/session-workspace.js';
 import { availableKinds, resolveChecks } from '../checks/recipes.js';
 import { normalizeCheckOutcome, unsupportedResult } from '../checks/normalize.js';
 import type { CheckResult, DetectedProject, DetectedWorkspace, ManifestStamp, ResolvedCheck } from '../checks/types.js';
@@ -104,6 +104,12 @@ export interface CheckToolDeps {
    */
   initial?: DetectedWorkspace;
   /**
+   * The session's ONE live detection (Session 16.5). When present every tool reads through it, so
+   * an install performed by `project_setup` is visible to the very next check instead of surfacing
+   * as a false "the project changed after this call was approved". Absent ⇒ a private holder.
+   */
+  shared?: SharedWorkspace;
+  /**
    * S14.5 (E): the bound plan task's declared `touches`, for defaulting a test-targeted scope
    * when the model omits one. null/absent = no plan context — the bad-request refusal stands
    * untouched. Safe by construction: gate matching is per-KIND, so a scoped `test-targeted`
@@ -166,9 +172,13 @@ function renderResult(r: CheckResult): string {
 }
 
 export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
-  const detect = deps.detect ?? detectWorkspace;
-  const probe = deps.probe ?? probeWorkspaceStamps;
-  let workspace = deps.initial ?? detect(deps.workspaceRoot);
+  const shared =
+    deps.shared ??
+    createSharedWorkspace(deps.workspaceRoot, {
+      ...(deps.initial !== undefined ? { initial: deps.initial } : {}),
+      ...(deps.detect !== undefined ? { detect: deps.detect } : {}),
+      ...(deps.probe !== undefined ? { probe: deps.probe } : {}),
+    });
 
   // S14.5 (E): an omitted test-targeted scope defaults from the BOUND plan task's touches.
   // Explicit scope always wins; without a binding (or plan context) nothing changes and the
@@ -188,7 +198,7 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
    * and ambiguity refuses: in a workspace holding several real projects, guessing which one a
    * build belongs to is not a convenience, it is a wrong command run at full user privilege.
    */
-  const unitFor = (input: RunCheckInputT): ReturnType<typeof selectUnit> => selectUnit(workspace, input.project);
+  const unitFor = (input: RunCheckInputT): ReturnType<typeof selectUnit> => selectUnit(shared.current(), input.project);
 
   const resolveFor = (input: RunCheckInputT): ReturnType<typeof resolveChecks> => {
     const sel = unitFor(input);
@@ -220,18 +230,25 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       // TOCTOU: the human approved the commands resolved from the snapshot above. Re-probe; only
       // if a manifest actually changed do we re-detect, and only if that changes a COMMAND do we
       // refuse. The snapshot is updated either way, so the next call is gated on current truth.
-      if (!stampsEqual(workspace.stamps, probe(deps.workspaceRoot))) {
-        workspace = detect(deps.workspaceRoot);
+      if (shared.refreshIfStale()) {
         const now = resolveFor(input).resolved;
         if (!sameCommands(gated, now)) {
           const describe = (rs: readonly ResolvedCheck[]): string =>
             rs.map((r) => `${r.command}${r.bodySha !== undefined ? ` (script body ${r.bodySha.slice(0, 8)})` : ''}`).join(' ; ') || '(nothing)';
+          // Two genuinely different situations, and calling both "the project changed after this
+          // call was approved" was false in the second one — nothing was approved, because
+          // nothing resolved. That message sent a model looking for a manifest edit that never
+          // happened, when the honest answer is "call it again and it will work".
+          const nothingWasGated = gated.length === 0;
           return {
             ok: false,
-            output:
-              `refused: the project changed after this call was approved, so the resolved command(s) no longer match what was gated.\n` +
-              `  approved: ${describe(gated)}\n  now:      ${describe(now)}\nNothing ran. Call run_check again to have the current command(s) approved.`,
-            error: 'project changed after approval; nothing ran',
+            output: nothingWasGated
+              ? `refused: when this call was gated, no command resolved for it — so nothing was approved and nothing ran. ` +
+                `The project's detected state has since changed and these command(s) now resolve: ${describe(now)}. ` +
+                `Call run_check again; the current command(s) will be put in front of the user.`
+              : `refused: the project changed after this call was approved, so the resolved command(s) no longer match what was gated.\n` +
+                `  approved: ${describe(gated)}\n  now:      ${describe(now)}\nNothing ran. Call run_check again to have the current command(s) approved.`,
+            error: nothingWasGated ? 'nothing was gated for this call; nothing ran' : 'project changed after approval; nothing ran',
             durationMs: Date.now() - startedAt,
             truncated: false,
           };
@@ -419,11 +436,8 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
       };
     },
 
-    workspaceSnapshot: () => workspace,
-    refresh: () => {
-      workspace = detect(deps.workspaceRoot);
-      return workspace;
-    },
+    workspaceSnapshot: () => shared.current(),
+    refresh: () => shared.refresh(),
   };
 }
 

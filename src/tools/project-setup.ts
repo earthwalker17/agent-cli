@@ -3,8 +3,8 @@ import { truncateForModel } from '../shared/hash.js';
 import { buildChildEnv } from '../exec/env.js';
 import { runManaged, type ExecSpec } from '../exec/run.js';
 import { shellInvocation } from '../exec/shell.js';
-import { stampsEqual } from '../checks/detect.js';
-import { detectWorkspace, probeWorkspaceStamps, selectUnit } from '../checks/workspace.js';
+import { selectUnit } from '../checks/workspace.js';
+import { createSharedWorkspace, type SharedWorkspace } from '../checks/session-workspace.js';
 import { extractSignals } from '../checks/normalize.js';
 import { resolveSetup, sameSetup, setupFact, type ResolvedSetup } from '../setup/intents.js';
 import type { DetectedWorkspace, ManifestStamp } from '../checks/types.js';
@@ -77,6 +77,8 @@ export interface SetupToolDeps {
   probe?: (root: string) => ManifestStamp[];
   /** The session's shared initial detection (see CheckToolDeps.initial). */
   initial?: DetectedWorkspace;
+  /** The session's ONE live detection (Session 16.5) — see CheckToolDeps.shared. */
+  shared?: SharedWorkspace;
 }
 
 export interface ProjectSetupTool extends Tool<SetupInputT> {
@@ -91,11 +93,15 @@ function refuse(output: string, error: string, startedAt: number): ToolResult {
 }
 
 export function createProjectSetupTool(deps: SetupToolDeps): ProjectSetupTool {
-  const detect = deps.detect ?? detectWorkspace;
-  const probe = deps.probe ?? probeWorkspaceStamps;
-  let workspace = deps.initial ?? detect(deps.workspaceRoot);
+  const shared =
+    deps.shared ??
+    createSharedWorkspace(deps.workspaceRoot, {
+      ...(deps.initial !== undefined ? { initial: deps.initial } : {}),
+      ...(deps.detect !== undefined ? { detect: deps.detect } : {}),
+      ...(deps.probe !== undefined ? { probe: deps.probe } : {}),
+    });
 
-  const unitFor = (input: SetupInputT): ReturnType<typeof selectUnit> => selectUnit(workspace, input.project);
+  const unitFor = (input: SetupInputT): ReturnType<typeof selectUnit> => selectUnit(shared.current(), input.project);
   const resolveFor = (input: SetupInputT): ResolvedSetup | null => {
     const sel = unitFor(input);
     if (sel.unit === null) return null;
@@ -131,18 +137,25 @@ export function createProjectSetupTool(deps: SetupToolDeps): ProjectSetupTool {
       // install includes the LOCKFILE, so a dependency edit between the approval and the run
       // re-asks instead of installing something else. This runs BEFORE unit selection so every
       // decision below is made against current truth rather than the snapshot policy saw.
-      if (!stampsEqual(workspace.stamps, probe(deps.workspaceRoot))) {
-        workspace = detect(deps.workspaceRoot);
+      if (shared.refreshIfStale()) {
         const now = resolveFor(input);
         if (!sameSetup(gated, now)) {
           const d = (r: ResolvedSetup | null): string =>
             r === null ? '(nothing)' : `${r.command}${r.lockfile !== undefined ? ` (lockfile ${r.lockfile.name} ${String(r.lockfile.sha256).slice(0, 8)})` : ''}`;
-          return refuse(
-            'the project changed after this call was approved, so the resolved setup command no longer matches what was gated.\n' +
-              `  approved: ${d(gated)}\n  now:      ${d(now)}\nNothing ran. Call project_setup again to have the current command approved.`,
-            'project changed after approval; nothing ran',
-            startedAt,
-          );
+          // See run_check: "changed after approval" is false when nothing resolved at gate time.
+          return gated === null
+            ? refuse(
+                `when this call was gated, no setup command resolved for it — so nothing was approved and nothing ran. ` +
+                  `The project's detected state has since changed and this now resolves: ${d(now)}. Call project_setup again.`,
+                'nothing was gated for this call; nothing ran',
+                startedAt,
+              )
+            : refuse(
+                'the project changed after this call was approved, so the resolved setup command no longer matches what was gated.\n' +
+                  `  approved: ${d(gated)}\n  now:      ${d(now)}\nNothing ran. Call project_setup again to have the current command approved.`,
+                'project changed after approval; nothing ran',
+                startedAt,
+              );
         }
       }
 
@@ -224,6 +237,12 @@ export function createProjectSetupTool(deps: SetupToolDeps): ProjectSetupTool {
       const outcome = await runManaged(spec);
       deps.caps.setupsRun++;
 
+      // An install just created a dependency tree; a migration just created a database file. Both
+      // change what every OTHER tool can resolve, and the whole point of the shared holder is that
+      // the next `run_check` or `preview` sees it at DECIDE time — so the human is asked about the
+      // real command instead of the call being allowed as "nothing to run" and then refused.
+      shared.refresh();
+
       // The exit code is the verdict — the same single rule typed checks live by. A killed or
       // timed-out setup is an `error` with NO exit code, and can never read as "dependencies are
       // installed": the classifier and the report both branch on this.
@@ -274,10 +293,7 @@ export function createProjectSetupTool(deps: SetupToolDeps): ProjectSetupTool {
       };
     },
 
-    workspaceSnapshot: () => workspace,
-    refresh: () => {
-      workspace = detect(deps.workspaceRoot);
-      return workspace;
-    },
+    workspaceSnapshot: () => shared.current(),
+    refresh: () => shared.refresh(),
   };
 }

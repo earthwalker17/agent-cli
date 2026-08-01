@@ -13,6 +13,7 @@ import { createRetrieveTool } from '../tools/retrieve.js';
 import { checkCapsFromEvents, createRunCheckTool, workspaceAvailableKinds, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { createProjectSetupTool, setupCapsFromEvents, type ProjectSetupTool, type SetupCaps } from '../tools/project-setup.js';
 import { detectWorkspace } from '../checks/workspace.js';
+import { createSharedWorkspace } from '../checks/session-workspace.js';
 import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
@@ -211,7 +212,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // never been told about — and the check and preview tools stop detecting independently, which
   // was two snapshots of the same workspace that could already disagree. Each tool still keeps
   // its OWN mutable copy for its own TOCTOU refresh, so no tool can advance another tool's gate.
+  //
+  // Session 16.5 makes that ONE LIVE holder rather than three diverging copies. The per-tool
+  // copies had no window to protect (tool calls execute strictly one at a time, so decide() and
+  // execute() for a call are back-to-back), and they cost a real defect: after `project_setup
+  // install` created node_modules, the next run_check/preview still resolved against a snapshot
+  // where nothing could run — allowed as 'nothing to run', then refused at execute with 'the
+  // project changed after this call was approved' for a call nobody approved.
   const detectedWorkspace = detectWorkspace(ctx.ws);
+  const sharedWorkspace = createSharedWorkspace(ctx.ws, { initial: detectedWorkspace });
   const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory), detectedWorkspace);
 
   const common = {
@@ -394,7 +403,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   const checkTool = createRunCheckTool({
     workspaceRoot: ctx.ws,
     caps: checkCaps,
-    initial: detectedWorkspace,
+    shared: sharedWorkspace,
     // S14.5 (E): a bound test-targeted run with no explicit scope defaults to the plan task's
     // declared touches — same approved-and-current filter as every other gate consumer.
     planTouches: (planTaskId) => {
@@ -409,7 +418,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // worktree is disposable, so an install there populates a directory about to be deleted, and a
   // migration there writes the REAL local database from what the user believes is isolation.
   const setupCaps = setupCapsFromEvents(session.log.events);
-  const setupTool = createProjectSetupTool({ workspaceRoot: ctx.ws, caps: setupCaps, initial: detectedWorkspace });
+  const setupTool = createProjectSetupTool({ workspaceRoot: ctx.ws, caps: setupCaps, shared: sharedWorkspace });
 
   // preview (Session 13): the managed preview-server tool — per-session for the same snapshot
   // reason as run_check, plus it owns this session's live process handles. `appendEnded` is the
@@ -421,7 +430,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     projectDir: layout.projectDir,
     sessionId: session.id,
     caps: previewCaps,
-    initial: detectedWorkspace,
+    shared: sharedWorkspace,
     envExcludePatterns: deps.config.rules.envExcludePatterns,
     appendEnded: (e) => {
       try {

@@ -198,8 +198,20 @@ export interface ResolvedCheck {
  * only be waived when the PROJECT genuinely cannot run the kind ('no-recipe'/'precondition'). A
  * 'bad-request' — the caller asked for something malformed — must never retire a declared gate,
  * or a routine mistake would silently discharge verification the user asked for.
+ *
+ * `'precondition-curable'` (Session 16.5) is the third answer, and it exists because Session 16
+ * changed the facts. "Dependencies are not installed" used to be a genuine project-capability
+ * statement — the harness had no way to install anything, so the only honest reading was "this
+ * project cannot be checked here". Now `project_setup install` exists, which makes it a TRANSIENT
+ * state with a named cure. Left as a plain 'precondition' it waived the gate, so a session that
+ * installed one half of a full-stack workspace and forgot the other could be accepted as COMPLETE
+ * with its own evidence claiming the second project cannot be built or tested. A curable
+ * precondition therefore keeps the gate PENDING and names the call that clears it.
+ *
+ * Old events carry no reason at all and keep the permissive reading; events written before this
+ * distinction existed carry 'precondition' and also keep it. The narrowing applies going forward.
  */
-export type UnsupportedReason = 'no-recipe' | 'precondition' | 'bad-request';
+export type UnsupportedReason = 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
 
 export interface UnsupportedCheck {
   kind: CheckKind;

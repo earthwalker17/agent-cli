@@ -66,7 +66,9 @@ const TOOL_READONLY: CheckEffects = { writesOutputs: false, network: false, work
 const TOOL_WRITES: CheckEffects = { writesOutputs: true, network: false, workspaceAuthored: false };
 
 const NEEDS_NODE_MODULES =
-  'dependencies are not installed (node_modules is absent) — install them, then re-run this check';
+  'dependencies are not installed (node_modules is absent) — run `project_setup` with action "install" for this ' +
+  'project, then re-run this check. This does NOT waive a declared gate: the project can be checked, it just has ' +
+  'not been installed yet.';
 
 /** `<pm> run <script>` — the portable form across npm, pnpm, and yarn. */
 function runScript(p: DetectedProject, name: string, extra: readonly string[] = []): string[] | null {
@@ -292,7 +294,17 @@ export function resolveChecks(
     }
     const ready = applicable.find((r) => r.unmetPrecondition(project) === null);
     if (ready === undefined) {
-      unsupported.push({ kind, why: 'precondition', reason: applicable[0]!.unmetPrecondition(project) ?? 'precondition not met' });
+      // A project that DECLARES dependencies and has no node_modules is not a project that
+      // cannot be checked — it is a project that has not been installed yet, and Session 16 gave
+      // the harness the call that fixes it. That distinction decides whether a declared gate is
+      // waived or stays pending, so it is made here, once, from the project's own facts rather
+      // than from which row happened to complain.
+      const curable = project.hasDependencies && !project.hasNodeModules;
+      unsupported.push({
+        kind,
+        why: curable ? 'precondition-curable' : 'precondition',
+        reason: applicable[0]!.unmetPrecondition(project) ?? 'precondition not met',
+      });
       continue;
     }
     const argv = argvWithBinary(ready, project, kindTakesScope(kind) ? paths : []);
