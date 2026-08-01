@@ -312,6 +312,14 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       try {
         const result = await runTurn(session, userText, { signal: controller.signal });
         renderer.endTurn(result, ctx.maxSteps);
+        // The plan-approval gate is the one blocker only the USER can clear, and until now only
+        // the MODEL was told about it. Found live: the agent amended its own approved plan on the
+        // first step of the build turn (a legitimate amendment — it had learned something), which
+        // reset the plan to draft and blocked every executor spawn. The harness said so in the
+        // tool result and again in the standing note each turn — to the model, which cannot type
+        // `/plan approve`. The human watched it quietly do all the parallel work serially in the
+        // parent instead, and only found out ten minutes later when /accept refused.
+        planApprovalReminder(commandCtx);
       } catch (err) {
         // Keep the session alive: answer any dangling tool_use so the next request stays valid.
         repairDanglingToolUses(session);
@@ -390,6 +398,46 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
  * Exported for tests: the hand-edit path (a sha the model has never seen → full injection)
  * cannot be reached through the scripted REPL driver, which owns the whole file lifecycle.
  */
+/**
+ * One chrome line, at the end of a turn, when the plan needs the USER's approval before the work
+ * it describes can actually run — and executor tasks are genuinely waiting on it.
+ *
+ * Deliberately narrow. It fires only when all three are true: a canonical plan exists and is not
+ * approved-and-current; the graph declares executor-role tasks; and at least one of them has not
+ * completed. A plan whose executor work is already done needs no re-approval to finish, and a
+ * plan with no executor tasks was never gated in the first place — a reminder in either case is
+ * noise, and noise at the idle prompt is how real warnings stop being read.
+ *
+ * Pure over the same `readPlanState` + `foldGraphState` every other surface uses; never throws
+ * (a plan problem must not be able to end a turn).
+ */
+export function planApprovalReminder(ctx: CommandContext): void {
+  try {
+    const state = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
+    if (state.kind !== 'canonical' || state.approvedAndCurrent) return;
+    if (state.status === 'superseded') return;
+    const graph = state.canonical?.graph ?? null;
+    if (graph === null) return;
+    const executors = graph.tasks.filter((t) => t.role === 'executor');
+    if (executors.length === 0) return;
+    const fold = foldGraphState(graph, ctx.session.log.events);
+    const waiting = executors.filter((t) => fold.byId.get(t.id)?.state !== 'completed').map((t) => t.id);
+    if (waiting.length === 0) return;
+    const why =
+      state.diverged
+        ? 'the plan changed after you approved it, so the approval no longer covers it'
+        : `the plan is ${state.status}`;
+    // Deliberately NOT dimmed, unlike the rest of the end-of-turn chrome: this is the one line
+    // whose whole purpose is to be read.
+    ctx.renderer.chromeLine(
+      `  plan: ${why} — isolated executor task(s) ${waiting.join(', ')} CANNOT run until you re-approve. ` +
+        'Type /plan approve (or /plan to read it first). Only you can clear this; meanwhile the agent will keep working in the main session.',
+    );
+  } catch {
+    /* a plan problem must never end a turn */
+  }
+}
+
 export function buildPlanNote(
   layout: ProjectLayout,
   session: Session,

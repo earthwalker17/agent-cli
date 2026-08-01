@@ -10,9 +10,12 @@ import { createSharedWorkspace } from '../src/checks/session-workspace.js';
 import { resolveSetup, sameSetup } from '../src/setup/intents.js';
 import { completionGateState } from '../src/plan/graph-state.js';
 import { validatePlanGraph } from '../src/plan/schema.js';
+import { readCanonicalPlan } from '../src/plan/canonical.js';
 import { proveWith } from '../src/recovery/catalogue.js';
 import { collectPassingEvidence, firstPassingEvidenceAfter } from '../src/report/report.js';
 import { runCommandTool } from '../src/tools/run-command.js';
+import { planApprovalReminder } from '../src/repl/repl.js';
+import { resolveLayout } from '../src/store/layout.js';
 import { createRunCheckTool } from '../src/tools/run-check.js';
 import { createProjectSetupTool } from '../src/tools/project-setup.js';
 import { createBrowserFlowTool, type BrowserToolDeps } from '../src/tools/browser-flow.js';
@@ -362,6 +365,66 @@ describe('a protected directory is protected as a PLACE, not only as a write tar
     const ok = await runCommandTool.execute({ command: 'node -v', cwd: 'api' }, ctx);
     expect(ok.output).not.toContain('protected directory');
     fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe('the blocker only the user can clear is shown to the USER', () => {
+  // Found in the first live full-stack take: the agent amended its own approved plan on the first
+  // step of the build turn. The amendment was legitimate, and the harness said so — in the tool
+  // result and in the standing note, every turn. But it said it to the MODEL, which cannot type
+  // `/plan approve`. Executor delegation was silently impossible from that moment; the agent did
+  // all the "parallel isolated" work serially in the main session, and the human found out ten
+  // minutes later when /accept refused.
+  it('reminds when an amended plan still has unspawned executor tasks, and stays silent otherwise', () => {
+    // Driven through the REAL readers (a real layout, a real plan file on disk), so the reminder
+    // is pinned against the same `readPlanState` + `foldGraphState` every other surface uses.
+    const tmp = tmpdir();
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const layout = resolveLayout(repo, { env: { AGENT_CLI_STATE_DIR: path.join(tmp, 'state') }, ensure: true });
+    const graph = {
+      version: 1,
+      objective: 'ship it',
+      tasks: [
+        { id: 'summary', title: 'Summary panel', intent: 'build it', role: 'executor', dependsOn: [], touches: ['web/'], verify: 'tests pass', risk: 'low' },
+      ],
+    };
+    const writePlan = (status: string): void => {
+      const f = layout.canonicalPlanFile('s1');
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify({ version: 1, planId: 's1', status, updated: 'now', plan: graph }));
+    };
+    const run = (status: string, events: SessionEvent[]): string[] => {
+      const lines: string[] = [];
+      writePlan(status);
+      planApprovalReminder({
+        layout,
+        session: { id: 's1', log: { events } },
+        renderer: { chromeLine: (l: string) => lines.push(l) },
+      } as never);
+      return lines;
+    };
+
+    // Draft plan, executor task never started => the user is told, by task name, with the command.
+    const warned = run('draft', []);
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('CANNOT run until you re-approve');
+    expect(warned[0]).toContain('/plan approve');
+    expect(warned[0]).toContain('summary');
+
+    // Approved AND consented => nothing. The reminder must not become idle-prompt noise.
+    // (Both halves are required: a file that merely SAYS approved without a recorded consent
+    // event is not approved-and-current, and the harness is right to keep warning about it.)
+    // The sha comes from the DOC, not from hashing the literal: the reader parses through zod
+    // (applying defaults) before hashing, so a hand-hashed literal is a different plan.
+    writePlan('approved');
+    const consent = [
+      { v: 1, seq: 1, ts: 't', type: 'plan.approved', sha256: readCanonicalPlan(layout, 's1').contentSha },
+    ] as unknown as SessionEvent[];
+    expect(run('approved', consent)).toEqual([]);
+    // …and a file claiming approval with no consent recorded still warns.
+    expect(run('approved', []).length).toBe(1);
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 });
 

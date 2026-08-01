@@ -73,7 +73,10 @@ export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInput
       'Create or replace the structured plan for this session (a task DAG the user reviews and approves with ' +
       '/plan approve). Use it BEFORE implementation of multi-step, cross-cutting, or high-risk work: executor ' +
       'delegation is blocked until the CURRENT plan content is approved. Amending the plan (any semantic change) ' +
-      'resets approval — present the revision and wait for re-approval. Validation errors (dependency cycles, ' +
+      'resets approval — present the revision and ASK THE USER to re-approve; you cannot approve it yourself, and ' +
+      'until they do, every executor task in the plan is unspawnable. Do NOT amend an approved plan to record ' +
+      'progress: execution state is derived from events and is never stored here, so a status edit buys nothing ' +
+      'and costs the approval mid-build. Validation errors (dependency cycles, ' +
       'unknown ids, missing verification) are returned in full with nothing written; fix and resubmit. The plan ' +
       "is context, not authority: the user's current request always outranks it.",
     schema: UpdatePlanInput,
@@ -136,7 +139,9 @@ export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInput
           w.status === 'approved'
             ? 'status: approved (semantic no-op — the content sha is unchanged, the approval stands)'
             : prior.exists && prior.status === 'approved'
-              ? 'status: draft — this AMENDMENT INVALIDATED the prior approval; present the revision and wait for /plan approve'
+              ? 'status: draft — this AMENDMENT INVALIDATED the prior approval. EVERY executor task is now unspawnable. ' +
+                'You cannot clear this yourself: STOP, tell the user what changed and why, and ask them to run /plan approve. ' +
+                'Do not silently do the delegated work in the main session instead.'
               : 'status: draft — present the plan and wait for /plan approve before executor delegation';
         return {
           ok: true,
