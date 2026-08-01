@@ -68,7 +68,14 @@ function projectLines(ws?: DetectedWorkspace): string[] {
   const multi = ws.units.length > 1;
   return [
     '',
-    `Detected projects in this workspace (${String(ws.units.length)}):`,
+    // This block is built ONCE, before the first turn, and the system prompt is the cached stable
+    // prefix — so it is a photograph, not a live reading. In a session whose whole point is to
+    // install dependencies and write a .env, the line "dependencies NOT installed" stays true-as-
+    // written and false-in-fact from the moment the install succeeds. Saying so is the cheap fix:
+    // an unlabelled stale claim invites a redundant re-install against the setup budget, or a
+    // refusal to start a preview the model "knows" cannot run.
+    `Detected projects in this workspace (${String(ws.units.length)}), AS OBSERVED AT SESSION START — ` +
+      'your own tool results outrank this block; run_check/preview/project_setup always resolve against the CURRENT state, and /checks re-probes on demand:',
     ...lines,
     ...(ws.units.length > MAX_PROMPT_PROJECTS ? [`  … and ${String(ws.units.length - MAX_PROMPT_PROJECTS)} more (see /checks)`] : []),
     ...(multi

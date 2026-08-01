@@ -147,6 +147,9 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   if (assembled.previewSweep !== undefined) {
     renderer.chromeLine(style.dim(`  previews: ${assembled.previewSweep}`));
   }
+  if (assembled.projectsNote !== undefined) {
+    renderer.chromeLine(style.dim(`  projects: ${sanitizeLine(assembled.projectsNote)}`));
+  }
 
   const pendingNotes: string[] = [];
   const commandCtx: CommandContext = {

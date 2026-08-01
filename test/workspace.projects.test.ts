@@ -51,7 +51,7 @@ describe('the system prompt tells the model which projects exist', () => {
     project('web', { scripts: { dev: 'vite' }, lock: 'package-lock.json' });
 
     const p = buildSystemPrompt(ws, MAP, undefined, undefined, undefined, detectWorkspace(ws));
-    expect(p).toContain('Detected projects in this workspace (2):');
+    expect(p).toContain('Detected projects in this workspace (2), AS OBSERVED AT SESSION START');
     expect(p).toContain('- api (node; npm; lockfile package-lock.json; dependencies installed');
     expect(p).toContain('expects env config (.env.example) — none present');
     expect(p).toContain('scripts: dev, migrate');

@@ -93,6 +93,14 @@ export interface Assembled {
   /** One-line summary when crash-orphaned preview processes were swept at startup (Session 13). */
   previewSweep?: string;
   /**
+   * One-line chrome note naming the projects detected in a MULTI-project workspace, and which of
+   * them are not installed (Session 16.5). The model has been told all of this in its system
+   * prompt since Session 16; the human at the terminal had not been told any of it, so a
+   * two-service repository looked identical to a one-package one right up until the first
+   * ambiguity refusal. Single-project workspaces print nothing, exactly as before.
+   */
+  projectsNote?: string;
+  /**
    * Delete this session's owed harness checkpoint refs (V0.7.1; kind-aware Session 14:
    * task-base + pre-integration + superseded delivery — the latest delivery ref survives as
    * the durable audit anchor) — call at clean session end, BEFORE endSession (the provenance
@@ -221,6 +229,19 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // project changed after this call was approved' for a call nobody approved.
   const detectedWorkspace = detectWorkspace(ctx.ws);
   const sharedWorkspace = createSharedWorkspace(ctx.ws, { initial: detectedWorkspace });
+  // The human's one-line version of the block the model gets. Only for a MULTI-project workspace:
+  // for a single project it would be noise, and the ambiguity it warns about does not exist there.
+  const projectsNote =
+    detectedWorkspace.units.length > 1
+      ? (() => {
+          const uninstalled = detectedWorkspace.units.filter((u) => u.hasDependencies && !u.hasNodeModules).map((u) => u.id);
+          return (
+            `${String(detectedWorkspace.units.length)} projects: ${detectedWorkspace.units.map((u) => u.id).join(', ')}` +
+            (uninstalled.length > 0 ? ` — dependencies NOT installed in ${uninstalled.join(', ')}` : '') +
+            ' (checks, previews and setup each take a `project`; /checks re-probes)'
+          );
+        })()
+      : undefined;
   const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory), detectedWorkspace);
 
   const common = {
@@ -632,6 +653,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     ...(ranked.note !== null ? { mapNote: ranked.note } : {}),
     ...(worktreeSweep !== undefined ? { worktreeSweep } : {}),
     ...(previewSweep !== undefined ? { previewSweep } : {}),
+    ...(projectsNote !== undefined ? { projectsNote } : {}),
     ...(pruneHarnessRefs !== undefined ? { pruneHarnessRefs } : {}),
   };
 }

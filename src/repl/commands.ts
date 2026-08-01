@@ -800,14 +800,24 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       );
       // Setup evidence lives beside the checks it enables, but is labeled as a DIFFERENT thing:
       // "dependencies were installed" is never a line in the verification story.
-      const setups = ctx.session.log.events.filter((e) => e.type === 'setup.completed');
-      if (setups.length > 0) {
-        lines.push('', 'project setup (not verification):');
-        for (const s of setups) {
-          if (s.type !== 'setup.completed') continue;
-          lines.push(`  ${s.action} [${s.projectId}]: ${s.status} — ${sanitizeLine(s.summary)}`);
+      // Started-and-never-completed is the state this surface most needs to show: an install
+      // SIGKILLed halfway leaves a half-written node_modules, and a migration killed halfway
+      // leaves a database in an unknown shape. Listing only completions made exactly that case
+      // invisible here while /report over the same log called the state UNKNOWN — the check
+      // surface has said "NO VERDICT" for this since S14.5, and setup has to say it too.
+      const setupStarts = new Map<string, { action: string; projectId: string }>();
+      const setups: string[] = [];
+      for (const e of ctx.session.log.events) {
+        if (e.type === 'setup.started') setupStarts.set(e.callId, { action: e.action, projectId: e.projectId });
+        else if (e.type === 'setup.completed') {
+          setupStarts.delete(e.callId);
+          setups.push(`  ${e.action} [${e.projectId}]: ${e.status} — ${sanitizeLine(e.summary)}`);
         }
       }
+      for (const [, s] of setupStarts) {
+        setups.push(`  ${s.action} [${s.projectId}]: NO VERDICT — it started and never completed; dependency or local data state is UNKNOWN, re-run it`);
+      }
+      if (setups.length > 0) lines.push('', 'project setup (not verification):', ...setups);
       lines.push('', `checks run this session: ${ctx.checkCaps?.checksRun ?? 0}/${CHECKS_PER_SESSION}`);
       if (ctx.setupCaps !== undefined) lines.push(`project setups this session: ${ctx.setupCaps.setupsRun}/${SETUPS_PER_SESSION}`);
       ctx.modelOut.write(lines.join('\n') + '\n');

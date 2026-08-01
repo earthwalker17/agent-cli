@@ -120,7 +120,7 @@ describe('ONE detection per session', () => {
     nodeProject('web', { dev: 'vite' });
     const a = await assemble();
     try {
-      expect(a.session.system).toContain('Detected projects in this workspace (2):');
+      expect(a.session.system).toContain('Detected projects in this workspace (2), AS OBSERVED AT SESSION START');
       expect(a.session.system).toContain('- api (node; npm; lockfile package-lock.json');
       expect(a.session.system).toContain('REFUSES to guess');
       expect(a.session.system).toContain('go through `project_setup`');
@@ -133,7 +133,7 @@ describe('ONE detection per session', () => {
     nodeProject('.', { test: 'vitest run' });
     const a = await assemble();
     try {
-      expect(a.session.system).toContain('Detected projects in this workspace (1):');
+      expect(a.session.system).toContain('Detected projects in this workspace (1), AS OBSERVED AT SESSION START');
       expect(a.session.system).not.toContain('REFUSES to guess');
     } finally {
       endSession(a.session, 'completed');
