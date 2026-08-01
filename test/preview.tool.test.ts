@@ -132,6 +132,7 @@ describe('resolvePreview', () => {
     lockfile: null,
     manifestSha256: null,
     npmrcSha256: null,
+    installConfigSha256: null,
     envFiles: { examples: [], present: [] },
     evidence: [],
     stamps: [],

@@ -80,6 +80,13 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
         if (!v.inWorkspace) {
           return refuseCwd(`'${input.cwd}' is outside the workspace`, startedAt);
         }
+        // The same protected set every declared WRITE is refused against. A protected directory is
+        // protected as a place, not only as a write target: `.git` and the harness's own state dir
+        // are exactly where an accidental command does the most damage, and an approval prompt
+        // reading `in: .agent-cli` asks a human to allow the containment the engine refuses.
+        if (v.protectedPath) {
+          return refuseCwd(`'${input.cwd}' is a protected directory (.git, .agent-cli, the harness state dir, or a configured protectedPath)`, startedAt);
+        }
         resolved = v.resolved;
       } catch (e) {
         return refuseCwd(`'${input.cwd}' is not a usable path: ${(e as Error).message}`, startedAt);

@@ -96,10 +96,19 @@ export interface DetectedProject {
    * an install, and `.npmrc` decides which registry the code comes from and what shell runs
    * those scripts. Binding the lockfile alone would let one `[s]` become standing consent to
    * execute whatever those files are later changed to say — the S14.5 body-binding lesson,
-   * which for an install has three files in the "body", not one.
+   * which for an install has several files in the "body", not one.
    */
   manifestSha256: string | null;
+  /** Kept for display and provenance; the consent identity uses `installConfigSha256`. */
   npmrcSha256: string | null;
+  /**
+   * One digest over EVERY install-affecting config file present (`.npmrc`, `.yarnrc.yml`,
+   * `.pnpmfile.cjs`), names included so adding one differs from editing one. `.npmrc` alone was
+   * the original binding and it was not enough: `.yarnrc.yml` can point `yarnPath` at an
+   * arbitrary script and `.pnpmfile.cjs` runs a hook in-process during resolution — both ordinary
+   * workspace files an auto-allowed write can create under a standing `[s]`.
+   */
+  installConfigSha256: string | null;
   /**
    * Environment-configuration FILE NAMES only — never contents. `.env` is secret-classified, so
    * reading one is an ask-with-redaction; but "this project ships `.env.example` and has no

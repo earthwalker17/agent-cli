@@ -72,6 +72,12 @@ export const LOCKFILES: readonly { name: string; pm: PackageManager }[] = [
   { name: 'yarn.lock', pm: 'yarn' },
 ];
 
+/**
+ * Files that decide what an install fetches or executes, beyond the lockfile and package.json.
+ * Bound into the install's consent identity, in this fixed order.
+ */
+const INSTALL_CONFIG_FILES = ['.npmrc', '.yarnrc.yml', '.pnpmfile.cjs'] as const;
+
 /** Files that DECLARE expected environment configuration, and files that PROVIDE it. Names only. */
 const ENV_EXAMPLES = ['.env.example', '.env.sample', '.env.template', '.env.defaults'] as const;
 const ENV_PRESENT = ['.env', '.env.local', '.env.development', '.env.development.local', '.env.production'] as const;
@@ -283,7 +289,23 @@ export function detectProject(root: string, id = '.'): DetectedProject {
   // arbitrary-shell consent — the S14.5 body-binding hole, reopened one file over.
   const lockfile = detectLockfile(root, detectPackageManager(root, pkg));
   const manifestSha256 = pkgText !== null ? sha256(pkgText) : null;
-  const npmrcSha256 = readBounded(path.join(root, '.npmrc')) !== null ? sha256(readBounded(path.join(root, '.npmrc'))!) : null;
+  const npmrcText = readBounded(path.join(root, '.npmrc'));
+  const npmrcSha256 = npmrcText !== null ? sha256(npmrcText) : null;
+  // Every OTHER file that changes what an install fetches or executes, folded into one sha.
+  // `.npmrc` was bound from the start; `.yarnrc.yml` can point `yarnPath` at an arbitrary script
+  // and `.pnpmfile.cjs` runs a `readPackage` hook in-process during resolution. Both are ordinary
+  // workspace files an auto-allowed write can create, so binding only the lockfile, package.json
+  // and .npmrc left a granted `[s]` covering an install whose behaviour had been rewritten
+  // underneath it — the S14.5 body-binding lesson, two files over. Names are included in the
+  // digest so adding a file is a different identity from editing one.
+  const installConfigSha256 = ((): string | null => {
+    const parts: string[] = [];
+    for (const name of INSTALL_CONFIG_FILES) {
+      const text = readBounded(path.join(root, name));
+      if (text !== null) parts.push(`${name}:${sha256(text)}`);
+    }
+    return parts.length > 0 ? sha256(parts.join('\n')) : null;
+  })();
   const envFiles = {
     examples: ENV_EXAMPLES.filter((c) => exists(root, c)),
     present: ENV_PRESENT.filter((c) => exists(root, c)),
@@ -322,6 +344,7 @@ export function detectProject(root: string, id = '.'): DetectedProject {
     lockfile,
     manifestSha256,
     npmrcSha256,
+    installConfigSha256,
     envFiles,
     evidence,
     stamps,

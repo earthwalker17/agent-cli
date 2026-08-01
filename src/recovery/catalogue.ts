@@ -290,11 +290,16 @@ export function recoveryEntry(cls: FailureClass): RecoveryEntry {
  * helper is shared by every surface that renders a kind list as an instruction (recover,
  * gate refusals, acceptance, graph-state summaries).
  */
-export function proveWith(kinds: readonly CheckKind[]): string {
+export function proveWith(kinds: readonly CheckKind[], project?: string): string {
   const shell = kinds.filter((k) => k !== 'browser');
+  // A multi-project workspace REFUSES an unnamed run_check, so guidance that omits the project
+  // it already knows sends the agent into a loop it cannot converge out of: call, get the
+  // ambiguity refusal, guess, re-run in the project that already passed, get the identical
+  // blocker back. The project is part of the instruction, not decoration.
+  const where = project !== undefined && project !== '.' ? ` project ${project}` : '';
   const parts = [
-    ...(shell.length > 0 ? [`run_check ${shell.join(', ')}`] : []),
-    ...(kinds.includes('browser') ? ['a passing browser_flow'] : []),
+    ...(shell.length > 0 ? [`run_check ${shell.join(', ')}${where}`] : []),
+    ...(kinds.includes('browser') ? [`a passing browser_flow${where !== '' ? ` against the${where} preview` : ''}`] : []),
   ];
   return parts.join(' + ');
 }

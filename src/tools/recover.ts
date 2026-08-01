@@ -97,7 +97,12 @@ export function createRecoverTool(deps: RecoverDeps): Tool<RecoverInputT> {
       const startedAt = Date.now();
       const events = deps.events();
       const target = input.target;
-      const evidence = latestFailureEvidence(events, target === 'session' ? undefined : target);
+      // A task-targeted failure inherits its plan task's declared project, so the regression
+      // proof this attempt eventually needs must come from the half of the stack that failed.
+      const taskProjects = new Map(
+        (deps.planGraph()?.tasks ?? []).filter((t) => t.project !== undefined).map((t) => [t.id, t.project!] as const),
+      );
+      const evidence = latestFailureEvidence(events, target === 'session' ? undefined : target, taskProjects);
       if (evidence === null) {
         return fail(
           'no recorded failure to recover from',

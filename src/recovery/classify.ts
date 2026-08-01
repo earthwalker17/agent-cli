@@ -33,6 +33,9 @@ export type FailureEvidence =
       childSessionId: string;
       status: TaskStatus;
       supervision: string[];
+      /** The plan task's declared project, when it declared one — carried so a repair proof is
+       *  scoped to the half of the stack that actually failed. */
+      projectId?: string;
     }
   | {
       source: 'integration';
@@ -49,6 +52,8 @@ export type FailureEvidence =
       reason: 'crashed' | 'start-failed';
       exitCode: number | null;
       logTail?: string;
+      /** The project unit this preview served (Session 16 recorded it on preview.started). */
+      projectId?: string;
     }
   | {
       /** A project setup that FAILED (Session 16). `unsupported` never spawned and is not one. */
@@ -210,7 +215,15 @@ function classifyTask(e: Extract<FailureEvidence, { source: 'task' }>): FailureC
     cls === 'unknown'
       ? `delegated task ended '${e.status}' with no classifying evidence — read the child log (agent report ${e.childSessionId})`
       : `delegated task ended '${e.status}'`;
-  return { class: cls, confidence, signals: fired, signature: signatureOf(cls, subject, fired), subject, detail };
+  return {
+    class: cls,
+    confidence,
+    signals: fired,
+    signature: signatureOf(cls, subject, fired),
+    subject,
+    ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
+    detail,
+  };
 }
 
 export function classifyFailure(e: FailureEvidence): FailureClassification {
@@ -293,6 +306,7 @@ export function classifyFailure(e: FailureEvidence): FailureClassification {
         signals: fired,
         signature: signatureOf(cls, e.previewId, fired),
         subject: e.previewId,
+        ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
         detail:
           e.reason === 'start-failed'
             ? `preview ${e.previewId} failed to start${e.exitCode !== null ? ` (exit ${e.exitCode})` : ''}${portConflict ? ' — port in use' : ''}; read the log tail`
@@ -310,7 +324,12 @@ export function classifyFailure(e: FailureEvidence): FailureClassification {
  * outcome was a genuine failure (crashes and user interventions are excluded, the same rule R10
  * uses), because "the user stopped it" must never be classified as something to repair.
  */
-export function latestFailureEvidence(events: readonly SessionEvent[], target?: string): FailureEvidence | null {
+export function latestFailureEvidence(
+  events: readonly SessionEvent[],
+  target?: string,
+  /** plan task id -> its declared project, so a task failure inherits the scope its proof needs. */
+  planTaskProjects?: ReadonlyMap<string, string>,
+): FailureEvidence | null {
   let latest: FailureEvidence | null = null;
   const take = (e: FailureEvidence): void => {
     if (latest === null || e.seq > latest.seq) latest = e;
@@ -318,6 +337,13 @@ export function latestFailureEvidence(events: readonly SessionEvent[], target?: 
   const childPlanTask = new Map<string, string>();
   for (const e of events) {
     if (e.type === 'task.started' && e.planTaskId !== undefined) childPlanTask.set(e.childSessionId, e.planTaskId);
+  }
+  // A preview's project is recorded at start; a repair proof must come from the project that
+  // failed, and without this a `preview-startup` failure in `api` could be closed by a green
+  // browser flow against `web`.
+  const previewProject = new Map<string, string>();
+  for (const e of events) {
+    if (e.type === 'preview.started' && e.projectId !== undefined) previewProject.set(e.previewId, e.projectId);
   }
   const supervisionBy = new Map<string, string[]>();
   for (const e of events) {
@@ -370,6 +396,9 @@ export function latestFailureEvidence(events: readonly SessionEvent[], target?: 
         childSessionId: e.childSessionId,
         status: e.status,
         supervision: supervisionBy.get(e.childSessionId) ?? [],
+        ...(planTaskId !== undefined && planTaskProjects?.get(planTaskId) !== undefined
+          ? { projectId: planTaskProjects.get(planTaskId)! }
+          : {}),
       });
     } else if (e.type === 'task.applied' && e.refused.length > 0) {
       const planTaskId = childPlanTask.get(e.childSessionId);
@@ -387,6 +416,7 @@ export function latestFailureEvidence(events: readonly SessionEvent[], target?: 
         reason: e.reason,
         exitCode: e.exitCode,
         ...(e.logTail !== undefined ? { logTail: e.logTail } : {}),
+        ...(previewProject.get(e.previewId) !== undefined ? { projectId: previewProject.get(e.previewId)! } : {}),
       });
     }
   }

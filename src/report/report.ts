@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { caseFold } from '../shared/pathutil.js';
 import type { CommandTermination, SessionEvent } from '../types.js';
 import type { PlanGraph } from '../plan/schema.js';
 import { foldRepairs } from '../recovery/ledger.js';
@@ -292,6 +294,23 @@ export interface PassingEvidenceEntry {
   exitCode?: number;
   ok: boolean;
   termination?: CommandTermination;
+  /**
+   * The workspace-relative directory this evidence actually covers — a typed check's project
+   * unit, or a `run_command`'s declared cwd. `'.'` or absent means the whole workspace, which is
+   * every pre-Session-16 event and every command run at the root.
+   *
+   * Without it, CHECKED had no project axis: a green `build` in `web/` marked a changed file in
+   * `api/` as CHECKED, in the one artifact whose entire job is not overstating what was verified.
+   */
+  scope?: string;
+}
+
+/** Does evidence scoped to `scope` say anything about `relPath`? `'.'`/absent covers everything. */
+function evidenceCovers(scope: string | undefined, relPath: string | undefined): boolean {
+  if (scope === undefined || scope === '.' || relPath === undefined) return true;
+  const f = caseFold(relPath.replace(/\\/g, '/'));
+  const s = caseFold(scope.replace(/\\/g, '/').replace(/\/+$/, ''));
+  return f === s || f.startsWith(`${s}/`);
 }
 
 /**
@@ -304,6 +323,7 @@ export interface PassingEvidenceEntry {
  */
 export function collectPassingEvidence(events: readonly SessionEvent[]): PassingEvidenceEntry[] {
   const commandByCall = new Map<string, string>();
+  const cwdByCall = new Map<string, string>();
   const decisionByCall = new Set<string>();
   const neverRan = new Set<string>();
   const endedByCall = new Map<string, CommandTermination>();
@@ -311,6 +331,9 @@ export function collectPassingEvidence(events: readonly SessionEvent[]): Passing
     if (e.type === 'tool.requested' && e.tool === 'run_command') {
       const cmd = (e.input as { command?: unknown }).command;
       if (typeof cmd === 'string') commandByCall.set(e.callId, cmd);
+      // The declared cwd is what the command could plausibly have verified. Absent = the root.
+      const cwd = (e.input as { cwd?: unknown }).cwd;
+      if (typeof cwd === 'string' && cwd !== '') cwdByCall.set(e.callId, cwd);
     } else if (e.type === 'policy.decision') {
       decisionByCall.add(e.callId);
       if (e.decision === 'deny') neverRan.add(e.callId);
@@ -326,12 +349,14 @@ export function collectPassingEvidence(events: readonly SessionEvent[]): Passing
       const cmd = commandByCall.get(e.callId);
       if (cmd === undefined || neverRan.has(e.callId) || !decisionByCall.has(e.callId)) continue;
       const term = endedByCall.get(e.callId);
+      const cwd = cwdByCall.get(e.callId);
       out.push({
         command: cmd,
         seq: e.seq,
         ok: e.ok,
         ...(e.exitCode !== undefined ? { exitCode: e.exitCode } : {}),
         ...(term !== undefined ? { termination: term } : {}),
+        ...(cwd !== undefined ? { scope: cwd } : {}),
       });
     } else if (e.type === 'check.completed' && e.status === 'pass') {
       out.push({
@@ -340,16 +365,30 @@ export function collectPassingEvidence(events: readonly SessionEvent[]): Passing
         ok: true,
         ...(e.exitCode !== null ? { exitCode: e.exitCode } : {}),
         ...(e.termination !== undefined ? { termination: e.termination } : {}),
+        ...(e.projectId !== undefined ? { scope: e.projectId } : {}),
       });
     }
   }
   return out.sort((a, b) => a.seq - b.seq);
 }
 
-/** The exact CHECKED rule: the first evidence after `seq` that genuinely EXITED with code 0
- *  (a killed command has no exit code by contract; termination evidence enforces it). */
-export function firstPassingEvidenceAfter(evidence: readonly PassingEvidenceEntry[], seq: number): PassingEvidenceEntry | undefined {
-  return evidence.find((cc) => cc.seq > seq && cc.exitCode === 0 && (cc.termination === undefined || cc.termination === 'exited'));
+/**
+ * The exact CHECKED rule: the first evidence after `seq` that genuinely EXITED with code 0
+ * (a killed command has no exit code by contract; termination evidence enforces it) AND whose
+ * scope actually covers the file. Omit `relPath` to ask the unscoped question.
+ */
+export function firstPassingEvidenceAfter(
+  evidence: readonly PassingEvidenceEntry[],
+  seq: number,
+  relPath?: string,
+): PassingEvidenceEntry | undefined {
+  return evidence.find(
+    (cc) =>
+      cc.seq > seq &&
+      cc.exitCode === 0 &&
+      (cc.termination === undefined || cc.termination === 'exited') &&
+      evidenceCovers(cc.scope, relPath),
+  );
 }
 
 /**
@@ -507,8 +546,14 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   // in collectPassingEvidence/firstPassingEvidenceAfter, shared verbatim with /diff.
   const passingEvidence = collectPassingEvidence(events);
 
+  const wsRoot = started?.type === 'session.started' ? started.workspaceRoot : null;
+  const relOf = (abs: string): string | undefined => {
+    if (wsRoot === null) return undefined; // no root recorded ⇒ ask the unscoped question
+    const rel = path.relative(wsRoot, abs).split(path.sep).join('/');
+    return rel === '' || rel.startsWith('..') ? undefined : rel;
+  };
   const filesChanged: ReportFile[] = [...lastMutation.values()].map((m) => {
-    const check = firstPassingEvidenceAfter(passingEvidence, m.seq);
+    const check = firstPassingEvidenceAfter(passingEvidence, m.seq, relOf(m.path));
     const file: ReportFile = {
       path: m.path,
       kind: m.kind,

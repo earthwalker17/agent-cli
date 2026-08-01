@@ -369,6 +369,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
         command: rc.command,
         cwd: rc.cwd,
         pid: handle.pid,
+        projectId: rc.projectId,
         ...(input.port !== undefined ? { expectedPort: input.port } : {}),
       });
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { sha256 } from '../shared/hash.js';
-import { normalizeRelPrefix, relPrefixesOverlap } from '../shared/pathutil.js';
+import { caseFold, normalizeRelPrefix, relPrefixesOverlap } from '../shared/pathutil.js';
 import type { CheckKind } from '../types.js';
 
 /**
@@ -220,14 +220,40 @@ export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions 
   // detection is a heuristic, and a check may become runnable later (an install, a new config).
   const known = opts.knownProjects;
   if (known !== undefined && known.length > 0) {
+    // Compare NORMALIZED ids on both sides. `./api` and `api` name the same unit, and scolding a
+    // correct-but-differently-spelled scope pushed the model toward the rational-but-wrong fix:
+    // drop the scoping entirely, landing on the any-project gate this feature exists to prevent.
+    const canon = (raw: string): string => (raw.trim() === '.' ? '.' : (normalizeRelPrefix(raw) ?? raw.trim()));
+    const knownSet = new Set(known.map((k) => caseFold(canon(k))));
     const named = new Set<string>();
     for (const t of input.tasks) if (t.project !== undefined && (t.checks?.length ?? 0) > 0) named.add(t.project);
     for (const p of input.gates?.projects ?? []) named.add(p);
     for (const p of named) {
-      if (!known.includes(p)) {
+      if (!knownSet.has(caseFold(canon(p)))) {
         warnings.push(
           `plan scopes a gate to project '${p}', which detection does not currently see (detected: ${known.join(', ')}) — ` +
             'a gate scoped to a project that does not exist can never pass AND can never be waived, so its dependents would stay blocked with no exit',
+        );
+      }
+    }
+    // The OTHER direction, and the one that produces a false green rather than a stall: in a
+    // multi-project workspace an UNSCOPED gate is satisfied by a pass in any single project, so a
+    // full-stack session can be accepted as complete having verified half of itself. The agent
+    // view says so verbatim; nothing said it at the point the plan is still editable.
+    if (known.length > 1) {
+      const unscopedGate = (input.gates?.integration?.length ?? 0) + (input.gates?.completion?.length ?? 0) > 0 && (input.gates?.projects?.length ?? 0) === 0;
+      const unscopedTasks = input.tasks.filter((t) => (t.checks?.length ?? 0) > 0 && t.project === undefined).map((t) => t.id);
+      if (unscopedGate) {
+        warnings.push(
+          `this workspace holds ${String(known.length)} projects (${known.join(', ')}) and gates declare no \`projects\` — ` +
+            'an unscoped gate is satisfied by a pass in ANY ONE of them, so the session could be accepted with the others never verified. ' +
+            'Set gates.projects to require each half.',
+        );
+      }
+      if (unscopedTasks.length > 0) {
+        warnings.push(
+          `task(s) ${unscopedTasks.join(', ')} declare checks but no \`project\` in a ${String(known.length)}-project workspace — ` +
+            'their gate accepts a passing run from any project. Name the project each task is verified in.',
         );
       }
     }

@@ -7,7 +7,12 @@ import { parsePortCandidates, waitForReady } from '../src/preview/ready.js';
 import { resolveChecks } from '../src/checks/recipes.js';
 import { detectProject } from '../src/checks/detect.js';
 import { createSharedWorkspace } from '../src/checks/session-workspace.js';
+import { resolveSetup, sameSetup } from '../src/setup/intents.js';
 import { completionGateState } from '../src/plan/graph-state.js';
+import { validatePlanGraph } from '../src/plan/schema.js';
+import { proveWith } from '../src/recovery/catalogue.js';
+import { collectPassingEvidence, firstPassingEvidenceAfter } from '../src/report/report.js';
+import { runCommandTool } from '../src/tools/run-command.js';
 import { createRunCheckTool } from '../src/tools/run-check.js';
 import { createProjectSetupTool } from '../src/tools/project-setup.js';
 import { createBrowserFlowTool, type BrowserToolDeps } from '../src/tools/browser-flow.js';
@@ -239,6 +244,124 @@ describe('browser evidence carries the project it verified', () => {
     const d = decide(t, { flow: { ...FLOW.flow, preview_id: 'pv-gone' } }, { workspaceRoot: tmpdir(), stateDir: tmpdir() }, new Grants());
     expect(d.reason).toContain("no READY preview with id 'pv-gone'");
     expect(d.reason).toContain('pv-web [project web]');
+  });
+});
+
+describe('CHECKED does not cross project boundaries', () => {
+  const ev = (over: Record<string, unknown>): SessionEvent => ({ v: 1, ts: 't', ...over }) as unknown as SessionEvent;
+
+  it('a green check in web/ does not mark an api/ file CHECKED, and its own file still is', () => {
+    const evidence = collectPassingEvidence([
+      ev({ seq: 10, callId: 'c1', type: 'check.completed', check: 'build', recipeId: 'node.script.build@web', status: 'pass', projectId: 'web', exitCode: 0, durationMs: 1, summary: 'ok' }),
+    ]);
+    expect(evidence[0]).toMatchObject({ scope: 'web', exitCode: 0 });
+    // The file the check actually covers.
+    expect(firstPassingEvidenceAfter(evidence, 5, 'web/src/App.tsx')).toBeDefined();
+    // The one it does not. Before this, the report and /diff both asserted the backend was
+    // CHECKED by a command that never entered its directory.
+    expect(firstPassingEvidenceAfter(evidence, 5, 'api/src/routes.ts')).toBeUndefined();
+    // A root-scoped check still covers everything, which is every pre-S16 event.
+    const rootRun = collectPassingEvidence([
+      ev({ seq: 10, callId: 'c1', type: 'check.completed', check: 'test', recipeId: 'node.script.test', status: 'pass', projectId: '.', exitCode: 0, durationMs: 1, summary: 'ok' }),
+    ]);
+    expect(firstPassingEvidenceAfter(rootRun, 5, 'api/src/routes.ts')).toBeDefined();
+  });
+
+  it("a run_command's declared cwd scopes it the same way", () => {
+    const evidence = collectPassingEvidence([
+      ev({ seq: 1, callId: 'c1', type: 'tool.requested', tool: 'run_command', input: { command: 'npm test', cwd: 'api' } }),
+      ev({ seq: 2, callId: 'c1', type: 'policy.decision', decision: 'ask', tool: 'run_command', classification: 'reversible', rule: 'r', reason: 'x' }),
+      ev({ seq: 3, callId: 'c1', type: 'approval.resolved', decision: 'allow', scope: 'once' }),
+      ev({ seq: 4, callId: 'c1', type: 'command.ended', termination: 'exited', exitCode: 0, durationMs: 1 }),
+      ev({ seq: 5, callId: 'c1', type: 'tool.completed', tool: 'run_command', ok: true, exitCode: 0, durationMs: 1, outputPreview: '' }),
+    ]);
+    expect(evidence[0]).toMatchObject({ scope: 'api' });
+    expect(firstPassingEvidenceAfter(evidence, 0, 'api/src/x.ts')).toBeDefined();
+    expect(firstPassingEvidenceAfter(evidence, 0, 'web/src/x.tsx')).toBeUndefined();
+  });
+});
+
+describe('a blocker has to name the project it means', () => {
+  it('boundaryGate reports WHICH scope is missing, and proveWith names it', () => {
+    const graph = {
+      version: 1,
+      goal: 'g',
+      tasks: [],
+      gates: { completion: ['test'], projects: ['api', 'web'] },
+    } as unknown as PlanGraph;
+    const events = [
+      { v: 1, seq: 1, ts: 't', callId: 'c', type: 'file.mutated' },
+      { v: 1, seq: 2, ts: 't', callId: 'c', type: 'check.completed', check: 'test', recipeId: 'r@api', status: 'pass', projectId: 'api', exitCode: 0, durationMs: 1, summary: 'ok' },
+    ] as unknown as SessionEvent[];
+    const gate = completionGateState(graph, events);
+    expect(gate.pending).toEqual(['test']);
+    expect(gate.byKind).toEqual([{ kind: 'test', passedIn: ['api'], waivedIn: [], missingIn: ['web'] }]);
+    // The guidance a multi-project workspace can actually act on: an unnamed run_check is
+    // refused as ambiguous, so the old "prove with run_check test" could never converge.
+    expect(proveWith(['test'], 'web')).toBe('run_check test project web');
+    expect(proveWith(['test'])).toBe('run_check test');
+  });
+
+  it('an unscoped gate over a multi-project workspace is WARNED at the consent boundary', () => {
+    const graph = {
+      version: 1,
+      objective: 'ship it',
+      tasks: [{ id: 'a', title: 't', intent: 'i', role: 'executor', dependsOn: [], touches: ['api/'], verify: 'v', risk: 'low', checks: ['test'] }],
+      gates: { completion: ['test'] },
+    } as unknown as PlanGraph;
+    const v = validatePlanGraph(graph, { knownProjects: ['api', 'web'] });
+    expect(v.errors).toEqual([]);
+    expect(v.warnings.join('\n')).toContain('an unscoped gate is satisfied by a pass in ANY ONE of them');
+    expect(v.warnings.join('\n')).toContain('declare checks but no `project`');
+
+    // …and a correctly-scoped plan spelled `./api` is NOT scolded for naming a project that
+    // exists. The old raw comparison pushed the model toward dropping scoping altogether.
+    const scoped = {
+      ...graph,
+      tasks: [{ ...(graph as unknown as { tasks: unknown[] }).tasks[0]!, project: './api' }],
+      gates: { completion: ['test'], projects: ['api', 'web'] },
+    } as unknown as PlanGraph;
+    expect(validatePlanGraph(scoped, { knownProjects: ['api', 'web'] }).warnings.join('\n')).not.toContain('which detection does not currently see');
+  });
+});
+
+describe('an install identity binds every file that changes what an install executes', () => {
+  it('.pnpmfile.cjs and .yarnrc.yml move the identity, so a granted [s] does not cover them', () => {
+    const root = tmpdir();
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'p', dependencies: { x: '^1' } }));
+    fs.writeFileSync(path.join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
+    const before = resolveSetup(detectProject(root, '.'), 'install').resolved;
+    expect(before?.command).toBe('pnpm install --frozen-lockfile');
+
+    // An ordinary in-workspace write — auto-allowed — that makes the next install run a hook.
+    fs.writeFileSync(path.join(root, '.pnpmfile.cjs'), 'module.exports={hooks:{readPackage:(p)=>p}}');
+    const after = resolveSetup(detectProject(root, '.'), 'install').resolved;
+    expect(after?.command).toBe(before?.command); // same string…
+    expect(after?.installIdentity).not.toBe(before?.installIdentity); // …different consent identity
+    expect(sameSetup(before, after)).toBe(false);
+
+    fs.writeFileSync(path.join(root, '.yarnrc.yml'), 'yarnPath: ./evil.cjs\n');
+    expect(resolveSetup(detectProject(root, '.'), 'install').resolved?.installIdentity).not.toBe(after?.installIdentity);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe('a protected directory is protected as a PLACE, not only as a write target', () => {
+  it('run_command refuses .git and .agent-cli as a cwd', async () => {
+    const root = tmpdir();
+    fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.agent-cli'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'api'), { recursive: true });
+    const ctx: ToolContext = { workspaceRoot: root, stateDir: path.join(tmpdir(), 'state') };
+    for (const cwd of ['.git', '.agent-cli']) {
+      const r = await runCommandTool.execute({ command: 'node -v', cwd }, ctx);
+      expect(r.ok).toBe(false);
+      expect(r.output).toContain('protected directory');
+    }
+    // A real project directory is still fine (the command itself still asks for approval).
+    const ok = await runCommandTool.execute({ command: 'node -v', cwd: 'api' }, ctx);
+    expect(ok.output).not.toContain('protected directory');
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });
 

@@ -959,6 +959,7 @@ function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvide
       cwd: e.cwd,
       pid: e.pid,
       ...(e.expectedPort !== undefined ? { expectedPort: e.expectedPort } : {}),
+      ...(e.projectId !== undefined ? { projectId: e.projectId } : {}),
     });
     return;
   }

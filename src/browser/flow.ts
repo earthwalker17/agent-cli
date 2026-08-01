@@ -165,6 +165,16 @@ export async function runFlow(spec: FlowSpec, deps: FlowRunDeps): Promise<FlowRu
         }
       }
       if (!outcome.ok) {
+        // Re-check liveness on the way out. The pre-step check catches a server that was already
+        // gone; a server that dies DURING a step produced a timeout or a failed assertion, and
+        // reporting that as a UI defect is a dishonest verdict — the app was never judged. It
+        // also sends the repair budget after a rendering hypothesis for a process that no longer
+        // exists (`browser-verification` instead of `runtime-process`).
+        if (!deps.isPreviewAlive()) {
+          previewDied = true;
+          steps.pop();
+          break;
+        }
         // Best-effort failure screenshot: the state that failed, at the moment it failed.
         try {
           const bytes = await page.screenshot({ timeout: 3_000 });

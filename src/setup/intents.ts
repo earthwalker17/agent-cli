@@ -136,9 +136,14 @@ function resolveInstall(p: DetectedProject): SetupResolution {
   // Every file that decides what an install fetches or executes, hashed together. A component
   // the harness could not read has no stable identity, so the approval covers THIS call only —
   // better to re-ask than to replay against a file nobody hashed.
+  // `installConfigSha256` covers .npmrc AND the two other files that can rewrite an install's
+  // behaviour without touching the lockfile or package.json: `.yarnrc.yml` can point `yarnPath`
+  // at an arbitrary script, and `.pnpmfile.cjs` runs a `readPackage` hook in-process during
+  // resolution. Both are ordinary workspace files an auto-allowed write can create, so binding
+  // .npmrc alone left them writable under a standing `[s]`.
   const installIdentity =
     lock !== null && lock.sha256 !== null && p.manifestSha256 !== null
-      ? sha256(`${lock.sha256}\n${p.manifestSha256}\n${p.npmrcSha256 ?? ''}`)
+      ? sha256(`${lock.sha256}\n${p.manifestSha256}\n${p.installConfigSha256 ?? ''}`)
       : null;
 
   return {

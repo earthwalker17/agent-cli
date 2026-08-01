@@ -644,8 +644,11 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
 export function repairVerdictsFor(graph: PlanGraph, events: readonly SessionEvent[]): Map<string, RepairVerdict> {
   const out = new Map<string, RepairVerdict>();
   const ledger = foldRepairs(events, { extraScope: (target) => graph.tasks.find((t) => t.id === target)?.touches ?? [] });
+  // A task failure inherits the project its plan task declared, so its repair proof must come
+  // from that project — the same rule a check failure already followed.
+  const taskProjects = new Map(graph.tasks.filter((t) => t.project !== undefined).map((t) => [t.id, t.project!] as const));
   for (const task of graph.tasks) {
-    const evidence = latestFailureEvidence(events, task.id);
+    const evidence = latestFailureEvidence(events, task.id, taskProjects);
     if (evidence === null) continue;
     const classification = classifyFailure(evidence);
     out.set(task.id, evaluateRepair({ classification, failureSeq: evidence.seq, ledger }));

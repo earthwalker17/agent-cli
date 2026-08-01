@@ -54,7 +54,14 @@ export function renderUserPlanView(doc: CanonicalPlanDoc): string {
 
   // The `checks` column is not decoration: it is what blocks dependents and what /accept
   // measures, so the user must see it in the document whose content sha they approve.
-  lines.push('', '## Tasks', '', '| id | title | role | depends on | risk | touches | checks |', '|---|---|---|---|---|---|---|');
+  // `project` joins `checks` in the approved document for the same reason: in a multi-project
+  // workspace a check gate means nothing until you know WHICH project it is measured against, and
+  // the user is binding a sha to this text.
+  const multiProject = g.tasks.some((t) => t.project !== undefined) || (g.gates?.projects?.length ?? 0) > 0;
+  const head = multiProject
+    ? '| id | title | role | depends on | risk | touches | project | checks |'
+    : '| id | title | role | depends on | risk | touches | checks |';
+  lines.push('', '## Tasks', '', head, `|${'---|'.repeat(multiProject ? 8 : 7)}`);
   const order = topoOrder(g.tasks) ?? g.tasks.map((t) => t.id);
   const byId = new Map(g.tasks.map((t) => [t.id, t] as const));
   for (const id of order) {
@@ -65,15 +72,30 @@ export function renderUserPlanView(doc: CanonicalPlanDoc): string {
       t.touches.length === 0 ? '—' : t.touches.slice(0, 2).join(', ') + (t.touches.length > 2 ? ` (+${t.touches.length - 2})` : '');
     const flags = [t.risk !== 'low' ? t.risk : '', t.serial ? 'serial' : ''].filter((s) => s !== '').join(', ') || 'low';
     const checks = t.checks !== undefined && t.checks.length > 0 ? t.checks.join(', ') : '—';
-    lines.push(`| ${t.id} | ${cell(t.title)} | ${t.role} | ${cell(deps)} | ${flags} | ${cell(touches)} | ${cell(checks)} |`);
+    const project = t.project !== undefined ? cell(t.project) : '—';
+    lines.push(
+      multiProject
+        ? `| ${t.id} | ${cell(t.title)} | ${t.role} | ${cell(deps)} | ${flags} | ${cell(touches)} | ${project} | ${cell(checks)} |`
+        : `| ${t.id} | ${cell(t.title)} | ${t.role} | ${cell(deps)} | ${flags} | ${cell(touches)} | ${cell(checks)} |`,
+    );
   }
   if (g.gates !== undefined && ((g.gates.integration?.length ?? 0) > 0 || (g.gates.completion?.length ?? 0) > 0)) {
     lines.push('', '## Gates', '');
+    // The SCOPE clause is the difference between "tests must pass in both halves of the stack"
+    // and "a green test anywhere ends the session". The agent view has always said which one this
+    // is; the user view — the document whose sha the approval binds — did not, so the two readings
+    // rendered identically to the person consenting to them.
+    const scope =
+      (g.gates.projects?.length ?? 0) > 0
+        ? ` — in EACH of: ${g.gates.projects!.join(', ')}`
+        : multiProject
+          ? ' — in ANY project (unscoped: a pass in one project satisfies this)'
+          : '';
     if ((g.gates.integration?.length ?? 0) > 0) {
-      lines.push(`- **integration** (after each apply, before the next executor wave): ${g.gates.integration!.join(', ')}`);
+      lines.push(`- **integration** (after each apply, before the next executor wave): ${g.gates.integration!.join(', ')}${scope}`);
     }
     if ((g.gates.completion?.length ?? 0) > 0) {
-      lines.push(`- **completion** (after the last change, before the session can be accepted): ${g.gates.completion!.join(', ')}`);
+      lines.push(`- **completion** (after the last change, before the session can be accepted): ${g.gates.completion!.join(', ')}${scope}`);
     }
   }
   // The review declaration is part of what the user approves — a waiver must be impossible to

@@ -302,7 +302,11 @@ export function selectUnit(
   if (ws.units.length === 0 && requested === undefined) return { unit: ws.rootUnit };
   if (requested !== undefined) {
     const id = requested.trim() === ROOT_UNIT_ID ? ROOT_UNIT_ID : normalizeRelPrefix(requested);
-    const found = id === null ? undefined : ws.units.find((u) => u.id === id);
+    // Case-folded on a case-insensitive filesystem, exactly as discovery folds when deduplicating.
+    // Matching case-SENSITIVELY against a filesystem that does not was a hard refusal for
+    // `project: 'API'` naming the on-disk `api` — and, worse, an unclearable gate: a plan scoped
+    // to 'API' could never record a run in that scope, so it could never pass and never be waived.
+    const found = id === null ? undefined : (ws.units.find((u) => u.id === id) ?? ws.units.find((u) => caseFold(u.id) === caseFold(id)));
     if (found === undefined) {
       return { unit: null, reason: `unknown project '${requested}'; detected projects: ${ws.units.map((u) => u.id).join(', ')}` };
     }

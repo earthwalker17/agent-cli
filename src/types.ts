@@ -227,6 +227,9 @@ export type PreviewEvidence =
       cwd: string;
       pid: number;
       expectedPort?: number;
+      /** Session 16.5 (additive): the project UNIT this server belongs to — what scopes a repair
+       *  proof, so a failed `api` boot cannot be closed by a green flow against `web`. */
+      projectId?: string;
     }
   | {
       kind: 'ready';
@@ -1257,6 +1260,8 @@ export type EventBody =
       cwd: string;
       pid: number;
       expectedPort?: number;
+      /** Session 16.5 (additive): the project UNIT this server belongs to. */
+      projectId?: string;
     }
   | {
       type: 'preview.ready';

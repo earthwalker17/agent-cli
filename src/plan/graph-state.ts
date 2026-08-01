@@ -58,6 +58,21 @@ export interface TaskVerification {
   status: 'none' | 'green' | 'waived' | 'pending';
 }
 
+/** Per-kind, per-project detail for a boundary gate. Empty when the graph declares no projects. */
+export interface BoundaryGateScope {
+  kind: CheckKind;
+  passedIn: string[];
+  waivedIn: string[];
+  missingIn: string[];
+}
+
+export interface BoundaryGateState {
+  required: CheckKind[];
+  pending: CheckKind[];
+  waived: CheckKind[];
+  byKind: BoundaryGateScope[];
+}
+
 export interface PlanTaskState {
   id: string;
   title: string;
@@ -349,15 +364,12 @@ export function depSatisfied(dep: PlanTaskState | undefined): boolean {
  * verify, so the gate is vacuously satisfied and a first wave is never delayed. `unsupported`
  * satisfies with a caveat, for the same never-strand-the-plan reason as a per-task gate.
  */
-export function integrationGateState(
-  graph: PlanGraph,
-  events: readonly SessionEvent[],
-): { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } {
+export function integrationGateState(graph: PlanGraph, events: readonly SessionEvent[]): BoundaryGateState {
   const required = [...(graph.gates?.integration ?? [])];
-  if (required.length === 0) return { required, pending: [], waived: [] };
+  if (required.length === 0) return { required, pending: [], waived: [], byKind: [] };
   let lastApply = 0;
   for (const e of events) if (e.type === 'task.applied') lastApply = Math.max(lastApply, e.seq);
-  if (lastApply === 0) return { required, pending: [], waived: [] };
+  if (lastApply === 0) return { required, pending: [], waived: [], byKind: [] };
   return boundaryGate(required, events, lastApply, graph.gates?.projects);
 }
 
@@ -368,12 +380,9 @@ export function integrationGateState(
  * correctly invalidate it. (A per-task gate deliberately is NOT invalidated by unrelated later
  * changes; this gate is what covers the combined state.)
  */
-export function completionGateState(
-  graph: PlanGraph,
-  events: readonly SessionEvent[],
-): { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } {
+export function completionGateState(graph: PlanGraph, events: readonly SessionEvent[]): BoundaryGateState {
   const required = [...(graph.gates?.completion ?? [])];
-  if (required.length === 0) return { required, pending: [], waived: [] };
+  if (required.length === 0) return { required, pending: [], waived: [], byKind: [] };
   // "The last change" must include reverts, or the gate would stay green over a workspace that
   // no longer exists: applyUndo writes files back to disk and records only `undo.applied`, and a
   // checkpoint restore is likewise a change to what the passing check measured.
@@ -401,28 +410,41 @@ function boundaryGate(
   events: readonly SessionEvent[],
   afterSeq: number,
   projects?: readonly string[],
-): { required: CheckKind[]; pending: CheckKind[]; waived: CheckKind[] } {
+): BoundaryGateState {
   const pending: CheckKind[] = [];
   const waived: CheckKind[] = [];
+  const byKind: BoundaryGateScope[] = [];
   const scopes = projects !== undefined && projects.length > 0 ? projects : [undefined];
   for (const kind of required) {
-    let anyWaived = false;
-    let allSatisfied = true;
+    const passedIn: string[] = [];
+    const waivedIn: string[] = [];
+    const missingIn: string[] = [];
     for (const scope of scopes) {
       const after = events.filter(
         (e) => e.type === 'check.completed' && e.check === kind && e.seq > afterSeq && (scope === undefined || (e.projectId ?? '.') === scope),
       );
-      if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) continue;
-      if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && waivesGate(e.unsupportedReason))) {
-        anyWaived = true;
+      const label = scope ?? '.';
+      if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) {
+        passedIn.push(label);
         continue;
       }
-      allSatisfied = false;
+      if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && waivesGate(e.unsupportedReason))) {
+        waivedIn.push(label);
+        continue;
+      }
+      missingIn.push(label);
     }
-    if (!allSatisfied) pending.push(kind);
-    else if (anyWaived) waived.push(kind);
+    // WHICH scope is unsatisfied is the actionable half. Collapsing it to a bare kind produced a
+    // blocker the agent could not converge on: "prove with run_check test" is a call a
+    // multi-project workspace refuses as ambiguous, and re-running it in the project that already
+    // passed returns the byte-identical blocker.
+    if (projects !== undefined && projects.length > 0) {
+      byKind.push({ kind, passedIn, waivedIn, missingIn });
+    }
+    if (missingIn.length > 0) pending.push(kind);
+    else if (waivedIn.length > 0) waived.push(kind);
   }
-  return { required: [...required], pending, waived };
+  return { required: [...required], pending, waived, byKind };
 }
 
 /**

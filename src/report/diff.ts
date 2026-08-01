@@ -86,7 +86,7 @@ export function buildSessionDiff(
   const out: SessionDiffFile[] = [];
   for (const [p, baseline] of [...firstBefore.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const relPath = path.relative(workspaceRoot, p).split(path.sep).join('/');
-    const evidence = firstPassingEvidenceAfter(passingEvidence, lastMutationSeq.get(p) ?? Number.MAX_SAFE_INTEGER);
+    const evidence = firstPassingEvidenceAfter(passingEvidence, lastMutationSeq.get(p) ?? Number.MAX_SAFE_INTEGER, relPath);
     const checkedFields = { checked: evidence !== undefined, ...(evidence !== undefined ? { checkedBy: evidence.command } : {}) };
     let current: Buffer | null = null;
     try {
