@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI **v1.2** is actually built. This describes the implemented system — its modules,
+How Agent CLI **v1.2.1** is actually built. This describes the implemented system — its modules,
 contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
 deferred; this file avoids session narration except where a decision's *reason* is the contract.
 
@@ -316,10 +316,19 @@ inert.
   secret-classified read, but "ships `.env.example`, has no `.env`" is a fact worth surfacing
   rather than a dev server that dies during startup for no visible reason). The stamp union
   qualifies every `relPath` by unit, so the TOCTOU guard notices a manifest appearing in ANY unit.
-- **One detection per session:** assembly detects once, before the system prompt, and hands the
-  same result to the prompt and to all three tools. The prompt block names each project so the
-  model can name one back; each tool then refreshes its own copy, so no tool advances another's
-  gate.
+- **One detection per session, one LIVE holder.** Assembly detects once, before the system prompt,
+  and `checks/session-workspace.ts` publishes that snapshot to `run_check`, `preview` and
+  `project_setup` through a single `SharedWorkspace`. Per-tool copies protected a window that does
+  not exist — tool calls execute strictly one at a time, so `decide()` and `execute()` for one call
+  are back-to-back — and cost a real defect: after `project_setup install` created `node_modules`,
+  the next check resolved against a snapshot where nothing could run, was allowed as "nothing to
+  run", then refused at execute with *"the project changed after this call was approved"* for a
+  call nobody approved. `project_setup` refreshes the holder after a run; the drift guard is
+  unchanged, and the never-gated case now has its own honest message.
+- **The prompt block is a photograph.** It is built before the first turn and lives in the cached
+  stable prefix, so it is labelled AS OBSERVED AT SESSION START and points at the tools that
+  resolve against current state. A multi-project workspace also gets ONE startup chrome line naming
+  its projects and which are uninstalled — the model had those facts since S16; the human did not.
 
 ## Project setup (`setup/`, `tools/project-setup.ts`) — install, migrate, seed
 
@@ -402,9 +411,16 @@ argument, and everything else follows from it.
   check budget (`CHECKS_PER_SESSION = 80`, events-rebuilt).
 - **Evidence:** `check.started` is emitted from `onSpawn` ONLY, so it means exactly what
   `command.started` means — a process really started. An `unsupported` kind records a completed
-  event alone carrying `unsupportedReason` (`no-recipe` | `precondition` | `bad-request`), which
-  is what lets a gate distinguish "this project cannot" from "you asked wrong". `reconstruct`
-  replays an interrupted check as "produced no verdict; effects unknown — re-run".
+  event alone carrying `unsupportedReason` (`no-recipe` | `precondition` | `precondition-curable`
+  | `bad-request`), which is what lets a gate distinguish "this project cannot" from "you asked
+  wrong" — and, since v1.2.1, from "this project is not installed yet". `precondition-curable` is
+  produced when the project DECLARES dependencies and has no `node_modules`: a transient state with
+  a named cure (`project_setup install`), decided once from the project's own facts rather than
+  from whichever recipe row complained. It does NOT waive a gate. Waiving it let a session that
+  installed `api` and forgot `web` be accepted as COMPLETE with its own caveat claiming a project
+  shipping a build and a test suite *cannot* run them — an uninstalled project is unverified, not
+  unverifiable. `reconstruct` replays an interrupted check as "produced no verdict; effects
+  unknown — re-run".
 
 ### Consent for checks — replay, bound to what actually runs
 

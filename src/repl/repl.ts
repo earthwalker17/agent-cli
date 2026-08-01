@@ -416,6 +416,15 @@ export function planApprovalReminder(ctx: CommandContext): void {
     const state = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
     if (state.kind !== 'canonical' || state.approvedAndCurrent) return;
     if (state.status === 'superseded') return;
+    // A plan that was NEVER approved is the ordinary post-planning state: the model has just
+    // written it and is presenting it for approval in the same breath. Warning there is noise,
+    // and noise at the idle prompt is how real warnings stop being read (observed immediately:
+    // the line fired at the end of the planning turn in the very next take).
+    //
+    // The dangerous state is narrower — an approval EXISTED and no longer covers the plan. That
+    // is the one a user cannot see coming, because nothing about the screen changed when it
+    // happened.
+    if (state.approvedSha === null) return;
     const graph = state.canonical?.graph ?? null;
     if (graph === null) return;
     const executors = graph.tasks.filter((t) => t.role === 'executor');

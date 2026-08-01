@@ -7,6 +7,79 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.2.1] — 2026-08-01
+
+The Session 16 capability, live-proven — and the defects that proving it exposed. 1.2.0 shipped
+multi-project support and `project_setup` with an honest caveat in its own release notes: the
+resolution layer was proven, the end-to-end agent run on a dependency-bearing full-stack project
+was not. This release closes that, and everything below is something the attempt found.
+
+### Fixed
+
+- **Readiness could not reach a server on IPv6 loopback.** Node 22 resolves `localhost` verbatim,
+  which on Windows is `::1` — so a dev server told to listen on `localhost` refuses every
+  connection to `127.0.0.1`, which was all the harness probed. A Vite front end could never become
+  ready. Both loopback literals are probed in order now, and the address that ANSWERED is what
+  gets recorded, because that URL becomes the origin a browser flow is locked to.
+- **A colourised server banner could hide its own port.** The announced-port parser required
+  digits immediately after `localhost:`; picocolors forces colour on win32 regardless of TTY, so a
+  dev server writing to a log file can emit `http://localhost:<ESC>[1m5173<ESC>[22m/`. The tail is
+  ANSI-stripped before parsing (`stripAnsi`, beside `sanitizeLine` — one removes for parsing, the
+  other escapes for display).
+- **A project-scoped `browser` gate was permanently unsatisfiable AND unwaivable.** `browser_flow`
+  recorded no `projectId` while every gate consumer folds a missing one to the root, and no other
+  call can produce that kind. Browser evidence is now project-attributed from the preview it drove.
+- **An unbound browser flow with two previews running was denied** with "start one with the preview
+  tool first" — in exactly the shape 1.2.0 raised the concurrency bound to enable. The denial now
+  names what is running and asks for a `preview_id`; and because an unbound flow still binds to
+  whatever single preview is ready (which can legitimately be the API), the result says what it
+  drove.
+- **"Dependencies are not installed" waived a user-approved verification gate.** True before 1.2.0,
+  when the harness could not install anything; `project_setup install` makes it a transient state
+  with a named cure. A session that installed one half of a full-stack workspace and forgot the
+  other could be accepted as COMPLETE, its own caveat claiming a project that ships a build and a
+  test suite *cannot* run them. A curable precondition now keeps the gate PENDING.
+- **The first check, preview or migrate after an install was always refused** with "the project
+  changed after this call was approved" — for a call nobody approved and a project nobody changed.
+  The three tools held independent detection snapshots; one `SharedWorkspace` now backs all three.
+- **CHECKED had no project axis:** a green `build` in `web/` marked a changed file in `api/` as
+  CHECKED, in both the report and `/diff`.
+- **A boundary gate discarded WHICH project was unsatisfied**, so `/accept` suggested a
+  `run_check` a multi-project workspace refuses as ambiguous — a loop that cannot converge. Gates
+  now report per-project detail, and the guidance names the project.
+- **The user-facing plan view omitted `project` and `gates.projects`**, so "tests must pass in both
+  halves" and "a green test anywhere ends the session" rendered identically in the document whose
+  sha the approval binds.
+- **A repair proof was project-filtered only for check and setup failures** — a `preview-startup`
+  failure in `api` could be closed by a green browser flow against `web`.
+- **An install's consent identity now binds `.pnpmfile.cjs` and `.yarnrc.yml`** alongside `.npmrc`:
+  a `readPackage` hook and a `yarnPath` both rewrite what an install executes, and both are
+  ordinary auto-allowed writes under a standing `[s]`.
+- `run_command`'s `cwd` is refused for protected directories — `.git` and the state dir are
+  protected as PLACES, not only as write targets.
+- A preview that dies DURING a browser step is re-checked for liveness, so a dead server stops
+  being reported as a UI defect that spends the repair budget on a rendering hypothesis.
+- **The one blocker only the user can clear is now shown to the user.** Found in the first live
+  take: the agent amended its own approved plan mid-build, which invalidated the approval and made
+  every executor task unspawnable. The harness said so correctly — to the *model*, which cannot
+  type `/plan approve` — and the agent quietly did the "parallel isolated" work serially in the
+  main session. One end-of-turn line now names the blocked tasks and the command that clears them.
+
+### Added
+
+- A startup line naming the detected projects in a multi-project workspace, and which of them are
+  not installed. The model had been told since 1.2.0; the human had not.
+
+### Changed
+
+- The system prompt's project block is labelled AS OBSERVED AT SESSION START — it is a cached
+  prefix built before the first turn, so in a session whose purpose is to install dependencies its
+  "dependencies NOT installed" line goes stale by design.
+- `/checks` shows an interrupted setup as NO VERDICT, matching the check surface.
+- `update_plan` tells the model to stop and ask for re-approval rather than absorb delegated work,
+  and says plainly that amending an approved plan to record progress buys nothing (execution state
+  is an event fold) and costs the approval mid-build.
+
 ## [1.2.0] — 2026-07-31
 
 Real local software engineering. A workspace is no longer assumed to hold one project at its root,

@@ -405,12 +405,21 @@ describe('the blocker only the user can clear is shown to the USER', () => {
       return lines;
     };
 
-    // Draft plan, executor task never started => the user is told, by task name, with the command.
-    const warned = run('draft', []);
+    // A freshly written, never-approved plan is the ORDINARY post-planning state — the model is
+    // presenting it for approval in the same breath. Warning there is noise, and noise at the
+    // idle prompt is how real warnings stop being read. (Observed live: the first version of this
+    // reminder fired at the end of every planning turn.)
+    expect(run('draft', [])).toEqual([]);
+
+    // The take-1 case: an approval EXISTED and no longer covers the plan. Nothing about the
+    // screen changed when that happened, so this is the one the user cannot see coming.
+    const staleConsent = [{ v: 1, seq: 1, ts: 't', type: 'plan.approved', sha256: 'a'.repeat(64) }] as unknown as SessionEvent[];
+    const warned = run('draft', staleConsent);
     expect(warned).toHaveLength(1);
     expect(warned[0]).toContain('CANNOT run until you re-approve');
     expect(warned[0]).toContain('/plan approve');
     expect(warned[0]).toContain('summary');
+    expect(warned[0]).toContain('changed after you approved it');
 
     // Approved AND consented => nothing. The reminder must not become idle-prompt noise.
     // (Both halves are required: a file that merely SAYS approved without a recorded consent
@@ -422,8 +431,10 @@ describe('the blocker only the user can clear is shown to the USER', () => {
       { v: 1, seq: 1, ts: 't', type: 'plan.approved', sha256: readCanonicalPlan(layout, 's1').contentSha },
     ] as unknown as SessionEvent[];
     expect(run('approved', consent)).toEqual([]);
-    // …and a file claiming approval with no consent recorded still warns.
-    expect(run('approved', []).length).toBe(1);
+    // A file claiming approval with NO consent recorded is also silent here: there is no
+    // approval to have lost, so it is the never-approved case wearing a misleading status word.
+    // `/accept` still refuses it, and says so in its own words.
+    expect(run('approved', [])).toEqual([]);
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 });
