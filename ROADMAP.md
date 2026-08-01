@@ -6,6 +6,210 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 16.5 (2026-08-01) — Proving S16: the review, the fixes, and how far the live run got
+
+### Objective
+
+Two goals. First, a bounded evidence-backed adversarial review of the Session 16 change set,
+fixing what is real — with priority on anything that would stop a large full-stack job from
+completing honestly. Second, the Live E2E that S16 deliberately did not claim: a genuinely
+dependency-bearing two-project application, built from one natural-language request against the
+live API, monitored, recorded.
+
+The first goal is complete. The second is **partially complete and stopped by an external limit**;
+this entry says exactly which parts are proven and which are not.
+
+### The review — 5 lenses, 30 findings, 16 fixed
+
+One bounded batch of five differentiated read-only lenses over `8a4ddf4..HEAD` (63 files,
++4717/−184), aimed at the shape of the outstanding run rather than at the diff in the abstract:
+two projects, two dev servers, a browser flow over the integrated stack, and an install that must
+happen before anything can be verified. No per-finding verifier fan-out (the CLAUDE.md cost rule);
+every finding hand-verified against the code before any fix.
+
+**Two were measured on this machine before a line changed**, and neither is reachable by any amount
+of single-project testing:
+
+- **Readiness could not reach an IPv6 server.** Node 22 resolves `localhost` verbatim; here that is
+  `::1`. Measured: `listen(0,'localhost')` bound `::1`, `http://127.0.0.1:<p>/` was ECONNREFUSED,
+  `http://[::1]:<p>/` answered 200. The harness probed IPv4 only, so a Vite front end could never
+  become ready — it would wait out its full 60s and then stop a healthy server as "failed to
+  start". Both loopback literals are probed now, and **the address that ANSWERED is recorded**,
+  because that URL becomes the origin a browser flow is locked to.
+- **A colourised banner would hide its own port.** picocolors enables colour whenever
+  `platform === 'win32'`, regardless of TTY. `parsePortCandidates` needed digits immediately after
+  `localhost:`, so a banner reading `http://localhost:<ESC>[1m5173<ESC>[22m/` matched nothing.
+  **Honest correction, found later by the fixture:** Vite 6 itself does NOT colourise to a non-TTY
+  here — measured three ways including `FORCE_COLOR=1`. The lens verified picocolors in isolation
+  and inferred Vite's bytes from it. The ANSI strip is therefore **defensive and correct, but it
+  was not a live blocker**; `probe-preview.mjs` asserts the measurement so the claim stays honest
+  if Vite changes.
+
+The other fixes that mattered, all verified against the code first:
+
+- **A project-scoped `browser` gate was permanently unsatisfiable AND unwaivable.** `browser_flow`
+  recorded no `projectId` while every S16 gate consumer folds a missing one to the root, and
+  `run_check` cannot produce kind `browser` at all — a dead end at `/accept` with no exit but
+  amending the plan or `/accept confirm`. **Live-confirmed unplanned:** take 1's model wrote
+  exactly that plan (`project: web`, `checks: [typecheck, test, browser]`).
+- **With TWO previews ready, an unbound flow was DENIED** with "start one with the preview tool
+  first" — in precisely the shape S16 raised `MAX_CONCURRENT_PREVIEWS` to enable, and whose most
+  plausible reading is to start a third. The fact now carries the ready set so the denial names
+  them; and because an unbound flow still binds to whatever single preview is ready (which can
+  legitimately be the API), the result now says what it drove.
+- **"Dependencies are not installed" WAIVED a user-approved gate.** True before S16, when the
+  harness could not install anything; `project_setup install` makes it a transient state with a
+  named cure. A session that installed `api` and forgot `web` could be accepted as COMPLETE with
+  its own caveat claiming a project shipping a build and a test suite *cannot* run them. New
+  additive `precondition-curable` keeps the gate PENDING; old events keep the permissive reading.
+- **The first check / preview / migrate after an install was always refused** with "the project
+  changed after this call was approved" — for a call nobody approved and a project nobody changed.
+  The three tools held independent detection snapshots. One `SharedWorkspace` now backs all three;
+  the window the private copies protected does not exist (tool calls execute strictly one at a
+  time), and the never-gated case gets its own honest message.
+- **CHECKED had no project axis** — a green `build` in `web/` marked an `api/` file CHECKED in the
+  report *and* `/diff`. Passing evidence now carries its scope (a check's unit, a command's cwd)
+  and the correlation requires containment; `'.'` still covers everything.
+- **A boundary gate discarded WHICH project was unsatisfied**, so `/accept` suggested a
+  `run_check` a multi-project workspace refuses as ambiguous — a loop that cannot converge.
+- **The user-facing plan view omitted `project` and `gates.projects`** — the document whose sha the
+  approval binds could not distinguish "both halves" from "any one half".
+- **`update_plan` never warned** about the unscoped-gate reading that produces a false green, and
+  scolded a correct `./api` for naming a project that does not exist (raw string comparison),
+  pushing the model toward dropping scoping altogether.
+- **Repair proofs were project-filtered only for check/setup failures** — a `preview-startup`
+  failure in `api` could be closed by a green flow against `web`.
+- **An install's consent identity bound only lockfile + package.json + `.npmrc`.** `.pnpmfile.cjs`
+  (a `readPackage` hook) and `.yarnrc.yml` (`yarnPath`) also rewrite what an install executes and
+  are ordinary auto-allowed writes — the S14.5 body-binding lesson, two files over.
+
+Plus: `run_command`'s `cwd` refused for protected directories (`.git` and the state dir are
+protected as PLACES, not only as write targets); a preview dying DURING a browser step re-checked
+for liveness so a dead server stops reading as a UI defect; `/checks` showing an interrupted setup
+as NO VERDICT; and the system-prompt project block labelled AS OBSERVED AT SESSION START, because
+it is a cached prefix that goes stale by design in a session whose purpose is to install things.
+
+### The defect only a live run could find
+
+Take 1 ran the whole arc and was discarded, and it was worth its cost.
+
+On the first step of the build turn the agent amended its own approved plan. The amendment was
+legitimate. But an amendment invalidates the approval by design, and an unapproved plan blocks
+every executor spawn — so the two tasks the user had explicitly asked for "as two parallel isolated
+tasks" silently became unspawnable. The agent did all of that work serially in the main session
+instead, and the human found out ten minutes later when `/accept` refused for the fourth time.
+
+The harness was not dishonest here. It said so in the `update_plan` result and again in the
+standing plan note, every turn. It said so **to the model**, which cannot type `/plan approve`.
+The gap is narrower and worse: **the one blocker only the USER can clear was the one thing never
+said to the user.**
+
+`planApprovalReminder` now prints one undimmed end-of-turn line naming the blocked tasks and the
+command that clears them — and only when an approval EXISTED and no longer covers the plan. The
+first version fired on every freshly written plan, which is the ordinary state; take 2 showed that
+within minutes, and it was narrowed. `update_plan` now tells the model to stop and ask rather than
+absorb the work, and says plainly that amending an approved plan to record PROGRESS buys nothing
+(execution state is an event fold) and costs the approval mid-build.
+
+### Verification evidence
+
+`npm run typecheck` + `npm run build` clean per commit; suite **1322 → 1340** across 95 files.
+`test/live-e2e-blockers.test.ts` pins all of it together — the ANSI strip against a real
+colourised banner, an IPv6-only listener, the curable precondition in both the gate and the
+resolver, the browser `projectId` unblocking a project-scoped gate, the two-preview denial naming
+what runs, CHECKED refusing to cross a project boundary, per-scope gate detail, the unscoped-gate
+warning, the install identity moving on a `.pnpmfile.cjs` write, `cwd` refusing protected
+directories, the shared snapshot, and the re-approval reminder through the real readers.
+
+**Fixture (`C:\Users\A\Desktop\agent-cli-s165-live\`) — "Depot":** two INDEPENDENT packages, no
+root manifest, two lockfiles, shipping with no `node_modules`, no `.env` and no database.
+`api/` Express + TypeScript + `node:sqlite` with migrate/seed; `web/` Vite + React. Three seeded
+defects, each reachable by exactly one capability. `probe-fixture.mjs`: **10/10** — D1 fails the
+api unit test and nothing else sees it; D2 is invisible to unit tests, real in a browser, and the
+API genuinely applied the change; D3 renders and only a review lens reads it.
+
+**`probe-preview.mjs`: 14/14 against the REAL dev servers** — both units discovered in
+deterministic order, unit-qualified recipe ids, the API ready at `127.0.0.1:3001`, **the web app
+ready at `[::1]:5173`** (an IPv4-only probe could never have reached it), the shipped parser
+finding the announced port, Vite measured as NOT colourising here, and `stop()` reaping both
+servers with no leftover listeners.
+
+**`validation/smoke-chain.mjs`: 18/18** — the mechanical chain (ports free, the `agent` shim on the
+fresh dist, prompt detection, trust, session-id capture, kill-by-CommandLine, resume).
+
+### The live E2E — PARTIAL, and stopped by an external limit
+
+**The Anthropic API credit balance was exhausted mid-take-2.** The identical 400 is recorded in
+three logs — the parent session and both executor children:
+`"Your credit balance is too low to access the Anthropic API."` Nothing in this repository caused
+it and nothing in it can clear it.
+
+**What the two takes DID prove live**, from persisted evidence:
+
+- One natural-language request → investigation → a task graph naming each task's project, with
+  `gates: {completion: [test, typecheck, build], projects: [api, web]}` — the per-project scoping
+  S16 built and S16.5 made warn-able.
+- `project_setup` installing **both** projects from their own lockfiles, then migrating and seeding
+  a real SQLite database: four setup events, all `ok`, none ever readable as verification.
+- Per-project typed checks: `test/api=fail` (the seeded D1, correctly failing), `typecheck/api`,
+  `test/web`, `typecheck/web` all passing, and `test/api=pass` after the fix.
+- `.env` written for both projects from their `.env.example`.
+- **The parallel executor wave spawning**: two executors in isolated worktrees, changes captured,
+  worktrees removed.
+- `/accept` refusing, repeatedly and correctly, with an honest unfinished list.
+- The take-1 fix working on camera in take 2: the harness asked for re-approval, the user gave it,
+  the run continued.
+
+**What is NOT proven and must not be claimed:** two dev servers running simultaneously *inside the
+agent loop*; a browser flow over the integrated stack catching D2; a review lens catching D3;
+`/accept` reaching COMPLETE; and therefore no recorded video. The preview half of that list is
+separately live-proven **outside** the loop by `probe-preview.mjs`, which is not the same thing and
+is not presented as if it were.
+
+### Decisions (and why)
+
+- **An uninstalled project is unverified, not unverifiable.** The waiver rule is about what a
+  project CAN do, and S16 changed what the harness can do about it. A reason with a named cure is
+  a different answer from a capability gap.
+- **Probe both loopback families, record the one that answered.** The recorded URL is not
+  cosmetic — it becomes a browser flow's origin lock, so it has to be an address that was proven
+  to answer rather than the one we tried first.
+- **A shared session snapshot beats three private ones.** The isolation the private copies bought
+  was never real (calls are strictly serialized) and it cost a false refusal at the busiest moment
+  of a run.
+- **Tell the human the thing only the human can fix.** Every other harness message is aimed at the
+  model because the model is the actor. A blocked approval is the exception, and the exception had
+  been missed.
+- **A warning that fires in the ordinary case is not a warning.** Narrowing the reminder mattered
+  as much as adding it.
+- **Say which half of the claim is proven.** `probe-preview.mjs` proves the preview substrate
+  against real servers; it does not prove the agent loop drives it. Both sentences are in the docs.
+
+### Open issues / boundaries
+
+- **The live E2E is unfinished for want of API credit.** Resuming needs only credits: reset the
+  fixture (`cd ws && git reset --hard && git clean -xdf`), `smoke-chain.mjs`, then `run-demo.cmd`
+  via `schtasks`. The harness, fixture, driver, recorder, subtitle pipeline and validator are all
+  built and rehearsed.
+- **No demo video exists yet.** `validation/edit.mjs` + `narration.mjs` are written (segment table,
+  raw→output time mapping, burned-in ASS subtitles, `narration.json` emitted for later audio
+  alignment) but have never run against a real recording.
+- **Recorded, deliberately not fixed:** in an npm-workspaces-root shape (root lockfile, child
+  manifests) a per-unit install resolves an unpinned `npm install` inside the child, fragmenting
+  hoisting while the prompt says "versions are NOT pinned" in a repo whose versions are pinned at
+  the root. Real, outside this fixture's shape, and needs a design decision (a declared workspace
+  member should install at its root). The macOS `caseFold` no-op is likewise recorded, on an
+  unexercised platform.
+- The two takes' evidence is kept at `agent-cli-s165-live/` (`take1-failed.log`,
+  `take1-marks.json`, `demo-run.log`, `state/`) and summarized in `DEMO.md`.
+
+### Recommended next step
+
+Add API credit and finish the take — it is the only thing standing between v1.2.1 and the claim
+S16 has been carrying since it shipped. Then Session 17 (documents/PDF pack) per BLUEPRINT.
+
+---
+
 ## Session 16 (2026-07-31) — Real local software engineering: project units
 
 ### Objective
@@ -140,412 +344,63 @@ the interrupted-setup replay. Then Session 17 (documents/PDF pack) per BLUEPRINT
 
 ---
 
-## Session 15 (2026-07-29/30) — V1.1: the multi-provider runtime
-
-### Objective
-
-Generalize the provider layer per BLUEPRINT S15: Anthropic, OpenAI, DeepSeek, Kimi and GLM behind
-one runtime with an explicit capability model, `/provider` + `/model` switching, env-only key
-discovery, and honest degradation — preserving streaming, tool calls, cancellation, usage
-accounting, resume and evidence semantics. Plus public-release hygiene (v1.1.0) and an enduring
-CLAUDE.md release-alignment rule.
-
-### Planning provenance
-
-Three Explore recon lenses (provider/runtime, REPL/config/evidence, tests/release) + a 5-agent
-first-party research workflow (Anthropic, OpenAI, DeepSeek, Moonshot/Kimi, Zhipu/GLM — official
-docs only, ~205 tool calls) + one Plan-agent design pass. **The research paid for itself
-immediately:** `deepseek-chat`/`deepseek-reasoner` had been RETIRED five days earlier
-(2026-07-24), the entire `kimi-k2-*` preview generation and `kimi-latest` were discontinued, the
-Moonshot docs had rebranded to kimi.ai (API hosts unchanged), and OpenAI's Chat Completions can no
-longer tool-call with reasoning off — every one of which would have shipped as a broken default
-from memory. User decisions: default model → `claude-opus-5`, full reasoning round-trip in scope,
-international endpoints as defaults, live keys to be configured during the session.
-
-### What was implemented (commits `1af04c6` … `7932fed`)
-
-1. **`feat(types,provider,runtime)`** — the reasoning core: an opaque `reasoning` ContentBlock
-   (provider-native payload, tagged provider+model), persisted additively on `assistant.message`,
-   replayed by `reconstruct` at the head of assistant content, weighed but never rewritten by
-   elision; `Usage.reasoningTokens`; `Provider.describeTransport()`; the `provider.changed` event;
-   the Anthropic adapter mapping thinking/redacted_thinking both ways with `scopeReasoning` as the
-   wire-view filter and a cache marker that walks past replayed thinking blocks.
-2. **`feat(repl,cli)`** — a refusal turn is stated instead of ending like a finished answer.
-3. **`feat(provider)`** — the data layer: `catalog.ts` (capabilities as DATA + `CATALOG_VERIFIED`),
-   `profiles.ts` (per-provider wire deviations), `errors.ts` (ProviderError taxonomy + bounded
-   connection-phase-only retry), `sse.ts` (one incremental parser).
-4. **`feat(provider)` ×2** — the two new adapters: one profile-parameterized Chat-Completions
-   adapter (deepseek/kimi/glm) and the OpenAI **Responses** adapter (`store:false` + encrypted
-   reasoning replay).
-5. **`feat(config,cli,provider)`** — the registry seam, `provider` as a user-config preference,
-   `DEFAULT_MODEL = 'claude-opus-5'` as ONE exported constant (ending a 5-site literal
-   duplication), catalog-driven `maxTokens` + `contextBudget` (production finally sets it), and
-   both `instanceof AnthropicProvider` checks replaced by the interface.
-6. **`feat(runtime,tools)`** — the vision choke: no image input ⇒ honest pointers, evidence intact.
-7. **`feat(repl,runtime,report)`** — `/provider` + `/model`, the live `currentRuntime()` getter so
-   children follow switches, resume-mismatch recording, newest-wins report identity + `modelsUsed`,
-   journal model line.
-8. **`feat(cli)`** — `agent providers` (+`--json`), joined to `KNOWN`.
-9. **`test(live)`** — per-provider live smokes double-gated on `AGENT_LIVE_TEST=1` + that
-   provider's key.
-10. **`chore(deps)`** — `@anthropic-ai/sdk` ^0.115.0; undici 8 / diff 9 deferred with reasons.
-11. **`fix(provider)`** — the live-found transport fix (below).
-
-### The live-found defect (the session's most valuable finding)
-
-`validateKey` used a bare global fetch, so the key-validation probe did **not** take the
-proxy-aware path every adapter uses. On this proxied machine that returned **401/403 for a key
-that works perfectly through the SDK** — meaning `/provider anthropic` would have refused a valid
-credential with "present but REJECTED", the most damaging possible false negative for a brand-new
-switch flow. Fixed by building `createTransport()` per provider inside the probe. Re-verified
-live: anthropic 11 models visible, openai 126. The same probe also **cross-checked the shipped
-catalog against reality**: `claude-opus-5`/`sonnet-5`/`fable-5` and `gpt-5.6-sol`/`terra`/`luna`
-are all genuinely callable.
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite **1072 → 1155 passed / 1 skipped
-across 84 files** (+83). New pins: reasoning recording/replay/old-log-validity/elision exemption,
-Anthropic thinking round-trip incl. scope + drop-on-switch + the cache-marker guard, the SSE parser
-at hostile chunk boundaries, the error taxonomy and retry policy, per-profile request goldens and
-SSE fixtures (usage from all three documented locations, glm `sensitive`→refusal,
-`model_context_window_exceeded`→throw, deepseek 402=balance, kimi type strings), the Responses
-request/replay/incomplete/error mapping, **`test/context.test.ts` closing the zero-coverage gap on
-the construction seam**, the workspace-cannot-set-`provider` pin, `/provider` and `/model` drive()
-flows incl. credential-shaped-argument refusal and no-key refusal, report newest-wins + modelsUsed,
-and `agent providers` creating no session and leaking no key value.
-
-**Live proof (real money, real APIs) — ALL FIVE PROVIDERS.** Fixtures at
-`C:\Users\A\Desktop\agent-cli-s15-live\`.
-
-1. **Gated adapter smokes: 10/10** (`test/live-providers.test.ts`) — every provider did a streamed
-   completion plus a tool round-trip whose second request replays the first turn's blocks, which is
-   exactly the reasoning echo kimi/deepseek require and Anthropic validates byte-verbatim. First
-   contact for DeepSeek/Kimi/GLM: **no adapter fixes were needed** — the byte-level fixtures built
-   from first-party docs were accurate.
-2. **E2E #1 (`ws`):** `claude-opus-5` wrote `notes.md` (2 turns carrying round-tripped thinking
-   blocks, cache reads 12.8k/12.9k), then `/provider openai` validated `OPENAI_API_KEY` live through
-   the proxy and switched, then `gpt-5.6-sol` appended line two via the Responses API
-   (`reasoningTokens: 13`). Report: `modelsUsed: anthropic·claude-opus-5 → openai·gpt-5.6-sol`.
-3. **E2E #2 (`ws2`) — three switches in one session:** `claude-opus-5` → `deepseek-v4-pro` →
-   `kimi-k3` → `glm-5.2`, each writing its own file through the policy-gated `write_file` path
-   (`ds.txt`, `kimi.txt`, `glm.txt` — all correct). Per-provider evidence: deepseek reported
-   `reasoningTokens` 21/13 with 8832 cache reads; kimi-k3 accepted its mandatory complete-message
-   round-trip with 7680 cache reads; glm streamed `reasoning_content` with 8704 cache reads. All
-   three verification modes were exercised for real — `models-list` (deepseek, kimi) and
-   `presence-only` (glm, which genuinely has no list endpoint). **The documented cross-provider
-   history risk did not materialize:** every provider accepted a history containing another
-   model's tool calls.
-
-**In neither run does any key value, `sk-` prefix, or `Bearer` token appear anywhere in the log.**
-
-### The adversarial review — 4 lenses, 17 findings, 11 fixed
-
-One bounded batch of four differentiated read-only lenses (provider wire correctness, evidence/log
-contract, credentials/consent, integration/test quality) over the session diff before release; every
-finding hand-verified against the code first. The lenses also returned a long list of invariants
-verified as HOLDING (tool_use/tool_result pairing across every history path, reasoning-scope
-correctness in all three adapters, SSE edge cases, retry-never-replays-a-consumed-stream, the
-old-log/new-binary compatibility matrix, credentials confined to headers).
-
-The two that mattered most were the same failure CLASS as S14.5's unanswered-tool_use bug — a
-wire-invalid history that poisons every later request:
-
-- **`scopeReasoning` could emit `{role:'assistant', content: []}`.** A thinking-only assistant turn
-  (reachable now that adaptive thinking is the default — e.g. a `max_tokens` cut before any text)
-  that ages out of the replay window was filtered to nothing, and the Messages API rejects an empty
-  content array. Empty messages are now DROPPED (safe: such a turn holds no tool_use, and
-  coalescing merges the adjacent user messages). The same hole existed in the compat adapter, where
-  a bare `{content:null}` with no tool_calls would 400.
-- **Elision monotonicity broke the moment `contextBudget` became mutable.** The sticky
-  `alreadyElided` pass sat AFTER the trigger early-return, so switching to a larger-budget model
-  could restore, verbatim, outputs `context.compacted` had already recorded as elided. The sticky
-  pass now runs unconditionally; the trigger still gates only the char walk, preserving hysteresis.
-
-Also fixed: `looksLikeCredential` was a blocklist that missed a GLM-style 49-char `id.secret` key
-(now positive validation against a conservative model-id shape, so a pasted secret cannot be
-persisted by `/model`); `/model` ignored a definitive 401/403 and recorded `verification:
-'models-list'` for a FAILED probe; a `*_BASE_URL` override — which redirects the credential to
-another host — was invisible at startup while the README claimed the banner named it; the OpenAI
-adapter re-homed tool-result images without consulting the catalog, so it could send pixels to a
-model the harness classifies as text-only; `tool.completed` recorded images identically whether the
-model saw them or not (new additive `imagesWithheld`); `agent sessions` was a third,
-non-folding identity derivation that also still took the FIRST `session.ended`; a `Retry-After`
-sleep of up to 60s ignored the abort signal; the resume-mismatch event claimed
-`presence-only` for the credential-less mock; and the report's `modelsUsed` de-duplicated an
-A→B→A session to "A → B", implying it ended on B.
-
-**Two findings were test-quality defects that would have shipped a false green:** the live smokes
-gated on the TRUTHINESS of `AGENT_LIVE_TEST`, so `AGENT_LIVE_TEST=0` ran all ten paid calls (now
-gated on `=== '1'`, verified: 10 skipped with keys present), and the `agent providers` no-leak
-assertion was conditional on the dev machine having a real key — a silent no-op on CI (now a
-deterministic injected canary). The review also correctly named the least test-supported claim of
-the session: the `currentRuntime()` getter behind "children follow switches" had ZERO coverage, as
-did the resume-mismatch recording. Both now have pins.
-
-**One finding was rejected as a false positive after hand-verification** (the cache marker "can
-mark nothing": reachable only for a final wire message made solely of thinking blocks, which
-neither `runTurn` nor the narrative call can produce — both end with a user message), and one is
-recorded as an accepted pre-existing limitation rather than fixed: a reasoning block can restate
-bytes from a `redactOutput` tool read, which the log then persists in cleartext. That property
-already existed for `assistant.message.text`; S15 widens it, and the honest response is that the
-approval prompt's redaction promise covers the tool RESULT, not the model's own restatements.
-
-**A test assertion added during the review then caught an inaccuracy in the catalog's own
-semantics:** requiring a reasoning block whenever the catalog says `on-by-default` failed live on
-claude-opus-5 and gpt-5.6-sol, because *adaptive* thinking legitimately skips thinking on a trivial
-request. Only `forced` is a guarantee — the assertion now says so, which is both correct and
-non-flaky.
-
-### Decisions (and why)
-
-- **Reasoning payloads are OPAQUE and provider+model-tagged.** Only the emitting adapter may
-  interpret one; replay is scoped per provider's documented rule (kimi `all`, anthropic/deepseek/
-  openai `current-loop`, glm never). Opacity is also the escape hatch: an adapter can widen its own
-  payload shape without touching the schema.
-- **Persist reasoning VERBATIM, uncapped.** Kimi and DeepSeek reject a tool-looping assistant
-  message whose reasoning was altered or dropped, so byte fidelity beats log-size thrift; a
-  spill-to-blob optimization is a deferred item, not a launch requirement.
-- **OpenAI means the Responses API.** Chat Completions cannot tool-call with reasoning off since
-  GPT-5.4, and reasoning replay is Responses-only — "OpenAI-compatible" would have been a false
-  equivalence at the exact point that matters.
-- **Capabilities are DATA with a verified date.** Only Anthropic and Kimi expose live capability
-  metadata; OpenAI and DeepSeek list ids only and GLM has no list endpoint at all, so the shipped
-  catalog is the honest source — advisory, cross-checked live where possible, and always outranked
-  by the wire answer.
-- **`budgetTokens` is OUR cost opinion, not the provider's window** — commented as such, so a
-  reader cannot mistake a 100k working budget for a 1M context limit.
-- **Availability is env presence; a switch validates, and every outcome is labeled.** models-list /
-  presence-only / unverified-network are three different words and the event records which.
-- **Every network path goes through the transport** — proven the hard way.
-
-### Open issues / boundaries (deliberate, documented)
-
-- **Only each provider's DEFAULT model was live-tested.** The rest of the catalog is documented
-  from first-party sources, not individually exercised — the catalog is advisory and the wire
-  answer outranks it.
-- GLM's key check is presence-only because no model-list endpoint exists on either platform (its
-  international host `api.z.ai` was reached successfully in the live run).
-- **Credential-source boundary held under pressure.** The user initially placed the three new keys
-  in an external project's `.env`; the harness did not see them, because credentials come from
-  `process.env` alone. That is the designed behavior, not a bug — a file-based credential source is
-  exactly what the design excludes. For the verification run the values were injected into ONE test
-  child process (never printed, never persisted, never written into this repo). `.env` support was
-  deliberately NOT added: it would contradict the README's env-only claim and widen the credential
-  surface of a public security-sensitive tool without review.
-- Reasoning deltas are not rendered live, so an always-thinking model can appear to pause before
-  text (deferred: a reasoning render channel).
-- OpenAI resume flattens interleaved reasoning order (reasoning→text→tool_use); live turns keep
-  exact order.
-- undici 8 / diff 9 majors deferred: both change surfaces (proxy dispatcher, patch API) that need a
-  session able to live-verify them.
-
-### Recommended next step
-
-Session 16 per BLUEPRINT: real local software engineering (dependency-bearing full-stack projects).
-The provider layer needs no further work to proceed — all five are live-proven; the remaining
-provider items in the deferred pool (live reasoning render channel, strict-schema transformation,
-per-role model tiers) are optimizations, not gaps.
-
----
-
-## Session 14.5 (2026-07-28) — V1.0: consolidation, repo-wide adversarial review, live proof
-
-### Objective
-
-Not a feature session. Clean the remaining coding-flow debt found by a bounded repo-wide
-adversarial review, resolve the practical items from the deferred pool, resolve the one
-permanently skipped test, stamp V1.0, prove the whole system in a fresh recorded live demo, and
-compress the documentation into high-density references for the first non-coding workflow pack.
-
-### Planning provenance
-
-3 Explore recon lenses + 1 Plan-agent adversarial critique, load-bearing claims hand-verified.
-The critique reshaped the plan before code: the autocrlf fix scoped to the uniform-LF case only
-(per-file byte rewriting was rejected as a harness that rewrites content), `/review dismiss`
-deferred as the only consent-contract change with no demo value, the review-gate fixes
-pre-decided as ONE commit so they could not thrash each other, and the V1.0 stamp moved BEFORE
-recording so the demo shows the shipped banner.
-
-### What was implemented (commits `a5ca9a7` … `6f3ca84`)
-
-1. **`chore(runtime,config)`** — the raw NUL byte in `subagent.ts` replaced with its source
-   escape (it made ripgrep classify the file as binary and silently skip it in every content
-   search, including review sweeps); the vitest `fileParallelism` comment corrected to match the
-   setting it contradicted.
-2. **`fix(cli)` ×3** — `agent version`/`help` were not in `KNOWN`, so the unknown-positional
-   fall-through started a REAL one-shot model session with the literal task string; `--version`
-   added and the usage header now reads the version from package.json (it had said "V0.7" for
-   seven sessions). Count flags refuse non-numeric values (a NaN `maxSteps` ended every turn
-   after zero steps, silently); `--max-steps` is the honest name with `--max-turns` kept as the
-   alias. `agent plan <id>` joined `readPlanState`, the ONE reader — it read only the legacy
-   store, so every canonical plan printed `status: unknown` with a raw-file sha.
-3. **`fix(store,memory)`** — the clean-end predicate reads the newest LIFECYCLE event:
-   `agent checkpoint/undo/commit` append to an ended log, so "last event is not session.ended"
-   was accusing cleanly-ended sessions of crashing.
-4. **`fix(tools)`** — `report_finding` paths joined the ingestion choke point; a path that
-   sanitization would ALTER is refused outright (an escaped form names no real file).
-5. **`fix(repl,assemble,git)`** — session-end hygiene failures leave evidence: `/accept` and the
-   quit path reported prune throws instead of swallowing them, the noted-refs fallback list is
-   restored on throw, and `createCheckpoint`'s untracked guard records an honest note when it
-   cannot run instead of failing open silently.
-6. **`fix(review,roles,delegate,report,plan,git)`** — the review-gate coherence commit: the
-   round-voiding rule narrowed to applies INSIDE the round window (the whole-log rule punished
-   exactly the harness-recommended fix path); executor captures count as real work (a
-   zero-net-change session could never satisfy its own gate); the reviewer budget raised to 24
-   steps (15 starved diligent lenses into `budget-steps`, which cannot qualify a round —
-   producing a double block with no forward path); `MAX_REVIEW_ROUNDS = 2` enforced at the
-   delegate tool; all-lenses-died rounds now caveat; wiring assertions replace optional-chained
-   evidence channels; the report states the requirement and open blockers for unaccepted
-   sessions and annotates delivery refs the log records as pruned; `pruneCheckpoints` shares the
-   missing-ref convergence rule; `approvedCurrentGraph` replaces the same predicate spelled in
-   three files.
-7. **`fix(git,runtime,tools)`** — the executor-capture EOL pin (below), the apply-side
-   normalization diagnosis, and the task-base untracked guard asking through the forwarded
-   channel instead of hard-refusing every executor group in a repo with a big un-ignored dir.
-8. **`feat(checks,report,repl)`** — `test-targeted` scope defaults from the bound plan task's
-   touches; `/diff` carries the report's CHECKED verdict through ONE shared correlation; five
-   dead exports and three stale comments removed.
-9. **`fix(checks,policy,runtime,report,repl,git)`** — the adversarial-review batch (below).
-
-### The executor-capture EOL pin (the top live-found S14 gap)
-
-With system `core.autocrlf=true` over an LF working tree, `worktree add` and capture's
-`checkout-index` re-applied the smudge filter: the executor based its edits on CRLF bytes the
-parent never held, so EVERY captured file refused at apply as base drift — and had the base
-matched, the apply would have written CRLF over LF and attributed a whole-file EOL flip to the
-task. `probeEolPin` now detects the case and pins `-c core.autocrlf=false -c core.eol=lf` on
-BOTH invocations when the parent tree is uniformly LF. Deliberately that case only: a mixed tree
-keeps the refusal, now with a diagnosis naming EOL normalization and exits that actually work
-(the scheduler refuses re-running a task holding captured changes, so the old message pointed at
-a dead end). The regression fixture sets repo-local `core.autocrlf=true` — the suite's emptied
-GIT_CONFIG env had HIDDEN this entire class.
-
-### The adversarial review — 4 lenses, 23 findings, 48 invariants held
-
-One bounded batch of four differentiated read-only lenses (kernel/runtime, policy/consent/
-injection, git/state lifecycle, verification/surfaces). Every finding hand-verified against the
-code before any fix; all 23 fixed. The seven that mattered most:
-
-- **The consent hole (the S12 critical's class, reopened by a display cap).**
-  `DetectedProject.scripts` is capped at 200 chars for display, and check/preview replay consent
-  hashed THAT — so an agent could append `&& <anything>` past character 200 and run it under the
-  earlier `[s]` with no prompt. `bodySha` now binds the sha of the UNTRUNCATED value.
-- **A session-killing wire bug.** `tool_use` blocks with a non-`tool_use` stop reason (a
-  `max_tokens` cut mid-call) were never answered, so the live history went permanently invalid —
-  every later turn 400'd, and the repair path could not help once a user message was last.
-- **Evidence loss on a write.** An unguarded post-write readback threw away ALL `file.mutated`
-  events, leaving `/undo` blind to bytes already on disk while the log claimed the call never
-  ran. The mutation is now always recorded, with additive `postStateUnverified`.
-- **An unreachable safety branch.** The `aborted` check-classification test sat below per-kind
-  rules that match every kind, so a Ctrl+C'd typecheck classified as an auto-eligible
-  `compile-type` defect — a cancellation becoming a diagnosis that spends the repair budget.
-- **A report that claimed a clean end.** `find` took the FIRST `session.ended`, so a session that
-  quit cleanly, was resumed, and then crashed reported the earlier clean end — in the one
-  artifact whose job is exposing abnormal termination.
-- **Secret classification on the wrong string.** `isSecretName` ran on the raw model-supplied
-  path, so a symlink or Windows 8.3 alias of `.env` skipped both the ask and the redaction.
-- **Prompt-fence spoofing.** Memory docs (AGENT.md is workspace bytes a cloned repo controls) and
-  plan notes reached the system prompt and the `[[harness note: …]]` wrapper un-neutralized.
-
-Also fixed: `agent checkpoint prune` — the documented backstop — deleted delivery audit anchors
-(now kept unless `--include-delivery`); a failed `worktree add` unregistered the entry without
-removing the directory, making the leak unreachable by any sweep; the capture cap could split a
-rename pair and half-apply a move; the event-log lock could be stolen from a live holder whose
-JSON was still being written; elision was not monotone once the image pass existed (an aging
-screenshot restored older outputs, re-billing the cache suffix and contradicting the
-`context.compacted` record); a swept preview log was re-reported as an "unaccounted" lost start
-for 48h; `callSandbox` reported `active` with no backend to confine; an unknown-tool call
-persisted an empty `outputPreview` while the model saw a different string.
-
-### The permanently skipped test — resolved
-
-`test/anthropic.test.ts:116` guards ONE live-API smoke call behind `AGENT_LIVE_TEST=1`. The skip
-is **still justified**: CI must stay hermetic, and the test needs a real key, network, and money.
-It was RUN live this session (9 passed instead of 8 + 1 skipped), which also re-proves the
-hardcoded model id and the provider adapter against the real API. The invocation is documented
-in the README rather than wired into an npm script (a bare `AGENT_LIVE_TEST=1 vitest` prefix is
-not portable on Windows without adding a dependency).
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite **1043 → 1072 passed / 1 skipped
-across 78 files**. New pins cover: the consent hole (an append past the display cap changes
-`bodySha` while the command string stays stable), the `max_tokens` tool_use path (the next turn
-must still reach the model), aborted classification across every check kind, the
-lifecycle-aware report end, the secret alias, the EOL pin across three cases (pinned/unpinned/
-mixed-tree), the untracked-guard deny path, `/diff` verdicts, scope defaulting, the review-round
-cap identity, in-window vs after-window applies, and the all-dead-lens caveat.
-
-### Live proof — the recorded V1.0 demo
-
-A local demo workspace outside this repo (fixture generator, recording chain, `VALIDATION.txt`,
-`DEMO.md`, a 4:54 MP4). A single continuous session against real claude-opus-4-8, driven by a
-scripted typist over a real ConPTY, on the "Pulse" fixture — a working dependency-free habit
-tracker with THREE seeded defects, each reachable only by a different capability: a failing
-streak unit test (deterministic check), an add-without-reload bug (browser-only), and an
-`innerHTML` XSS (adversarial review only).
-
-**48/48 post-hoc evidence checks, 0 failures**, all re-derived from the event log, plan file, git
-refs, journal, and the app on disk. The arc: one natural-language request → planning (with a
-user-requested revision that INVALIDATED the approval, then a fresh sha-bound `/plan approve`) →
-ONE parallel executor group in isolated worktrees → integration with **zero apply refusals** (the
-EOL pin holding on a machine whose system git sets `core.autocrlf=true`) → typed checks → managed
-preview → browser flows that **caught a real defect** → a 3-lens review round recording 10 typed
-findings, the **security lens finding the seeded XSS** at `high` → **`/accept` REFUSING twice**
-with honest unfinished lists → the XSS fixed and proven by a purpose-written browser flow → all
-findings triaged → `/accept` COMPLETE with 7 accepted-limitation caveats → `/quit` with the
-journal handoff → the delivered app walked through live (heatmap, weekday chart, and a habit added
-WITHOUT a reload).
-
-Hygiene verified independently: exactly ONE ref survives under `refs/agent-cli` (the delivery
-anchor the acceptance consumed, pointing at a real commit object), the plan was retired, and
-**zero commits were added to the user's branch**. The delivered suite re-runs green now (15/15,
-up from 11 with 1 failing). Parent usage: 176 uncached input tokens against 6.1M cache-read.
-
-Two honest notes, both recorded in `DEMO.md`: the first take was discarded for a DRIVER bug (the
-planning turn asked to run a command and the driver only waited for the idle prompt instead of
-answering approvals — no product behavior was changed for the demo), and the validator's own
-first run had a wrong assertion (`passed` vs `pass`), now fixed and made stricter.
-
-### Decisions (and why)
-
-- **A display cap must never be a consent identity.** `scripts` stays truncated for prompts and
-  preconditions; `scriptShas` carries the full-value hash. Any future field that is both shown
-  to a human and bound by consent needs the same split.
-- **Blocks and stopReason can diverge**, so the loop answers tool_uses on their existence, not
-  on the stop reason. Wire validity is a property of what we SEND, not of what the model meant.
-- **A non-verdict is not a diagnosis.** Timeout and abort now sit together at the top of
-  classification: both produced no verdict, and only a verdict can justify a repair.
-- **Honest degrade beats silent proceed, everywhere it was cheap**: an unrunnable untracked
-  guard, a failed readback, a swallowed prune, a backend-less sandbox claim.
-- **The EOL pin is a configuration choice, not a content rewrite.** The harness pins git's own
-  normalization for the worktree it creates; it never edits bytes to make an apply succeed.
-- **Compress by density, not deletion.** ARCHITECTURE dropped session attributions, duplicated
-  rationale, and prose catalogues (the event surface is now a table) while keeping every
-  contract, ordering, constant, and honest limitation.
-
-### Open issues / boundaries (deliberate, documented)
-
-- The EOL pin covers the uniform-LF parent only; a genuinely mixed tree still refuses at apply,
-  now with an honest diagnosis and workable exits.
-- `/review` still has no user-side per-finding dismissal (the design is recorded in the deferred
-  pool); `/accept confirm` remains the coarse override.
-- The review requirement stays PLAN-scoped: executor work delegated with no plan derives none.
-- Browser-flow tests contend when many suites launch the system browser in parallel; they pass
-  in isolation and the contention is environmental, not a product defect.
-
-### Recommended next step
-
-Session 15 per BLUEPRINT: the first non-coding workflow pack (documents/PDF), reusing the
-context/task/verification/recovery/review/delivery contracts rather than copying them.
-
----
-
 ## Earlier Milestones (compressed per the rolling-docs policy)
 
 Contract detail lives in `ARCHITECTURE.md`; entries keep the objective, lasting decisions, the
 evidence, and what stayed open.
+
+### Session 15 (2026-07-29/30) — V1.1: the multi-provider runtime
+
+Five providers over two genuinely different protocols behind one runtime (commits `1af04c6`…
+`7932fed`; suite 1072→1155+1). Landed: an opaque `reasoning` ContentBlock carrying the
+provider-NATIVE artifact verbatim, tagged provider+model, persisted additively and replayed per
+each provider's documented scope (kimi `all`, anthropic/deepseek/openai `current-loop`, glm never)
+— which is what makes always-thinking models and reasoning tool loops legal at all; `catalog.ts`
+as capability DATA with a verified date; one profile-parameterized Chat-Completions adapter plus a
+separate **OpenAI Responses** adapter (Chat Completions cannot tool-call with reasoning off since
+GPT-5.4, so "OpenAI-compatible" would have been a false equivalence at the point that matters);
+`/provider` + `/model` + `agent providers`; env-only key discovery; `DEFAULT_MODEL =
+'claude-opus-5'` as ONE constant; catalog-driven `maxTokens`/`contextBudget`; honest vision
+degradation at one choke. Lasting decisions: reasoning payloads are OPAQUE and only the emitting
+adapter may interpret one; persist them VERBATIM and uncapped (kimi and deepseek reject a
+tool-looping message whose reasoning was altered); capabilities are advisory DATA and the wire
+answer always outranks them; availability is env presence, a switch VALIDATES, and every outcome is
+labeled (`models-list` / `presence-only` / `unverified-network`). **Live proof: all five providers**
+— 10/10 gated adapter smokes plus two multi-provider sessions, one switching through DeepSeek,
+Kimi and GLM with each writing its own file; no key value, `sk-` prefix or `Bearer` token appears
+anywhere in either log. The session's most valuable find was live: `validateKey` used a bare global
+fetch, so on a proxied machine it returned 401/403 for a key that works — `/provider anthropic`
+would have refused a valid credential. Review: 4 lenses, 17 findings, 11 fixed, including two of
+the wire-invalid-history class (`scopeReasoning` could emit an empty assistant content array;
+elision monotonicity broke once `contextBudget` became mutable) and two test-quality defects that
+would have shipped a false green. Still relevant: only each provider's DEFAULT model was
+live-tested; GLM's key check is presence-only; reasoning deltas are captured but never rendered.
+
+### Session 14.5 (2026-07-28) — V1.0: consolidation, repo-wide review, live proof
+
+Not a feature session (commits `a5ca9a7`…`6f3ca84`; suite 1043→1072+1). Landed: CLI correctness
+(`agent version`/`help` were not in `KNOWN`, so they started a REAL one-shot session with the
+literal task string; count flags refusing NaN; `agent plan <id>` joined the ONE reader);
+`test-targeted` scope defaulting from the bound plan task's touches; `/diff` carrying the report's
+CHECKED verdict through ONE shared correlation; and the review-gate coherence commit (round-voiding
+narrowed to applies INSIDE the round window, executor captures counting as real work, the reviewer
+budget raised to 24 steps because 15 starved exactly the diligent lenses into `budget-steps`, which
+cannot qualify a round). **The executor-capture EOL pin** was the top live-found gap: with system
+`core.autocrlf=true` over an LF tree, `worktree add` and `checkout-index` re-applied the smudge
+filter, so EVERY captured file refused at apply as base drift — the harness now pins
+`core.autocrlf=false -c core.eol=lf` on both invocations when the parent tree is uniformly LF, and
+a mixed tree keeps the refusal with an honest diagnosis. Lasting decisions: **a display cap must
+never be a consent identity** (`scripts` is truncated for prompts; `scriptShas` carries the full
+hash — an append past character 200 had ridden the earlier `[s]`); blocks and stopReason can
+diverge, so the loop answers tool_uses on their EXISTENCE (a `max_tokens` cut mid-call had left the
+history permanently invalid); a non-verdict is not a diagnosis (timeout and abort sit together at
+the top of classification); honest degrade beats silent proceed. Review: 4 lenses, 23 findings, all
+23 fixed. **Live proof: the recorded V1.0 demo** — one continuous session on the "Pulse" fixture
+with three seeded defects each reachable by a different capability, **48/48 post-hoc evidence
+checks**, `/accept` REFUSING twice with honest lists, the security lens finding the seeded XSS, a
+browser flow catching a real defect, exactly ONE surviving harness ref, and **zero commits added to
+the user's branch**. Two honest notes recorded in `DEMO.md`: the first take was discarded for a
+DRIVER bug, and the validator's own first run had a wrong assertion.
 
 ### Session 14 (2026-07-27/28) — the delivery boundary: Git audit lineage + the structural review gate
 

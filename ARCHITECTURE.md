@@ -347,9 +347,11 @@ means "we fetched".
   NOT pinned. Python is `unsupported` with the reason. `migrate`/`seed` resolve the project's OWN
   script from a fixed per-intent allowlist, so neither can become "run any script".
 - **Consent, two different answers for two different consequences.** An install is `external` and
-  MAY replay under `[s]`, bound to `sha(lockfile + package.json + .npmrc)` — three files, because
-  every package manager executes package.json's lifecycle scripts during an install and `.npmrc`
-  chooses the registry and the shell they run in. Binding the lockfile alone let an ordinary
+  MAY replay under `[s]`, bound to `sha(lockfile + package.json + every install-affecting config
+  file)` — never the lockfile alone, because
+  every package manager executes package.json's lifecycle scripts during an install, and `.npmrc`,
+  `.yarnrc.yml` (`yarnPath`) and `.pnpmfile.cjs` (a `readPackage` hook) each choose what code runs
+  and where it comes from — all of them ordinary auto-allowed writes. Binding the lockfile alone let an ordinary
   auto-allowed package.json write turn one `[s]` into standing arbitrary-shell consent (found by
   the S16 review; the S14.5 body-binding lesson, one file over). `migrate`/`seed` are
   `destructive` and ask EVERY time: a migration is not idempotent, so "you approved this once"
@@ -465,7 +467,13 @@ explicit SESSION resource with recorded start, readiness, health, logs, and dete
 - **Readiness is honest**: the harness probes HTTP only on a port the server's own output
   ANNOUNCED (declared ports included — an unannounced answer is somebody else's socket), caps
   candidates, honors the deadline and the turn abort, re-checks liveness after a successful
-  probe, and records "socket ownership not verified". An HTTP answer means A server is up;
+  probe, and records "socket ownership not verified". The tail is ANSI-stripped before parsing
+  (a dev server writing to a log file can still colourise: picocolors forces colour on win32
+  regardless of TTY, which would put the port behind an escape sequence). Each candidate port is
+  probed on BOTH loopback literals, `127.0.0.1` then `[::1]`, and **the address that ANSWERED is
+  what gets recorded** — Node 22 resolves `localhost` verbatim, so a server told to listen on that
+  name binds `::1` here and refuses IPv4 entirely; the recorded URL is also the origin a browser
+  flow is locked to, so it must be an address proven to answer rather than the first one tried. An HTTP answer means A server is up;
   APPLICATION state is judged only by browser flows. An aborted wait leaves the process running
   and says so; a readiness timeout stops it with `start-failed`, never a user-shaped `stopped`.
 - **Events + ordering (load-bearing)**: registry entry BEFORE `preview.started`; `preview.ended`
@@ -511,7 +519,14 @@ the gate-waiving `unsupported/precondition`.
   a 64 MiB events-rebuilt artifact byte budget; dropped artifacts are recorded, never silent.
 - **Policy**: the `browser` fact's whole decision is `previewBound` — a flow bound to a RUNNING
   managed preview auto-allows, anything else DENIES (no ask path for arbitrary origins). Execute
-  re-verifies; a died-in-between preview is a typed error, never a silent pass.
+  re-verifies; a died-in-between preview is a typed error, never a silent pass. The fact also
+  carries the READY SET and the requested id, so a denial names what is running and asks for a
+  `preview_id` instead of telling a session with two live servers to start a third.
+- **Project attribution**: both check events carry the bound preview's `projectId`. Without it a
+  project-scoped `browser` gate was permanently unsatisfiable AND unwaivable — every gate consumer
+  folds a missing `projectId` to the root, and `run_check` cannot produce kind `browser` at all.
+  An unbound flow still binds to whatever single preview is ready, which in a full-stack session
+  can legitimately be the API, so the RESULT states which preview, project and URL it drove.
 - **Visual judgment is judgment**: `view_image` returns real pixels for a sha ONLY if this
   session's `browser.flow` artifacts recorded it — enforced at the GATE (an un-admitted sha
   DENIES, because the shared blob store also holds spilled output and snapshot pre-images) and
@@ -784,8 +799,21 @@ requirement — three call sites previously spelled the same triple predicate in
   invalidates. Optional fields with NO zod default (checks/gates/review) are dropped by
   `canonicalJson`, so every pre-existing plan keeps its exact sha; an EMPTY list normalizes to
   absent (`[]` and "no gate" are the same gate).
+- **Projections carry the project axis.** Both views show each task's `project` and the gates'
+  `in EACH of: …` / `in ANY project (unscoped)` clause — the user view had omitted both, so the
+  document whose sha the approval binds could not distinguish "tests must pass in both halves"
+  from "a green test anywhere ends the session". Projection-only, so sha-neutral.
+- **Validation warns at the consent boundary** when a multi-project workspace declares gates or
+  task checks with no project (the unscoped reading is the one that produces a false green), and
+  compares project ids NORMALIZED — a correct `./api` had been scolded for naming a project that
+  does not exist, which pushes a model toward dropping scoping altogether.
 - **The amendment contract:** a model write keeps `approved` only for a semantic no-op; otherwise
-  → `draft`, including over `superseded`. `/plan approve` REFUSES a file that does not parse and
+  → `draft`, including over `superseded`. An amendment therefore blocks every executor spawn, and
+  because only the USER can clear that, the REPL prints one undimmed end-of-turn line naming the
+  blocked tasks and the command — but only when an approval EXISTED and no longer covers the plan
+  (a never-approved draft is the ordinary post-planning state, and a warning that fires in the
+  ordinary case stops being read). `update_plan` tells the model to stop and ask rather than
+  absorb the delegated work. `/plan approve` REFUSES a file that does not parse and
   validate (no consent to garbage bytes); an unparseable hand-edit reads as status `unknown` with
   `contentSha` null → gated. `plan.approved {sha256}` is the consent record; `approvedAndCurrent`
   is THE executor precondition — divergence BLOCKS.
@@ -883,9 +911,17 @@ is green**. The mechanism is one predicate, not a new state.
   For `test-targeted` the SCOPE is the check: the run's recorded `scopePaths` must overlap the
   task's `touches`.
 - **Waivers, honestly:** an `unsupported` result waives the kind — but ONLY when the reason is a
-  project-capability one, never a `bad-request`. A waiver is recorded as a caveat in the fold note,
-  both plan views, `/tasks`, and `AcceptanceState.caveats`, so a recorded "complete" can never
-  quietly mean "the declared check never ran".
+  project-CAPABILITY one. Neither a `bad-request` nor a `precondition-curable` may (the latter
+  means the project simply has not been installed yet, and `project_setup install` is the named
+  cure — waiving it let a session that installed half a stack be accepted as COMPLETE claiming the
+  other half *cannot* be tested). A waiver is recorded as a caveat in the fold note, both plan
+  views, `/tasks`, and `AcceptanceState.caveats`, so a recorded "complete" can never quietly mean
+  "the declared check never ran".
+- **A boundary gate keeps its per-scope detail.** With `gates.projects`, a kind is satisfied only
+  when it passed (or was honestly waived) in EVERY named project, and `byKind` records which
+  projects passed, waived and are missing — so a blocker names the project that is missing and the
+  guidance names it too. Collapsed to a bare kind, `/accept` suggested a `run_check` that a
+  multi-project workspace refuses as ambiguous: a repair loop that could not converge.
 - **Boundaries:** `integrationGateState` refuses a NEW executor wave while `gates.integration` is
   unsatisfied since the last apply (R12). `completionGateState` blocks `/accept` until
   `gates.completion` passed after the LAST change — and "change" includes `undo.applied` and
@@ -1018,7 +1054,9 @@ complete) AND every applicable capture is applied, registry-wide including plan-
 work. Three further axes: a completed task whose declared check gate is still pending is
 UNFINISHED; a declared `gates.completion` kind that has not passed since the last change is
 UNFINISHED; an open escalation or unproven repair is UNFINISHED. It also carries non-blocking
-**caveats** — above all gates WAIVED because the project cannot run them. One derivation feeds
+**caveats** — above all gates WAIVED because the project cannot run them, each naming the project
+it means ("NEVER RAN in web; it passed in api"), because a bare "NEVER RAN" was false whenever a
+kind passed in one half of a stack and was unsupported in the other. One derivation feeds
 `/accept`, `/status`, the quit summary, the report, and the journal handoff.
 
 - **`/accept`** (user-typed = consent; between-turns only, piped-deterministic): on COMPLETE,
@@ -1095,7 +1133,9 @@ protectedPath }`; the engine decides.
 - **Browser flow** (`tool.browser`) → previewBound allows; anything else DENIES.
 - **Session-evidence read** (`tool.evidenceRead`) → allow only when the fact says the sha is
   `admitted`; an un-admitted sha DENIES.
-- **Shell command** (`tool.command`) → **automatic review** (the single default). A hardcoded
+- **Shell command** (`tool.command`) → **automatic review** (the single default). A declared
+  `cwd` is validated with the same containment rule as a write target and REFUSED for protected
+  paths: `.git` and the state dir are protected as PLACES, not only as write destinations. A hardcoded
   circuit-breaker denies workspace/drive wipes and `format`. Otherwise `analyzeCommand` decides: a
   command it PROVES safe **and** an active OS boundary together yield `allow` with `execBoundary:
   'sandbox'`; anything else is `ask` with `execBoundary: 'unsandboxed'`. With no enforced sandbox a
@@ -1269,7 +1309,11 @@ changed file is labeled **CHECKED** only if a `run_command` — or a typed **che
 **exited** zero *after* its last mutation. The widening is honest because a check's `pass` is
 derived from the identical `exited && exitCode === 0` rule; the two sources are merged and **sorted
 by seq** before the lookup. `collectPassingEvidence`/`firstPassingEvidenceAfter` are the ONE
-implementation, shared with `/diff`. A `command.ended` recording a kill vetoes CHECKED even against
+implementation, shared with `/diff`. Each entry carries the SCOPE it covers — a check's project
+unit, a `run_command`'s declared cwd — and the correlation requires the file to be inside it
+(`'.'`, and every pre-S16 event, covers everything). Without that axis a green `build` in `web/`
+marked a changed file in `api/` as CHECKED, in the one artifact whose job is not overstating what
+was verified. A `command.ended` recording a kill vetoes CHECKED even against
 a stray exit-0 completion. Everything else is **UNCHECKED**, and the report prints *which command*
 with the exact wording "check ran, exit 0" and **no correctness claim**.
 

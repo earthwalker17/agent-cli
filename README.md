@@ -41,7 +41,7 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.1.** 1156 hermetic tests across 84 files (real-OS sandbox, real-repository git,
+> **Status: v1.2.1.** 1340 hermetic tests across 95 files (real-OS sandbox, real-repository git,
 > real browser flows, adversarial-review suites) plus opt-in live smokes. Proven live end-to-end
 > across ten recorded runs: a full v1.0 demo (one natural-language request → plan → revision →
 > sha-bound approval → parallel worktree executors → integration → typed checks → managed preview
@@ -379,14 +379,20 @@ Read this before trusting the harness with anything sensitive.
   never runs without an explicit approval showing the exact command and directory, and installs
   deliberately DO run package lifecycle scripts (`--ignore-scripts` would break esbuild,
   playwright and every prebuild download, so the prompt states the risk instead of pretending it
-  away). A session-scope answer covers re-runs only while the lockfile, `package.json` and
-  `.npmrc` are unchanged; migrations and seeds ask every single time.
-- **The multi-project workflow's resolution layer is live-proven; the full run is not (yet).**
-  Detection, per-project command resolution and per-project consent were verified against a real
-  two-package project (Express + `node:sqlite`, Vite + React, real lockfiles, real `npm install`).
-  An end-to-end agent session on such a project — installs through real approvals, two dev servers
-  at once, a browser flow over the integrated stack — has not been run live, and this README does
-  not claim it has.
+  away). A session-scope answer covers re-runs only while the lockfile, `package.json` and every
+  install-affecting config file (`.npmrc`, `.yarnrc.yml`, `.pnpmfile.cjs`) are unchanged;
+  migrations and seeds ask every single time.
+- **The multi-project workflow is live-proven in parts, and the parts are named.** Live against a
+  real two-package project (Express + `node:sqlite`, Vite + React, real lockfiles, no
+  `node_modules`): detection and per-project resolution and consent; `project_setup` installing
+  BOTH projects, then migrating and seeding a real SQLite database; per-project typed checks; and a
+  parallel executor wave in isolated worktrees. Separately live-proven against both real dev
+  servers, but *outside* the agent loop: preview startup, announced-port readiness (including a
+  server bound to IPv6 loopback) and clean two-server teardown.
+  **Not yet proven end-to-end inside one agent session:** two dev servers running at once, a
+  browser flow over the integrated stack, an adversarial review round, and `/accept` reaching
+  COMPLETE. The runs that would have shown it stopped when the API credit balance ran out, not
+  because anything refused. This README does not claim what those runs did not reach.
 - **yarn is implemented from documentation, not live-proven.** npm is exercised; pnpm is
   implemented and unit-tested; yarn is not installed on the development machine.
 - **External database servers, Docker and containers are out of scope.** What is supported is

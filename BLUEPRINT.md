@@ -47,6 +47,30 @@ honest vision degradation. **All five providers live-proven** through the real b
 GLM with each writing its own file). Default model is now `claude-opus-5`. Details and honest
 limits: `ROADMAP.md` Session 15, `ARCHITECTURE.md` "Providers".
 
+### Session 16.5 — Proving Session 16 — **review DONE; live proof PARTIAL (blocked on API credit)**
+
+A bounded five-lens adversarial review over the S16 change set found 30 findings; 16 were fixed,
+each regression-pinned (`test/live-e2e-blockers.test.ts`; suite 1322 → 1340). Two were measured on
+real platform behaviour before a line changed — readiness could not reach a server on IPv6
+loopback (which is where a Vite dev server binds here), and a colourised banner could hide its own
+port. Others: a project-scoped `browser` gate was permanently unsatisfiable; "dependencies are not
+installed" WAIVED a user-approved gate; CHECKED had no project axis; the first check after an
+install was always refused; an install's consent identity missed `.pnpmfile.cjs`/`.yarnrc.yml`.
+
+The live E2E built the fixture ("Depot": two independent packages, two lockfiles, no
+`node_modules`/`.env`/database, three seeded defects each reachable by exactly one capability) and
+proved it 10/10, proved the preview substrate against both real dev servers 14/14, and rehearsed
+the recording chain 18/18. **Two takes ran against the live API.** Take 1 found the session's best
+defect — an amendment to an approved plan silently made every executor task unspawnable, and the
+harness told only the model, which cannot type `/plan approve`. Take 2 got through install ×2,
+migrate, seed, per-project checks and **the parallel executor wave**, then stopped: the Anthropic
+API credit balance was exhausted.
+
+**Still outstanding, and the first thing to clear:** two dev servers under the agent loop, a
+browser flow catching the integrated defect, a review lens catching the XSS, `/accept` COMPLETE,
+and the recorded video. Needs only credit — fixture, driver, recorder, subtitle pipeline and
+validator are all built. Details: `ROADMAP.md` Session 16.5, `agent-cli-s165-live/DEMO.md`.
+
 ### Session 16 — Real Local Software Engineering — **DONE (implementation), live proof PARTIAL**
 
 Delivered: project UNITS (bounded multi-project detection), per-unit typed checks and previews,
