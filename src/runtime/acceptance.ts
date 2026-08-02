@@ -97,6 +97,9 @@ export function computeAcceptance(
   const unfinished: string[] = [];
   /** Non-blocking honesty: things a reader of "complete" must still be told (Session 12). */
   const caveats: string[] = [];
+  // Folded once, up front: the plan-task loop needs it to tell an UNBOUND reviewer task apart
+  // from outstanding review work, and the review axis below consumes the same result.
+  const reviewFold = foldReview(approvedCurrentGraph(planState), events);
 
   // Plan axis. A superseded (discarded/retired) plan never blocks; a draft is NOT silently
   // complete — accepting work the user never approved a plan for is a consent mismatch, so it
@@ -125,6 +128,28 @@ export function computeAcceptance(
               `plan task '${t.id}' is completed but its required check(s) have not passed since integration: ${t.verification.missing.join(', ')} — prove with ${proveWith(t.verification.missing, taskProject)}`,
             );
           }
+          continue;
+        }
+        // A REVIEWER task that was never bound to a delegate call, in a session whose review
+        // requirement is otherwise satisfied, is a dead end rather than outstanding work. The
+        // reviewers ran — their captures and findings are in the log — but without
+        // `plan_task: '<id>'` on the delegate call the DAG fold cannot see the binding, so the
+        // task sits `queued` forever. And once MAX_REVIEW_ROUNDS is spent there is NO call left
+        // that could bind it: the agent cannot clear this, and neither can the user except by
+        // amending the plan or overriding. (Found live: a session with three lens captures and
+        // fourteen findings refused four times on `plan task 'review' is queued`.)
+        //
+        // The REVIEW GATE is unaffected — `foldReview` derives the requirement from the recorded
+        // rounds and findings independently, and still blocks below on anything it finds open.
+        // What is dropped here is only the planning artifact's binding, and it is dropped
+        // LOUDLY, as a caveat.
+        const unboundReviewer =
+          t.role === 'reviewer' && (t.state === 'queued' || t.state === 'blocked') && t.attempts === 0 && reviewFold.satisfied && reviewFold.rounds.length > 0;
+        if (unboundReviewer) {
+          caveats.push(
+            `plan task '${t.id}' was never bound to a delegate call (no \`plan_task\` argument), so the graph cannot ` +
+              `attribute the ${String(reviewFold.rounds.length)} recorded review round(s) to it — the review requirement itself IS satisfied`,
+          );
           continue;
         }
         unfinished.push(`plan task '${t.id}' is ${t.state}${t.state === 'blocked' ? ` (on ${t.blockedOn.join(', ')})` : ''}`);
@@ -224,9 +249,8 @@ export function computeAcceptance(
   // blockers and caveats arrive pre-rendered from the one fold /review also shows.
   // approvedCurrentGraph, not merely 'approved' (review): divergence is already its own
   // blocker; the shared filter keeps the ATTRIBUTION honest too (see its doc in canonical.ts).
-  const review = foldReview(approvedCurrentGraph(planState), events);
-  for (const blocker of review.openBlockers) unfinished.push(blocker);
-  for (const caveat of review.caveats) caveats.push(caveat);
+  for (const blocker of reviewFold.openBlockers) unfinished.push(blocker);
+  for (const caveat of reviewFold.caveats) caveats.push(caveat);
 
   // The latest recorded acceptance, if any.
   let accepted: RecordedAcceptance | null = null;

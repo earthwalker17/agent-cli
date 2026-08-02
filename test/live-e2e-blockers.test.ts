@@ -8,7 +8,8 @@ import { resolveChecks } from '../src/checks/recipes.js';
 import { detectProject } from '../src/checks/detect.js';
 import { createSharedWorkspace } from '../src/checks/session-workspace.js';
 import { resolveSetup, sameSetup } from '../src/setup/intents.js';
-import { completionGateState } from '../src/plan/graph-state.js';
+import { completionGateState, foldGraphState } from '../src/plan/graph-state.js';
+import { computeAcceptance } from '../src/runtime/acceptance.js';
 import { validatePlanGraph } from '../src/plan/schema.js';
 import { readCanonicalPlan } from '../src/plan/canonical.js';
 import { proveWith } from '../src/recovery/catalogue.js';
@@ -436,6 +437,61 @@ describe('the blocker only the user can clear is shown to the USER', () => {
     // `/accept` still refuses it, and says so in its own words.
     expect(run('approved', [])).toEqual([]);
     fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+describe('an unbound reviewer task is a dead end, not outstanding work', () => {
+  // Found in the third live full-stack take. Three lens captures, fourteen findings, every
+  // executor task green — and /accept refused four times on `plan task 'review' is queued`,
+  // because the reviewers were spawned without `plan_task: 'review'`. With MAX_REVIEW_ROUNDS
+  // already spent there was no call left that could bind it: unclearable by the agent, and by
+  // the user only via a plan amendment or an override.
+  const graph = {
+    version: 1,
+    objective: 'ship it',
+    tasks: [
+      { id: 'build', title: 'B', intent: 'i', role: 'executor', dependsOn: [], touches: ['src/'], verify: 'v', risk: 'low' },
+      { id: 'review', title: 'R', intent: 'i', role: 'reviewer', dependsOn: ['build'], touches: [], verify: 'v', risk: 'low' },
+    ],
+  } as unknown as PlanGraph;
+
+  const planState = {
+    kind: 'canonical',
+    status: 'approved',
+    approvedAndCurrent: true,
+    diverged: false,
+    canonical: { graph },
+  } as never;
+
+  /** An executor that ran and applied, then a review round captured with NO plan_task binding. */
+  const events = [
+    { v: 1, seq: 1, ts: 't', callId: 'c1', type: 'task.started', role: 'executor', planTaskId: 'build', childSessionId: 'k1' },
+    { v: 1, seq: 2, ts: 't', callId: 'c1', type: 'task.changes', childSessionId: 'k1', files: [{ relPath: 'src/a.ts', kind: 'modify', afterSha256: 'a', beforeSha256: 'b', bytes: 1 }], omittedCount: 0 },
+    { v: 1, seq: 3, ts: 't', callId: 'c1', type: 'task.ended', childSessionId: 'k1', status: 'completed' },
+    { v: 1, seq: 4, ts: 't', callId: 'c1', type: 'task.applied', childSessionId: 'k1', applied: ['src/a.ts'], refused: [] },
+    { v: 1, seq: 5, ts: 't', callId: 'c1', type: 'file.mutated', path: 'C:/ws/src/a.ts' },
+    { v: 1, seq: 6, ts: 't', callId: 'c2', type: 'task.started', role: 'reviewer', childSessionId: 'k2' },
+    { v: 1, seq: 7, ts: 't', callId: 'c2', type: 'review.findings', childSessionId: 'k2', lens: 'security', findings: [] },
+    { v: 1, seq: 8, ts: 't', callId: 'c2', type: 'task.ended', childSessionId: 'k2', status: 'completed' },
+  ] as unknown as SessionEvent[];
+
+  it('does not block acceptance, and says so as a caveat', () => {
+    const fold = foldGraphState(graph, events);
+    expect(fold.byId.get('review')?.state).not.toBe('completed'); // the binding genuinely is absent
+    const acc = computeAcceptance(planState, fold, events);
+    expect(acc.unfinished).toEqual([]);
+    expect(acc.complete).toBe(true);
+    expect(acc.caveats.join('\n')).toContain("plan task 'review' was never bound");
+    expect(acc.caveats.join('\n')).toContain('review requirement itself IS satisfied');
+  });
+
+  it('still blocks when the review requirement is genuinely unmet', () => {
+    // Same graph, same executor work — but no review round at all. The requirement is real and
+    // the task is real outstanding work; nothing here may be waived.
+    const noReview = events.filter((e) => (e as { callId?: string }).callId !== 'c2');
+    const acc = computeAcceptance(planState, foldGraphState(graph, noReview), noReview);
+    expect(acc.complete).toBe(false);
+    expect(acc.unfinished.join('\n')).toContain("plan task 'review'");
   });
 });
 
