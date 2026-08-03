@@ -271,7 +271,8 @@ You name an intent; the harness resolves the command from the lockfile (`npm ci`
 declares neither) or from the project's own declared script. An install asks for approval showing
 the exact command, the directory, and the lockfile it is pinned to, and states plainly that it
 downloads and **executes** third-party package code with network access; a session-scope answer
-covers re-runs only while the lockfile, `package.json` and `.npmrc` are all unchanged. Migrations
+covers re-runs only while the lockfile, `package.json` and every install-affecting config file
+(`.npmrc`, `.yarnrc.yml`, `.pnpmfile.cjs`) are unchanged. Migrations
 and seeds are classified destructive and ask **every** time, because a migration is not idempotent
 and the harness cannot undo it. A setup is never verification: it can never satisfy a plan gate.
 

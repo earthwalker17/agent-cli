@@ -106,7 +106,7 @@ export const HELP = [
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
   'keys: Ctrl+C interrupts the running turn; at the idle prompt press it twice to quit.',
-  'note: shell commands always ask; their effects are never undoable.',
+  'note: shell commands ask — except provably read-only ones when the OS sandbox probe passed, which auto-run INSIDE it; command effects are never undoable.',
   'note: /cancel <task> ends one child; Ctrl+C aborts the whole turn (every task included).',
   'note: @plan <request> routes a request into plan mode (plan first, no execution until approved).',
 ].join('\n');

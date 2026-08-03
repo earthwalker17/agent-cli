@@ -44,8 +44,9 @@ jobs:
         run: npm run typecheck
 
       - name: Test
-        # AGENT_LIVE_TEST is deliberately never set: the one opt-in test makes a real, billable
-        # Anthropic API call. CI stays hermetic — no network, no key.
+        # AGENT_LIVE_TEST is deliberately never set: the opt-in live smokes (one per provider
+        # whose key is set — Anthropic, OpenAI, DeepSeek, Kimi, GLM — see test/live-providers)
+        # each make a real, billable API call. CI stays hermetic — no network, no keys.
         run: npm test
 
   # Advisory, and honestly labelled as such. The suite is Windows-first: a number of tests assert

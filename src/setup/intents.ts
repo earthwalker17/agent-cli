@@ -69,6 +69,9 @@ export interface SetupResolution {
   reason?: string;
   /** true = the CALLER asked wrong; false/absent = a genuine project-capability gap. */
   badRequest?: boolean;
+  /** true = a TRANSIENT state with a named cure (deps declared, node_modules absent) — the
+   *  evidence must not claim a capability gap for a project that declares the script (S16.5b). */
+  curable?: boolean;
 }
 
 const NEEDS_NODE_MODULES =
@@ -174,7 +177,7 @@ function resolveScriptIntent(p: DetectedProject, action: Exclude<SetupAction, 'i
       reason: `this project declares no ${action} script (looked for package.json scripts: ${names.join(', ')})`,
     };
   }
-  if (p.hasDependencies && !p.hasNodeModules) return { resolved: null, reason: NEEDS_NODE_MODULES };
+  if (p.hasDependencies && !p.hasNodeModules) return { resolved: null, reason: NEEDS_NODE_MODULES, curable: true };
 
   const name = candidates[0]!;
   const body = p.scripts[name]!;

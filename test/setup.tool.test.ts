@@ -375,6 +375,24 @@ describe('execution, evidence and refusals', () => {
     expect(done.unsupportedReason).toBe('no-recipe');
   }, 60_000);
 
+  it('migrate blocked only by missing node_modules records precondition-curable, never no-recipe', async () => {
+    // The project DECLARES the script; the state is transient with a named cure (install).
+    // Recording 'no-recipe' put a falsifiable capability claim in the log right next to the
+    // later successful migrate of the same project (S16.5b review).
+    project('api', { scripts: { migrate: 'node -e ""' }, nodeModules: false });
+    const { approver, calls } = scriptedApprover([]);
+    const { session } = drive([{ calls: [{ name: 'project_setup', input: { action: 'migrate', project: 'api' } }] }, { say: 'done' }], approver);
+
+    await runTurn(session, 'migrate');
+    endSession(session, 'completed');
+    expect(calls).toHaveLength(0); // never reached an approval — nothing resolved
+    const evs = events(session.id);
+    expect(evs.some((e) => e.type === 'setup.started')).toBe(false);
+    const done = evs.find((e) => e.type === 'setup.completed') as { status: string; unsupportedReason?: string };
+    expect(done.status).toBe('unsupported');
+    expect(done.unsupportedReason).toBe('precondition-curable');
+  }, 60_000);
+
   it('refuses an unattributable call, recording NOTHING', async () => {
     project('web', { scripts: { migrate: 'node -e ""' } });
     project('api', { scripts: { migrate: 'node -e ""' } });

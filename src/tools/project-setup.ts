@@ -169,7 +169,10 @@ export function createProjectSetupTool(deps: SetupToolDeps): ProjectSetupTool {
       if (resolution.resolved === null) {
         // A project-capability gap is RECORDED as `unsupported` (the model and the report both
         // need to see "this project has no migrate script"); a bad request records nothing.
-        const why = resolution.badRequest === true ? 'bad-request' : 'no-recipe';
+        // The missing-node_modules state is neither: the project DECLARES the script and the
+        // cure is named — recording 'no-recipe' put a falsifiable capability claim in the log
+        // right next to the later successful run (S16.5b review).
+        const why = resolution.badRequest === true ? 'bad-request' : resolution.curable === true ? 'precondition-curable' : 'no-recipe';
         if (why === 'bad-request') {
           return refuse(resolution.reason ?? 'invalid setup request', `invalid setup request: ${input.action}`, startedAt);
         }
@@ -179,7 +182,7 @@ export function createProjectSetupTool(deps: SetupToolDeps): ProjectSetupTool {
           projectId: selected.unit.id,
           recipeId: `setup.${input.action}`,
           status: 'unsupported',
-          unsupportedReason: 'no-recipe',
+          unsupportedReason: why,
           exitCode: null,
           durationMs: 0,
           summary: resolution.reason ?? `no ${input.action} recipe applies to this project`,

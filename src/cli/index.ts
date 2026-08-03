@@ -10,7 +10,7 @@ import { loadConfig } from '../config/config.js';
 import { runRepl } from '../repl/repl.js';
 import { EventLog } from '../store/event-log.js';
 import { SnapshotStore } from '../store/snapshots.js';
-import { endReasonForTurn, endSession, runTurn, type Session } from '../runtime/session.js';
+import { DEFAULT_MAX_STEPS, endReasonForTurn, endSession, runTurn, type Session } from '../runtime/session.js';
 import { detectGitFacts } from '../git/facts.js';
 import { applyUndo } from '../runtime/undo.js';
 import { buildWorkspaceMap } from '../workspace/map.js';
@@ -79,7 +79,7 @@ Options:
                            anthropic: ${DEFAULT_MODEL})
   --no-input               Non-interactive: every approval auto-denies (also auto-detected off a TTY)
   --interactive            Force interactive mode on piped stdio (expect-style test driving)
-  --max-steps <n>          Maximum agent steps per turn (default: 20; --max-turns is the
+  --max-steps <n>          Maximum agent steps per turn (default: ${String(DEFAULT_MAX_STEPS)}; --max-turns is the
                            legacy alias for the same limit)
   --dangerously-allow-all  Bypass approvals (loud; every auto-allow is logged). No isolation whatsoever.
   --session <id>           Target session for undo (default: latest)

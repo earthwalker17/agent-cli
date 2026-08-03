@@ -15,6 +15,13 @@ import { analyzeCommand } from './command-review.js';
  * captured elsewhere: filesystem I/O here would break both the purity contract and the guarantee
  * that what the human approved is exactly what executes.
  *
+ * KNOWN EXCEPTION (honest, S16.5b): run_check's fact resolves a bound `test-targeted` scope via
+ * a planTouches lookup that reads the PLAN DOCUMENT — one bounded file read per decide, not a
+ * workspace probe. The plan file is not covered by the workspace drift stamps, so an external
+ * plan edit during an open approval prompt could alter the executed scope without tripping the
+ * TOCTOU guard; tool calls are otherwise strictly serialized, so the window is exactly the
+ * prompt wait. Recorded in the deferred pool rather than papered over here.
+ *
  * Approval and sandbox are SEPARATE axes (V0.4+): this engine is the approval control, and it
  * additionally READS `ctx.sandbox.enforced` to gate command auto-run — a provably-safe command
  * auto-runs only INSIDE an OS-enforced boundary; with no enforcement every command asks (fail
