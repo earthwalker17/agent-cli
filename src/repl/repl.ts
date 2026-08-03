@@ -80,7 +80,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   // The "working" heartbeat (S16.5b): dim elapsed-time line while a model request is in flight
   // and no text has streamed yet — an always-thinking model otherwise looks frozen. TTY-only by
   // construction (the status area passes through zero bytes off-TTY).
-  const heartbeat = createWorkingHeartbeat({ area: statusArea, style });
+  const heartbeat = createWorkingHeartbeat({ area: statusArea });
 
   // Approval prompts own the screen: the status area is suspended for the question's lifetime.
   const question = async (q: string): Promise<string | null> => {

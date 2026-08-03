@@ -38,29 +38,40 @@ function fakeArea(): FakeArea {
   return a;
 }
 
-const dimStyle = { dim: (s: string) => `DIM(${s})` };
-
 describe('createWorkingHeartbeat', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
   it('stays invisible through the grace period, then ticks with elapsed seconds', () => {
     const area = fakeArea();
-    const hb = createWorkingHeartbeat({ area, style: dimStyle, graceMs: 2_000, tickMs: 1_000 });
+    const hb = createWorkingHeartbeat({ area, graceMs: 2_000, tickMs: 1_000 });
     hb.modelCallStarted();
     vi.advanceTimersByTime(1_999);
     expect(area.drawn).toEqual([]); // a fast response never flashes the line
     vi.advanceTimersByTime(1);
-    expect(area.drawn).toEqual([['DIM(· model working (2s))']]);
+    expect(area.drawn).toEqual([['· model working (2s)']]);
     vi.advanceTimersByTime(2_000);
-    expect(area.drawn[area.drawn.length - 1]).toEqual(['DIM(· model working (4s))']);
+    expect(area.drawn[area.drawn.length - 1]).toEqual(['· model working (4s)']);
     hb.modelCallEnded();
     expect(area.clears).toBe(1);
   });
 
+  it('the line is PLAIN text — no ANSI byte may reach the sanitizing status area', () => {
+    // The first recorded run burned this in: a style.dim()-wrapped line went through the
+    // area's sanitizeLine, which ESCAPES ANSI, and the screen showed literal
+    // `\u{1b}[2m· model working (2s)\u{1b}[22m` on every thinking stretch (S16.5b).
+    const area = fakeArea();
+    const hb = createWorkingHeartbeat({ area, graceMs: 10, tickMs: 10 });
+    hb.modelCallStarted();
+    vi.advanceTimersByTime(50);
+    expect(area.drawn.length).toBeGreaterThan(0);
+    for (const lines of area.drawn) for (const l of lines) expect(l).not.toMatch(//);
+    hb.modelCallEnded();
+  });
+
   it('the first text delta erases it and suppresses every later redraw of the step', () => {
     const area = fakeArea();
-    const hb = createWorkingHeartbeat({ area, style: dimStyle, graceMs: 100, tickMs: 50 });
+    const hb = createWorkingHeartbeat({ area, graceMs: 100, tickMs: 50 });
     hb.modelCallStarted();
     vi.advanceTimersByTime(200);
     expect(area.drawn.length).toBeGreaterThan(0);
@@ -77,7 +88,7 @@ describe('createWorkingHeartbeat', () => {
 
   it('a call that never streamed (tool-only step) is erased when the request settles', () => {
     const area = fakeArea();
-    const hb = createWorkingHeartbeat({ area, style: dimStyle, graceMs: 100, tickMs: 50 });
+    const hb = createWorkingHeartbeat({ area, graceMs: 100, tickMs: 50 });
     hb.modelCallStarted();
     vi.advanceTimersByTime(300);
     hb.modelCallEnded();
@@ -90,7 +101,7 @@ describe('createWorkingHeartbeat', () => {
     let bytes = '';
     const out = { write: (c: string) => ((bytes += c), true) } as unknown as NodeJS.WritableStream;
     const area = createStatusArea({ chromeOut: out, isTTY: false });
-    const hb = createWorkingHeartbeat({ area, style: dimStyle, graceMs: 10, tickMs: 5 });
+    const hb = createWorkingHeartbeat({ area, graceMs: 10, tickMs: 5 });
     hb.modelCallStarted();
     vi.advanceTimersByTime(1_000);
     hb.textArrived();

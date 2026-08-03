@@ -1,5 +1,4 @@
 import type { StatusArea } from './status.js';
-import type { Style } from './format.js';
 
 /**
  * The "model working" heartbeat (S16.5b) — one dim status line, `· model working (Ns)`, shown
@@ -33,7 +32,6 @@ export interface WorkingHeartbeat {
 
 export function createWorkingHeartbeat(opts: {
   area: Pick<StatusArea, 'setLines' | 'clear'>;
-  style: Pick<Style, 'dim'>;
   /** Delay before the line first appears — a fast response should never flash it. */
   graceMs?: number;
   tickMs?: number;
@@ -63,7 +61,11 @@ export function createWorkingHeartbeat(opts: {
         const elapsed = Date.now() - startedAt;
         if (elapsed < grace) return;
         visible = true;
-        opts.area.setLines([opts.style.dim(`· model working (${String(Math.round(elapsed / 1000))}s)`)]);
+        // PLAIN text, never styled: status-area lines pass through sanitizeLine, which ESCAPES
+        // ANSI bytes into visible `\u{1b}` text — the first recorded run showed the styled line
+        // verbatim on screen (S16.5b, found by the take-4 video). The area's sanitize-and-clip
+        // contract is exactly why styling must not be smuggled in through content.
+        opts.area.setLines([`· model working (${String(Math.round(elapsed / 1000))}s)`]);
       }, tick);
       timer.unref?.();
     },
