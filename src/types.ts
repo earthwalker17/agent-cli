@@ -279,6 +279,8 @@ export interface BrowserFlowEvidence {
   finalUrl: string | null;
   /** A trace too large for the artifact budget was dropped; its size is the honest record. */
   traceOmittedBytes?: number;
+  /** Declared screenshots dropped (budget exhausted or storage failed) — never silent (S16.5b). */
+  screenshotsOmitted?: number;
 }
 
 /**
@@ -1313,6 +1315,7 @@ export type EventBody =
       offOriginRequests: string[];
       finalUrl: string | null;
       traceOmittedBytes?: number;
+      screenshotsOmitted?: number;
     })
   | {
       type: 'undo.applied';

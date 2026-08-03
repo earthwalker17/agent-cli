@@ -11,6 +11,7 @@ import {
   type BrowserToolDeps,
 } from '../src/tools/browser-flow.js';
 import { createViewImageTool } from '../src/tools/view-image.js';
+import { cacheSuccessfulProbe, type BrowserAvailability } from '../src/browser/probe.js';
 import { createRunCheckTool, CHECKS_PER_SESSION } from '../src/tools/run-check.js';
 import { decide, Grants } from '../src/policy/engine.js';
 import { CHECK_KINDS, type CheckEvidence, type BrowserFlowEvidence, type SessionEvent, type Tool, type ToolContext } from '../src/types.js';
@@ -87,7 +88,7 @@ function harness(over: Partial<BrowserToolDeps> = {}): Harness {
   const flows: BrowserFlowEvidence[] = [];
   const blobs = new Map<string, Buffer>();
   const deps: BrowserToolDeps = {
-    preview: { readyPreview: () => fakePreview(), active: () => [fakePreview()] },
+    preview: { readyPreview: () => fakePreview(), active: () => [fakePreview()], endedReason: () => undefined },
     putBlob: (b) => {
       const sha = sha256(b);
       blobs.set(sha, b);
@@ -113,6 +114,34 @@ function harness(over: Partial<BrowserToolDeps> = {}): Harness {
 
 const FLOW_INPUT = { flow: { name: 'smoke', steps: [{ do: 'goto' as const, path: '/', ready_when: { selector: '#app' } }] } };
 
+describe('cacheSuccessfulProbe', () => {
+  it('caches success forever, re-probes after a failure, shares an in-flight attempt', async () => {
+    // A transiently failed probe cached for the whole session turned every later flow into
+    // the gate-WAIVING unsupported/precondition — acceptance could reach COMPLETE without the
+    // UI ever having been driven (S16.5b review).
+    let calls = 0;
+    const answers: BrowserAvailability[] = [
+      { available: false, reason: 'transient overload' },
+      { available: true, channel: 'msedge' },
+      { available: true, channel: 'chrome' }, // must never be reached — success is cached
+    ];
+    const probe = cacheSuccessfulProbe(() => Promise.resolve(answers[calls++]!));
+    expect((await probe()).available).toBe(false); // first probe fails…
+    expect((await probe()).available).toBe(true); // …the next call RE-probes and succeeds…
+    expect((await probe()).channel).toBe('msedge'); // …and success is cached from then on.
+    expect(calls).toBe(2);
+
+    // Concurrent callers share one in-flight attempt (no double launch).
+    let slowCalls = 0;
+    const slow = cacheSuccessfulProbe(
+      () => new Promise<BrowserAvailability>((r) => setTimeout(() => { slowCalls++; r({ available: true }); }, 10)),
+    );
+    const [a, b] = await Promise.all([slow(), slow()]);
+    expect(a.available && b.available).toBe(true);
+    expect(slowCalls).toBe(1);
+  });
+});
+
 describe('browser_flow policy', () => {
   it('preview-bound flows allow under browser.preview-bound; unbound deny; a throwing fact denies', () => {
     const h = harness();
@@ -125,7 +154,7 @@ describe('browser_flow policy', () => {
       noUndo: true,
     });
 
-    const none = createBrowserFlowTool(harness({ preview: { readyPreview: () => null, active: () => [] } }).deps);
+    const none = createBrowserFlowTool(harness({ preview: { readyPreview: () => null, active: () => [], endedReason: () => undefined } }).deps);
     const d = decide(none, FLOW_INPUT, ctx, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'browser.no-preview' });
     expect(d.reason).toContain('RUNNING harness-managed preview');
@@ -175,7 +204,7 @@ describe('browser_flow evidence', () => {
   });
 
   it('a preview death between gate and execute is a typed ERROR with preview-died — never a pass, never a started', async () => {
-    const h = harness({ preview: { readyPreview: () => null, active: () => [] } });
+    const h = harness({ preview: { readyPreview: () => null, active: () => [], endedReason: () => undefined } });
     const t = createBrowserFlowTool(h.deps);
     const r = await t.execute(FLOW_INPUT, h.ctx);
     expect(r.ok).toBe(false);
@@ -234,6 +263,41 @@ describe('browser_flow evidence', () => {
     expect(r.output).toContain('trace NOT stored');
     expect(h.flows[0]!.traceOmittedBytes).toBe(bigTrace.length);
     expect(h.flows[0]!.artifacts.map((a) => a.kind)).toEqual(['screenshot']);
+  });
+
+  it('an over-budget SCREENSHOT is dropped with a count recorded and a do-not-cite output line', async () => {
+    // Screenshots used to be skipped silently while only traces recorded omission: the model
+    // could cite a screenshot that was never stored and view_image would refuse the sha with
+    // no explanation anywhere (S16.5b review).
+    const h = harness({
+      artifactBudget: { usedBytes: ARTIFACT_BYTES_PER_SESSION - 5 }, // no room for the shot
+      run: (_s, d2) => {
+        d2.onBrowserLaunched?.();
+        return Promise.resolve(passResult({ artifacts: [{ kind: 'screenshot', bytes: SHOT, label: 'shot', mediaType: 'image/png' }] }));
+      },
+    });
+    const r = await createBrowserFlowTool(h.deps).execute(FLOW_INPUT, h.ctx);
+    expect(r.output).toContain('1 declared screenshot(s) NOT stored');
+    expect(r.output).toContain('do not cite them');
+    expect(h.flows[0]!.screenshotsOmitted).toBe(1);
+    expect(h.flows[0]!.artifacts).toEqual([]);
+  });
+
+  it('a preview stopped by the HARNESS (TTL/log cap/stop) is preview-stopped-lifecycle, not preview-died', async () => {
+    // A TTL reap of a healthy server is a lifecycle bound, not a crash — 'preview-died'
+    // routed it to runtime-process and repairs hunted an app failure that never happened.
+    const h = harness({ preview: { readyPreview: () => null, active: () => [], endedReason: () => 'ttl-timeout' } });
+    const t = createBrowserFlowTool(h.deps);
+    const r = await t.execute({ flow: { ...FLOW_INPUT.flow, preview_id: 'pv-web' } }, h.ctx);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('ttl-timeout');
+    expect(h.checks[0]).toMatchObject({ kind: 'ended', status: 'error', signals: ['preview-stopped-lifecycle'] });
+    expect(r.output).toContain('lifecycle bound, not an app failure');
+    // An unbound flow (no preview_id) cannot name which preview ended — the crash reading stays.
+    const h2 = harness({ preview: { readyPreview: () => null, active: () => [], endedReason: () => 'ttl-timeout' } });
+    const r2 = await createBrowserFlowTool(h2.deps).execute(FLOW_INPUT, h2.ctx);
+    expect(h2.checks[0]).toMatchObject({ kind: 'ended', signals: ['preview-died'] });
+    expect(r2.ok).toBe(false);
   });
 
   it('artifactBytesFromEvents rebuilds the budget from browser.flow events', () => {

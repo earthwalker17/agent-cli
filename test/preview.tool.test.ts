@@ -12,7 +12,7 @@ import {
 } from '../src/tools/preview.js';
 import { resolvePreview, PREVIEW_SCRIPT_PREFERENCE } from '../src/preview/recipes.js';
 import { parsePortCandidates, waitForReady } from '../src/preview/ready.js';
-import { loadPreviewRegistry, previewsFile } from '../src/preview/registry.js';
+import { loadPreviewRegistry, previewsFile, registerPreview } from '../src/preview/registry.js';
 import { decide, Grants } from '../src/policy/engine.js';
 import { formatApprovalPrompt } from '../src/runtime/approvals.js';
 import { startSession, resumeSession, endSession, runTurn } from '../src/runtime/session.js';
@@ -400,6 +400,67 @@ describe('preview tool — lifecycle', () => {
     expect(s.output).toContain('pv-t2');
     const r2 = await t.execute({ action: 'stop', preview_id: 'pv-t1' }, h.ctx);
     expect(r2.ok).toBe(true);
+  });
+
+  it('a nothing-was-gated drift refusal says so — never "changed after this call was approved"', async () => {
+    // Policy allowed the call as nothing-to-run (no preview script resolved at gate time);
+    // when the manifest then gains one, the old message claimed a nonexistent approval was
+    // invalidated ("approved: (nothing)") — the same false message run_check and
+    // project_setup already had split honestly (S16.5b review).
+    nodeProject({});
+    const h = harness();
+    const t = createPreviewTool(h.deps);
+    fs.writeFileSync(path.join(ws, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { dev: 'node server.js' } }));
+    const r = await t.execute({ action: 'start' }, h.ctx);
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain('no preview command resolved for it — so nothing was approved and nothing started');
+    expect(r.output).not.toContain('changed after this call was approved');
+    expect(r.output).toContain('npm run dev');
+  });
+
+  it('status surfaces a PREVIOUS-life registry survivor of this same session (the port dead-end)', async () => {
+    // A resumed life keeps the same session id: an unverifiable orphan from the previous life
+    // was in neither the live list nor the "another session" list — invisible exactly when it
+    // still held the port Vite strictPort needs (S16.5b review).
+    nodeProject({ dev: 'node server.js' });
+    const h = harness();
+    const t = createPreviewTool(h.deps);
+    await registerPreview(previewsFile(layout.projectDir), {
+      previewId: 'pv-ghost',
+      pid: 999_999,
+      command: 'npm run dev',
+      cwd: ws,
+      ownerSessionId: 'test-session-0001', // SAME session id — a previous life
+      ownerPid: 1,
+      createdAt: new Date().toISOString(),
+      logFile: path.join(layout.projectDir, 'ghost.log'),
+    });
+    await registerPreview(previewsFile(layout.projectDir), {
+      previewId: 'pv-foreign',
+      pid: 999_998,
+      command: 'npm run dev',
+      cwd: ws,
+      ownerSessionId: 'someone-else',
+      ownerPid: 2,
+      createdAt: new Date().toISOString(),
+      logFile: path.join(layout.projectDir, 'foreign.log'),
+    });
+    const s = await t.execute({ action: 'status' }, h.ctx);
+    expect(s.output).toContain('pv-ghost: recorded by a PREVIOUS life of this session');
+    expect(s.output).toContain('still holds its port');
+    expect(s.output).toContain('pv-foreign: recorded by another session');
+  });
+
+  it('endedReason names why a since-ended preview stopped (crash vs harness lifecycle)', async () => {
+    nodeProject({ dev: 'node server.js' });
+    const h = harness();
+    const t = createPreviewTool(h.deps);
+    await t.execute({ action: 'start' }, h.ctx);
+    expect(t.endedReason('pv-t1')).toBeUndefined(); // still running
+    h.handles[0]!.die(1);
+    await flush();
+    expect(t.endedReason('pv-t1')).toBe('crashed');
+    expect(t.endedReason('pv-nothing')).toBeUndefined();
   });
 
   it('previewCapsFromEvents counts started events', () => {

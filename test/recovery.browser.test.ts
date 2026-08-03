@@ -69,6 +69,14 @@ describe('classifyCheck — the browser branch', () => {
     expect(c.class).toBe('runtime-process');
   });
 
+  it('preview-stopped-lifecycle routes to timeout-resource — the harness reaped a HEALTHY server', () => {
+    // A TTL/log-cap/stop between approval and the flow is a resource bound expiring, not an
+    // app failure; runtime-process sent repairs hunting a crash that never happened (S16.5b).
+    const c = classifyFailure(browserCheck(['preview-stopped-lifecycle'], 'error'));
+    expect(c.class).toBe('timeout-resource');
+    expect(c.confidence).toBe('high');
+  });
+
   it('a signal-less browser FAIL still classifies browser-verification (medium); an ERROR stays unknown', () => {
     expect(classifyFailure(browserCheck(['console-error']))).toMatchObject({ class: 'browser-verification', confidence: 'medium' });
     expect(classifyFailure(browserCheck([], 'error')).class).toBe('unknown');

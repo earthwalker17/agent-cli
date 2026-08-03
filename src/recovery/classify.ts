@@ -130,6 +130,13 @@ function classifyCheck(e: Extract<FailureEvidence, { source: 'check' }>): Failur
       cls = 'dependency-setup'; // a missing browser is a toolchain the user installs
       confidence = 'high';
       fired.push('browser-unavailable');
+    } else if (s.has('preview-stopped-lifecycle')) {
+      // The harness reaped a HEALTHY server (TTL, log cap, an explicit stop) between approval
+      // and the flow: a resource bound expired, nothing about the app failed — routing it to
+      // runtime-process sent repairs hunting a crash that never happened (S16.5b review).
+      cls = 'timeout-resource';
+      confidence = 'high';
+      fired.push('preview-stopped-lifecycle');
     } else if (s.has('preview-died')) {
       cls = 'runtime-process'; // the server died at runtime; the flow was only the witness
       confidence = 'high';

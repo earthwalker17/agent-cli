@@ -128,6 +128,9 @@ export interface PreviewTool extends Tool<PreviewInputT> {
   refresh(): DetectedWorkspace;
   /** This session's previews (live handles; callers re-probe isAlive() at render time). */
   active(): readonly ActivePreview[];
+  /** Why a since-ended preview of this session stopped — lets the browser layer tell "the
+   *  harness reaped it (TTL/log-cap/stop)" apart from "the server crashed" (S16.5b review). */
+  endedReason(previewId: string): PreviewEndReason | undefined;
   /** The one the browser layer binds to: a ready, still-alive preview by id (or the only one). */
   readyPreview(previewId?: string): ActivePreview | null;
   stopById(previewId: string, reason: 'stopped' | 'session-end'): Promise<{ ok: boolean; detail: string }>;
@@ -152,6 +155,10 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       ...(deps.probe !== undefined ? { probe: deps.probe } : {}),
     });
   const active = new Map<string, ActivePreview>();
+  // Why each since-ended preview stopped (exit-listener-written). In-memory only: a resumed
+  // life reads preview.ended events instead, and a flow bound to a dead preview from a prior
+  // life is refused at decide() before this map is ever consulted.
+  const endedReasons = new Map<string, PreviewEndReason>();
 
   /** Which unit to serve. Pure over the snapshot (the `check()` fact contract); ambiguity refuses. */
   const unitFor = (input: PreviewInputT): ReturnType<typeof selectUnit> => selectUnit(shared.current(), input.project);
@@ -252,6 +259,17 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
         const now = resolveFor(input).resolved;
         if (!samePreview(gated, now)) {
           const d = (r: ResolvedPreview | null): string => (r === null ? '(nothing)' : `${r.command} (script body ${r.bodySha.slice(0, 8)})`);
+          // See run_check/project_setup: "changed after approval" is FALSE when nothing
+          // resolved at gate time — policy allowed the call as nothing-to-run, so no command
+          // was ever approved. The two states get two honest messages (S16.5b review).
+          if (gated === null) {
+            return refuse(
+              `refused: when this call was gated, no preview command resolved for it — so nothing was approved and nothing started.\n` +
+                `  now resolvable: ${d(now)}\nThe project state has advanced. Call preview again to have the current command approved.`,
+              'nothing was gated for this call; nothing started',
+              startedAt,
+            );
+          }
           return refuse(
             `the project changed after this call was approved, so the resolved preview command no longer matches what was gated.\n` +
               `  approved: ${d(gated)}\n  now:      ${d(now)}\nNothing started. Call preview again to have the current command approved.`,
@@ -324,6 +342,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
       // stop() resolves — i.e. before session end closes the log.
       void handle.exited.then((info) => {
         const reason: PreviewEndReason = info.requestedStop ?? (ap.readyObserved ? 'crashed' : 'start-failed');
+        endedReasons.set(previewId, reason);
         try {
           fs.appendFileSync(logFile, `\n${LOG_ENDED_MARKER} (${reason})\n`);
         } catch {
@@ -447,6 +466,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
     workspaceSnapshot: () => shared.current(),
     refresh: () => shared.refresh(),
     active: () => [...active.values()],
+    endedReason: (previewId) => endedReasons.get(previewId),
     readyPreview: (previewId) => {
       const alive = aliveActive().filter((a) => a.readyObserved);
       if (previewId !== undefined) return alive.find((a) => a.previewId === previewId) ?? null;
@@ -497,9 +517,19 @@ function statusResult(
       .slice(-5);
     for (const l of tail) lines.push(`    | ${l}`);
   }
-  const others = loadPreviewRegistry(registryFile).filter((e) => e.ownerSessionId !== sessionId);
-  for (const o of others) {
+  const registry = loadPreviewRegistry(registryFile);
+  for (const o of registry.filter((e) => e.ownerSessionId !== sessionId)) {
     lines.push(`${o.previewId}: recorded by another session (pid ${String(o.pid)}) — not managed here`);
+  }
+  // A PREVIOUS LIFE of this same session id can leave a registry entry the resume sweep could
+  // not verify and therefore (correctly) did not kill. It is in neither the live map nor the
+  // foreign list, which made it invisible exactly when it mattered: a survivor still holds its
+  // port, and Vite's strictPort makes a replacement start impossible (S16.5b review).
+  for (const o of registry.filter((e) => e.ownerSessionId === sessionId && !all.has(e.previewId))) {
+    lines.push(
+      `${o.previewId}: recorded by a PREVIOUS life of this session (pid ${String(o.pid)}) — not attached. ` +
+        `If that process is still running it still holds its port; stop it (e.g. taskkill /PID ${String(o.pid)} after verifying the pid) before starting a replacement.`,
+    );
   }
   const stoppedCount = all.size - alive.length;
   if (stoppedCount > 0) lines.push(`(${String(stoppedCount)} earlier preview(s) of this session already ended — see preview.ended events)`);

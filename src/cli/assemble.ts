@@ -19,7 +19,7 @@ import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser
 import { createViewImageTool } from '../tools/view-image.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { effectiveIdentity } from '../report/report.js';
-import { likelyBrowserAvailable, probeBrowser, type BrowserAvailability } from '../browser/probe.js';
+import { cacheSuccessfulProbe, likelyBrowserAvailable, probeBrowser } from '../browser/probe.js';
 import { createUpdatePlanTool } from '../tools/update-plan.js';
 import { createApplyChangesTool, createTaskChangesRegistry } from '../tools/apply-changes.js';
 import { createRecoverTool } from '../tools/recover.js';
@@ -479,11 +479,9 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // is cached per session and only runs when a flow actually needs it. Flows share the SESSION
   // CHECK BUDGET (the same live CheckCaps instance run_check refuses on) plus an artifact byte
   // budget rebuilt from browser.flow events.
-  let browserProbePromise: Promise<BrowserAvailability> | null = null;
-  const cachedProbe = (): Promise<BrowserAvailability> => {
-    browserProbePromise ??= probeBrowser();
-    return browserProbePromise;
-  };
+  // Success-only caching (S16.5b review): a transiently failed probe must not waive browser
+  // gates for the rest of the session. See cacheSuccessfulProbe.
+  const cachedProbe = cacheSuccessfulProbe(probeBrowser);
   const artifactBudget = { usedBytes: artifactBytesFromEvents(session.log.events) };
   const browserTool = createBrowserFlowTool({
     preview: previewTool,
@@ -536,8 +534,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
           return `state unknown (pid ${String(pid)})`;
         }
       };
+      // "Start a new preview" was a dead end when the survivor STILL HOLDS its port: Vite's
+      // strictPort exits EADDRINUSE, and the api's announcement-gated readiness rightly refuses
+      // to adopt a foreign server — so name the possibility and the honest way out (S16.5b).
       previewResumeNote = unended
-        .map(([id, v]) => `preview ${id} (${v.command}) was running when the previous life ended; ${outcome(id, v.pid)}. It is NOT attached to this session — start a new preview if needed.`)
+        .map(
+          ([id, v]) =>
+            `preview ${id} (${v.command}) was running when the previous life ended; ${outcome(id, v.pid)}. ` +
+            `It is NOT attached to this session. If its process is still alive it still holds its port — verify and stop it (pid above) before starting a replacement; otherwise start a new preview.`,
+        )
         .join(' ');
     }
   }

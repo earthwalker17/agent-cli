@@ -177,7 +177,7 @@ describe('browser evidence carries the project it verified', () => {
     const checks: CheckEvidence[] = [];
     const flows: BrowserFlowEvidence[] = [];
     const d: BrowserToolDeps = {
-      preview: { readyPreview: () => preview(), active: () => [preview()] },
+      preview: { readyPreview: () => preview(), active: () => [preview()], endedReason: () => undefined },
       putBlob: () => 'sha',
       caps: { checksRun: 0 },
       artifactBudget: { usedBytes: 0 },
@@ -230,7 +230,7 @@ describe('browser evidence carries the project it verified', () => {
 
   it('with TWO previews ready and none named, the denial NAMES them instead of saying "start one first"', () => {
     const two = [preview(), preview({ previewId: 'pv-api', projectId: 'api', port: 3001 })];
-    const h = deps({ preview: { readyPreview: () => null, active: () => two } });
+    const h = deps({ preview: { readyPreview: () => null, active: () => two, endedReason: () => undefined } });
     const t = createBrowserFlowTool(h.deps);
     const d = decide(t, FLOW, { workspaceRoot: tmpdir(), stateDir: tmpdir() }, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'browser.no-preview' });
@@ -243,7 +243,7 @@ describe('browser evidence carries the project it verified', () => {
   });
 
   it('a named preview that is not ready is refused with what IS ready', () => {
-    const h = deps({ preview: { readyPreview: () => null, active: () => [preview()] } });
+    const h = deps({ preview: { readyPreview: () => null, active: () => [preview()], endedReason: () => undefined } });
     const t = createBrowserFlowTool(h.deps);
     const d = decide(t, { flow: { ...FLOW.flow, preview_id: 'pv-gone' } }, { workspaceRoot: tmpdir(), stateDir: tmpdir() }, new Grants());
     expect(d.reason).toContain("no READY preview with id 'pv-gone'");

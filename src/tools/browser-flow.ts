@@ -46,8 +46,9 @@ export function artifactBytesFromEvents(events: readonly SessionEvent[]): number
 }
 
 export interface BrowserToolDeps {
-  /** `active` is read for project attribution and for naming what is running in a denial. */
-  preview: Pick<PreviewTool, 'readyPreview' | 'active'>;
+  /** `active` is read for project attribution and for naming what is running in a denial;
+   *  `endedReason` tells a harness lifecycle stop apart from a crash (S16.5b review). */
+  preview: Pick<PreviewTool, 'readyPreview' | 'active' | 'endedReason'>;
   putBlob: (bytes: Buffer) => string;
   /** The SAME live instance run_check refuses on — flows share the session check budget. */
   caps: CheckCaps;
@@ -167,6 +168,27 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         // Budget symmetry with checkCapsFromEvents: this completed row counts on resume, so the
         // live counter must count it too.
         deps.caps.checksRun++;
+        // A harness LIFECYCLE stop (TTL, log cap, an explicit stop) is not a crash: recording
+        // it as 'preview-died' classified a healthy app as runtime-process and sent repair
+        // guidance hunting a process failure that never happened (S16.5b review).
+        const ended = flow.preview_id !== undefined ? deps.preview.endedReason(flow.preview_id) : undefined;
+        const lifecycle = ended === 'ttl-timeout' || ended === 'log-overflow' || ended === 'stopped' || ended === 'session-end';
+        if (lifecycle) {
+          completed({
+            status: 'error',
+            summary: `flow '${flow.name}': the bound preview was stopped by the harness before the flow ran (${ended}) — the server did not crash`,
+            signals: ['preview-stopped-lifecycle'],
+          });
+          return {
+            ok: false,
+            output:
+              `browser flow '${flow.name}' could not run: the bound preview was stopped (${ended}) — a lifecycle bound, not an app failure. ` +
+              'Start the preview again and re-run the flow.',
+            error: `preview stopped (${ended}) before the flow ran`,
+            durationMs: Date.now() - startedAt,
+            truncated: false,
+          };
+        }
         completed({
           status: 'error',
           summary: `flow '${flow.name}': the bound preview is no longer running (it died between approval and execution)`,
@@ -217,12 +239,21 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
       });
       deps.caps.checksRun++;
 
-      // Store artifacts under the byte budget; what is dropped is recorded, never silent.
+      // Store artifacts under the byte budget; what is dropped is recorded, never silent —
+      // for EVERY kind. Screenshots used to be skipped without a marker while only traces
+      // recorded their omission, so late in a long session the model could cite a screenshot
+      // that was never stored and view_image would refuse the expected sha with no explanation
+      // anywhere (S16.5b review).
       const stored: BrowserArtifact[] = [];
       let traceOmittedBytes: number | undefined;
+      let screenshotsOmitted = 0;
       for (const a of result.artifacts) {
-        if (deps.artifactBudget.usedBytes + a.bytes.length > ARTIFACT_BYTES_PER_SESSION) {
+        const drop = (): void => {
           if (a.kind === 'trace') traceOmittedBytes = a.bytes.length;
+          else screenshotsOmitted++;
+        };
+        if (deps.artifactBudget.usedBytes + a.bytes.length > ARTIFACT_BYTES_PER_SESSION) {
+          drop();
           continue;
         }
         try {
@@ -230,7 +261,7 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
           deps.artifactBudget.usedBytes += a.bytes.length;
           stored.push({ kind: a.kind, sha256: sha, bytes: a.bytes.length, label: a.label, mediaType: a.mediaType });
         } catch {
-          if (a.kind === 'trace') traceOmittedBytes = a.bytes.length;
+          drop();
         }
       }
 
@@ -253,6 +284,7 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         offOriginRequests: result.offOriginRequests,
         finalUrl: result.finalUrl,
         ...(traceOmittedBytes !== undefined ? { traceOmittedBytes } : {}),
+        ...(screenshotsOmitted > 0 ? { screenshotsOmitted } : {}),
       });
 
       // Name what was driven. An unbound flow binds to whatever single preview is ready — which
@@ -271,6 +303,11 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
       const trace = stored.find((a) => a.kind === 'trace');
       if (trace !== undefined) lines.push(`  trace: objects/${trace.sha256} (${String(Math.round(trace.bytes / 1024))} KiB; open with npx playwright show-trace or trace.playwright.dev)`);
       if (traceOmittedBytes !== undefined) lines.push(`  trace NOT stored (${String(Math.round(traceOmittedBytes / 1024))} KiB over the artifact budget)`);
+      if (screenshotsOmitted > 0) {
+        lines.push(
+          `  ${String(screenshotsOmitted)} declared screenshot(s) NOT stored (session artifact budget exhausted or storage failed) — do not cite them; the typed step outcomes above are the evidence`,
+        );
+      }
       if (result.consoleErrors.length > 0) lines.push(`  console errors (${String(result.consoleErrors.length)}): ${result.consoleErrors[0] ?? ''}`.slice(0, 240));
       if (result.pageErrors.length > 0) lines.push(`  page errors (${String(result.pageErrors.length)}): ${result.pageErrors[0] ?? ''}`.slice(0, 240));
       if (result.failedRequests.length > 0) lines.push(`  failed requests (${String(result.failedRequests.length)}): ${result.failedRequests[0] ?? ''}`.slice(0, 240));

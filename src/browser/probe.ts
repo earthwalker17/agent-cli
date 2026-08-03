@@ -26,6 +26,28 @@ export interface BrowserAvailability {
 const CHANNELS = ['msedge', 'chrome'] as const;
 const LAUNCH_TIMEOUT_MS = 30_000;
 
+/**
+ * Session-cache a probe — SUCCESS only. A transiently failed probe (all channels timing out
+ * under machine load) used to be cached for the whole session, turning every later browser
+ * flow into the gate-WAIVING unsupported/precondition: acceptance could reach COMPLETE without
+ * the UI ever having been driven (S16.5b review). A machine genuinely without a browser
+ * re-probes on the next flow and fails again — that costs seconds, never honesty. Concurrent
+ * callers share the in-flight attempt.
+ */
+export function cacheSuccessfulProbe(probe: () => Promise<BrowserAvailability>): () => Promise<BrowserAvailability> {
+  let cached: Promise<BrowserAvailability> | null = null;
+  return () => {
+    if (cached === null) {
+      const attempt = probe().then((a) => {
+        if (!a.available) cached = null;
+        return a;
+      });
+      cached = attempt;
+    }
+    return cached;
+  };
+}
+
 export async function probeBrowser(): Promise<BrowserAvailability> {
   let chromium: typeof import('playwright-core')['chromium'];
   try {
