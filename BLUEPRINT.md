@@ -58,7 +58,7 @@ one natural-language request through installs ×2, migrate, seed, per-project ch
 the parallel executor wave, two simultaneous dev servers, three passing browser flows, a
 three-lens review that caught the seeded XSS, kill + resume, and `/accept` COMPLETE with no
 override — post-hoc validated 38/38 from persisted evidence, with a 4.7-minute subtitled MP4
-produced from the continuous recording. Suite 1342 → 1366. Details and honest limits:
+produced from the continuous recording. Suite 1342 → 1373. Details and honest limits:
 `ROADMAP.md` Session 16.5, `agent-cli-s165-live/DEMO.md`, CHANGELOG 1.2.1.
 
 ### Session 16 — Real Local Software Engineering — **DONE (v1.2.0 implementation, live-proven by S16.5)**

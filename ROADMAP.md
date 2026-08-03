@@ -138,8 +138,8 @@ evidence and honest limitations in `agent-cli-s165-live/DEMO.md`.
 
 ### Verification evidence
 
-`npm run typecheck` + `npm run build` clean per commit; suite **1342 → 1366** (1355 passed + 11
-skipped) across 96 files. New pins: the stream-end guard, compat user-message coalescing, the
+`npm run typecheck` + `npm run build` clean per commit; suite **1342 → 1373** (1362 passed + 11
+skipped) across 97 files. New pins: the stream-end guard, compat user-message coalescing, the
 reasoning display-copy weight, the kind-aware retry budget, `cacheSuccessfulProbe`, screenshot
 omission accounting, `preview-stopped-lifecycle` classification, the previous-life status line,
 the nothing-gated preview refusal, the cap-aware review blocker (both directions), the

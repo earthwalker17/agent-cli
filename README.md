@@ -41,7 +41,7 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.2.1.** 1355 hermetic tests across 96 files (real-OS sandbox, real-repository git,
+> **Status: v1.2.1.** 1362 hermetic tests across 97 files (real-OS sandbox, real-repository git,
 > real browser flows, adversarial-review suites) plus opt-in live smokes. Proven live end-to-end
 > across eleven recorded runs — newest: **the full multi-project workflow in one 84-minute Kimi K3
 > session** (one natural-language request → plan → revision → sha-bound approval → `npm ci` in
