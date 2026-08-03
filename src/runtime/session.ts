@@ -501,7 +501,8 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
     } catch (err) {
       // Abort is detected via the signal, never via provider-specific error classes. Nothing has
       // been appended for this step, so the log and message history end at the last complete
-      // exchange (a trailing user message; the wire coalesces consecutive user messages).
+      // exchange (a trailing user message; the Anthropic and chat-compat adapters coalesce
+      // consecutive user messages at the wire, and the Responses API accepts them as items).
       if (signal?.aborted) return abortedResult('model', steps);
       throw err;
     }

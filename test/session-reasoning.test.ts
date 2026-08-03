@@ -171,6 +171,36 @@ describe('elision and reasoning', () => {
     // And its weight is part of the raw accounting (payload 5000 chars + the rest).
     expect(out.rawChars).toBeGreaterThan(13_000);
   });
+
+  it('a display-copy `text` equal to the payload is NOT double-weighed (the kimi/deepseek shape)', () => {
+    // The compat adapters set text === payload; `text` is display-only and never re-sent
+    // (types.ts). Counting both doubled every compat reasoning block's weight and could fire
+    // the "history still exceeds the context target" warning at half the real reasoning
+    // volume in a long forced-thinking session (S16.5b review).
+    const thought = big(5_000);
+    const mk = (withText: boolean): ChatMessage[] => [
+      { role: 'user', content: [{ type: 'text', text: 'q' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', providerName: 'kimi', model: 'kimi-k3', payload: thought, ...(withText ? { text: thought } : {}) },
+          { type: 'text', text: 'a' },
+        ],
+      },
+    ];
+    const withText = elideHistory(mk(true), { triggerChars: 1_000_000 });
+    const withoutText = elideHistory(mk(false), { triggerChars: 1_000_000 });
+    expect(withText.rawChars).toBe(withoutText.rawChars);
+    // A block with NO payload still counts its text (nothing else carries its weight).
+    const textOnly: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'q' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'reasoning', providerName: 'kimi', model: 'kimi-k3', payload: null, text: thought }, { type: 'text', text: 'a' }],
+      },
+    ];
+    expect(elideHistory(textOnly, { triggerChars: 1_000_000 }).rawChars).toBeGreaterThan(5_000);
+  });
 });
 
 describe('elision monotonicity across a provider switch (Session 15 regression)', () => {

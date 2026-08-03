@@ -98,11 +98,17 @@ function blockChars(b: ContentBlock): number {
       return b.name.length + JSON.stringify(b.input ?? null).length;
     case 'tool_result':
       return contentChars(b.content);
-    case 'reasoning':
+    case 'reasoning': {
       // Session 15: reasoning blocks are never REPLACED (elision rewrites only tool_result
       // content, and reasoning lives on assistant messages), but their opaque payload must
       // count toward the budget — it is resent within the provider's replay scope.
-      return JSON.stringify(b.payload ?? null).length + (b.text?.length ?? 0);
+      // `text` is a DISPLAY copy that is never re-sent (types.ts); the compat adapters set it
+      // to the SAME string as the payload, so adding both double-weighed every kimi/deepseek
+      // block and could fire the "history still exceeds the context target" warning at half
+      // the real reasoning volume (S16.5b review). Count text only when there is no payload.
+      const payloadChars = JSON.stringify(b.payload ?? null).length;
+      return b.payload === undefined || b.payload === null ? payloadChars + (b.text?.length ?? 0) : payloadChars;
+    }
   }
 }
 

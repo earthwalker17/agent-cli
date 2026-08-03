@@ -178,6 +178,28 @@ describe('provider errors and retry', () => {
     expect(authCalls).toBe(1);
   });
 
+  it('withRetry gives rate-limit errors the deeper default budget, but an explicit retries wins', async () => {
+    // A 429 is EXPECTED to clear (Retry-After says when); on kimi Tier 0 (3 req/min) two
+    // retries regularly turned a short throttle into a dead executor child (S16.5b review).
+    let calls = 0;
+    const throttled = async (): Promise<string> => {
+      calls++;
+      if (calls < 5) throw new ProviderError({ kind: 'rate-limit', provider: 'test', message: '429', status: 429 });
+      return 'ok';
+    };
+    await expect(withRetry(throttled, { sleep: async () => {} })).resolves.toBe('ok');
+    expect(calls).toBe(5); // first attempt + RATE_LIMIT_RETRIES
+
+    // Explicit retries: 0 disables retry even for 429 — tests and callers stay in control.
+    let strictCalls = 0;
+    const strict = async (): Promise<never> => {
+      strictCalls++;
+      throw new ProviderError({ kind: 'rate-limit', provider: 'test', message: '429', status: 429 });
+    };
+    await expect(withRetry(strict, { retries: 0, sleep: async () => {} })).rejects.toMatchObject({ kind: 'rate-limit' });
+    expect(strictCalls).toBe(1);
+  });
+
   it('withRetry rethrows aborts immediately', async () => {
     let calls = 0;
     const aborting = async (): Promise<never> => {

@@ -1,7 +1,7 @@
 import type { ChatMessage, ContentBlock, Provider, ProviderRequest, ProviderTurn, StopReason, ToolResultPart } from '../types.js';
 import { createTransport, type Transport } from '../net/transport.js';
 import { capsFor, type ModelCaps, type ProviderName } from './catalog.js';
-import { ProviderError, classifyHttpStatus, retryAfterMs, withRetry } from './errors.js';
+import { ProviderError, retryAfterMs, withRetry } from './errors.js';
 import { sseEvents, SSE_DONE } from './sse.js';
 import type { CompatProfile } from './profiles.js';
 
@@ -157,7 +157,21 @@ export function buildCompatRequest(profile: CompatProfile, req: ProviderRequest,
         ],
       });
     }
-    if (texts.length > 0) messages.push({ role: 'user', content: texts.join('\n') });
+    if (texts.length > 0) {
+      // Coalesce consecutive USER TEXT wire messages (S16.5b review). An aborted turn or a
+      // crash-resume legitimately leaves consecutive user messages in the harness history —
+      // the Anthropic adapter merges them because its API demands alternation, and the runTurn
+      // error path RELIES on that being true at the wire. This family generally tolerates
+      // adjacent user messages, but "generally tolerates" is not a contract; merging costs
+      // nothing and keeps the crash-resume shape provably valid. Only string+string merges:
+      // the rehomed-screenshots message (parts array) keeps its own shape.
+      const prev = messages[messages.length - 1];
+      if (prev !== undefined && prev.role === 'user' && typeof prev.content === 'string') {
+        prev.content = `${prev.content}\n${texts.join('\n')}`;
+      } else {
+        messages.push({ role: 'user', content: texts.join('\n') });
+      }
+    }
   });
 
   const body: CompatRequestBody = {
@@ -296,11 +310,15 @@ export class OpenAiCompatProvider implements Provider {
     let text = '';
     let reasoning = '';
     let finish: string | undefined;
+    let sawDone = false;
     let rawUsage: Record<string, unknown> | undefined;
     const toolAcc = new Map<number, ToolCallAccumulator>();
 
     for await (const ev of sseEvents(bodyStream, signal)) {
-      if (ev.data === SSE_DONE) break;
+      if (ev.data === SSE_DONE) {
+        sawDone = true;
+        break;
+      }
       let chunk: Record<string, unknown>;
       try {
         chunk = JSON.parse(ev.data) as Record<string, unknown>;
@@ -346,6 +364,21 @@ export class OpenAiCompatProvider implements Provider {
       }
     }
 
+    // A stream that ends with NEITHER the [DONE] sentinel NOR any finish_reason died
+    // mid-generation (proxy/LB idle-timeout half-close, server crash): committing what
+    // streamed so far would present a truncated sentence — or a half-accumulated tool call —
+    // as the model's real turn, with no error and no log marker (S16.5b review; the Responses
+    // adapter has always had this guard). NOT retryable: part of the stream was consumed, and
+    // a replay would double-bill and duplicate onText deltas. The turn fails honestly instead.
+    if (!sawDone && finish === undefined) {
+      throw new ProviderError({
+        kind: 'server',
+        provider: this.name,
+        message: 'stream ended without a finish_reason or [DONE] — the connection died mid-generation; the partial output was discarded',
+        retryable: false,
+      });
+    }
+
     // Error-shaped finishes throw typed errors — a failed generation must not become a model turn.
     const extra = finish !== undefined ? this.profile.finishExtras[finish] : undefined;
     if (extra !== undefined && 'error' in extra) {
@@ -382,7 +415,7 @@ export class OpenAiCompatProvider implements Provider {
 
     const mapped: StopReason | undefined =
       extra !== undefined && 'stop' in extra ? extra.stop : finish !== undefined ? BASE_FINISH[finish] : undefined;
-    const stopReason: StopReason = mapped ?? (toolAcc.size > 0 ? 'tool_use' : finish === undefined ? 'other' : 'other');
+    const stopReason: StopReason = mapped ?? (toolAcc.size > 0 ? 'tool_use' : 'other');
 
     return { blocks, stopReason, usage: this.profile.mapUsage(rawUsage) };
   }

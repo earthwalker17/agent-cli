@@ -74,6 +74,15 @@ export interface RetryOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/**
+ * Rate-limit (429) throttling gets a deeper budget than transient server/network failures:
+ * a throttle is EXPECTED to clear (Retry-After says when), and on a low-tier account — kimi
+ * Tier 0 allows 3 requests/min — two retries meant a busy parallel wave regularly turned a
+ * 20-second wait into a dead executor child or a failed parent turn (S16.5b review). Still
+ * bounded, still connection-phase-only, still abort-raceable.
+ */
+export const RATE_LIMIT_RETRIES = 4;
+
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -85,9 +94,12 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  */
 export async function withRetry<T>(attempt: () => Promise<T>, opts: RetryOptions = {}): Promise<T> {
   const retries = opts.retries ?? 2;
+  // An EXPLICIT `retries` is honored verbatim for every kind (tests use 0 to disable retry);
+  // the deeper 429 budget applies only on top of the default.
+  const rateLimitBudget = opts.retries !== undefined ? retries : RATE_LIMIT_RETRIES;
   const sleep = opts.sleep ?? defaultSleep;
   let lastErr: unknown;
-  for (let i = 0; i <= retries; i++) {
+  for (let i = 0; i <= Math.max(retries, rateLimitBudget); i++) {
     if (opts.signal?.aborted) throw lastErr ?? abortError();
     try {
       return await attempt();
@@ -95,7 +107,9 @@ export async function withRetry<T>(attempt: () => Promise<T>, opts: RetryOptions
       lastErr = err;
       if (isAbortError(err)) throw err;
       const pe = err instanceof ProviderError ? err : undefined;
-      if (pe === undefined || !pe.retryable || i === retries) throw err;
+      // 429s draw from the deeper budget; everything else keeps `retries`.
+      const budget = pe?.kind === 'rate-limit' ? rateLimitBudget : retries;
+      if (pe === undefined || !pe.retryable || i >= budget) throw err;
       const hinted = (pe as ProviderError & { retryAfterHint?: number }).retryAfterHint;
       const backoff = hinted ?? Math.min(500 * 2 ** i + Math.floor(Math.random() * 250), 8_000);
       // Abort-aware wait (S15 review finding): a Retry-After hint can be up to 60s, and an

@@ -46,6 +46,29 @@ describe('buildCompatRequest goldens', () => {
     expect(body['max_tokens']).toBe(4096);
   });
 
+  it('consecutive USER TEXT messages coalesce into one wire message (the crash-resume shape)', () => {
+    // An aborted turn or a crash-resume leaves consecutive user messages in the harness
+    // history. The Anthropic adapter merges them because its API demands alternation; the
+    // compat wire must be equally safe — "this family generally tolerates it" is not a
+    // contract (S16.5b review).
+    const history: ChatMessage[] = [
+      userText('the request the crash interrupted'),
+      userText('please continue where you left off'),
+    ];
+    const body = buildCompatRequest(COMPAT_PROFILES.kimi, mkReq('kimi-k3', history), capsFor('kimi', 'kimi-k3'));
+    const users = body.messages.filter((m) => m.role === 'user');
+    expect(users).toHaveLength(1);
+    expect(users[0]!.content).toBe('the request the crash interrupted\nplease continue where you left off');
+    // …and an assistant message between user messages keeps them separate.
+    const separated: ChatMessage[] = [
+      userText('one'),
+      { role: 'assistant', content: [{ type: 'text', text: 'reply' }] },
+      userText('two'),
+    ];
+    const body2 = buildCompatRequest(COMPAT_PROFILES.kimi, mkReq('kimi-k3', separated), capsFor('kimi', 'kimi-k3'));
+    expect(body2.messages.filter((m) => m.role === 'user')).toHaveLength(2);
+  });
+
   it('each tool_result becomes its OWN role:tool message, before any user text from the same message', () => {
     const history: ChatMessage[] = [
       userText('task'),
@@ -241,6 +264,35 @@ describe('OpenAiCompatProvider streaming', () => {
     ]);
     expect(turn.stopReason).toBe('tool_use');
     expect(turn.usage).toEqual({ inputTokens: 40, outputTokens: 30, cacheReadInputTokens: 60, reasoningTokens: 12 });
+  });
+
+  it('a stream that dies with NEITHER [DONE] nor a finish_reason throws instead of committing a half turn', async () => {
+    // Proxy/LB idle-timeout half-close: the body stream ends cleanly mid-generation. Before
+    // S16.5b this was silently committed as a completed turn (truncated text, stopReason
+    // 'other') — with a partial tool call it became {_unparsed} churn. It must throw, and it
+    // must NOT be retryable: part of the stream was consumed and a replay would double-bill.
+    const events = [
+      chunk({ choices: [{ delta: { content: 'I was about to sa' } }] }),
+      // …the connection dies here: no finish_reason, no [DONE].
+    ];
+    const { provider, calls } = makeProvider('kimi', [sseResponse(events)]);
+    await expect(provider.complete(mkReq('kimi-k3', [userText('go')]))).rejects.toMatchObject({
+      kind: 'server',
+      retryable: false,
+    });
+    expect(calls).toHaveLength(1); // never replayed
+  });
+
+  it('a finish_reason WITHOUT a trailing [DONE] still commits the turn (the generation completed)', async () => {
+    const events = [
+      chunk({ choices: [{ delta: { content: 'done' } }] }),
+      chunk({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+      // no DONE sentinel — sloppy but the generation itself terminated properly.
+    ];
+    const { provider } = makeProvider('kimi', [sseResponse(events)]);
+    const turn = await provider.complete(mkReq('kimi-k3', [userText('go')]));
+    expect(turn.stopReason).toBe('end_turn');
+    expect(turn.blocks[0]).toMatchObject({ type: 'text', text: 'done' });
   });
 
   it('kimi-shaped stream: usage nested at choices[0].usage in the final chunk', async () => {
