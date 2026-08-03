@@ -2,7 +2,7 @@ import type { SessionEvent, TaskChangeFile } from '../types.js';
 import { approvedCurrentGraph, type PlanState } from '../plan/canonical.js';
 import { completionGateState, type GraphState } from '../plan/graph-state.js';
 import { foldRepairs, openRepairBlockers } from '../recovery/ledger.js';
-import { foldReview } from '../review/ledger.js';
+import { foldReview, MAX_REVIEW_ROUNDS } from '../review/ledger.js';
 import { proveWith } from '../recovery/catalogue.js';
 
 /**
@@ -149,6 +149,23 @@ export function computeAcceptance(
           caveats.push(
             `plan task '${t.id}' was never bound to a delegate call (no \`plan_task\` argument), so the graph cannot ` +
               `attribute the ${String(reviewFold.rounds.length)} recorded review round(s) to it — the review requirement itself IS satisfied`,
+          );
+          continue;
+        }
+        // The BOUND-but-dead variant, one event later (S16.5b review): a reviewer task whose
+        // child ended failed/cancelled/interrupted while a SIBLING round satisfied the review
+        // requirement. While rounds remain, a re-spawn with `plan_task` is a real cure — keep
+        // blocking. Once the round cap is spent, no delegate call that could re-bind it will
+        // ever be allowed again: the same dead end e933677 closed for the unbound case.
+        const deadBoundReviewer =
+          t.role === 'reviewer' &&
+          (t.state === 'failed' || t.state === 'cancelled' || t.state === 'interrupted') &&
+          reviewFold.satisfied &&
+          reviewFold.rounds.length >= MAX_REVIEW_ROUNDS;
+        if (deadBoundReviewer) {
+          caveats.push(
+            `plan task '${t.id}' (reviewer) ended ${t.state}, but the review requirement itself IS satisfied by the ` +
+              `recorded round(s), and the ${String(MAX_REVIEW_ROUNDS)}-round cap is spent — no delegate call remains that could re-bind it`,
           );
           continue;
         }

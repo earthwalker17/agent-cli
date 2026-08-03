@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import type { Tool, ToolResult } from '../types.js';
-import { PlanGraphSchema, validatePlanGraph } from '../plan/schema.js';
+import type { SessionEvent, Tool, ToolResult } from '../types.js';
+import { PlanGraphSchema, planTaskDefinitionSha, validatePlanGraph } from '../plan/schema.js';
 import { readCanonicalPlan, writeCanonicalPlan } from '../plan/canonical.js';
+import { foldGraphState } from '../plan/graph-state.js';
 import { graphSummary, writeUserView } from '../plan/views.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 import type { ProjectLayout } from '../store/layout.js';
@@ -64,6 +65,13 @@ export interface UpdatePlanDeps {
   availableChecks?: () => readonly CheckKind[];
   /** Project ids detection currently sees (Session 16) — enables the unknown-project warning. */
   knownProjects?: () => readonly string[];
+  /**
+   * The live event stream (S16.5b) — enables the reopened-completed-tasks warning. A full-graph
+   * amendment that rewrites a COMPLETED task's prose silently re-opens it for execution (the
+   * conservative definition-identity rule), and the model habitually resubmits the whole graph;
+   * without this line it learns which tasks it re-opened only when /accept lists them as queued.
+   */
+  events?: () => readonly SessionEvent[];
 }
 
 export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInputT> {
@@ -123,6 +131,24 @@ export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInput
           };
         }
         const prior = readCanonicalPlan(deps.layout, deps.planId);
+        // Which COMPLETED tasks does this amendment re-open? Computed against the PRIOR graph's
+        // fold before the write, so the warning names exactly what the definition-identity rule
+        // will re-queue (title/intent/verify prose all participate in the sha — a cosmetic
+        // rewrite of a done task costs a re-run or a byte-exact revert).
+        const reopened: string[] = [];
+        try {
+          if (prior.graph !== null && deps.events !== undefined) {
+            const states = foldGraphState(prior.graph, deps.events()).tasks;
+            for (const t of prior.graph.tasks) {
+              const st = states.find((s) => s.id === t.id);
+              if (st?.state !== 'completed') continue;
+              const next = v.graph.tasks.find((n) => n.id === t.id);
+              if (next === undefined || planTaskDefinitionSha(next) !== planTaskDefinitionSha(t)) reopened.push(t.id);
+            }
+          }
+        } catch {
+          /* a fold failure must never block writing a plan */
+        }
         const w = await writeCanonicalPlan(deps.layout, deps.planId, v.graph, deps.snapshots, deps.clock);
         if ('error' in w) return fail(`plan write failed: ${w.error}`);
         // Regenerate the user-facing view beside the canonical file (failure is noted, never fatal).
@@ -148,6 +174,13 @@ export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInput
           output: [
             `plan ${deps.planId} written: ${v.graph.tasks.length} task(s), content sha ${w.contentSha.slice(0, 12)}…`,
             statusLine,
+            ...(reopened.length > 0
+              ? [
+                  `warning: this amendment CHANGED or REMOVED the definition of COMPLETED task(s) ${reopened.join(', ')} — ` +
+                    'changed tasks are RE-OPENED for execution (completed state belongs to the definition that ran). ' +
+                    'If you did not intend a re-run, restore those tasks byte-identically and resubmit.',
+                ]
+              : []),
             ...v.warnings.map((warn) => `warning: ${warn}`),
             `canonical (user-editable JSON): ${deps.layout.canonicalPlanFile(deps.planId)}`,
             'error' in viewR

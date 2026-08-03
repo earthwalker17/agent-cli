@@ -191,6 +191,13 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       );
     }
   }
+  // A resumed session can be sitting on the amended-but-unapproved state RIGHT NOW — the kill
+  // may have landed between the amendment and the user's re-approval, and waiting for the next
+  // turn to END means the user's first post-resume instruction runs with every executor spawn
+  // silently refused (S16.5b review). Same narrow guard as the per-turn call: it prints only
+  // when an approval EXISTED and no longer covers the plan.
+  if (opts.resumeId !== undefined) planApprovalReminder(commandCtx);
+
   let exitCode = 0;
   let consecutiveInterrupts = 0;
   // Plan injection dedupe: content already shown to the model (by injection or its own
@@ -324,6 +331,11 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         // Keep the session alive: answer any dangling tool_use so the next request stays valid.
         repairDanglingToolUses(session);
         renderer.turnError(err as Error);
+        // The reminder must survive an ERROR-ended turn too (S16.5b review): a turn that amends
+        // the approved plan and then dies on a thrown provider error (rate-limit exhaustion is
+        // the live case) otherwise ends with no re-approval line — and the next turn quietly
+        // does the parallel work serially, the exact incident 8f35fbd was written to prevent.
+        planApprovalReminder(commandCtx);
       } finally {
         io.setMidTurnHandler(null);
         statusArea.clear(); // readline owns the bottom line at the idle prompt

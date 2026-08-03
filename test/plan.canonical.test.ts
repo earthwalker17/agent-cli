@@ -16,7 +16,8 @@ import { SnapshotStore } from '../src/store/snapshots.js';
 import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
 import { fixedClock } from '../src/shared/clock.js';
 import { sha256 } from '../src/shared/hash.js';
-import type { SessionEvent } from '../src/types.js';
+import { createUpdatePlanTool } from '../src/tools/update-plan.js';
+import type { SessionEvent, ToolContext } from '../src/types.js';
 
 /**
  * The canonical plan store: content-sha approval identity (wrapper flips are sha-neutral BY
@@ -244,5 +245,48 @@ describe('plan views', () => {
 
     const r2 = await writeUserView(layout, 's-1', doc, snapshots);
     expect(!('error' in r2) && r2.archivedLegacySha256).toBeNull(); // generated → no archive needed
+  });
+});
+
+describe('update_plan names the completed tasks an amendment re-opens (S16.5b)', () => {
+  // The definition-identity rule re-queues a COMPLETED task whose prose changed — the
+  // conservative direction — but the model habitually resubmits the whole graph and used to
+  // learn which tasks it re-opened only when /accept listed them as queued.
+  const completedT1Events = (): SessionEvent[] => [
+    ev({ callId: 'c1', type: 'task.started', role: 'executor', planTaskId: 't1', childSessionId: 'k1' }),
+    ev({ callId: 'c1', type: 'task.changes', childSessionId: 'k1', files: [{ relPath: 'src/core/a.ts', kind: 'modify', afterSha256: 'a', beforeSha256: 'b', bytes: 1 }], omittedCount: 0 }),
+    ev({ callId: 'c1', type: 'task.ended', childSessionId: 'k1', status: 'completed' }),
+    ev({ callId: 'c1', type: 'task.applied', childSessionId: 'k1', applied: ['src/core/a.ts'], refused: [] }),
+  ];
+  const ctx = (): ToolContext => ({ workspaceRoot: path.join(tmp, 'ws'), stateDir: layout.projectDir });
+
+  it('warns with the re-opened task ids; an additive amendment stays silent', async () => {
+    const events = completedT1Events();
+    const tool = createUpdatePlanTool({ layout, snapshots, planId: 's-1', clock, events: () => events });
+    // execute() receives the ZOD-PARSED input in production (defaults applied) — mirror that.
+    const raw = PlanGraphSchema.parse({
+      objective: 'ship the feature',
+      tasks: [
+        { id: 't1', title: 'core module', intent: 'build it', role: 'executor', verify: 'unit tests pass', touches: ['src/core'] },
+        { id: 't2', title: 'wire it', intent: 'integrate', role: 'executor', verify: 'e2e passes', dependsOn: ['t1'], touches: ['src/app'] },
+      ],
+    });
+    const first = await tool.execute({ plan: raw } as never, ctx());
+    expect(first.ok).toBe(true);
+    expect(first.output).not.toContain('RE-OPENED');
+
+    // A cosmetic rewrite of the COMPLETED t1 — exactly the kimi full-graph-resubmit habit.
+    const amended = { ...raw, tasks: [{ ...raw.tasks[0]!, title: 'core module (done)' }, raw.tasks[1]!] };
+    const second = await tool.execute({ plan: amended } as never, ctx());
+    expect(second.ok).toBe(true);
+    expect(second.output).toContain('COMPLETED task(s) t1');
+    expect(second.output).toContain('RE-OPENED');
+
+    // Additive change over the CURRENT prior (new task; t1/t2 byte-identical to what is on
+    // disk now — the second write): nothing is re-opened, no warning.
+    const additive = PlanGraphSchema.parse({ ...amended, tasks: [...amended.tasks, { id: 't3', title: 'polish', intent: 'p', role: 'main', verify: 'reads well' }] });
+    const third = await tool.execute({ plan: additive } as never, ctx());
+    expect(third.ok).toBe(true);
+    expect(third.output).not.toContain('RE-OPENED');
   });
 });

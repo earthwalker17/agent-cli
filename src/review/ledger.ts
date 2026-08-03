@@ -2,6 +2,14 @@ import type { PlanGraph } from '../plan/schema.js';
 import type { ReviewFinding, SessionEvent } from '../types.js';
 
 /**
+ * Review rounds allowed per session (S14.5). Lives HERE (the delegate tool re-exports it) so
+ * the pure fold can tell when the cap is spent and stop prescribing a reviewer group that
+ * delegate would refuse (S16.5b review). Matches the prompt guidance ("≤2 rounds"); clearing
+ * findings needs the review TRIAGE tool, not another fan-out.
+ */
+export const MAX_REVIEW_ROUNDS = 2;
+
+/**
  * The structural review gate's pure fold (Session 14): events → ReviewState. The house
  * pattern — no store, no recorded outcomes, everything re-derivable from the log alone.
  *
@@ -314,6 +322,10 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
     st.blocking = (sev === 'critical' || sev === 'high') && (st.status === 'open' || st.status === 'verified');
   }
 
+  // Rounds STARTED (qualifying or not) — the same count delegate's cap refusal uses, derived
+  // here from events so the pure fold can tell when "run another round" stops being a real exit.
+  const roundsStarted = rounds.length;
+
   // ---- Gate derivation. --------------------------------------------------------------------
   const caveats: string[] = [];
   const openBlockers: string[] = [];
@@ -330,8 +342,15 @@ export function foldReview(graph: PlanGraph | null, events: readonly SessionEven
       rounds.length === 0
         ? 'no review round has run'
         : `no round qualifies (${rounds[rounds.length - 1]!.note ?? 'see /review'})`;
+    // With the round cap spent, "run one bounded reviewer group" prescribes a call delegate
+    // REFUSES — the S16.5 refusable-cure class, one axis over. In that state the only real
+    // exits belong to the user, and the blocker must say so instead of steering the agent into
+    // a loop of refused fan-outs (S16.5b review).
     openBlockers.push(
-      `adversarial review required (${label}) — ${why}; run ONE bounded reviewer group (delegate_task, 2-3 differentiated read-only lenses) after integration`,
+      roundsStarted >= MAX_REVIEW_ROUNDS
+        ? `adversarial review required (${label}) — ${why}, and the ${String(MAX_REVIEW_ROUNDS)}-round cap is spent, so another reviewer group would be refused. ` +
+            'The remaining exits are the USER\'s: amend the plan to waive the review (with a reason) and re-approve, or record a partial acceptance with /accept confirm.'
+        : `adversarial review required (${label}) — ${why}; run ONE bounded reviewer group (delegate_task, 2-3 differentiated read-only lenses) after integration`,
     );
   }
   // A recorded critical/high finding blocks REGARDLESS of the requirement: a waiver waives the

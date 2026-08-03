@@ -10,6 +10,7 @@ import { createSharedWorkspace } from '../src/checks/session-workspace.js';
 import { resolveSetup, sameSetup } from '../src/setup/intents.js';
 import { completionGateState, foldGraphState } from '../src/plan/graph-state.js';
 import { computeAcceptance } from '../src/runtime/acceptance.js';
+import { foldReview, MAX_REVIEW_ROUNDS } from '../src/review/ledger.js';
 import { validatePlanGraph } from '../src/plan/schema.js';
 import { readCanonicalPlan } from '../src/plan/canonical.js';
 import { proveWith } from '../src/recovery/catalogue.js';
@@ -327,6 +328,26 @@ describe('a blocker has to name the project it means', () => {
     } as unknown as PlanGraph;
     expect(validatePlanGraph(scoped, { knownProjects: ['api', 'web'] }).warnings.join('\n')).not.toContain('which detection does not currently see');
   });
+
+  it("gate kind 'browser' under multi-project gates.projects is WARNED while the plan is editable", () => {
+    // The EACH-of semantics the scoping warnings steer toward make a browser gate demand a
+    // browser_flow bound to EACH named project's OWN preview — including the API. The exits
+    // after approval are an api-bound flow or a gates amendment that resets approval, so the
+    // warning has to land in the revision loop (S16.5b review).
+    const graph = {
+      version: 1,
+      objective: 'ship it',
+      tasks: [{ id: 'a', title: 't', intent: 'i', role: 'executor', dependsOn: [], touches: ['web/'], verify: 'v', risk: 'low', project: 'web' }],
+      gates: { completion: ['test', 'browser'], projects: ['api', 'web'] },
+    } as unknown as PlanGraph;
+    const v = validatePlanGraph(graph, { knownProjects: ['api', 'web'] });
+    expect(v.errors).toEqual([]);
+    expect(v.warnings.join('\n')).toContain("requires a browser_flow bound to EACH named project's OWN preview");
+
+    // A single-project gates.projects (the take-1 shape) is fine — no warning.
+    const single = { ...graph, gates: { completion: ['test', 'browser'], projects: ['web'] } } as unknown as PlanGraph;
+    expect(validatePlanGraph(single, { knownProjects: ['api', 'web'] }).warnings.join('\n')).not.toContain('browser_flow bound to EACH');
+  });
 });
 
 describe('an install identity binds every file that changes what an install executes', () => {
@@ -492,6 +513,84 @@ describe('an unbound reviewer task is a dead end, not outstanding work', () => {
     const acc = computeAcceptance(planState, foldGraphState(graph, noReview), noReview);
     expect(acc.complete).toBe(false);
     expect(acc.unfinished.join('\n')).toContain("plan task 'review'");
+  });
+
+  // The BOUND-but-dead variant, one event later (S16.5b): the reviewer task WAS bound via
+  // plan_task, but its child died — while a sibling round satisfied the requirement.
+  const boundDeadEvents = (rounds: 1 | 2): SessionEvent[] => {
+    const base = events.slice(0, 5); // the executor work (c1)
+    const roundOne: unknown[] =
+      rounds === 2
+        ? [
+            // Round 1 (c2): UNBOUND, qualifies — the requirement is satisfied by this one.
+            { v: 1, seq: 6, ts: 't', callId: 'c2', type: 'task.started', role: 'reviewer', childSessionId: 'k2' },
+            { v: 1, seq: 7, ts: 't', callId: 'c2', type: 'review.findings', childSessionId: 'k2', lens: 'security', findings: [] },
+            { v: 1, seq: 8, ts: 't', callId: 'c2', type: 'task.ended', childSessionId: 'k2', status: 'completed' },
+            // Round 2 (c3): bound to the plan task; the child times out with no capture.
+            { v: 1, seq: 9, ts: 't', callId: 'c3', type: 'task.started', role: 'reviewer', planTaskId: 'review', childSessionId: 'k3' },
+            { v: 1, seq: 10, ts: 't', callId: 'c3', type: 'task.ended', childSessionId: 'k3', status: 'timeout' },
+          ]
+        : [
+            // ONE round (c2) with two lenses: the bound lens dies, the sibling qualifies it.
+            { v: 1, seq: 6, ts: 't', callId: 'c2', type: 'task.started', role: 'reviewer', planTaskId: 'review', childSessionId: 'k2' },
+            { v: 1, seq: 7, ts: 't', callId: 'c2', type: 'task.started', role: 'reviewer', childSessionId: 'k3' },
+            { v: 1, seq: 8, ts: 't', callId: 'c2', type: 'review.findings', childSessionId: 'k3', lens: 'security', findings: [] },
+            { v: 1, seq: 9, ts: 't', callId: 'c2', type: 'task.ended', childSessionId: 'k2', status: 'timeout' },
+            { v: 1, seq: 10, ts: 't', callId: 'c2', type: 'task.ended', childSessionId: 'k3', status: 'completed' },
+          ];
+    return [...base, ...roundOne] as unknown as SessionEvent[];
+  };
+
+  it('a bound reviewer whose child died is a CAVEAT once the round cap is spent (satisfied requirement)', () => {
+    const evs = boundDeadEvents(2);
+    const fold = foldGraphState(graph, evs);
+    expect(fold.byId.get('review')?.state).toBe('failed'); // the bound attempt genuinely died
+    const acc = computeAcceptance(planState, fold, evs);
+    expect(acc.complete).toBe(true);
+    expect(acc.caveats.join('\n')).toContain("plan task 'review' (reviewer) ended failed");
+    expect(acc.caveats.join('\n')).toContain('cap is spent');
+  });
+
+  it('…but while rounds REMAIN, a re-spawn with plan_task is a real cure and it still blocks', () => {
+    const evs = boundDeadEvents(1);
+    const fold = foldGraphState(graph, evs);
+    expect(fold.byId.get('review')?.state).toBe('failed');
+    const acc = computeAcceptance(planState, fold, evs);
+    expect(acc.complete).toBe(false);
+    expect(acc.unfinished.join('\n')).toContain("plan task 'review' is failed");
+  });
+});
+
+describe('the review-gate blocker adapts once the round cap is spent', () => {
+  // With no qualifying round and the cap spent, "run ONE bounded reviewer group" prescribes a
+  // call delegate REFUSES — the S16.5 refusable-cure class. The blocker must hand the exits to
+  // the user instead (S16.5b review).
+  const graph = {
+    version: 1,
+    objective: 'ship it',
+    tasks: [{ id: 'build', title: 'B', intent: 'i', role: 'executor', dependsOn: [], touches: ['src/'], verify: 'v', risk: 'low' }],
+  } as unknown as PlanGraph;
+  const deadRound = (callId: string, child: string, seq: number): unknown[] => [
+    { v: 1, seq, ts: 't', callId, type: 'task.started', role: 'reviewer', childSessionId: child },
+    { v: 1, seq: seq + 1, ts: 't', callId, type: 'task.ended', childSessionId: child, status: 'timeout' },
+  ];
+  const work = [{ v: 1, seq: 1, ts: 't', type: 'file.mutated', path: 'C:/ws/src/a.ts' }];
+
+  it('one dead round: the agent is still told to run a round', () => {
+    const evs = [...work, ...deadRound('c2', 'k2', 2)] as unknown as SessionEvent[];
+    const r = foldReview(graph, evs);
+    expect(r.openBlockers.join('\n')).toContain('run ONE bounded reviewer group');
+  });
+
+  it('cap spent with no qualifying round: the blocker names the USER exits, not a refused fan-out', () => {
+    const evs = [...work, ...deadRound('c2', 'k2', 2), ...deadRound('c3', 'k3', 4)] as unknown as SessionEvent[];
+    const r = foldReview(graph, evs);
+    expect(r.rounds).toHaveLength(MAX_REVIEW_ROUNDS);
+    const blockers = r.openBlockers.join('\n');
+    expect(blockers).toContain('cap is spent');
+    expect(blockers).toContain('amend the plan to waive the review');
+    expect(blockers).toContain('/accept confirm');
+    expect(blockers).not.toContain('run ONE bounded reviewer group');
   });
 });
 

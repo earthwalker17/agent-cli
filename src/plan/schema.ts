@@ -256,6 +256,20 @@ export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions 
             'their gate accepts a passing run from any project. Name the project each task is verified in.',
         );
       }
+      // 'browser' × gates.projects EACH-of (S16.5b): the scoping the two warnings above steer
+      // toward makes a browser kind require a browser_flow bound to EACH named project's OWN
+      // preview — for an API project that means driving its HTTP responses in a browser, which
+      // is rarely what the plan means. Say so while the plan is still editable, because the
+      // only exits later are an api-bound flow or a gates amendment that resets approval.
+      const gateProjects = input.gates?.projects ?? [];
+      const browserGated = [...(input.gates?.integration ?? []), ...(input.gates?.completion ?? [])].includes('browser');
+      if (browserGated && gateProjects.length > 1) {
+        warnings.push(
+          `gate kind 'browser' with gates.projects [${gateProjects.join(', ')}] requires a browser_flow bound to EACH ` +
+            "named project's OWN preview — including non-UI projects. If browser evidence is only meaningful for the " +
+            "frontend, declare 'browser' as a per-task check on the frontend task (with its project) instead of in the shared gates.",
+        );
+      }
     }
   }
 

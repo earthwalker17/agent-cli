@@ -607,6 +607,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       // multi-project workspaces this session exists to support.
       availableChecks: () => [...workspaceAvailableKinds(checkTool.workspaceSnapshot()), ...(likelyBrowserAvailable() ? (['browser'] as const) : [])],
       knownProjects: () => checkTool.workspaceSnapshot().units.map((u) => u.id),
+      // The reopened-completed-tasks warning (S16.5b): the fold needs the live event stream.
+      events: () => session.log.events,
     }),
     createApplyChangesTool(
       changesRegistry,

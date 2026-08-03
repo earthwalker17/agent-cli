@@ -2,6 +2,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { REVIEW_SEVERITIES, type ReviewFinding, type SessionEvent, type SubagentRoleName, type TaskChangeFile, type Tool, type ToolContext, type ToolResult } from '../types.js';
 import { createFindingAccumulator, createReportFindingTool } from './report-finding.js';
+import { MAX_REVIEW_ROUNDS } from '../review/ledger.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { PlanState } from '../plan/canonical.js';
 import type { GraphState } from '../plan/graph-state.js';
@@ -128,11 +129,12 @@ export interface DelegateCaps {
 
 /**
  * Review rounds allowed per session (S14.5, implements the deferred-pool follow-up recorded
- * post-S14). Matches the prompt guidance ("≤2 rounds"). The refusal is NOT a trap: clearing
- * findings needs the review TRIAGE tool, not another fan-out, and a post-fix re-review is a
- * caveat, never a blocker — the exits stay open with the cap in force.
+ * post-S14). The CONSTANT lives in review/ledger.ts since S16.5b so the pure fold can adapt
+ * its blocker text once the cap is spent; re-exported here for the existing import sites.
+ * The refusal is NOT a trap: clearing findings needs the review TRIAGE tool, not another
+ * fan-out, and a post-fix re-review is a caveat, never a blocker.
  */
-export const MAX_REVIEW_ROUNDS = 2;
+export { MAX_REVIEW_ROUNDS } from '../review/ledger.js';
 
 /**
  * R10 (Session 11.5): the per-task retry ceiling — genuine failure outcomes (error, timeout,
@@ -566,7 +568,8 @@ export function createDelegateTool(
       if (input.tasks.some((t) => t.role === 'reviewer') && caps.reviewRoundsStarted >= MAX_REVIEW_ROUNDS) {
         return refuse(
           `review round cap reached (${caps.reviewRoundsStarted} of ${MAX_REVIEW_ROUNDS} rounds have run this session): a third fan-out is not the exit — ` +
-            'hand-verify and triage the recorded findings with the review tool, or the user records /accept confirm',
+            'hand-verify and triage the recorded findings with the review tool. If NO round qualified, triage cannot clear the requirement either: ' +
+            'ask the user to amend the plan to waive the review (with a reason) and re-approve, or to record /accept confirm',
         );
       }
 
