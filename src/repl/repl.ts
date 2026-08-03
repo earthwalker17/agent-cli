@@ -17,6 +17,7 @@ import { createReplIO, type ReplIO } from './io.js';
 import { createProviderRegistry, type ProviderRegistry } from '../provider/registry.js';
 import { createRenderer, type Renderer } from './render.js';
 import { createStatusArea } from './status.js';
+import { createWorkingHeartbeat } from './heartbeat.js';
 import { createTaskTable } from './live-tasks.js';
 import { detectStyle } from './format.js';
 import { completionLine, dispatchSlash, sessionAcceptance, type CommandContext } from './commands.js';
@@ -76,6 +77,10 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   const statusArea = createStatusArea({ chromeOut: streams.chromeOut, isTTY: streams.isTTY });
   const taskTable = createTaskTable();
   const renderer = createRenderer({ modelOut: streams.modelOut, chromeOut: streams.chromeOut, style, chromeSink: statusArea });
+  // The "working" heartbeat (S16.5b): dim elapsed-time line while a model request is in flight
+  // and no text has streamed yet — an always-thinking model otherwise looks frozen. TTY-only by
+  // construction (the status area passes through zero bytes off-TTY).
+  const heartbeat = createWorkingHeartbeat({ area: statusArea, style });
 
   // Approval prompts own the screen: the status area is suspended for the question's lifetime.
   const question = async (q: string): Promise<string | null> => {
@@ -101,7 +106,16 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       layout,
       ...(opts.resumeId !== undefined ? { resumeId: opts.resumeId } : {}),
       argv: process.argv.slice(2),
-      onText: (t: string) => renderer.onText(t),
+      // textArrived runs SYNCHRONOUSLY before the first stdout byte of the step, preserving the
+      // status area's no-interleaving invariant (see heartbeat.ts).
+      onText: (t: string) => {
+        heartbeat.textArrived();
+        renderer.onText(t);
+      },
+      onModelRequest: (inFlight: boolean) => {
+        if (inFlight) heartbeat.modelCallStarted();
+        else heartbeat.modelCallEnded();
+      },
       onCommandOutput: (_callId: string, chunk: string, stream: 'stdout' | 'stderr') => renderer.onCommandOutput(chunk, stream),
       onLogEvent: (e) => renderer.onEvent(e),
       onTaskProgress: (line: string) => renderer.chromeLine(`  [task] ${sanitizeLine(line)}`),

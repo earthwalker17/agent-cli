@@ -63,6 +63,13 @@ export interface Session {
   onText?: (delta: string) => void;
   /** Live command output for rendering (callId-scoped). Render-only; evidence is the event log. */
   onCommandOutput?: (callId: string, chunk: string, stream: 'stdout' | 'stderr') => void;
+  /**
+   * Render-only model-request lifecycle (S16.5b): `true` immediately before each provider call,
+   * `false` when it settles (success, error, or abort alike). The REPL's "working" heartbeat
+   * hangs off this — an always-thinking model otherwise looks frozen between tool steps. Never
+   * an event; the evidence stream is untouched.
+   */
+  onModelRequest?: (inFlight: boolean) => void;
   /** Narrowing-only policy additions from config; passed to every tool/policy context. */
   rules?: PolicyRules;
   /** The session's execution sandbox backend + its probed enforcement facts (both or neither). */
@@ -116,6 +123,7 @@ export interface StartOptions {
   maxTokens?: number;
   onText?: (delta: string) => void;
   onCommandOutput?: (callId: string, chunk: string, stream: 'stdout' | 'stderr') => void;
+  onModelRequest?: (inFlight: boolean) => void;
   argv?: string[];
   tools?: Tool[];
   rules?: PolicyRules;
@@ -189,6 +197,7 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
   };
   if (opts.onText) base.onText = opts.onText;
   if (opts.onCommandOutput) base.onCommandOutput = opts.onCommandOutput;
+  if (opts.onModelRequest) base.onModelRequest = opts.onModelRequest;
   if (opts.rules) base.rules = opts.rules;
   if (opts.sandbox) base.sandbox = opts.sandbox;
   if (opts.sandboxFacts) base.sandboxFacts = opts.sandboxFacts;
@@ -496,6 +505,7 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
       maxTokens: session.maxTokens,
     };
     let turn;
+    session.onModelRequest?.(true);
     try {
       turn = await session.provider.complete(req, session.onText, signal);
     } catch (err) {
@@ -505,6 +515,9 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
       // consecutive user messages at the wire, and the Responses API accepts them as items).
       if (signal?.aborted) return abortedResult('model', steps);
       throw err;
+    } finally {
+      // Success, error and abort alike: the request is no longer in flight (render-only).
+      session.onModelRequest?.(false);
     }
     lastStop = turn.stopReason;
 

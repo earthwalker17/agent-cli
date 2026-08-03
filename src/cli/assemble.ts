@@ -60,6 +60,8 @@ export interface AssembleDeps {
   argv?: string[];
   onText?: (delta: string) => void;
   onCommandOutput?: (callId: string, chunk: string, stream: 'stdout' | 'stderr') => void;
+  /** Render-only model-request lifecycle (S16.5b) — drives the REPL's "working" heartbeat. */
+  onModelRequest?: (inFlight: boolean) => void;
   /** Live log observer (the REPL renderer); assigned BEFORE the post-start records so it misses nothing. */
   onLogEvent?: (e: SessionEvent) => void;
   /** Injectable for deterministic, platform-independent tests; defaults to selectSandbox. */
@@ -264,6 +266,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     gitFacts,
     ...(deps.onText !== undefined ? { onText: deps.onText } : {}),
     ...(deps.onCommandOutput !== undefined ? { onCommandOutput: deps.onCommandOutput } : {}),
+    ...(deps.onModelRequest !== undefined ? { onModelRequest: deps.onModelRequest } : {}),
   };
 
   const session = deps.resumeId !== undefined
