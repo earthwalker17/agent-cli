@@ -7,78 +7,92 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## [1.2.1] — 2026-08-01
+## [1.2.1] — 2026-08-03
 
-The Session 16 capability, live-proven — and the defects that proving it exposed. 1.2.0 shipped
-multi-project support and `project_setup` with an honest caveat in its own release notes: the
-resolution layer was proven, the end-to-end agent run on a dependency-bearing full-stack project
-was not. This release closes that, and everything below is something the attempt found.
-
-### Fixed
-
-- **Readiness could not reach a server on IPv6 loopback.** Node 22 resolves `localhost` verbatim,
-  which on Windows is `::1` — so a dev server told to listen on `localhost` refuses every
-  connection to `127.0.0.1`, which was all the harness probed. A Vite front end could never become
-  ready. Both loopback literals are probed in order now, and the address that ANSWERED is what
-  gets recorded, because that URL becomes the origin a browser flow is locked to.
-- **A colourised server banner could hide its own port.** The announced-port parser required
-  digits immediately after `localhost:`; picocolors forces colour on win32 regardless of TTY, so a
-  dev server writing to a log file can emit `http://localhost:<ESC>[1m5173<ESC>[22m/`. The tail is
-  ANSI-stripped before parsing (`stripAnsi`, beside `sanitizeLine` — one removes for parsing, the
-  other escapes for display).
-- **A project-scoped `browser` gate was permanently unsatisfiable AND unwaivable.** `browser_flow`
-  recorded no `projectId` while every gate consumer folds a missing one to the root, and no other
-  call can produce that kind. Browser evidence is now project-attributed from the preview it drove.
-- **An unbound browser flow with two previews running was denied** with "start one with the preview
-  tool first" — in exactly the shape 1.2.0 raised the concurrency bound to enable. The denial now
-  names what is running and asks for a `preview_id`; and because an unbound flow still binds to
-  whatever single preview is ready (which can legitimately be the API), the result says what it
-  drove.
-- **"Dependencies are not installed" waived a user-approved verification gate.** True before 1.2.0,
-  when the harness could not install anything; `project_setup install` makes it a transient state
-  with a named cure. A session that installed one half of a full-stack workspace and forgot the
-  other could be accepted as COMPLETE, its own caveat claiming a project that ships a build and a
-  test suite *cannot* run them. A curable precondition now keeps the gate PENDING.
-- **The first check, preview or migrate after an install was always refused** with "the project
-  changed after this call was approved" — for a call nobody approved and a project nobody changed.
-  The three tools held independent detection snapshots; one `SharedWorkspace` now backs all three.
-- **CHECKED had no project axis:** a green `build` in `web/` marked a changed file in `api/` as
-  CHECKED, in both the report and `/diff`.
-- **A boundary gate discarded WHICH project was unsatisfied**, so `/accept` suggested a
-  `run_check` a multi-project workspace refuses as ambiguous — a loop that cannot converge. Gates
-  now report per-project detail, and the guidance names the project.
-- **The user-facing plan view omitted `project` and `gates.projects`**, so "tests must pass in both
-  halves" and "a green test anywhere ends the session" rendered identically in the document whose
-  sha the approval binds.
-- **A repair proof was project-filtered only for check and setup failures** — a `preview-startup`
-  failure in `api` could be closed by a green browser flow against `web`.
-- **An install's consent identity now binds `.pnpmfile.cjs` and `.yarnrc.yml`** alongside `.npmrc`:
-  a `readPackage` hook and a `yarnPath` both rewrite what an install executes, and both are
-  ordinary auto-allowed writes under a standing `[s]`.
-- `run_command`'s `cwd` is refused for protected directories — `.git` and the state dir are
-  protected as PLACES, not only as write targets.
-- A preview that dies DURING a browser step is re-checked for liveness, so a dead server stops
-  being reported as a UI defect that spends the repair budget on a rendering hypothesis.
-- **The one blocker only the user can clear is now shown to the user.** Found in the first live
-  take: the agent amended its own approved plan mid-build, which invalidated the approval and made
-  every executor task unspawnable. The harness said so correctly — to the *model*, which cannot
-  type `/plan approve` — and the agent quietly did the "parallel isolated" work serially in the
-  main session. One end-of-turn line now names the blocked tasks and the command that clears them.
+The Session 16 capability, now genuinely live-proven — and every defect that proving it exposed.
+1.2.0 shipped multi-project support and `project_setup` with an honest caveat in its own release
+notes: the resolution layer was proven, the end-to-end agent run on a dependency-bearing
+full-stack project was not. This release closes that gap with a complete recorded run — one
+natural-language request against live **Kimi K3**, through install ×2, migrate, seed,
+per-project checks, a parallel executor wave, two simultaneous dev servers, three passing
+browser flows, a three-lens adversarial review that caught the seeded XSS, a deliberate
+mid-session kill and resume, and `/accept` COMPLETE with no override — validated post hoc by
+38/38 checks over persisted evidence alone. It took four takes across two providers; three of
+the four each bought one of the fixes below, which is what takes are for.
 
 ### Added
 
-- A startup line naming the detected projects in a multi-project workspace, and which of them are
-  not installed. The model had been told since 1.2.0; the human had not.
+- **A one-level tolerant decode for double-encoded tool arguments.** Kimi K3 serialized
+  `update_plan`'s nested `plan` object as a string, and fed the schema error it cycled YAML,
+  single-quoted JSON, XML-ish tags and entry-pair arrays for twelve minutes — no plan could ever
+  be written. The decode fires only after the schema rejected the input, only at paths expecting
+  object/array where a string sits, accepts only a string that itself parses to a structure,
+  re-validates once, and otherwise keeps the original error plus a plain-language hint. The
+  recorded events and the wire history keep the model's original bytes.
+- **The "working" heartbeat.** An always-thinking model streams nothing while it reasons, so the
+  REPL looked frozen for minutes at a time. One dim TTY-only status line —
+  `· model working (Ns)` — driven by a render-only `Session.onModelRequest` seam, drawn only
+  while a request is in flight with no text streamed, erased synchronously before the first
+  stdout byte, zero bytes off-TTY. (Its own first recording found its own bug: the line must be
+  PLAIN text, because the status area sanitizes — and escapes — anything styled.)
+- `preview status` now surfaces a previous-life registry survivor of the same session id — it
+  used to be invisible in both the live and the another-session lists exactly while it still
+  held the port a strict-port dev server needs.
+- `update_plan` names the COMPLETED tasks an amendment re-opens (definition identity: prose
+  participates in the sha; a full-graph resubmit that rewrites a done task's title silently
+  re-queues it, and the model used to learn that only from `/accept` refusals).
+- Plan validation warns when gate kind `browser` rides multi-project `gates.projects` — EACH-of
+  semantics demand a browser flow against EACH named project's own preview, including non-UI
+  projects, and the only exits after approval are an API-bound flow or a gates amendment.
 
-### Changed
+### Fixed
 
-- The system prompt's project block is labelled AS OBSERVED AT SESSION START — it is a cached
-  prefix built before the first turn, so in a session whose purpose is to install dependencies its
-  "dependencies NOT installed" line goes stale by design.
-- `/checks` shows an interrupted setup as NO VERDICT, matching the check surface.
-- `update_plan` tells the model to stop and ask for re-approval rather than absorb delegated work,
-  and says plainly that amending an approved plan to record progress buys nothing (execution state
-  is an event fold) and costs the approval mid-build.
+- **A compat stream that died with neither `[DONE]` nor a `finish_reason` was silently committed
+  as a completed turn** — a proxy idle-timeout half-close could turn a truncated sentence into
+  the model's "final" answer, or a half-accumulated tool call into schema-error churn. It now
+  throws a non-retryable typed server error; part of the stream was consumed, and a replay would
+  double-bill.
+- **Consecutive user messages now coalesce at the compat wire.** The crash-resume and
+  aborted-turn shapes legitimately produce them; only the Anthropic adapter coalesced while the
+  runtime's comment claimed they all did.
+- **Elision no longer double-weighs compat reasoning blocks.** `text` is a display copy equal to
+  the payload there and is never re-sent; charging both could fire the "history still exceeds
+  the context target" alarm at half the real reasoning volume.
+- **Rate-limit 429s get a deeper default retry budget** (4, Retry-After-aware; a throttle is
+  EXPECTED to clear, and kimi Tier 0 allows 3 requests/min) while an explicit retry option is
+  honored verbatim.
+- **A transiently failed browser probe was cached for the whole session**, turning every later
+  `browser_flow` into the gate-WAIVING unsupported/precondition — acceptance could reach
+  COMPLETE without the UI ever having been driven. Success is cached; failure re-probes.
+- **A preview reaped by the harness (TTL, log cap, stop) between approval and a flow read as
+  `preview-died`** and classified runtime-process — repairs hunted a crash that never happened.
+  The flow now reports `preview-stopped-lifecycle`, routed to timeout-resource.
+- **Over-budget screenshots were dropped silently** while only traces recorded omission; the
+  flow event and output now carry `screenshotsOmitted` and a do-not-cite line.
+- **With no qualifying review round and the round cap spent, the acceptance blocker prescribed a
+  reviewer group that delegate refuses** — the third member of the refusable-cure class this
+  release hunts. The fold now owns `MAX_REVIEW_ROUNDS` and hands the exits to the user once the
+  cap is spent; the bound-but-dead reviewer variant of the same dead end became a caveat.
+- **The plan re-approval reminder now also fires after an error-ended turn and once at resume
+  startup** — a turn that amends the approved plan and then dies on a thrown provider error used
+  to end with no re-approval line at all.
+- migrate/seed blocked only by missing `node_modules` records `precondition-curable`, not a
+  false `no-recipe` capability claim; the preview tool's nothing-was-gated drift refusal got the
+  honest split its siblings already had; `agent help` no longer claims a 20-step default (it is
+  40, now interpolated from the constant); REPL `/help` no longer claims "shell commands always
+  ask" (false since 1.0's sandboxed auto-run); README's consent-identity claim matches the code.
+
+### Honest limits
+
+- The recorded run's video shows the heartbeat's pre-fix escaped-text rendering — the recording
+  found the bug, and the frames stay because the footage is unedited.
+- Two of three review lenses hit the 8-minute reviewer wall under Kimi's thinking pace; their
+  captured findings counted and the round qualified through the completed lens, but their
+  remaining scope went unreviewed and the acceptance says so.
+- Kimi fixed the seeded failing test before running it on camera, so the fail-then-pass beat
+  exists in the evidence only as the delivered green run.
+- yarn remains implemented from documentation and unit-tested only; pnpm's install path exists
+  but was not live-run; the npm-workspaces-root install shape still needs a design decision.
 
 ## [1.2.0] — 2026-07-31
 
@@ -348,6 +362,8 @@ likely to matter:
 - Non-Node/Python projects report check kinds as `unsupported` with a reason rather than guessing.
 - Single-user assumption on the session lock.
 
+[1.2.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.2.1
+[1.2.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.2.0
 [1.1.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.1.1
 [1.1.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.1.0
 [1.0.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.0.0

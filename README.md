@@ -41,18 +41,19 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.2.1.** 1340 hermetic tests across 95 files (real-OS sandbox, real-repository git,
+> **Status: v1.2.1.** 1355 hermetic tests across 96 files (real-OS sandbox, real-repository git,
 > real browser flows, adversarial-review suites) plus opt-in live smokes. Proven live end-to-end
-> across ten recorded runs: a full v1.0 demo (one natural-language request → plan → revision →
-> sha-bound approval → parallel worktree executors → integration → typed checks → managed preview
-> → browser verification → adversarial review → crash → resume → acceptance → memory handoff), and
+> across eleven recorded runs — newest: **the full multi-project workflow in one 84-minute Kimi K3
+> session** (one natural-language request → plan → revision → sha-bound approval → `npm ci` in
+> both packages → migrate → seed → per-project typed checks incl. lint → parallel worktree
+> executors → integration → two dev servers at once → three passing browser flows → a three-lens
+> adversarial review that caught the seeded XSS → mid-session kill → resume → `/accept` COMPLETE,
+> validated post hoc 38/38 from persisted evidence alone). Before it: the full v1.0 demo, and
 > **all five providers exercised live through the real bounded tool loop** — 10/10 gated adapter
-> smokes plus two multi-provider sessions, one switching `claude-opus-5` → `gpt-5.6-sol`
-> mid-session and one switching `claude-opus-5` → `deepseek-v4-pro` → `kimi-k3` → `glm-5.2` with
-> each model writing its own file. Every provider's reasoning round-trip was accepted live, and no
-> credential appears anywhere in the evidence. This is an open, build-in-public engineering effort
-> — see `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what
-> is done, deferred, and next.
+> smokes plus two multi-provider sessions with each model writing its own file. No credential
+> appears anywhere in the evidence. This is an open, build-in-public engineering effort — see
+> `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is
+> done, deferred, and next.
 
 ## Install
 
@@ -383,17 +384,16 @@ Read this before trusting the harness with anything sensitive.
   away). A session-scope answer covers re-runs only while the lockfile, `package.json` and every
   install-affecting config file (`.npmrc`, `.yarnrc.yml`, `.pnpmfile.cjs`) are unchanged;
   migrations and seeds ask every single time.
-- **The multi-project workflow is live-proven in parts, and the parts are named.** Live against a
-  real two-package project (Express + `node:sqlite`, Vite + React, real lockfiles, no
-  `node_modules`): detection and per-project resolution and consent; `project_setup` installing
-  BOTH projects, then migrating and seeding a real SQLite database; per-project typed checks; and a
-  parallel executor wave in isolated worktrees. Separately live-proven against both real dev
-  servers, but *outside* the agent loop: preview startup, announced-port readiness (including a
-  server bound to IPv6 loopback) and clean two-server teardown.
-  **Not yet proven end-to-end inside one agent session:** two dev servers running at once, a
-  browser flow over the integrated stack, an adversarial review round, and `/accept` reaching
-  COMPLETE. The runs that would have shown it stopped when the API credit balance ran out, not
-  because anything refused. This README does not claim what those runs did not reach.
+- **The multi-project workflow is live-proven end to end, in one session.** Against a real
+  two-package project (Express + `node:sqlite`, Vite + React, real lockfiles, no `node_modules`,
+  no `.env`, no database): one natural-language request drove detection, `project_setup`
+  installing BOTH projects, `.env`, migrate, seed, per-project typed checks (including a lint
+  script only one project declares), a parallel executor wave in isolated worktrees, integration,
+  two managed dev servers at once (one answering only on IPv6 loopback), three passing
+  project-attributed browser flows, a three-lens adversarial review that recorded the seeded
+  XSS, a deliberate mid-session kill and resume, and `/accept` COMPLETE with no override —
+  38/38 post-hoc checks over persisted evidence alone (see `CHANGELOG.md` 1.2.1 for the honest
+  limits of that run, including two review lenses that hit their budget wall after capturing).
 - **yarn is implemented from documentation, not live-proven.** npm is exercised; pnpm is
   implemented and unit-tested; yarn is not installed on the development machine.
 - **External database servers, Docker and containers are out of scope.** What is supported is

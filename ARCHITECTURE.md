@@ -178,8 +178,15 @@ nothing to a model (documented exception) and keeps the pure walker pre-trust.
    the life of the session.
 
 `executeCall` is the gate: record `tool.requested` (verbatim, untrusted) → parse input against
-the tool's zod schema (parse failure → recorded deny) → `decide(...)` → record
-`policy.decision`. On `deny`, return a terminal error result (with a `tool.completed` so resume
+the tool's zod schema → `decide(...)` → record `policy.decision`. A parse FAILURE first passes
+through `input-coerce.ts` (S16.5b, found live): when an `invalid_type` issue expected
+object/array and a STRING sits at that path, and that string itself `JSON.parse`s to a
+structure, it is decoded and the input re-validated ONCE — kimi-k3 double-encodes nested
+arguments, and fed only the schema error it cycled serialization formats for twelve minutes
+without ever un-stringifying the value. Anything else keeps the original error plus a
+plain-language hint naming the stringified path. `tool.requested` and the wire history keep the
+model's ORIGINAL bytes; policy and execution both see the decoded input (the same thing an
+approval prompt shows). A still-failing parse is a recorded deny. On `deny`, return a terminal error result (with a `tool.completed` so resume
 never mistakes it for a crash). On `ask`, call the approver and record `approval.resolved`; a
 `session`-scope allow adds a grant. On `allow`/approved, run `runExecution`.
 
@@ -234,6 +241,10 @@ PURE function recomputed per request:
   those results STAY elided. Without it, an aging screenshot could free enough budget that the
   char pass restored older outputs verbatim — invalidating the moving cache breakpoint (the whole
   suffix re-billed) and contradicting the `context.compacted` record.
+- **Reasoning blocks weigh their PAYLOAD only** (plus `text` when no payload exists): `text` is a
+  display copy that is never re-sent, and the compat adapters set it equal to the payload —
+  charging both double-weighed every kimi/deepseek block and could fire the exhausted warning at
+  half the real reasoning volume (S16.5b).
 
 Only tool_result CONTENT is replaced: tool_use/result pairing (API validity), assistant text,
 user messages, and the last 4 assistant steps are untouched; outputs smaller than their marker
@@ -282,10 +293,9 @@ Large-repo understanding is selective and ranked, not a broad file dump. One in-
 
 ## Project units (`checks/workspace.ts`)
 
-A workspace holds one or more project UNITS, not one project at its root. Before Session 16 a
-repository containing `web/` and `api/` detected nothing: every check kind `unsupported`, no
-preview-capable script, every declared gate warned unrunnable. It did not fail loudly; it went
-inert.
+A workspace holds one or more project UNITS, not one project at its root (before S16, a
+`web/`+`api/` repository with no root manifest went silently inert — nothing detected, every
+gate unrunnable).
 
 - **Discovery** is bounded, stat-first and NEVER throwing (the `detect.ts` discipline): the root
   when it has a manifest, whatever the root `package.json` `workspaces` / `pnpm-workspace.yaml`
@@ -345,7 +355,9 @@ means "we fetched".
   `package-lock.json` in a migrated repo does not compose `npm ci` for a pnpm project; every other
   lockfile present is named in the evidence. No lockfile still installs, saying the versions are
   NOT pinned. Python is `unsupported` with the reason. `migrate`/`seed` resolve the project's OWN
-  script from a fixed per-intent allowlist, so neither can become "run any script".
+  script from a fixed per-intent allowlist, so neither can become "run any script" — and when the
+  only blocker is missing `node_modules`, the recorded reason is `precondition-curable`, not a
+  false `no-recipe` capability claim for a project that declares the script (S16.5b).
 - **Consent, two different answers for two different consequences.** An install is `external` and
   MAY replay under `[s]`, bound to `sha(lockfile + package.json + every install-affecting config
   file)` — never the lockfile alone, because
@@ -489,13 +501,28 @@ explicit SESSION resource with recorded start, readiness, health, logs, and dete
   killing a recycled pid is not); >24h unverifiable records are deregistered WITHOUT a kill; a
   20s identity wall budget bounds startup. Stop-all runs on every session-end path.
   `/accept` deliberately does NOT stop previews (the user may browse the accepted app).
+- **Honest answers when a preview is GONE (S16.5b):** the tool keeps an in-memory
+  `endedReason(previewId)` so the browser layer can tell a harness lifecycle stop apart from a
+  crash; `status` surfaces a PREVIOUS-life registry survivor of the SAME session id (an
+  unverifiable orphan used to be in neither the live nor the another-session list — invisible
+  exactly while it held the port Vite strictPort needs), and the resume note names the
+  stop-it-first way out; the nothing-was-gated drift refusal says "nothing was approved and
+  nothing started" instead of claiming a nonexistent approval was invalidated.
 
 ## Browser verification (`browser/`, `tools/browser-flow.ts`, `tools/view-image.ts`)
 
 The check inversion applied to UI: the model declares a TYPED FLOW; the harness owns execution,
 waits, and the failure taxonomy. `playwright-core` drives the SYSTEM browser — probe order
-msedge → chrome → Playwright-cache Chromium, cached per session; a machine with none degrades to
-the gate-waiving `unsupported/precondition`.
+msedge → chrome → Playwright-cache Chromium, cached per session **SUCCESS-only**
+(`cacheSuccessfulProbe`, S16.5b: a transiently failed probe cached for the session turned every
+later flow into the gate-WAIVING unsupported/precondition — acceptance could reach COMPLETE
+without the UI ever driven; a failed probe re-probes on the next flow, which costs seconds and
+never honesty); a machine with none degrades to the gate-waiving `unsupported/precondition`.
+A flow bound to a preview the HARNESS stopped (TTL / log cap / explicit stop) between approval
+and execution reports `preview-stopped-lifecycle` (routed to `timeout-resource` — a resource
+bound expired, nothing about the app failed), keeping `preview-died` → runtime-process for real
+crashes. Over-budget or store-failing SCREENSHOTS are counted (`screenshotsOmitted` on the event
+and a do-not-cite output line), matching the trace-omission honesty.
 
 - **FlowSpec (zod, strict)**: `goto{path (relative-only), ready_when{selector|text} REQUIRED}`,
   `click/fill/select/press/wait_for`, typed `expect{text|visible|hidden|value|url|count}`,
@@ -806,7 +833,13 @@ requirement — three call sites previously spelled the same triple predicate in
 - **Validation warns at the consent boundary** when a multi-project workspace declares gates or
   task checks with no project (the unscoped reading is the one that produces a false green), and
   compares project ids NORMALIZED — a correct `./api` had been scolded for naming a project that
-  does not exist, which pushes a model toward dropping scoping altogether.
+  does not exist, which pushes a model toward dropping scoping altogether. It also warns when
+  gate kind `browser` rides multi-project `gates.projects` (S16.5b): EACH-of semantics demand a
+  browser_flow bound to EACH named project's OWN preview — including non-UI projects — and the
+  only exits after approval are an api-bound flow or a gates amendment that resets approval.
+  And `update_plan` names the COMPLETED tasks an amendment RE-OPENS (definition identity: prose
+  participates in the sha; a full-graph resubmit rewriting a done task's title silently
+  re-queues it, and the model used to learn that only from `/accept` refusals).
 - **The amendment contract:** a model write keeps `approved` only for a semantic no-op; otherwise
   → `draft`, including over `superseded`. An amendment therefore blocks every executor spawn, and
   because only the USER can clear that, the REPL prints one undimmed end-of-turn line naming the
@@ -1012,6 +1045,11 @@ of running Agent CLI.
 **The reviewers record TYPED findings, the harness derives what the records are worth, and the
 parent's judgment annotates but never erases.**
 
+- **`MAX_REVIEW_ROUNDS` (2) lives in the FOLD's module** (delegate re-exports it), because the
+  fold's blocker text must adapt once the cap is spent: with no qualifying round left to buy,
+  "run ONE bounded reviewer group" prescribed a call delegate REFUSES — the S16.5 refusable-cure
+  class. The cap-spent blocker hands the exits to the USER (amend the plan to waive review and
+  re-approve, or `/accept confirm`), and delegate's refusal names the same exits (S16.5b).
 - **Findings are typed at the SOURCE.** `report_finding` is the reviewer child's only findings
   channel: a PER-TASK accumulator+instance the delegate constructs inside the fan-out (parallel
   lenses can never interleave), admitted through the named `childTools` seam. Bounded: 8 findings,
@@ -1059,6 +1097,14 @@ it means ("NEVER RAN in web; it passed in api"), because a bare "NEVER RAN" was 
 kind passed in one half of a stack and was unsupported in the other. One derivation feeds
 `/accept`, `/status`, the quit summary, the report, and the journal handoff.
 
+**Reviewer dead-end carve-outs (e933677 + S16.5b), both LOUD caveats and both fired live:** a
+reviewer plan task NEVER BOUND via `plan_task` (queued/blocked, zero attempts) while the review
+requirement is independently satisfied by recorded rounds is a dead end, not outstanding work —
+once `MAX_REVIEW_ROUNDS` is spent there is no call left that could bind it. Same for the
+BOUND-but-dead variant one event later: a reviewer child that ended failed/cancelled/interrupted
+with the requirement satisfied AND the cap spent. While rounds REMAIN, a re-spawn with
+`plan_task` is a real cure and both states still block.
+
 - **`/accept`** (user-typed = consent; between-turns only, piped-deterministic): on COMPLETE,
   appends `session.accepted {complete, summary, deliveryRef?, deliveryOid?}` and runs bounded
   cleanup — prune this session's owed harness refs now, and retire a fully-executed
@@ -1096,6 +1142,17 @@ the latest EVIDENCE per kind — a check that spawned and never completed reads 
 not as the older passing run. `/diff` carries the report's CHECKED verdict per file through the
 same correlation the report uses (one implementation, so CHECKED cannot mean two things).
 
+**The "working" heartbeat (`repl/heartbeat.ts`, S16.5b).** An always-thinking model (kimi-k3)
+streams nothing while it reasons, so the screen looked frozen for minutes between tool steps.
+One dim TTY-only status line — `· model working (Ns)` — driven by the render-only
+`Session.onModelRequest` seam (`true` before every provider call, `false` in a finally: success,
+error and abort alike; never an event). Drawn only while a request is in flight with NO text
+streamed (a 2s grace stops fast responses from flashing it), erased SYNCHRONOUSLY by the
+wrapped `onText` before the first stdout byte of a step — which is what preserves the status
+area's no-interleaving invariant — zero bytes off-TTY, timer unref'd. The line is PLAIN text by
+contract: the status area sanitizes (and ESCAPES) its content, so styling smuggled in through
+content renders as visible `\u{1b}` text — the first recorded run proved it on camera.
+
 **The live task surface.** `status.ts` is the sticky status area — the ONLY cursor-moving code,
 strictly TTY- and stderr-confined: ALL chrome routes through its status-aware writer (erase →
 write → redraw at line boundaries), approval prompts suspend it, every turn's finally clears it,
@@ -1129,7 +1186,11 @@ protectedPath }`; the engine decides.
   fact combinations refuse; a throwing fact denies. Verdict `reversible` + `noUndo` +
   `execBoundary: 'unsandboxed'`, and `ask` unless every resolved command already carries replay
   consent. The fact must be PURE — the tool resolves from a captured project snapshot, never the
-  filesystem. Kind `'preview'` splits to distinct rule ids and persistent-process reasons.
+  filesystem. KNOWN EXCEPTION, stated rather than papered over (S16.5b): run_check's bound
+  `test-targeted` scope resolves via a planTouches lookup that reads the PLAN DOCUMENT at decide,
+  and the plan file is outside the workspace drift stamps — the exposure window is exactly an
+  open approval prompt (calls are otherwise serialized); the mechanism fix is in the deferred
+  pool. Kind `'preview'` splits to distinct rule ids and persistent-process reasons.
 - **Browser flow** (`tool.browser`) → previewBound allows; anything else DENIES.
 - **Session-evidence read** (`tool.evidenceRead`) → allow only when the fact says the sha is
   `admitted`; an un-admitted sha DENIES.
@@ -1272,7 +1333,7 @@ lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The a
 | verification | `check.started` (a REAL spawn — a `WORK_EVENT_TYPES` member), `check.completed` (verdict + named signals + `scopePaths`), both +`projectId` |
 | setup | `setup.started` (a REAL spawn; a `WORK_EVENT_TYPES` member), `setup.completed` (`ok`/`failed`/`error`/`unsupported` — never `pass`, and never readable as verification) |
 | recovery | `repair.attempted` (+`projectId` — a proof must come from the project that failed), `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash) |
-| preview/browser | `preview.started`, `preview.ready`, `preview.ended`, `preview.swept`, `browser.flow` |
+| preview/browser | `preview.started`, `preview.ready`, `preview.ended`, `preview.swept`, `browser.flow` (+`traceOmittedBytes`, `screenshotsOmitted`) |
 | review | `review.findings` (an EMPTY list is a recorded clean lens), `review.triage` (deliberately NO `review.completed` — a round is derived from its capture events) |
 | acceptance | `session.accepted {complete, summary, unfinished?, deliveryRef?, deliveryOid?}` |
 
@@ -1367,7 +1428,10 @@ profiles.ts   Per-provider wire deviations for the chat-compat adapter (param na
               policy, strict-flag policy, reasoning-replay policy, usage extraction, extra
               finish_reasons, error envelopes).
 errors.ts     ProviderError taxonomy (auth|rate-limit|balance|context-window|bad-request|server|
-              network|aborted) + bounded CONNECTION-PHASE-ONLY retry (≤2, Retry-After aware).
+              network|aborted) + bounded CONNECTION-PHASE-ONLY retry, Retry-After aware — ≤2 by
+              default, rate-limit 429s draw a deeper default budget (RATE_LIMIT_RETRIES = 4: a
+              throttle is EXPECTED to clear, and kimi Tier 0 is 3 req/min); an explicit
+              `retries` option is honored verbatim for every kind (S16.5b).
 sse.ts        One incremental SSE parser: chunk splits mid-UTF-8, CRLF, comment keep-alives,
               multi-line data, `[DONE]` yielded to callers.
 registry.ts   The ONE construction/discovery seam: env-only key discovery (NAMES + presence),
@@ -1388,10 +1452,16 @@ registry.ts   The ONE construction/discovery seam: env-only key discovery (NAMES
   or a terminal-less stream throws rather than fabricating a turn.
 - **`OpenAiCompatProvider`** is ONE Chat-Completions adapter parameterized by a profile
   (deepseek/kimi/glm). Load-bearing mappings: each tool_result becomes its own `role:'tool'`
-  message before same-message user text (kimi's pairing rule); `[DONE]` is the terminator; usage
-  is accepted from all three documented locations; error-shaped `finish_reason`s throw typed
-  errors; no sampling params, no `tool_choice`, no `thinking` are ever sent (provider defaults are
-  what the harness wants, and kimi locks sampling outright).
+  message before same-message user text (kimi's pairing rule); consecutive USER TEXT messages
+  COALESCE at the wire (the crash-resume/aborted-turn shapes legitimately produce them, and
+  "this family generally tolerates it" is not a contract — S16.5b); `[DONE]` is the terminator,
+  and a stream that ends with NEITHER `[DONE]` nor any `finish_reason` THROWS a non-retryable
+  typed server error rather than committing a half-generated turn (a proxy idle half-close used
+  to turn a truncated sentence into the model's "final" answer; part of the stream was consumed,
+  so a replay would double-bill — S16.5b); usage is accepted from all three documented
+  locations; error-shaped `finish_reason`s throw typed errors; no sampling params, no
+  `tool_choice`, no `thinking` are ever sent (provider defaults are what the harness wants, and
+  kimi locks sampling outright).
 - **`MockProvider`** replays scripted turns offline and throws if exhausted — the entire loop,
   policy, snapshot, resume, and report behavior are proven through it. `hang: true` turns
   (in-process only) resolve only when the abort signal fires — the deterministic way to test

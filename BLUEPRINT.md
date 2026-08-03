@@ -47,47 +47,27 @@ honest vision degradation. **All five providers live-proven** through the real b
 GLM with each writing its own file). Default model is now `claude-opus-5`. Details and honest
 limits: `ROADMAP.md` Session 15, `ARCHITECTURE.md` "Providers".
 
-### Session 16.5 — Proving Session 16 — **review DONE; live proof PARTIAL (blocked on API credit)**
+### Session 16.5 — Proving Session 16 — **DONE (v1.2.1)**
 
-A bounded five-lens adversarial review over the S16 change set found 30 findings; 16 were fixed,
-each regression-pinned (`test/live-e2e-blockers.test.ts`; suite 1322 → 1340). Two were measured on
-real platform behaviour before a line changed — readiness could not reach a server on IPv6
-loopback (which is where a Vite dev server binds here), and a colourised banner could hide its own
-port. Others: a project-scoped `browser` gate was permanently unsatisfiable; "dependencies are not
-installed" WAIVED a user-approved gate; CHECKED had no project axis; the first check after an
-install was always refused; an install's consent identity missed `.pnpmfile.cjs`/`.yarnrc.yml`.
+Both goals complete. Two bounded adversarial reviews (5 lenses over the S16 diff: 30 findings,
+16 fixed; then 5 lenses over the whole implementation: 25 findings, 16 fixed — the wire under an
+always-thinking compat model, preview/browser truth, refusable-cure dead ends, and doc/metadata
+staleness), the "working" heartbeat, and the tolerant decode for double-encoded tool arguments
+that take 3 exposed live. **The live E2E is done end to end**: one 84.6-minute Kimi K3 session —
+one natural-language request through installs ×2, migrate, seed, per-project checks incl. lint,
+the parallel executor wave, two simultaneous dev servers, three passing browser flows, a
+three-lens review that caught the seeded XSS, kill + resume, and `/accept` COMPLETE with no
+override — post-hoc validated 38/38 from persisted evidence, with a 4.7-minute subtitled MP4
+produced from the continuous recording. Suite 1342 → 1366. Details and honest limits:
+`ROADMAP.md` Session 16.5, `agent-cli-s165-live/DEMO.md`, CHANGELOG 1.2.1.
 
-The live E2E built the fixture ("Depot": two independent packages, two lockfiles, no
-`node_modules`/`.env`/database, three seeded defects each reachable by exactly one capability) and
-proved it 10/10, proved the preview substrate against both real dev servers 14/14, and rehearsed
-the recording chain 18/18. **Two takes ran against the live API.** Take 1 found the session's best
-defect — an amendment to an approved plan silently made every executor task unspawnable, and the
-harness told only the model, which cannot type `/plan approve`. Take 2 got through install ×2,
-migrate, seed, per-project checks and **the parallel executor wave**, then stopped: the Anthropic
-API credit balance was exhausted.
+### Session 16 — Real Local Software Engineering — **DONE (v1.2.0 implementation, live-proven by S16.5)**
 
-**Still outstanding, and the first thing to clear:** two dev servers under the agent loop, a
-browser flow catching the integrated defect, a review lens catching the XSS, `/accept` COMPLETE,
-and the recorded video. Needs only credit — fixture, driver, recorder, subtitle pipeline and
-validator are all built. Details: `ROADMAP.md` Session 16.5, `agent-cli-s165-live/DEMO.md`.
-
-### Session 16 — Real Local Software Engineering — **DONE (implementation), live proof PARTIAL**
-
-Delivered: project UNITS (bounded multi-project detection), per-unit typed checks and previews,
-`project_setup` (lockfile-driven install / migrate / seed) with its own consent and its own event
-stream that can never satisfy a verification gate, per-project plan scoping, `run_command` cwd,
-one shared detection feeding the system prompt, secret-named contents withheld from the session
-diff, and an audited limits table (scale bounds raised, repetition bounds deliberately not).
-Suite 1164 → 1322. A four-lens adversarial review found four critical/high holes — all of them a
-Session-16 change re-opening an earlier session's closed hole one axis over — and all are fixed.
-
-**The resolution layer is live-proven** against a real two-package fixture (21/21 assertions,
-including a package.json rewrite revoking an install's `[s]`). **The end-to-end workflow is not.**
-Before this session's capability is advertised as complete, run the full live E2E described in
-`ROADMAP.md` Session 16 "Recommended next step" — install through `project_setup` with real
-approvals, two simultaneous dev servers, a browser flow over the integrated stack, a review round,
-`/accept`, and a resume-after-kill life. Details and honest limits: `ROADMAP.md` Session 16,
-`ARCHITECTURE.md` "Project units" and "Project setup".
+Delivered project UNITS, per-unit typed checks and previews, `project_setup` (lockfile-driven
+install / migrate / seed) with its own consent and event stream that can never satisfy a
+verification gate, per-project plan scoping, and the audited limits table. Suite 1164 → 1322.
+The end-to-end proof it owed was delivered by Session 16.5 (above). Details: `ROADMAP.md`
+Earlier Milestones, `ARCHITECTURE.md` "Project units" and "Project setup".
 
 ### Session 17 — First Non-Coding Workflow Pack: Documents and PDF
 
@@ -191,9 +171,9 @@ Before calling the next phase mature, Agent CLI should have demonstrated:
 - ~~at least two genuinely different provider protocols and all named providers live-smoked through
   the same bounded tool loop~~ **(MET in S15: Anthropic Messages + OpenAI Responses + a
   Chat-Completions family, all five providers live)**;
-- a realistic dependency-bearing full-stack project built and verified locally — **S16 built the
-  capability and live-proved the RESOLUTION layer against a real two-package project; the
-  end-to-end agent run on it is still outstanding and is the first thing S17 should clear**;
+- ~~a realistic dependency-bearing full-stack project built and verified locally~~ **(MET in
+  S16.5: one live Kimi K3 session from natural-language request to `/accept` COMPLETE over a real
+  two-package full stack, post-hoc validated 38/38)**;
 - a document/PDF workflow whose completion is based on artifact and visual evidence;
 - polyglot retrieval and checks over several different build ecosystems;
 - source-backed research with bounded network authority and durable provenance;

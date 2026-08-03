@@ -6,341 +6,201 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
-## Session 16.5 (2026-08-01) — Proving S16: the review, the fixes, and how far the live run got
+## Session 16.5 (2026-08-01 … 08-03) — Proving S16 end to end: two reviews, four takes, one complete live run
 
 ### Objective
 
-Two goals. First, a bounded evidence-backed adversarial review of the Session 16 change set,
-fixing what is real — with priority on anything that would stop a large full-stack job from
-completing honestly. Second, the Live E2E that S16 deliberately did not claim: a genuinely
-dependency-bearing two-project application, built from one natural-language request against the
-live API, monitored, recorded.
+Two goals, both now COMPLETE. First, evidence-backed adversarial review — one bounded batch over
+the S16 change set (08-01), then a second bounded batch over the whole current implementation
+(08-03) — fixing what is real, with priority on anything that could stop a legitimate full-stack
+job. Second, the live E2E Session 16 had been owing since it shipped: a genuinely
+dependency-bearing two-project application built from one natural-language request against a live
+API, monitored, recorded, accepted, and post-hoc validated. The finished run took four takes
+across two providers, and three of the four takes each bought a real harness fix — which is what
+the takes were for.
 
-The first goal is complete. The second is **partially complete and stopped by an external limit**;
-this entry says exactly which parts are proven and which are not.
+### Review one (08-01, Opus 5): 5 lenses over `8a4ddf4..HEAD`, 30 findings, 16 fixed
 
-### The review — 5 lenses, 30 findings, 16 fixed
+Aimed at the shape of the then-outstanding run. The two measured-on-this-machine finds: readiness
+could not reach an IPv6-loopback server (Node 22 resolves `localhost` verbatim → `::1` here; a
+Vite dev server was unreachable by the IPv4-only probe — both loopback literals are probed now
+and the ANSWERING address is recorded, because it becomes a browser flow's origin lock), and a
+colourised banner could hide its announced port (the ANSI strip is defensive; Vite 6 measured NOT
+colourising to a log file — `probe-preview.mjs` asserts the measurement). The rest, all
+hand-verified: a project-scoped `browser` gate was permanently unsatisfiable AND unwaivable
+(browser evidence now carries the driven preview's `projectId`); "dependencies are not installed"
+WAIVED a user-approved gate (`precondition-curable` keeps it PENDING — an uninstalled project is
+unverified, not unverifiable); the first check/preview/migrate after an install was falsely
+refused as "changed after approval" (ONE `SharedWorkspace` now backs all three tools); CHECKED
+had no project axis (passing evidence carries its scope; correlation requires containment);
+a two-preview denial told the model to start a third; an install's consent identity missed
+`.pnpmfile.cjs`/`.yarnrc.yml`; boundary gates and repair proofs lost their project axis;
+`run_command` `cwd` refused for protected PLACES; the plan views got the project axis; and
+`update_plan` learned to warn about the unscoped-gate false green. Pinned together in
+`test/live-e2e-blockers.test.ts`.
 
-One bounded batch of five differentiated read-only lenses over `8a4ddf4..HEAD` (63 files,
-+4717/−184), aimed at the shape of the outstanding run rather than at the diff in the abstract:
-two projects, two dev servers, a browser flow over the integrated stack, and an install that must
-happen before anything can be verified. No per-finding verifier fan-out (the CLAUDE.md cost rule);
-every finding hand-verified against the code before any fix.
+Takes 1–2 ran against Anthropic. Take 1 found the session's best defect: the agent amended its
+own approved plan mid-build, delegation silently became impossible, and the ONE blocker only the
+user can clear was never said to the user — `planApprovalReminder` now prints one undimmed
+end-of-turn line, narrowed (d93be56) to fire only when an approval EXISTED and no longer covers
+the plan. Take 2 proved installs ×2, migrate, seed, per-project checks and the parallel executor
+wave live, then stopped: the Anthropic credit balance was exhausted mid-run.
 
-**Two were measured on this machine before a line changed**, and neither is reachable by any amount
-of single-project testing:
+### Review two (08-03, this session): 5 lenses over the whole implementation, 25 findings, 16 fixed
 
-- **Readiness could not reach an IPv6 server.** Node 22 resolves `localhost` verbatim; here that is
-  `::1`. Measured: `listen(0,'localhost')` bound `::1`, `http://127.0.0.1:<p>/` was ECONNREFUSED,
-  `http://[::1]:<p>/` answered 200. The harness probed IPv4 only, so a Vite front end could never
-  become ready — it would wait out its full 60s and then stop a healthy server as "failed to
-  start". Both loopback literals are probed now, and **the address that ANSWERED is recorded**,
-  because that URL becomes the origin a browser flow is locked to.
-- **A colourised banner would hide its own port.** picocolors enables colour whenever
-  `platform === 'win32'`, regardless of TTY. `parsePortCandidates` needed digits immediately after
-  `localhost:`, so a banner reading `http://localhost:<ESC>[1m5173<ESC>[22m/` matched nothing.
-  **Honest correction, found later by the fixture:** Vite 6 itself does NOT colourise to a non-TTY
-  here — measured three ways including `FORCE_COLOR=1`. The lens verified picocolors in isolation
-  and inferred Vite's bytes from it. The ANSI strip is therefore **defensive and correct, but it
-  was not a live blocker**; `probe-preview.mjs` asserts the measurement so the claim stays honest
-  if Vite changes.
+One workflow batch of five differentiated read-only lenses (provider/wire under an
+always-thinking compat model; preview/browser under two long-lived servers; plan/review/
+acceptance convergence; setup/checks/consent; staleness and contradictions across docs, metadata
+and in-code prompt text), findings verified BY HAND against the code before any fix — no
+verifier fan-out. Fixed, in four commits:
 
-The other fixes that mattered, all verified against the code first:
+- **`08b978a` the wire.** A compat stream dying with NEITHER `[DONE]` nor a `finish_reason`
+  (proxy/LB idle half-close) was silently committed as a completed turn — a truncated sentence
+  became the model's "final" answer. It now throws a non-retryable typed server error (part of
+  the stream was consumed; a replay would double-bill). Consecutive USER messages now coalesce at
+  the compat wire (the crash-resume shape; only Anthropic coalesced, while the runTurn comment
+  claimed all did). Elision no longer double-weighs compat reasoning blocks (`text` is a display
+  copy equal to `payload` there — the doubled weight could fire the "history still exceeds the
+  context target" alarm at half the real volume). Rate-limit 429s get a deeper default retry
+  budget (4; a throttle is EXPECTED to clear, and kimi Tier 0 is 3 req/min) while an explicit
+  `retries` stays verbatim.
+- **`b01ab86` the preview/browser truth.** A transiently FAILED browser probe was cached for the
+  whole session — every later flow became the gate-WAIVING `unsupported/precondition`, so
+  acceptance could reach COMPLETE without the UI ever driven; `cacheSuccessfulProbe` caches
+  success only. Over-budget screenshots dropped silently (now `screenshotsOmitted` + a
+  do-not-cite output line). A harness lifecycle stop (TTL/log-cap/stop) between approval and a
+  flow read as `preview-died`→runtime-process — repairs hunted a crash that never happened; the
+  preview tool now exposes `endedReason` and the flow reports `preview-stopped-lifecycle`,
+  routed to `timeout-resource`. `preview status` surfaces a PREVIOUS-life registry survivor of
+  the same session id (it was invisible in both lists exactly while it held the port Vite
+  strictPort needs), and the resume note names the stop-it-first way out. The preview tool's
+  nothing-was-gated drift refusal got the honest split its siblings already had.
+- **`7a36525` every prescribed cure must be a call the harness allows.** With no qualifying
+  review round and the round cap spent, the requirement blocker prescribed a reviewer group
+  delegate REFUSES — `MAX_REVIEW_ROUNDS` now lives in `review/ledger.ts` (delegate re-exports
+  it) and the blocker hands the exits to the USER once the cap is spent. The e933677 carve-out's
+  BOUND-but-dead variant (reviewer child ended failed/cancelled/interrupted, requirement
+  satisfied by a sibling round, cap spent) is now a caveat; while rounds remain it still blocks.
+  `planApprovalReminder` fires after ERROR-ended turns and once at resume startup. `update_plan`
+  names the COMPLETED tasks an amendment re-opens. `validatePlanGraph` warns when gate kind
+  `browser` rides multi-project `gates.projects` (EACH-of demands a flow against EACH project's
+  own preview, including non-UI ones).
+- **`306907e` say what is true.** migrate/seed blocked only by missing `node_modules` records
+  `precondition-curable`, not a false `no-recipe` capability claim; `agent help` interpolates
+  `DEFAULT_MAX_STEPS` (it said 20; the default is 40); REPL `/help` no longer claims "shell
+  commands always ask" (false since S5's sandboxed auto-run); README's capability section
+  matches the 5-file install consent identity; the CI comment and bug-template placeholder
+  updated; `policy/engine`'s purity doc states its one real exception (run_check's `planTouches`
+  reads the plan document at decide — mechanism gap recorded below, not papered over).
 
-- **A project-scoped `browser` gate was permanently unsatisfiable AND unwaivable.** `browser_flow`
-  recorded no `projectId` while every S16 gate consumer folds a missing one to the root, and
-  `run_check` cannot produce kind `browser` at all — a dead end at `/accept` with no exit but
-  amending the plan or `/accept confirm`. **Live-confirmed unplanned:** take 1's model wrote
-  exactly that plan (`project: web`, `checks: [typecheck, test, browser]`).
-- **With TWO previews ready, an unbound flow was DENIED** with "start one with the preview tool
-  first" — in precisely the shape S16 raised `MAX_CONCURRENT_PREVIEWS` to enable, and whose most
-  plausible reading is to start a third. The fact now carries the ready set so the denial names
-  them; and because an unbound flow still binds to whatever single preview is ready (which can
-  legitimately be the API), the result now says what it drove.
-- **"Dependencies are not installed" WAIVED a user-approved gate.** True before S16, when the
-  harness could not install anything; `project_setup install` makes it a transient state with a
-  named cure. A session that installed `api` and forgot `web` could be accepted as COMPLETE with
-  its own caveat claiming a project shipping a build and a test suite *cannot* run them. New
-  additive `precondition-curable` keeps the gate PENDING; old events keep the permissive reading.
-- **The first check / preview / migrate after an install was always refused** with "the project
-  changed after this call was approved" — for a call nobody approved and a project nobody changed.
-  The three tools held independent detection snapshots. One `SharedWorkspace` now backs all three;
-  the window the private copies protected does not exist (tool calls execute strictly one at a
-  time), and the never-gated case gets its own honest message.
-- **CHECKED had no project axis** — a green `build` in `web/` marked an `api/` file CHECKED in the
-  report *and* `/diff`. Passing evidence now carries its scope (a check's unit, a command's cwd)
-  and the correlation requires containment; `'.'` still covers everything.
-- **A boundary gate discarded WHICH project was unsatisfied**, so `/accept` suggested a
-  `run_check` a multi-project workspace refuses as ambiguous — a loop that cannot converge.
-- **The user-facing plan view omitted `project` and `gates.projects`** — the document whose sha the
-  approval binds could not distinguish "both halves" from "any one half".
-- **`update_plan` never warned** about the unscoped-gate reading that produces a false green, and
-  scolded a correct `./api` for naming a project that does not exist (raw string comparison),
-  pushing the model toward dropping scoping altogether.
-- **Repair proofs were project-filtered only for check/setup failures** — a `preview-startup`
-  failure in `api` could be closed by a green flow against `web`.
-- **An install's consent identity bound only lockfile + package.json + `.npmrc`.** `.pnpmfile.cjs`
-  (a `readPackage` hook) and `.yarnrc.yml` (`yarnPath`) also rewrite what an install executes and
-  are ordinary auto-allowed writes — the S14.5 body-binding lesson, two files over.
+Plus **`3df42e1` the "working" heartbeat**, built FOR this run: kimi-k3 thinks before every reply
+and streams nothing while it does, so the REPL looked frozen for minutes. One dim TTY-only status
+line (`· model working (Ns)`) driven by a render-only `Session.onModelRequest` seam, drawn only
+while a request is in flight with no text streamed, erased synchronously before the first stdout
+byte (the status area's no-interleaving invariant holds), zero bytes off-TTY.
 
-Plus: `run_command`'s `cwd` refused for protected directories (`.git` and the state dir are
-protected as PLACES, not only as write targets); a preview dying DURING a browser step re-checked
-for liveness so a dead server stops reading as a UI defect; `/checks` showing an interrupted setup
-as NO VERDICT; and the system-prompt project block labelled AS OBSERVED AT SESSION START, because
-it is a cached prefix that goes stale by design in a session whose purpose is to install things.
+### The live E2E — takes three and four (Kimi K3)
 
-### The defect only a live run could find
+**Take 3 stopped on a real harness gap, found live.** Kimi serialized `update_plan`'s nested
+`plan` object as a STRING, and fed the zod "expected object, received string" error it cycled
+YAML, single-quoted JSON, XML-ish tags and entry-pair arrays for twelve minutes — no plan could
+ever be written. Fixed the same hour (**`5ffb7c4`**): a narrow one-level tolerant decode at the
+runtime's input-parse choke — fires only after the schema rejected the input, only at
+`invalid_type` paths expecting object/array where a string sits, accepts only a string that
+itself `JSON.parse`s to a structure, re-validates once, and otherwise keeps the original error
+plus a plain-language hint naming the stringified path. The recorded `tool.requested` and the
+wire history keep the model's original bytes; policy and execution see the decoded input.
+Pinned end to end.
 
-Take 1 ran the whole arc and was discarded, and it was worth its cost.
+**Take 4 is the complete arc — 84.6 minutes, EXIT=0, then `validate.mjs` 38/38.** One request →
+investigation → a 13.8 KB task graph (the first write succeeded one attempt after the hint) →
+user revision → amendment → `/plan approve` → installs ×2 through `project_setup` (`npm ci` from
+each lockfile) → `.env` → migrate → seed → per-project checks including the lint kind resolving
+only in `api` → the parallel executor wave (two worktree children bound to plan tasks, captured,
+applied, zero refusals) → post-integration re-checks green in both projects → **two dev servers
+at once under harness management** (`127.0.0.1:3001` and `[::1]:5173` — the IPv6 case) → **three
+passing project-attributed browser flows** (17/17, 20/20, 19/19; D2 proven fixed on camera; one
+flow drove the 409 error path a lens had flagged) → **a three-lens review whose security lens
+recorded the seeded XSS** (fixed in the delivered source; two lenses hit their 8-minute wall
+under kimi's pace — honest `timeout` with captured findings still counted, the round qualifying
+through the completed lens) → `/diff` → **kill + `agent resume <id> --provider kimi` on camera**
+(state intact; post-resume preview restarts first failed honestly on still-held ports, then
+succeeded) → **`/accept` COMPLETE on round 1, no override**, with the e933677 unbound-reviewer
+carve-out firing in production as a caveat → clean `/quit` → the finished app walked through in
+the same recording. 567 events, 43 model turns, 104 tool calls, 21 approvals, 6 session logs,
+3 `input.invalid` denials all recovered within one attempt.
 
-On the first step of the build turn the agent amended its own approved plan. The amendment was
-legitimate. But an amendment invalidates the approval by design, and an unapproved plan blocks
-every executor spawn — so the two tasks the user had explicitly asked for "as two parallel isolated
-tasks" silently became unspawnable. The agent did all of that work serially in the main session
-instead, and the human found out ten minutes later when `/accept` refused for the fourth time.
-
-The harness was not dishonest here. It said so in the `update_plan` result and again in the
-standing plan note, every turn. It said so **to the model**, which cannot type `/plan approve`.
-The gap is narrower and worse: **the one blocker only the USER can clear was the one thing never
-said to the user.**
-
-`planApprovalReminder` now prints one undimmed end-of-turn line naming the blocked tasks and the
-command that clears them — and only when an approval EXISTED and no longer covers the plan. The
-first version fired on every freshly written plan, which is the ordinary state; take 2 showed that
-within minutes, and it was narrowed. `update_plan` now tells the model to stop and ask rather than
-absorb the work, and says plainly that amending an approved plan to record PROGRESS buys nothing
-(execution state is an event fold) and costs the approval mid-build.
+Recording chain: `edit.mjs`'s first live render found its own bug — ffmpeg 8 rejects the old
+`C\\:` subtitle-path escaping (measured: `'C\:/path'` parses; fixed and commented). The
+polished MP4 (~5 min, burned-in narration subtitles, ×N badges on accelerated stretches,
+`narration.json` for a later voice mix) lives at `agent-cli-s165-live/agent-cli-depot-demo.mp4`;
+evidence and honest limitations in `agent-cli-s165-live/DEMO.md`.
 
 ### Verification evidence
 
-`npm run typecheck` + `npm run build` clean per commit; suite **1322 → 1340** across 95 files.
-`test/live-e2e-blockers.test.ts` pins all of it together — the ANSI strip against a real
-colourised banner, an IPv6-only listener, the curable precondition in both the gate and the
-resolver, the browser `projectId` unblocking a project-scoped gate, the two-preview denial naming
-what runs, CHECKED refusing to cross a project boundary, per-scope gate detail, the unscoped-gate
-warning, the install identity moving on a `.pnpmfile.cjs` write, `cwd` refusing protected
-directories, the shared snapshot, and the re-approval reminder through the real readers.
-
-**Fixture (`C:\Users\A\Desktop\agent-cli-s165-live\`) — "Depot":** two INDEPENDENT packages, no
-root manifest, two lockfiles, shipping with no `node_modules`, no `.env` and no database.
-`api/` Express + TypeScript + `node:sqlite` with migrate/seed; `web/` Vite + React. Three seeded
-defects, each reachable by exactly one capability. `probe-fixture.mjs`: **10/10** — D1 fails the
-api unit test and nothing else sees it; D2 is invisible to unit tests, real in a browser, and the
-API genuinely applied the change; D3 renders and only a review lens reads it.
-
-**`probe-preview.mjs`: 14/14 against the REAL dev servers** — both units discovered in
-deterministic order, unit-qualified recipe ids, the API ready at `127.0.0.1:3001`, **the web app
-ready at `[::1]:5173`** (an IPv4-only probe could never have reached it), the shipped parser
-finding the announced port, Vite measured as NOT colourising here, and `stop()` reaping both
-servers with no leftover listeners.
-
-**`validation/smoke-chain.mjs`: 18/18** — the mechanical chain (ports free, the `agent` shim on the
-fresh dist, prompt detection, trust, session-id capture, kill-by-CommandLine, resume).
-
-### The live E2E — PARTIAL, and stopped by an external limit
-
-**The Anthropic API credit balance was exhausted mid-take-2.** The identical 400 is recorded in
-three logs — the parent session and both executor children:
-`"Your credit balance is too low to access the Anthropic API."` Nothing in this repository caused
-it and nothing in it can clear it.
-
-**What the two takes DID prove live**, from persisted evidence:
-
-- One natural-language request → investigation → a task graph naming each task's project, with
-  `gates: {completion: [test, typecheck, build], projects: [api, web]}` — the per-project scoping
-  S16 built and S16.5 made warn-able.
-- `project_setup` installing **both** projects from their own lockfiles, then migrating and seeding
-  a real SQLite database: four setup events, all `ok`, none ever readable as verification.
-- Per-project typed checks: `test/api=fail` (the seeded D1, correctly failing), `typecheck/api`,
-  `test/web`, `typecheck/web` all passing, and `test/api=pass` after the fix.
-- `.env` written for both projects from their `.env.example`.
-- **The parallel executor wave spawning**: two executors in isolated worktrees, changes captured,
-  worktrees removed.
-- `/accept` refusing, repeatedly and correctly, with an honest unfinished list.
-- The take-1 fix working on camera in take 2: the harness asked for re-approval, the user gave it,
-  the run continued.
-
-**What is NOT proven and must not be claimed:** two dev servers running simultaneously *inside the
-agent loop*; a browser flow over the integrated stack catching D2; a review lens catching D3;
-`/accept` reaching COMPLETE; and therefore no recorded video. The preview half of that list is
-separately live-proven **outside** the loop by `probe-preview.mjs`, which is not the same thing and
-is not presented as if it were.
+`npm run typecheck` + `npm run build` clean per commit; suite **1342 → 1366** (1355 passed + 11
+skipped) across 96 files. New pins: the stream-end guard, compat user-message coalescing, the
+reasoning display-copy weight, the kind-aware retry budget, `cacheSuccessfulProbe`, screenshot
+omission accounting, `preview-stopped-lifecycle` classification, the previous-life status line,
+the nothing-gated preview refusal, the cap-aware review blocker (both directions), the
+bound-but-dead reviewer caveat (both directions), the reopened-completed-tasks warning, the
+browser×projects gate warning, the curable setup reason, the heartbeat (5 tests incl. the
+zero-bytes-off-TTY pin), and the tolerant decode (6 tests incl. the end-to-end loop pin).
+Live: take 4's own event log, validated post hoc **38/38**.
 
 ### Decisions (and why)
 
-- **An uninstalled project is unverified, not unverifiable.** The waiver rule is about what a
-  project CAN do, and S16 changed what the harness can do about it. A reason with a named cure is
-  a different answer from a capability gap.
-- **Probe both loopback families, record the one that answered.** The recorded URL is not
-  cosmetic — it becomes a browser flow's origin lock, so it has to be an address that was proven
-  to answer rather than the one we tried first.
-- **A shared session snapshot beats three private ones.** The isolation the private copies bought
-  was never real (calls are strictly serialized) and it cost a false refusal at the busiest moment
-  of a run.
-- **Tell the human the thing only the human can fix.** Every other harness message is aimed at the
-  model because the model is the actor. A blocked approval is the exception, and the exception had
-  been missed.
-- **A warning that fires in the ordinary case is not a warning.** Narrowing the reminder mattered
-  as much as adding it.
-- **Say which half of the claim is proven.** `probe-preview.mjs` proves the preview substrate
-  against real servers; it does not prove the agent loop drives it. Both sentences are in the docs.
+- **A tolerant decode is not intent-guessing.** The adapter already JSON-decodes the arguments
+  once; decoding an unambiguous nested string ONE more level against the schema that rejected it
+  is the same operation, bounded — and the alternative was a model provably unable to converge on
+  the error text alone. Everything else (YAML, quasi-JSON) still fails, now with a hint written
+  for the model that failed.
+- **Cache probe SUCCESS, never failure.** A cached failure silently converted "the machine was
+  busy for 30 seconds" into "this session cannot produce browser evidence", and that conversion
+  was gate-waiving. Seconds of re-probing can never cost honesty.
+- **A blocker must name a cure the harness will allow.** Third occurrence of the class (S16.5a
+  found two); the fold now knows the round cap so its guidance and delegate's refusals can never
+  disagree about what is possible.
+- **`MAX_REVIEW_ROUNDS` belongs to the fold.** The pure derivation adapts its own blocker text;
+  the tool re-exports the constant. Knowledge lives where the decision is derived.
+- **A display copy must not weigh.** `text` on reasoning blocks is contractually never re-sent;
+  charging it doubled every compat block and made context-health reporting false in exactly the
+  long sessions where the report matters.
+- **Validator assertions are session-scoped.** "Zero commits" means zero SINCE the session
+  started; ref hygiene means THIS session's refs. Environment history (fixture upgrades, archived
+  takes) must not be able to fail a run that behaved perfectly.
+- **The reviewer-budget philosophy held under a slower model.** Two lenses timed out but their
+  captures counted and the round qualified — the S14.5 capture-before-completion design is what
+  made a slow always-thinking reviewer usable at all.
 
 ### Open issues / boundaries
 
-- **The live E2E is unfinished for want of API credit.** Resuming needs only credits: reset the
-  fixture (`cd ws && git reset --hard && git clean -xdf`), `smoke-chain.mjs`, then `run-demo.cmd`
-  via `schtasks`. The harness, fixture, driver, recorder, subtitle pipeline and validator are all
-  built and rehearsed.
-- **No demo video exists yet.** `validation/edit.mjs` + `narration.mjs` are written (segment table,
-  raw→output time mapping, burned-in ASS subtitles, `narration.json` emitted for later audio
-  alignment) but have never run against a real recording.
-- **Recorded, deliberately not fixed:** in an npm-workspaces-root shape (root lockfile, child
-  manifests) a per-unit install resolves an unpinned `npm install` inside the child, fragmenting
-  hoisting while the prompt says "versions are NOT pinned" in a repo whose versions are pinned at
-  the root. Real, outside this fixture's shape, and needs a design decision (a declared workspace
-  member should install at its root). The macOS `caseFold` no-op is likewise recorded, on an
-  unexercised platform.
-- The two takes' evidence is kept at `agent-cli-s165-live/` (`take1-failed.log`,
-  `take1-marks.json`, `demo-run.log`, `state/`) and summarized in `DEMO.md`.
+- **Multi-kind `run_check` batches re-probe drift once, before the first spawn** — a
+  workspace-authored script run by an earlier kind could rewrite a later kind's body within one
+  approved batch (cannot fire on Depot; consent-fidelity gap on the S14.5 axis). Deferred with
+  design intent: per-iteration re-probe.
+- **`planTouches` purity exception**: run_check's fact reads the plan document at decide and the
+  plan file is outside the drift stamps (documented in `policy/engine.ts`; the window is an open
+  approval prompt). Likely shape: stamp the plan file into the drift probe.
+- **Resume identity is flags>config>default, not sticky.** A bare `agent resume` of a kimi
+  session resumes on the default provider — recorded and surfaced honestly, but the least
+  surprising default would be the session's own identity, with flags overriding. The driver
+  passes the flag explicitly; a design decision for later.
+- **Reviewer wall-clock vs always-thinking models**: two of three kimi lenses hit the 8-minute
+  wall. Budgets are harness-fixed by design; a per-provider budget scale is a possible follow-up.
+- Kimi occasionally stringifies OTHER structured arguments too (one `review` triage call denied
+  and recovered in take 4) — covered by the same decode+hint, worth watching.
+- Carried from S16, still true: npm-workspaces-root per-unit installs fragment hoisting
+  (design decision pending); macOS `caseFold` no-op on an unexercised platform; yarn implemented
+  from documentation, unit-tested only.
+- Take evidence: `take1-failed.log`/`take1-marks.json`, `take2-state/` + `take2-partial.log`,
+  `take3-format-churn.log`, and take 4's full `state/` + recording, all under
+  `agent-cli-s165-live/`.
 
 ### Recommended next step
 
-Add API credit and finish the take — it is the only thing standing between v1.2.1 and the claim
-S16 has been carrying since it shipped. Then Session 17 (documents/PDF pack) per BLUEPRINT.
-
----
-
-## Session 16 (2026-07-31) — Real local software engineering: project units
-
-### Objective
-
-Per BLUEPRINT S16: make the coding workflow dependable for realistic local applications — several
-projects in one workspace, lockfile-aware dependency installation, environment configuration,
-migrations and seed data, multiple simultaneous services, and verification scoped to the project
-it actually verified. Plus an audit of every task, tool-call, token, time, output, verification,
-recovery and supervision limit, raising the ones that would stop legitimate work.
-
-### The gap, stated from repository evidence
-
-Every live proof through v1.1 (Pulse, QuickBoard, LedgerLite) was a single-package,
-dependency-free fixture. `detectProject(root)` read only root-level manifests, so a repository
-holding `web/` and `api/` with no root manifest detected `kinds: []`: every check kind
-`unsupported`, no preview-capable script, `availableKinds()` empty so every declared gate warned
-unrunnable. The workflow did not fail loudly on a realistic project — it went **inert**. Three
-spawn sites hardcoded the workspace root as cwd (the event schema already carried `cwd`; only the
-producers lied), `MAX_CONCURRENT_PREVIEWS = 2` made a frontend plus a backend impossible, and
-there was no install path at all — `recovery/catalogue.ts` could only say "ask the user".
-
-### What was implemented (commits `0b7aff1` … `6f2a55e`)
-
-1. **`feat(checks,tools,policy)`** — project UNITS: bounded, never-throwing discovery (declared
-   workspaces + a general depth-1 scan + conventional containers), deterministic ordering,
-   unit-qualified recipe ids, per-unit cwd, `projectId` on check events, ambiguity refusing.
-2. **`feat(preview,tools)`** — per-unit previews: a frontend and a backend at once.
-3. **`feat(setup,policy,types)`** — `project_setup` (install / migrate / seed): lockfile-driven
-   install resolution, two different consent answers, `setup.*` events.
-4. **`feat(report,repl,recovery,runtime)`** — setup evidence everywhere, as WORK and never as
-   verification.
-5. **`feat(plan)`** — `PlanTask.project` and `gates.projects`, both sha-neutral when absent.
-6. **`feat(tools,workspace,cli,report)`** — `run_command` cwd, ONE detection per session, project
-   facts in the system prompt, and secret-named file contents withheld from the session diff.
-7. **`chore(limits)`** — the audited bound increases, asserted as one visible contract.
-8. **`fix(setup,checks,plan,recovery)`** — the adversarial-review findings (below).
-
-### Decisions (and why)
-
-- **Setup is not verification, structurally.** New event types rather than a widened `check.*`,
-  because `collectPassingEvidence` marks a file CHECKED on a zero exit, plan gates count a passing
-  kind as verification, and the repair ledger accepts one as proof. An install exiting 0 means
-  dependencies were fetched. A paired test now asserts the asymmetry directly: same file, same
-  zero exit, same ordering — CHECKED via `check.completed`, UNCHECKED via `setup.completed`.
-- **An install's "body" is three files.** The lockfile decides versions, package.json's lifecycle
-  scripts decide what runs, `.npmrc` decides the registry and the shell. Binding only the first was
-  the session's critical review finding.
-- **Ambiguity refuses; it never picks** — including when a root unit exists, because a container
-  root resolves most kinds to `unsupported`, and that reason WAIVES a gate.
-- **The root unit is never qualified.** Single-project workspaces keep byte-identical recipe ids,
-  grants, evidence and tests; qualification appears only where the ambiguity it resolves exists.
-- **Scale bounds were raised; repetition bounds were not.** A looser loop bound buys more looping,
-  never more capability. `test/limits.test.ts` records both categories with the reasoning.
-
-### The adversarial review — 4 lenses, 4 critical/high findings, all fixed
-
-One bounded batch (detection determinism; consent and authority; evidence, resume and gates;
-integration and test quality), every finding hand-verified before any fix. The four that mattered
-were all a Session-16 change re-opening a hole an earlier session had closed, one axis over:
-
-- **An install `[s]` was standing arbitrary-shell consent.** Approve `npm ci` once; add a
-  `preinstall` to package.json through an ordinary auto-allowed write (dependencies untouched, so
-  the lockfile is unchanged); call install again — key matches, no prompt, arbitrary shell.
-- **A monorepo root silently WAIVED declared gates**, so a full-stack session could be accepted as
-  COMPLETE with zero tests run, its evidence claiming the project cannot be tested.
-- **A repair could be "proven" by a green check in another project** — the S14.5 unrelated-green-
-  check hole on the project axis, missed by the `scopePaths` guard because `build` is not
-  scope-bearing.
-- **A plan could be stranded with no exit**: a task scoped to a nonexistent project can never pass
-  AND can never be waived.
-
-Also fixed: a dead `(project_setup, external)` grant that was still being STORED (the prompt hid
-`[s]`, the storage site had not been told); the resolver's "NO LOCKFILE — versions are NOT pinned"
-sentence computed and never shown; discovery non-determinism (200 raw dirents capped over an
-unsorted readdir); a stale `package-lock.json` composing `npm ci` for a pnpm project; a column-0
-comment truncating a pnpm `packages:` block while suppressing its own note; duplicate units on
-case-insensitive filesystems; a symlinked workspace entry resolving outside the workspace.
-
-The review also named the session's least-tested claims, and all three are now pinned:
-`project_setup` was attached in exactly one line of `assemble.ts` and deleting it left every test
-green; the shared-detection wiring was unobservable; the supervision stall fix had no test at all.
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite **1164 → 1322 passed / 11 skipped
-across 94 files** (+158). New pins cover unit discovery and its refusals, per-unit consent
-disjointness (an `[s]` for `api` does not cover `web`, including two units with byte-identical
-lockfiles), the install identity revoking on a package.json rewrite, the whole install resolution
-table including both yarn dialects and the refusal to guess, plan-sha stability asserted against
-the literal pre-S16 canonical form, `gates.projects` EACH-of semantics, the setup/verification
-asymmetry, the assembly seam, and the limits table as a contract.
-
-**Live proof — PARTIAL, and stated as such.** A real two-package fixture ("Roster":
-`api/` Express + TypeScript + `node:sqlite` with migrate/seed scripts, `web/` Vite + React, three
-seeded defects) was generated at `C:\Users\A\Desktop\agent-cli-s16-live\`, installed for real
-(`npm install`, 136 packages in api), and its seeded unit-test defect confirmed failing. The BUILT
-harness was then driven against it: **21/21 assertions** — two units discovered in deterministic
-order, the root correctly not a unit, an unnamed call refusing, per-unit runnable kinds, unit-
-qualified recipe ids with per-unit cwd, the same `npm run test` string in both projects yielding
-DIFFERENT replay-consent identities, lockfile-driven `npm ci`, migrate/seed resolving each
-project's own script, migrate never replayable, and a package.json rewrite revoking an install's
-`[s]` — the critical review finding, verified against a real project.
-
-**What was NOT proven live, and must not be claimed:** the full agent loop against a live model on
-this fixture (no scripted piped-REPL session was run), a real `npm ci` executed *through*
-`project_setup` with a real approval, two dev servers running simultaneously under harness
-management, a browser flow catching the integrated date defect, and a review lens catching the
-seeded XSS. The resolution layer is live-proven; the end-to-end workflow on a dependency-bearing
-project is not yet.
-
-### Open issues / boundaries (deliberate, documented)
-
-- **yarn is implemented from documentation and unit-tested only** — yarn is not installed on this
-  machine. npm is live-exercised; pnpm 11.1.3 is present but its install path was not run.
-- **External database servers, Docker and container orchestration remain out of scope.** S16
-  supports file-backed local databases and project-declared migrate/seed scripts.
-- **Executors still cannot verify their own work** (worktrees materialise without `node_modules`);
-  parent-only verification after apply remains the contract.
-- A graph gate without `gates.projects` is satisfied by ANY project — the agent plan view says so
-  verbatim; the user-facing plan view does not yet (review finding #3, not fixed).
-- The report's CHECKED correlation is temporal and has no project axis, so in a multi-project
-  session a file can be marked CHECKED by another project's passing check. In-contract as written,
-  but the contract is weaker than it reads.
-- `/preview` in the REPL does not label previews with their project (the tool's own `status` does).
-
-### Recommended next step
-
-Run the full live E2E on the Roster fixture before advertising the workflow: a scripted piped-REPL
-session through install → `.env` → migrate → seed → executor wave → per-project checks → two
-simultaneous previews → browser flow → review round → `/accept`, plus a resume-after-kill life for
-the interrupted-setup replay. Then Session 17 (documents/PDF pack) per BLUEPRINT.
+Session 17 per BLUEPRINT: the first non-coding workflow pack (documents/PDF), now standing on a
+live-proven full-stack coding workflow.
 
 ---
 
@@ -348,6 +208,32 @@ the interrupted-setup replay. Then Session 17 (documents/PDF pack) per BLUEPRINT
 
 Contract detail lives in `ARCHITECTURE.md`; entries keep the objective, lasting decisions, the
 evidence, and what stayed open.
+
+### Session 16 (2026-07-31) — Real local software engineering: project units
+
+The coding workflow made dependable for realistic local applications (commits `0b7aff1`…
+`6f2a55e`; suite 1164→1322). Before it, a repository holding `web/` and `api/` with no root
+manifest detected NOTHING — every check kind `unsupported`, no preview script, every gate
+unrunnable: the workflow went inert, not loud. Landed: project UNITS (bounded never-throwing
+discovery — declared workspaces + a general depth-1 scan + conventional containers; a unit
+exists only where a MANIFEST exists; unglossed globs are refused with a reason); deterministic
+ordering because unit ids qualify recipe ids and recipe ids are what consent binds to (the root
+unit is never qualified, so single-project workspaces keep byte-identical grants); `selectUnit`
+refuses ambiguity, never picks; per-unit checks/previews with per-unit cwd and `projectId` on
+check events; `project_setup` (install/migrate/seed) — the model names an INTENT and a UNIT, the
+harness names the command from the LOCKFILE, installs may replay under `[s]` bound to
+`sha(lockfile + package.json + install-affecting config files)` while migrate/seed ask EVERY time
+(not idempotent; destructive is structurally non-grantable); `setup.*` as NEW event types that can
+never satisfy a verification gate (an install exiting 0 means dependencies were fetched — the
+paired asymmetry test is the contract); `PlanTask.project` + `gates.projects` (sha-neutral when
+absent); `run_command` cwd; ONE detection per session feeding the system prompt; secret-named
+contents withheld from the session diff; the audited limits table (scale bounds raised, repetition
+bounds deliberately not). Its four-lens review found four critical/high holes — each an S16 change
+re-opening an earlier session's closed hole one axis over (an install `[s]` as standing shell
+consent via a package.json rewrite; a monorepo root silently waiving gates; a repair proven by
+another project's green; a plan strandable on a nonexistent project) — all fixed and pinned.
+Live proof of the RESOLUTION layer: 21/21 against a real two-package fixture. The end-to-end
+agent run it owed was delivered by Session 16.5.
 
 ### Session 15 (2026-07-29/30) — V1.1: the multi-provider runtime
 
@@ -603,14 +489,20 @@ merely resolved state root (so a state dir inside the workspace could evade the 
 spelled as an 8.3 short path or through a symlink), and a test whose premise silently broke when
 cwd and TEMP sit on different drives.
 
-**Provider/model (new, S15):** surface `Usage.reasoningTokens` in the report and `/status` (it is
-recorded on `assistant.message` but no reader folds it yet); a live reasoning
-render channel (deltas are captured for round-trip but never displayed, so an always-thinking model
-looks paused); reasoning-payload spill-to-blob if event logs grow uncomfortable; strict-schema
-transformation for OpenAI/Kimi strict tool mode (currently `strict:false` — zod-derived draft-7
-schemas are not strict-compatible); per-role model tiers (a cheap explorer model); exposing
-Anthropic `output_config.effort` / reasoning-effort controls per provider; `undici` 8 and `diff` 9
-majors (deferred deliberately — proxy dispatcher and patch API need live verification).
+**Provider/model (new, S15; amended S16.5):** surface `Usage.reasoningTokens` in the report and
+`/status` (recorded on `assistant.message`; no reader folds it yet); a live reasoning render
+channel — the S16.5 heartbeat covers the frozen-screen half; the CONTENT half (streaming the
+reasoning text dim) remains open; reasoning-payload spill-to-blob if event logs grow
+uncomfortable; strict-schema transformation for OpenAI/Kimi strict tool mode (currently
+`strict:false` — the S16.5 tolerant decode handles the observed double-encoding, but strict mode
+would prevent it at the source); resume identity stickiness (a bare `agent resume` of a kimi
+session resumes on the default provider — recorded honestly, but the least-surprising default is
+the session's own identity, flags overriding); per-provider reviewer/executor budget scale (two
+of three kimi lenses hit the 8-minute wall; budgets stay harness-fixed, but a slow
+always-thinking model may deserve a scaled wall); per-role model tiers (a cheap explorer model);
+exposing Anthropic `output_config.effort` / reasoning-effort controls per provider; `undici` 8
+and `diff` 9 majors (deferred deliberately — proxy dispatcher and patch API need live
+verification).
 
 **Kernel/runtime:** `pause_turn` is mapped but the loop would end the turn; per-action / `--to` /
 `--steps` undo; conversation rewind; session
@@ -634,7 +526,11 @@ ever bites.
 languages as data-shaped table additions; a user config knob for the map budget; a post-group
 child read-set overlap metric; retrieval-aware journal topics.
 
-**Verification/recovery:** a `session`-targeted escalation has no harness-derived resolution (a
+**Verification/recovery (amended S16.5):** multi-kind `run_check` batches re-probe drift once,
+before the first spawn — a workspace-authored script run by an earlier kind could rewrite a later
+kind's body within one approved batch (per-iteration re-probe is the likely shape); run_check's
+`planTouches` fact reads the plan document at decide and the plan file is outside the drift
+stamps (stamp it in); a `session`-targeted escalation has no harness-derived resolution (a
 user-side dismissal recorded as an event is the likely shape); per-task gates are unit-tested only,
 since a plan of all-`main` tasks cannot declare them; executors cannot self-verify (parent-only
 `run_check`, because a worktree lacks gitignored deps); more ecosystems as data-shaped recipe rows;
