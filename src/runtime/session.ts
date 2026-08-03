@@ -39,6 +39,7 @@ import type { Approver, ExecSandbox, ResolvedCheckFact, SetupEvidence } from '..
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
+import { coerceStringifiedInput } from './input-coerce.js';
 import { elideHistory, type ElisionOptions } from './elision.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { DIFF_MAX_BYTES, isProbablyBinary, lineDiffStat } from '../shared/diff.js';
@@ -677,10 +678,25 @@ async function executeCall(
     return { toolResult: toolResultBlock(callId, message, true), denied: false, stop: false };
   }
 
-  const parsed = tool.schema.safeParse(tu.input);
+  let parsed = tool.schema.safeParse(tu.input);
+  let coerceHint: string | undefined;
+  if (!parsed.success) {
+    // One-level tolerant decode for double-encoded arguments (S16.5b, found live: kimi-k3
+    // serialized the nested `plan` object and then cycled formats against the schema error for
+    // twelve minutes). The decode is narrow and deterministic (see input-coerce.ts); the
+    // recorded tool.requested and the wire history keep the model's ORIGINAL bytes, and the
+    // normalized input is what both policy and execution see — the same thing the human is
+    // shown at an approval prompt.
+    const c = coerceStringifiedInput(tu.input, parsed.error);
+    coerceHint = c.hint;
+    if (c.data !== undefined) {
+      const second = tool.schema.safeParse(c.data);
+      if (second.success) parsed = second;
+    }
+  }
   if (!parsed.success) {
     session.log.append({ type: 'policy.decision', callId, classification: 'observe', decision: 'deny', rule: 'input.invalid', reason: 'input failed schema validation' });
-    const msg = `invalid input: ${parsed.error.message}`;
+    const msg = `invalid input: ${parsed.error.message}${coerceHint !== undefined ? `\n${coerceHint}` : ''}`;
     session.log.append({ type: 'tool.completed', callId, ok: false, outputPreview: msg, durationMs: 0, truncated: false });
     return { toolResult: toolResultBlock(callId, msg, true), denied: false, stop: false };
   }

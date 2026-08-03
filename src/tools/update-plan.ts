@@ -78,6 +78,8 @@ export function createUpdatePlanTool(deps: UpdatePlanDeps): Tool<UpdatePlanInput
   return {
     name: 'update_plan',
     description:
+      'Pass `plan` as a JSON OBJECT — the structure itself as the argument value, NEVER a serialized string ' +
+      '(no JSON-in-a-string, no YAML). ' +
       'Create or replace the structured plan for this session (a task DAG the user reviews and approves with ' +
       '/plan approve). Use it BEFORE implementation of multi-step, cross-cutting, or high-risk work: executor ' +
       'delegation is blocked until the CURRENT plan content is approved. Amending the plan (any semantic change) ' +
