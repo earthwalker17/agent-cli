@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { SETUP_ACTIONS, subagentRoleAccess } from '../types.js';
-import type { ActionClass, MutationPlan, PolicyDecision, ResolvedCheckFact, Tool, ToolContext } from '../types.js';
+import type { ActionClass, ArtifactFact, MutationPlan, PolicyDecision, ResolvedCheckFact, Tool, ToolContext } from '../types.js';
 import { validatePath } from './paths.js';
 import { PathError } from '../shared/errors.js';
 import { caseFold } from '../shared/pathutil.js';
@@ -193,12 +193,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'task.invalid-contract', `delegates() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
+    if (tool.command !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'task.conflicting-contract',
-        'a tool may declare delegation, a shell command, a plan-document write, typed checks, a browser flow, or an evidence read — never a combination',
+        'a tool may declare delegation, a shell command, a plan-document write, typed checks, a browser flow, an evidence read, or a document-artifact operation — never a combination',
       );
     }
     if (delegation.roles.length === 0) {
@@ -247,12 +247,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'plan.invalid-contract', `planDoc() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
+    if (tool.command !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'plan.conflicting-contract',
-        'a tool may declare a plan-document write, a shell command, typed checks, a browser flow, or an evidence read — never a combination',
+        'a tool may declare a plan-document write, a shell command, typed checks, a browser flow, an evidence read, or a document-artifact operation — never a combination',
       );
     }
     if (planDoc.action !== 'update') {
@@ -285,12 +285,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'check.invalid-contract', `check() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'check.conflicting-contract',
-        'a tool may declare typed checks, a shell command, delegation, a plan-document write, a browser flow, or an evidence read — never a combination',
+        'a tool may declare typed checks, a shell command, delegation, a plan-document write, a browser flow, an evidence read, or a document-artifact operation — never a combination',
       );
     }
     if (fact.resolved.length === 0) {
@@ -426,12 +426,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'browser.invalid-contract', `browser() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.evidenceRead !== undefined) {
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'browser.conflicting-contract',
-        'a tool may declare a browser flow, typed checks, a shell command, delegation, a plan-document write, or an evidence read — never a combination',
+        'a tool may declare a browser flow, typed checks, a shell command, delegation, a plan-document write, an evidence read, or a document-artifact operation — never a combination',
       );
     }
     if (!fact.previewBound) {
@@ -479,12 +479,12 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'evidence.invalid-contract', `evidenceRead() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined) {
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.artifact !== undefined) {
       return decision(
         'sensitive',
         'deny',
         'evidence.conflicting-contract',
-        'a tool may declare an evidence read, typed checks, a shell command, delegation, a plan-document write, or a browser flow — never a combination',
+        'a tool may declare an evidence read, typed checks, a shell command, delegation, a plan-document write, a browser flow, or a document-artifact operation — never a combination',
       );
     }
     // An evidence READER must not write: a declared mutation plan (or an undeclarable one)
@@ -514,6 +514,137 @@ export function decide<I>(
       'allow',
       'observe.session-evidence',
       `re-reads image evidence this session recorded (objects/${fact.sha256.slice(0, 12)}…); no workspace or process access`,
+    );
+  }
+
+  // 0f. Document-artifact operation (Session 17) → explicit fail-closed branch, before the
+  //     command branch and every fall-through. Two consequence shapes, neither of which the
+  //     generic branches can describe honestly:
+  //     - 'render' writes workspace artifacts (snapshot-backed like any mutation) AND may launch
+  //       the headless system browser to print the PDF — the mutation branch's "in-workspace
+  //       file change" reason says nothing about a browser, and the engine structurally never
+  //       evaluates readsPaths on a tool with a non-empty mutation plan, so this rule's reason
+  //       states where the spec-referenced reads ARE enforced (at execute).
+  //     - 'inspect' is command-less and mutation-less — the S6 trap with a browser behind it.
+  //       Admission splits on provenance: a document THIS SESSION rendered inherits its render's
+  //       consent (decide admits by path over the in-memory events; execute re-verifies by
+  //       CONTENT sha — the preview-drift pattern); any other workspace document asks, grantable
+  //       (`sensitive` — pixels of arbitrary workspace bytes go to the model through a real
+  //       renderer); outside the workspace denies.
+  if (tool.artifact !== undefined) {
+    let fact: ArtifactFact;
+    try {
+      fact = tool.artifact(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'artifact.invalid-contract', `artifact() threw: ${(e as Error).message}`);
+    }
+    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'artifact.conflicting-contract',
+        'a tool may declare a document-artifact operation, typed checks, a shell command, delegation, a plan-document write, a browser flow, or an evidence read — never a combination',
+      );
+    }
+    let plan: MutationPlan | null;
+    try {
+      plan = tool.mutates(input, ctx);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'artifact.invalid-contract', `mutates() threw: ${(e as Error).message}`);
+    }
+    if (fact.kind === 'render') {
+      const outputs = fact.outputs ?? [];
+      if (outputs.length === 0) {
+        return decision('sensitive', 'deny', 'artifact.no-outputs', 'a render must declare the artifact paths it will write');
+      }
+      // The runtime snapshots from mutates(); a fact/mutates divergence would let a declared
+      // output escape snapshot coverage (or snapshot a path the fact never showed the human).
+      const planPaths = [...(plan?.paths ?? [])].sort();
+      const factPaths = [...outputs].sort();
+      if (plan === null || planPaths.length !== factPaths.length || planPaths.some((p, i) => p !== factPaths[i])) {
+        return decision(
+          'sensitive',
+          'deny',
+          'artifact.inconsistent-contract',
+          'a render must declare the SAME paths through artifact() and mutates() — the snapshot machinery follows mutates()',
+        );
+      }
+      for (const p of outputs) {
+        let v;
+        try {
+          v = validatePath(ctx.workspaceRoot, p, stateOpt);
+        } catch (e) {
+          return denyFromError(e);
+        }
+        if (!v.inWorkspace) {
+          return decision('destructive', 'deny', 'artifact.output-outside-workspace', 'rendering an artifact outside the workspace is not allowed');
+        }
+        if (v.protectedPath) {
+          return decision('destructive', 'deny', 'artifact.output-protected', 'rendering an artifact to a protected path (.git / state dir) is not allowed');
+        }
+      }
+      return decision(
+        'reversible',
+        'allow',
+        'artifact.render',
+        'renders document artifact(s) into the workspace from the session-authored spec (snapshot first, undoable)' +
+          (fact.usesBrowser === true
+            ? '; the PDF prints via the system browser, HEADLESS, loading only harness-generated content with network access blocked'
+            : '') +
+          '; spec-referenced image reads are validated at execute — out-of-workspace and secret-named paths refuse into the validation errors',
+        { requiresSnapshot: true },
+      );
+    }
+    // kind 'inspect'
+    if (fact.path === undefined) {
+      return decision('sensitive', 'deny', 'artifact.invalid-contract', 'an inspect must name the document path it rasterizes');
+    }
+    // An inspector must not write: blobs go to the evidence store through the runtime, never
+    // through a mutation plan this branch did not validate.
+    if (plan === null || plan.paths.length > 0) {
+      return decision('sensitive', 'deny', 'artifact.mutating-contract', 'an inspect tool must declare an empty mutation plan');
+    }
+    let v;
+    try {
+      v = validatePath(ctx.workspaceRoot, fact.path, stateOpt);
+    } catch (e) {
+      return denyFromError(e);
+    }
+    if (!v.inWorkspace) {
+      return decision(
+        'sensitive',
+        'deny',
+        'artifact.inspect-outside-workspace',
+        'page inspection reads workspace documents only; files outside the workspace are not rasterized',
+      );
+    }
+    if (isSecretName(fact.path, ctx.rules?.secretPatterns) || isSecretName(v.resolved, ctx.rules?.secretPatterns)) {
+      // Pixels are not redactable the way text is: a rasterized .env is the secret, verbatim,
+      // in a form the redaction machinery cannot touch. Deny rather than ask-with-redaction.
+      return decision('sensitive', 'deny', 'artifact.inspect-secret-name', 'this file may contain secrets; pixels cannot be redacted, so it is not rasterized');
+    }
+    if (fact.sessionRendered === true) {
+      return decision(
+        'reversible',
+        'allow',
+        'artifact.inspect-session-artifact',
+        'rasterizes pages of an artifact THIS SESSION rendered (consent inherited from the render; content identity re-verified at execute) ' +
+          'in the headless system browser with network access blocked; page images are stored as session evidence and shown to the model',
+        { noUndo: true },
+      );
+    }
+    return applyGrant(
+      decision(
+        'sensitive',
+        'ask',
+        'artifact.inspect-approval-required',
+        'rasterizes pages of a workspace document the harness did NOT produce, in the headless system browser (network access ' +
+          'blocked, script evaluation disabled in the PDF engine); the rendered pixels are shown to the model and stored as ' +
+          'session evidence; a session-scope answer covers further documents this session',
+        { noUndo: true },
+      ),
+      tool,
+      grants,
     );
   }
 

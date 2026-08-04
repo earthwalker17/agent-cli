@@ -679,6 +679,32 @@ export interface ResolvedCheckFact {
   effects: { writesOutputs: boolean; network: boolean; workspaceAuthored: boolean };
 }
 
+/**
+ * The policy-visible shape of one document-artifact operation (Session 17). See `Tool.artifact`
+ * for the two kinds and why each needs its own branch.
+ */
+export interface ArtifactFact {
+  kind: 'render' | 'inspect';
+  /**
+   * 'render' only: the workspace paths this call will write. The engine validates them with the
+   * same containment rule as declared mutations AND cross-checks them against `mutates()` —
+   * the runtime snapshots from `mutates()`, so a divergence between the two would let outputs
+   * escape snapshot coverage; it denies instead.
+   */
+  outputs?: readonly string[];
+  /** 'render' only: whether this call will launch the headless browser (a PDF is requested). */
+  usesBrowser?: boolean;
+  /** 'inspect' only: the document path being rasterized. */
+  path?: string;
+  /**
+   * 'inspect' only: whether `path` names an artifact THIS SESSION rendered (a pure scan of
+   * `artifact.rendered` events by workspace-relative path). Session-rendered artifacts inherit
+   * the render's consent and auto-allow; anything else asks. Execute re-verifies by CONTENT
+   * sha, so a file swapped after the render refuses rather than riding the path claim.
+   */
+  sessionRendered?: boolean;
+}
+
 export interface Tool<I = unknown> {
   name: string;
   /** Sent to the model. */
@@ -763,6 +789,25 @@ export interface Tool<I = unknown> {
    * execute as defense in depth.
    */
   evidenceRead?(input: I): { sha256: string; admitted?: boolean };
+  /**
+   * Declares a DOCUMENT-ARTIFACT operation (Session 17) — the documents workflow pack's two
+   * consequence shapes, each of which would otherwise misclassify:
+   *
+   * - kind 'render': produces DOCX/PDF artifacts in the workspace from a session-authored spec.
+   *   Writing files alone would auto-allow through the mutation branch — but that branch's
+   *   recorded reason ("in-workspace file change") is FALSE for a call that also launches a
+   *   headless browser to print the PDF, and the engine structurally never evaluates
+   *   `readsPaths` on a tool with a non-empty mutation plan, so the spec's image reads MUST be
+   *   (and are) enforced at execute. The fact's own rule says both truths out loud.
+   * - kind 'inspect': rasterizes document pages to pixels in a headless browser. Command-less
+   *   and mutation-less, it would auto-allow as observe — the S6 trap with a browser behind it.
+   *
+   * MUST be pure: `outputs`/`path` come from input, `sessionRendered` from an in-memory event
+   * scan (whether a path-matching `artifact.rendered` exists) — never the filesystem. The tool
+   * re-verifies content identity at execute (the preview-drift pattern): decide-time admission
+   * is a PATH claim, execute compares the file's sha against the recorded artifact.
+   */
+  artifact?(input: I): ArtifactFact;
   /**
    * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
    * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the
