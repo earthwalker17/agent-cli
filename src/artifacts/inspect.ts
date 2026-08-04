@@ -11,7 +11,7 @@ import { firstChild, parseXmlBounded, walkElements } from './xml.js';
 export type DocumentFormat = 'docx' | 'pptx' | 'xlsx' | 'pdf';
 
 export type Identified =
-  | { format: DocumentFormat; zip?: OpenedZip }
+  | { format: DocumentFormat; zip?: OpenedZip | undefined }
   | { format: 'unsupported'; reason: string };
 
 const OOXML_MAIN_TYPES: readonly { format: DocumentFormat; contentType: string }[] = [
@@ -29,7 +29,22 @@ function startsWith(bytes: Uint8Array, prefix: readonly number[]): boolean {
  * Identify a document from its bytes. Returns an OpenedZip alongside OOXML formats so callers
  * do not unzip twice (the bounded unzip is the expensive step).
  */
+/**
+ * Identify a document from its bytes, NEVER throwing: every failure is an `unsupported` verdict
+ * with a reason. Callers sit in tool paths whose typed-failure handling starts after this call.
+ */
 export function identifyDocument(bytes: Uint8Array): Identified {
+  try {
+    return identifyInner(bytes);
+  } catch (err) {
+    return {
+      format: 'unsupported',
+      reason: err instanceof ArtifactError ? err.message : 'the file could not be read as a document container',
+    };
+  }
+}
+
+function identifyInner(bytes: Uint8Array): Identified {
   // %PDF-
   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) return { format: 'pdf' };
 
@@ -58,20 +73,25 @@ export function identifyDocument(bytes: Uint8Array): Identified {
     if (ct === null) {
       return { format: 'unsupported', reason: 'a zip archive without [Content_Types].xml — not an OOXML document' };
     }
-    let doc;
-    try {
-      doc = parseXmlBounded(ct, '[Content_Types].xml');
-    } catch {
-      return { format: 'unsupported', reason: '[Content_Types].xml is not well-formed XML' };
-    }
-    const types = firstChild(doc, 'Types');
-    if (types === null) return { format: 'unsupported', reason: '[Content_Types].xml has no Types root' };
+    // The WALK is inside the guard too, not only the parse: a bounded-depth document can still
+    // exhaust a recursive consumer, and an untyped throw here would kill the turn instead of
+    // refusing the file (measured in the S17 review).
     const declared = new Set<string>();
-    for (const el of walkElements(types)) {
-      if (el.name === 'Override') {
-        const t = el.attributes['ContentType'];
-        if (t !== undefined) declared.add(t);
+    try {
+      const doc = parseXmlBounded(ct, '[Content_Types].xml');
+      const types = firstChild(doc, 'Types');
+      if (types === null) return { format: 'unsupported', reason: '[Content_Types].xml has no Types root' };
+      for (const el of walkElements(types)) {
+        if (el.name === 'Override') {
+          const t = el.attributes['ContentType'];
+          if (t !== undefined) declared.add(t);
+        }
       }
+    } catch (err) {
+      return {
+        format: 'unsupported',
+        reason: `[Content_Types].xml could not be read: ${err instanceof ArtifactError ? err.message : 'malformed or excessively nested XML'}`,
+      };
     }
     for (const { format, contentType } of OOXML_MAIN_TYPES) {
       if (declared.has(contentType)) return { format, zip };

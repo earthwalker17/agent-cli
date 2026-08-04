@@ -110,6 +110,8 @@ export const rasterizePdfPages: Rasterize = async (bytes, pages, probe) => {
             };
             let scale = args.scale;
             let dataUrl = '';
+            let bytesApprox = 0;
+            let renderedScale = scale;
             for (let attempt = 0; attempt < 3; attempt++) {
               const viewport = p.getViewport({ scale });
               const canvas = document.createElement('canvas');
@@ -117,12 +119,24 @@ export const rasterizePdfPages: Rasterize = async (bytes, pages, probe) => {
               canvas.height = Math.ceil(viewport.height);
               await p.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
               dataUrl = canvas.toDataURL('image/png');
-              const bytesApprox = Math.floor((dataUrl.length - 22) * 0.75);
+              renderedScale = scale;
+              bytesApprox = Math.floor((dataUrl.length - 22) * 0.75);
               if (bytesApprox <= args.maxBytes || scale <= 0.75) break;
+              // Compute the NEXT scale, then say what happened only once it has been rendered —
+              // recording a scale that was never rendered (and a re-render that never occurred)
+              // put a false number into the inspection evidence.
               scale = Math.max(0.75, scale * Math.sqrt((args.maxBytes / bytesApprox) * 0.9));
-              out.warnings.push(`page ${pageNo} re-rendered at scale ${scale.toFixed(2)} to fit the per-image byte ceiling`);
+              out.warnings.push(`page ${pageNo} re-rendering at scale ${scale.toFixed(2)} to fit the per-image byte ceiling`);
             }
-            out.pages.push({ page: pageNo, dataUrl, scale });
+            if (bytesApprox > args.maxBytes) {
+              // The ceiling is ENFORCED, not advisory: a page that will not fit even at the
+              // scale floor is dropped with its size, rather than riding every request.
+              out.warnings.push(
+                `page ${pageNo} omitted: ${bytesApprox} bytes still exceeds the ${args.maxBytes}-byte per-image ceiling at the minimum scale`,
+              );
+              continue;
+            }
+            out.pages.push({ page: pageNo, dataUrl, scale: renderedScale });
           }
           await task.destroy().catch(() => undefined);
         } catch (err) {

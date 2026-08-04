@@ -21,12 +21,34 @@ export { XmlDocument, XmlElement, XmlText };
 /** Large enough for real-world document.xml parts; a bound, not a target. */
 export const MAX_XML_CHARS = 32 * 1024 * 1024;
 
+/**
+ * Nesting bound. Real OOXML nests a few dozen levels; a crafted 546-byte part nesting 5000
+ * elements parses fine and then overflows the stack in any recursive consumer — measured as an
+ * untyped RangeError escaping the tool (a killed turn, not a refusal). Checked ITERATIVELY here
+ * so the check itself cannot be the thing that overflows.
+ */
+export const MAX_XML_DEPTH = 256;
+
+function assertDepthBounded(doc: XmlDocument, what: string): void {
+  const stack: { node: XmlDocument | XmlElement; depth: number }[] = [{ node: doc, depth: 0 }];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    if (depth > MAX_XML_DEPTH) {
+      throw new ArtifactError(`${what}: XML nests deeper than ${MAX_XML_DEPTH} levels`, 'xml-bounds');
+    }
+    for (const child of node.children) {
+      if (child instanceof XmlElement) stack.push({ node: child, depth: depth + 1 });
+    }
+  }
+}
+
 export function parseXmlBounded(xml: string, what: string, maxChars = MAX_XML_CHARS): XmlDocument {
   if (xml.length > maxChars) {
     throw new ArtifactError(`${what}: XML exceeds ${maxChars} chars (${xml.length})`, 'xml-bounds');
   }
+  let doc: XmlDocument;
   try {
-    return parseXml(xml);
+    doc = parseXml(xml);
   } catch (err) {
     if (err instanceof XmlError) {
       // Deliberately no `excerpt`: the message may travel further than the file's bytes should.
@@ -34,6 +56,8 @@ export function parseXmlBounded(xml: string, what: string, maxChars = MAX_XML_CH
     }
     throw new ArtifactError(`${what}: XML parse failed: ${err instanceof Error ? err.message : String(err)}`, 'xml-parse');
   }
+  assertDepthBounded(doc, what);
+  return doc;
 }
 
 /** Direct child elements, optionally filtered by (prefixed) name. */

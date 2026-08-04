@@ -287,8 +287,15 @@ export interface BrowserFlowEvidence {
 export interface ArtifactValidation {
   /** 'skipped' = the validator could not run (stated why in summary), never that it passed. */
   status: 'pass' | 'fail' | 'skipped';
-  /** Structural spec↔artifact mismatches, bounded AT EMIT (count + length). */
+  /** Structural mismatches AND layout notes, bounded AT EMIT (count + length). */
   findings: string[];
+  /**
+   * How many of those are structural FAILURES. Carried separately because `findings` is both
+   * bounded and mixed: counting its length told acceptance "4 finding(s)" for one failure plus
+   * three layout notes, and under-reported past the cap — in the one line whose job is stating
+   * the failure honestly (S17 review).
+   */
+  failureCount: number;
   summary: string;
 }
 
@@ -312,6 +319,13 @@ export type ArtifactEvidence =
       specPath: string;
       specSha256: string;
       validation: ArtifactValidation;
+      /**
+       * The spec embedded workspace image files this harness did not produce. It gates the
+       * INSPECT side's inherited consent: rasterizing such an artifact shows the model pixels
+       * of arbitrary workspace bytes — exactly what `artifact.inspect-approval-required` asks
+       * about — so the render's own auto-allow must not launder them (S17 review).
+       */
+      embeddedWorkspaceImages?: true;
       durationMs: number;
     }
   | {
@@ -1422,6 +1436,8 @@ export type EventBody =
       specPath: string;
       specSha256: string;
       validation: ArtifactValidation;
+      /** The spec embedded workspace images; the inspect side must not inherit consent. */
+      embeddedWorkspaceImages?: true;
       durationMs: number;
     }
   /** One rasterization pass (Session 17, additive): page images stored as evidence blobs. */

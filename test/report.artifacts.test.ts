@@ -28,7 +28,7 @@ function rendered(over: Partial<Extract<EventBody, { type: 'artifact.rendered' }
     bytes: 5_000,
     specPath: 'report.docspec.json',
     specSha256: 'd'.repeat(64),
-    validation: { status: 'pass', findings: [], summary: 'parse-back validation passed (0 note(s))' },
+    validation: { status: 'pass', findings: [], failureCount: 0, summary: 'parse-back validation passed (0 note(s))' },
     durationMs: 40,
     ...over,
   } as Extract<EventBody, { type: 'artifact.rendered' }>;
@@ -51,7 +51,7 @@ describe('report: the Document artifacts section', () => {
     const events = [
       ...base(),
       evt(rendered()),
-      evt(rendered({ callId: 'a1', format: 'pdf', path: 'report.pdf', pages: 3, validation: { status: 'fail', findings: ['heading "X" is not findable in the printed text'], summary: 'printed-text validation FAILED: 1 finding(s)' } })),
+      evt(rendered({ callId: 'a1', format: 'pdf', path: 'report.pdf', pages: 3, validation: { status: 'fail', findings: ['heading "X" is not findable in the printed text'], failureCount: 1, summary: 'printed-text validation FAILED: 1 finding(s)' } })),
       evt({
         type: 'artifact.inspected',
         callId: 'a2',
@@ -94,7 +94,7 @@ describe('acceptance: failing artifact validation is a loud caveat, never a bloc
     reset();
     const failing = [
       ...base(),
-      evt(rendered({ validation: { status: 'fail', findings: ['outline mismatch'], summary: 'FAILED' } })),
+      evt(rendered({ validation: { status: 'fail', findings: ['outline mismatch'], failureCount: 1, summary: 'FAILED' } })),
     ];
     const state = computeAcceptance(NO_PLAN, null, failing);
     expect(state.caveats.join('\n')).toContain("artifact 'report.docx'");
@@ -104,7 +104,7 @@ describe('acceptance: failing artifact validation is a loud caveat, never a bloc
     reset();
     const recovered = [
       ...base(),
-      evt(rendered({ validation: { status: 'fail', findings: ['outline mismatch'], summary: 'FAILED' } })),
+      evt(rendered({ validation: { status: 'fail', findings: ['outline mismatch'], failureCount: 1, summary: 'FAILED' } })),
       evt(rendered({ callId: 'a2' })),
     ];
     expect(computeAcceptance(NO_PLAN, null, recovered).caveats.join('\n')).not.toContain("artifact 'report.docx'");

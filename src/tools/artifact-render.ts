@@ -35,15 +35,22 @@ export const RENDERS_PER_SESSION = 20;
 const MAX_SPEC_BYTES = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
-/** Session render budget, rebuilt from events at assembly (distinct rendered callIds — one
- *  call may emit two formats). A call that crashed before any event counts free on resume:
- *  no artifact exists, so the honest ledger has nothing to charge. */
+/**
+ * Session render budget, rebuilt from events at assembly. The live counter charges every call
+ * that gets past validation, so the rebuild counts the same set: distinct callIds that either
+ * produced an artifact OR completed as a render_document call (a browserless PDF-only render
+ * legitimately emits no artifact event — counting only artifacts handed a resumed session its
+ * whole budget back). Deduped by callId: one call may emit two formats.
+ */
 export function renderCapsFromEvents(events: readonly SessionEvent[]): { renders: number } {
-  const callIds = new Set<string>();
+  const renderCallIds = new Set<string>();
+  const charged = new Set<string>();
   for (const e of events) {
-    if (e.type === 'artifact.rendered') callIds.add(e.callId);
+    if (e.type === 'tool.requested' && e.tool === 'render_document') renderCallIds.add(e.callId);
+    else if (e.type === 'artifact.rendered') charged.add(e.callId);
+    else if (e.type === 'tool.completed' && renderCallIds.has(e.callId) && e.ok) charged.add(e.callId);
   }
-  return { renders: callIds.size };
+  return { renders: charged.size };
 }
 
 const BASENAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,78}[A-Za-z0-9]$/;
@@ -125,7 +132,27 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
         return fail(`the session render budget (${RENDERS_PER_SESSION}) is spent; revise within existing artifacts or start a new session`);
       }
 
-      const specAbs = resolveForTool(ctx, input.spec_path);
+      // Execute-time enforcement for the SPEC read itself. The engine's artifact branch returns
+      // before its reads section, so `path.secret-name` (ask + redaction) and the
+      // out-of-workspace ask never fire for this path — pointing render_document at `.env`
+      // otherwise read it and echoed a content fragment through the JSON parser's message.
+      const stateOpt = {
+        ...(ctx.stateDir ? { stateDir: ctx.stateDir } : {}),
+        ...(ctx.rules && ctx.rules.protectedPaths.length > 0 ? { extraProtected: ctx.rules.protectedPaths } : {}),
+      };
+      let specResolved: { resolved: string; inWorkspace: boolean };
+      try {
+        specResolved = validatePath(ctx.workspaceRoot, input.spec_path, stateOpt);
+      } catch (err) {
+        return fail(`spec path refused: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (!specResolved.inWorkspace) {
+        return fail(`spec path resolves outside the workspace: ${input.spec_path}`);
+      }
+      if (isSecretName(input.spec_path, ctx.rules?.secretPatterns) || isSecretName(specResolved.resolved, ctx.rules?.secretPatterns)) {
+        return fail(`refusing to read ${input.spec_path} as a document spec: secret-named files are never read by this tool`);
+      }
+      const specAbs = specResolved.resolved;
       let specText: string;
       try {
         const stat = fs.statSync(specAbs);
@@ -145,10 +172,6 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
       // here): containment + secret-name + decodability, complete error list, nothing written.
       const imageErrors: string[] = [];
       const imageBytes = new Map<string, Uint8Array>();
-      const stateOpt = {
-        ...(ctx.stateDir ? { stateDir: ctx.stateDir } : {}),
-        ...(ctx.rules && ctx.rules.protectedPaths.length > 0 ? { extraProtected: ctx.rules.protectedPaths } : {}),
-      };
       const specDir = path.dirname(specAbs);
       for (const block of spec.blocks) {
         if (block.kind !== 'image' || imageBytes.has(block.path)) continue;
@@ -193,94 +216,120 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
       const rel = (abs: string): string => path.relative(ctx.workspaceRoot, abs).split(path.sep).join('/');
       const sections: string[] = [];
       const formats = formatsOf(input);
+      /** A requested format that produced no artifact for a NON-degradation reason. */
+      const hardFailures: string[] = [];
+      let pdfProduced = false;
 
       if (formats.includes('docx')) {
         const t0 = Date.now();
-        let bytes: Uint8Array;
         try {
-          bytes = renderDocx(spec, imageBytes);
-        } catch (err) {
-          if (err instanceof ArtifactError) return fail(`DOCX render failed: ${err.message}`);
-          throw err;
-        }
-        writeAtomic(out.docx, bytes);
-        const validation = validateDocxAgainstSpec(bytes, spec);
-        ctx.reportArtifact?.({
-          kind: 'rendered',
-          format: 'docx',
-          path: rel(out.docx),
-          sha256: sha256(Buffer.from(bytes)),
-          bytes: bytes.length,
-          specPath: rel(specAbs),
-          specSha256,
-          validation: {
-            status: validation.status,
-            findings: [...validation.failures, ...validation.notes.map((n) => `note: ${n}`)],
-            summary:
-              validation.status === 'pass'
-                ? `parse-back validation passed (${validation.notes.length} note(s))`
-                : `parse-back validation FAILED: ${validation.failures.length} finding(s)`,
-          },
-          durationMs: Date.now() - t0,
-        });
-        sections.push(
-          `DOCX: ${rel(out.docx)} (${bytes.length} bytes, sha256 ${sha256(Buffer.from(bytes)).slice(0, 12)}…)\n` +
-            `  validation: ${validation.status.toUpperCase()}` +
-            (validation.failures.length > 0 ? `\n${validation.failures.map((f) => `  - ${f}`).join('\n')}` : '') +
-            (validation.notes.length > 0 ? `\n${validation.notes.map((n) => `  ~ ${n}`).join('\n')}` : ''),
-        );
-      }
-
-      if (formats.includes('pdf')) {
-        const t0 = Date.now();
-        const rendered = renderHtml(spec, imageBytes);
-        const printed = await renderPdf(spec, rendered, deps.probe);
-        if (!printed.ok) {
-          sections.push(
-            `PDF: SKIPPED — ${printed.reason}` +
-              (printed.kind === 'no-browser' ? '\n  (the DOCX artifact, when requested, is unaffected)' : ''),
-          );
-        } else {
-          writeAtomic(out.pdf, printed.bytes);
-          const { report, extras } = await validatePdfAgainstSpec(new Uint8Array(printed.bytes), spec);
+          const bytes = renderDocx(spec, imageBytes);
+          writeAtomic(out.docx, bytes);
+          const validation = validateDocxAgainstSpec(bytes, spec);
           ctx.reportArtifact?.({
             kind: 'rendered',
-            format: 'pdf',
-            path: rel(out.pdf),
-            sha256: sha256(printed.bytes),
-            bytes: printed.bytes.length,
-            pages: extras.pageCount,
+            format: 'docx',
+            path: rel(out.docx),
+            sha256: sha256(Buffer.from(bytes)),
+            bytes: bytes.length,
             specPath: rel(specAbs),
             specSha256,
+            ...(imageBytes.size > 0 ? { embeddedWorkspaceImages: true as const } : {}),
             validation: {
-              status: report.status,
-              findings: [...report.failures, ...report.notes.map((n) => `note: ${n}`)],
+              status: validation.status,
+              findings: [...validation.failures, ...validation.notes.map((n) => `note: ${n}`)],
+              failureCount: validation.failures.length,
               summary:
-                report.status === 'pass'
-                  ? `printed-text validation passed over ${extras.pageCount} page(s) (${report.notes.length} note(s))`
-                  : `printed-text validation FAILED: ${report.failures.length} finding(s)`,
+                validation.status === 'pass'
+                  ? `parse-back validation passed (${validation.notes.length} note(s))`
+                  : `parse-back validation FAILED: ${validation.failures.length} finding(s)`,
             },
             durationMs: Date.now() - t0,
           });
           sections.push(
-            `PDF: ${rel(out.pdf)} (${printed.bytes.length} bytes, ${extras.pageCount} page(s), sha256 ${sha256(printed.bytes).slice(0, 12)}…)\n` +
-              `  validation: ${report.status.toUpperCase()}` +
-              (report.failures.length > 0 ? `\n${report.failures.map((f) => `  - ${f}`).join('\n')}` : '') +
-              (report.notes.length > 0 ? `\n${report.notes.map((n) => `  ~ ${n}`).join('\n')}` : ''),
+            `DOCX: ${rel(out.docx)} (${bytes.length} bytes, sha256 ${sha256(Buffer.from(bytes)).slice(0, 12)}…)\n` +
+              `  validation: ${validation.status.toUpperCase()}` +
+              (validation.failures.length > 0 ? `\n${validation.failures.map((f) => `  - ${f}`).join('\n')}` : '') +
+              (validation.notes.length > 0 ? `\n${validation.notes.map((n) => `  ~ ${n}`).join('\n')}` : ''),
           );
+        } catch (err) {
+          // A locked output file (Word has it open) or a render/validate throw must not escape:
+          // an uncaught throw leaves no tool.completed and the crash-repair replay then claims
+          // the call never ran — while a DOCX may already be on disk.
+          const why = err instanceof ArtifactError ? err.message : err instanceof Error ? err.message.slice(0, 200) : String(err);
+          hardFailures.push(`DOCX: FAILED — ${why}`);
+          sections.push(`DOCX: FAILED — ${why}`);
         }
       }
 
-      const guidance =
-        formats.includes('pdf') && sections.some((s) => s.startsWith('PDF: ') && !s.includes('SKIPPED'))
-          ? `\n\nNext: inspect_pages on ${rel(out.pdf)} to SEE the pages before claiming visual quality; revise by editing ${rel(specAbs)} and re-rendering.`
-          : `\n\nRevise by editing ${rel(specAbs)} and re-rendering.`;
-      return {
-        ok: true,
-        output: `rendered from ${rel(specAbs)} (spec sha256 ${specSha256.slice(0, 12)}…)\n\n${sections.join('\n\n')}${guidance}`,
-        truncated: false,
-        durationMs: Date.now() - started,
-      };
+      if (formats.includes('pdf')) {
+        const t0 = Date.now();
+        try {
+          const rendered = renderHtml(spec, imageBytes);
+          const printed = await renderPdf(spec, rendered, deps.probe);
+          if (!printed.ok) {
+            // A degradation ('no-browser') and a failure ('render-failed') are different facts:
+            // folding both into "SKIPPED" with ok:true hid a real print failure everywhere but
+            // the model-facing text.
+            if (printed.kind === 'no-browser') {
+              sections.push(`PDF: SKIPPED — ${printed.reason}\n  (the DOCX artifact, when requested, is unaffected)`);
+            } else {
+              hardFailures.push(`PDF: FAILED — ${printed.reason}`);
+              sections.push(`PDF: FAILED — ${printed.reason}`);
+            }
+          } else {
+            writeAtomic(out.pdf, printed.bytes);
+            const { report, extras } = await validatePdfAgainstSpec(new Uint8Array(printed.bytes), spec);
+            pdfProduced = true;
+            ctx.reportArtifact?.({
+              kind: 'rendered',
+              format: 'pdf',
+              path: rel(out.pdf),
+              sha256: sha256(printed.bytes),
+              bytes: printed.bytes.length,
+              pages: extras.pageCount,
+              specPath: rel(specAbs),
+              specSha256,
+              ...(imageBytes.size > 0 ? { embeddedWorkspaceImages: true as const } : {}),
+              validation: {
+                status: report.status,
+                findings: [...report.failures, ...report.notes.map((n) => `note: ${n}`)],
+                failureCount: report.failures.length,
+                summary:
+                  report.status === 'pass'
+                    ? `printed-text validation passed over ${extras.pageCount} page(s) (${report.notes.length} note(s))`
+                    : `printed-text validation FAILED: ${report.failures.length} finding(s)`,
+              },
+              durationMs: Date.now() - t0,
+            });
+            sections.push(
+              `PDF: ${rel(out.pdf)} (${printed.bytes.length} bytes, ${extras.pageCount} page(s), sha256 ${sha256(printed.bytes).slice(0, 12)}…)\n` +
+                `  validation: ${report.status.toUpperCase()}` +
+                (report.failures.length > 0 ? `\n${report.failures.map((f) => `  - ${f}`).join('\n')}` : '') +
+                (report.notes.length > 0 ? `\n${report.notes.map((n) => `  ~ ${n}`).join('\n')}` : ''),
+            );
+          }
+        } catch (err) {
+          const why = err instanceof ArtifactError ? err.message : err instanceof Error ? err.message.slice(0, 200) : String(err);
+          hardFailures.push(`PDF: FAILED — ${why}`);
+          sections.push(`PDF: FAILED — ${why}`);
+        }
+      }
+
+      const guidance = pdfProduced
+        ? `\n\nNext: inspect_pages on ${rel(out.pdf)} to SEE the pages before claiming visual quality; revise by editing ${rel(specAbs)} and re-rendering.`
+        : `\n\nRevise by editing ${rel(specAbs)} and re-rendering.`;
+      const body = `rendered from ${rel(specAbs)} (spec sha256 ${specSha256.slice(0, 12)}…)\n\n${sections.join('\n\n')}${guidance}`;
+      if (hardFailures.length > 0) {
+        return {
+          ok: false,
+          output: body,
+          error: hardFailures.join('; '),
+          truncated: false,
+          durationMs: Date.now() - started,
+        };
+      }
+      return { ok: true, output: body, truncated: false, durationMs: Date.now() - started };
     },
   };
 }

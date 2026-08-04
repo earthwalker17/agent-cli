@@ -41,6 +41,9 @@ export function imageInfo(bytes: Uint8Array): ImageInfo | null {
     let o = 2;
     while (o + 9 < bytes.length) {
       if (bytes[o] !== 0xff) return null;
+      // Fill bytes: any number of 0xFF may precede a marker (ITU T.81 B.1.1.2). Reading one as
+      // the marker derails the walk and refuses a perfectly valid JPEG.
+      while (bytes[o + 1] === 0xff) o += 1;
       const marker = bytes[o + 1]!;
       if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) {
         o += 2; // standalone markers carry no length

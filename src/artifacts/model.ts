@@ -142,8 +142,11 @@ export const DocSpecSchema = z
     styles: z
       .object({
         theme: z.enum(['default', 'compact', 'formal']).optional(),
-        bodyFont: z.string().max(60).optional(),
-        headingFont: z.string().max(60).optional(),
+        // Font names are interpolated into a CSS block and into DOCX attributes. The charset is
+        // the structural defense: HTML rawtext ends at the first `</style` regardless of CSS
+        // string quoting, so a font name able to carry `<` could close the block (measured).
+        bodyFont: z.string().max(60).regex(/^[A-Za-z0-9 _-]+$/, 'font names may use letters, digits, space, underscore and hyphen only').optional(),
+        headingFont: z.string().max(60).regex(/^[A-Za-z0-9 _-]+$/, 'font names may use letters, digits, space, underscore and hyphen only').optional(),
         baseSizePt: z.number().min(8).max(14).optional(),
         accentColor: z.string().regex(HEX_COLOR, 'accentColor must be #RRGGBB').optional(),
         lineSpacing: z.number().min(1).max(2).optional(),
@@ -162,13 +165,21 @@ export type DocSpec = z.infer<typeof DocSpecSchema>;
 
 export type ParsedSpec = { ok: true; spec: DocSpec } | { ok: false; errors: string[] };
 
-/** Parse spec JSON text: json errors and the COMPLETE zod issue list come back verbatim. */
+/**
+ * Parse spec JSON text: the COMPLETE zod issue list comes back verbatim. JSON syntax errors are
+ * reported by POSITION only — V8's message quotes the offending source text, which would echo
+ * the contents of whatever file was pointed at this tool.
+ */
 export function parseDocSpec(jsonText: string): ParsedSpec {
   let raw: unknown;
   try {
     raw = JSON.parse(jsonText);
   } catch (err) {
-    return { ok: false, errors: [`spec is not valid JSON: ${err instanceof Error ? err.message : String(err)}`] };
+    const pos = /position (\d+)/.exec(err instanceof Error ? err.message : '');
+    return {
+      ok: false,
+      errors: [`spec is not valid JSON${pos !== null ? ` (at character ${pos[1]})` : ''} — a document spec must be a JSON object`],
+    };
   }
   const parsed = DocSpecSchema.safeParse(raw);
   if (parsed.success) return { ok: true, spec: parsed.data };

@@ -994,7 +994,14 @@ function recordArtifactEvidence(session: Session, callId: string, e: ArtifactEvi
       ...(e.pages !== undefined ? { pages: e.pages } : {}),
       specPath: e.specPath,
       specSha256: e.specSha256,
-      validation: { status: e.validation.status, findings, summary: e.validation.summary.slice(0, 400) },
+      validation: {
+        status: e.validation.status,
+        findings,
+        // Carried whole, never derived from the SLICED list — the count is the honest number.
+        failureCount: e.validation.failureCount,
+        summary: e.validation.summary.slice(0, 400),
+      },
+      ...(e.embeddedWorkspaceImages === true ? { embeddedWorkspaceImages: true as const } : {}),
       durationMs: e.durationMs,
     });
     return;

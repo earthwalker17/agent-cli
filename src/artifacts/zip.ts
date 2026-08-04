@@ -79,13 +79,18 @@ export function openZipBounded(data: Uint8Array, bounds?: ZipBounds): OpenedZip 
         if (entryCount > maxEntries) {
           throw new ArtifactError(`zip has more than ${maxEntries} entries`, 'zip-bounds');
         }
-        if (info.originalSize > maxEntryBytes) {
+        // Gate on the LARGER of the two declared sizes. A STORED (uncompressed) entry is
+        // materialized by its COMPRESSED size, which a hand-forged central directory can pair
+        // with a tiny uncompressed-size field — measured: a 1000-byte cap admitted a 300 KB
+        // entry, refused only by the after-inflate re-check, i.e. after the allocation.
+        const declared = Math.max(info.size, info.originalSize);
+        if (declared > maxEntryBytes) {
           throw new ArtifactError(
-            `zip entry "${info.name.slice(0, 120)}" declares ${info.originalSize} bytes (cap ${maxEntryBytes})`,
+            `zip entry "${info.name.slice(0, 120)}" declares ${declared} bytes (cap ${maxEntryBytes})`,
             'zip-bounds',
           );
         }
-        declaredTotal += info.originalSize;
+        declaredTotal += declared;
         if (declaredTotal > maxTotalBytes) {
           throw new ArtifactError(`zip declares more than ${maxTotalBytes} total decompressed bytes`, 'zip-bounds');
         }

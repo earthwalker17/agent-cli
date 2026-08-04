@@ -157,7 +157,7 @@ describe('render_document policy + execute (no browser needed)', () => {
         bytes: 1,
         specPath: 's',
         specSha256: 'b'.repeat(64),
-        validation: { status: 'pass', findings: [], summary: '' },
+        validation: { status: 'pass', findings: [], failureCount: 0, summary: '' },
         durationMs: 1,
       }) as SessionEvent;
     // Two formats under ONE callId = one render.

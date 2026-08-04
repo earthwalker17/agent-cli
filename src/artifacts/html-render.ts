@@ -18,8 +18,13 @@ import { ArtifactError } from './errors.js';
 const eh = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-/** CSS string literal (single-quoted) for font names etc. */
-const cssStr = (s: string): string => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/[\n\r]/g, ' ')}'`;
+/**
+ * CSS string literal (single-quoted). Drops `<` as well as escaping quotes/backslashes: the
+ * schema already constrains font charsets, and this is the second belt — HTML rawtext ends at
+ * the first `</style`, so CSS-level quoting alone never contains a `<`.
+ */
+const cssStr = (s: string): string =>
+  `'${s.replace(/[<>]/g, '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/[\n\r]/g, ' ')}'`;
 
 export interface RenderedHtml {
   html: string;

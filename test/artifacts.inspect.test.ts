@@ -53,7 +53,7 @@ function renderedEvent(relPath: string, docSha: string): SessionEvent {
     bytes: 1,
     specPath: 's.docspec.json',
     specSha256: 'b'.repeat(64),
-    validation: { status: 'pass', findings: [], summary: '' },
+    validation: { status: 'pass', findings: [], failureCount: 0, summary: '' },
     durationMs: 1,
   } as SessionEvent;
 }

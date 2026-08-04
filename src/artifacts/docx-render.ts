@@ -83,22 +83,24 @@ function planRender(spec: DocSpec, imageBytes: ReadonlyMap<string, Uint8Array>, 
   return { images, links, listNumIds };
 }
 
+/**
+ * Run properties in CT_RPr's SCHEMA SEQUENCE (rStyle, rFonts, b, i, color, u, shd). Word is
+ * lenient about the order; strict validators are not, and this file claims to emit valid OOXML.
+ */
 function runProps(run: DocRun, theme: ResolvedTheme, extra?: { styleId?: string }): string {
   const parts: string[] = [];
   if (extra?.styleId !== undefined) parts.push(`<w:rStyle w:val="${extra.styleId}"/>`);
-  if (run.code === true) {
-    parts.push(`<w:rFonts w:ascii="${ea(theme.monoFont)}" w:hAnsi="${ea(theme.monoFont)}"/>`);
-    parts.push('<w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/>');
-  }
+  if (run.code === true) parts.push(`<w:rFonts w:ascii="${ea(theme.monoFont)}" w:hAnsi="${ea(theme.monoFont)}"/>`);
   if (run.bold === true) parts.push('<w:b/>');
   if (run.italic === true) parts.push('<w:i/>');
-  if (run.underline === true) parts.push('<w:u w:val="single"/>');
   if (run.color !== undefined) parts.push(`<w:color w:val="${hex(run.color)}"/>`);
+  if (run.underline === true) parts.push('<w:u w:val="single"/>');
+  if (run.code === true) parts.push('<w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/>');
   return parts.length > 0 ? `<w:rPr>${parts.join('')}</w:rPr>` : '';
 }
 
-/** One logical run → w:r elements; embedded \n and \t become real breaks and tabs. */
-function renderRunText(text: string, rPr: string): string {
+/** Text → the INNER children of a w:r: w:t segments with real w:br / w:tab between them. */
+function runInner(text: string): string {
   const pieces: string[] = [];
   let current = '';
   const flush = (): void => {
@@ -120,7 +122,13 @@ function renderRunText(text: string, rPr: string): string {
     }
   }
   flush();
-  return pieces.length > 0 ? `<w:r>${rPr}${pieces.join('')}</w:r>` : '';
+  return pieces.join('');
+}
+
+/** One logical run → a w:r element; embedded \n and \t become real breaks and tabs. */
+function renderRunText(text: string, rPr: string): string {
+  const inner = runInner(text);
+  return inner.length > 0 ? `<w:r>${rPr}${inner}</w:r>` : '';
 }
 
 function renderRuns(runs: readonly DocRun[], theme: ResolvedTheme, plan: RenderPlan): string {
@@ -136,7 +144,10 @@ function renderRuns(runs: readonly DocRun[], theme: ResolvedTheme, plan: RenderP
     .join('');
 }
 
-const JC: Record<string, string> = { left: 'start', center: 'center', right: 'end', justify: 'both' };
+// TRANSITIONAL ST_Jc values (this file declares the 2006 transitional namespace): `start`/`end`
+// are the ISO-strict spellings, which older readers ignore — silently left-aligning a right-
+// aligned paragraph.
+const JC: Record<string, string> = { left: 'left', center: 'center', right: 'right', justify: 'both' };
 
 function renderImageParagraph(img: ImagePart, n: number, align: string | undefined, theme: ResolvedTheme, caption?: string): string {
   const cx = mmToEmu(img.widthMm);
@@ -325,7 +336,10 @@ export function renderDocx(spec: DocSpec, imageBytes: ReadonlyMap<string, Uint8A
       const lines = block.text.replace(/\r\n?/g, '\n').split('\n');
       const runs = lines
         .map((line, i) => {
-          const t = line.length > 0 ? `<w:t xml:space="preserve">${et(line)}</w:t>` : '';
+          // Tabs go through the SAME `<w:tab/>` conversion every other text path uses — a raw
+          // #x9 inside w:t renders at the reader's mercy, and code is the most
+          // indentation-sensitive block there is (the HTML twin keeps real tabs via <pre>).
+          const t = runInner(line);
           return `<w:r>${i < lines.length - 1 ? `${t}<w:br/>` : t}</w:r>`;
         })
         .join('');

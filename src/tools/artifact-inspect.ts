@@ -48,6 +48,7 @@ export function inspectBudgetFromEvents(events: readonly SessionEvent[]): Inspec
 }
 
 const normalizeRel = (p: string): string => caseFold(p.split('\\').join('/').replace(/^\.\//, ''));
+const relFromWorkspace = (root: string, abs: string): string => path.relative(root, abs).split(path.sep).join('/');
 
 const InspectInput = z
   .object({
@@ -73,25 +74,32 @@ export interface InspectPagesDeps {
 }
 
 export function createInspectPagesTool(deps: InspectPagesDeps): Tool<InspectInputT> {
-  const sessionRenderedByPath = (rel: string): boolean => {
+  /** The newest render this session recorded for a path (identity + provenance), if any. */
+  const latestRender = (rel: string): { sha256: string; embeddedWorkspaceImages: boolean } | null => {
     try {
       const want = normalizeRel(rel);
+      let found: { sha256: string; embeddedWorkspaceImages: boolean } | null = null;
       for (const e of deps.events()) {
-        if (e.type === 'artifact.rendered' && normalizeRel(e.path) === want) return true;
+        if (e.type === 'artifact.rendered' && normalizeRel(e.path) === want) {
+          found = { sha256: e.sha256, embeddedWorkspaceImages: e.embeddedWorkspaceImages === true };
+        }
       }
+      return found;
     } catch {
-      return false;
+      return null;
     }
-    return false;
   };
-  /** Newest recorded content identity for a session-rendered path. */
-  const latestRenderedSha = (rel: string): string | null => {
-    const want = normalizeRel(rel);
-    let sha: string | null = null;
-    for (const e of deps.events()) {
-      if (e.type === 'artifact.rendered' && normalizeRel(e.path) === want) sha = e.sha256;
-    }
-    return sha;
+
+  /**
+   * Inherited consent needs a recorded render for this path whose spec embedded NO workspace
+   * images. The image clause is the anti-laundering rule: a spec may name any in-workspace
+   * non-secret PNG/JPEG, the render auto-allows, and rasterizing the result would then show the
+   * model pixels of arbitrary workspace bytes — exactly what the inspect ask exists to gate
+   * (S17 review). PURE by contract (events only); execute re-verifies content identity.
+   */
+  const inheritsConsent = (relPath: string): boolean => {
+    const render = latestRender(relPath);
+    return render !== null && !render.embeddedWorkspaceImages;
   };
 
   return {
@@ -104,7 +112,7 @@ export function createInspectPagesTool(deps: InspectPagesDeps): Tool<InspectInpu
       'judgment never overrides a failed deterministic validation.',
     schema: InspectInput,
     mutates: () => ({ paths: [] }),
-    artifact: (i) => ({ kind: 'inspect', path: i.path, sessionRendered: sessionRenderedByPath(i.path) }),
+    artifact: (i) => ({ kind: 'inspect', path: i.path, sessionRendered: inheritsConsent(i.path) }),
     async execute(input, ctx) {
       const started = Date.now();
       const fail = (error: string): ToolResult => ({ ok: false, output: '', error, truncated: false, durationMs: Date.now() - started });
@@ -139,16 +147,18 @@ export function createInspectPagesTool(deps: InspectPagesDeps): Tool<InspectInpu
       }
 
       // Execute-time identity re-check for the auto-allowed admission (the decision inherited
-      // the RENDER's consent; a swapped file must not ride the path claim).
+      // the RENDER's consent; a swapped file must not ride the path claim). The named cures are
+      // calls the harness actually allows — a refusal that prescribes an unobtainable approval
+      // is a dead end (the S16.5 refusable-cure lesson).
       const docSha = sha256(bytes);
-      if (sessionRenderedByPath(input.path)) {
-        const recorded = latestRenderedSha(input.path);
-        if (recorded !== null && recorded !== docSha) {
-          return fail(
-            `${input.path} has CHANGED since this session rendered it (sha ${docSha.slice(0, 12)}… ≠ recorded ${recorded.slice(0, 12)}…). ` +
-              'Re-render it from the spec, or — if the change is external and intentional — the file now needs its own inspection approval.',
-          );
-        }
+      const recorded = latestRender(input.path);
+      if (recorded !== null && recorded.sha256 !== docSha) {
+        return fail(
+          `${input.path} has CHANGED since this session rendered it (sha ${docSha.slice(0, 12)}… ≠ recorded ${recorded.sha256.slice(0, 12)}…). ` +
+            'The consent this call inherited belongs to the bytes THIS session produced. Re-render it from its spec (render_document) ' +
+            'and inspect again, or copy the current file to a different name and inspect that — a path this session did not render ' +
+            'asks for its own approval.',
+        );
       }
 
       const pages = [...new Set(input.pages ?? [1, 2])].sort((a, b) => a - b);
@@ -178,18 +188,22 @@ export function createInspectPagesTool(deps: InspectPagesDeps): Tool<InspectInpu
       }
 
       const warnings = [...result.warnings, ...omitted];
+      if (stored.length === 0) {
+        // No event: an `artifact.inspected` with zero pages claims an inspection that produced
+        // nothing, and the report/chrome would render an empty "page(s)" list under it.
+        return fail(`no pages could be shown: ${warnings.join('; ') || 'nothing rendered'}`);
+      }
       ctx.reportArtifact?.({
         kind: 'inspected',
-        path: input.path.split('\\').join('/'),
+        // Workspace-relative POSIX, exactly like the render side — an absolute or `./`-prefixed
+        // model string would record a different identity for the same artifact and stop
+        // correlating with its render event.
+        path: relFromWorkspace(ctx.workspaceRoot, abs),
         sha256: docSha,
         source: 'pdf',
         pages: stored.map((s) => ({ page: s.page, imageSha256: s.sha, bytes: s.bytes, mediaType: 'image/png' })),
         warnings,
       });
-
-      if (stored.length === 0) {
-        return fail(`no pages could be shown: ${warnings.join('; ') || 'nothing rendered'}`);
-      }
       const lines = [
         `${input.path} (${result.pageCount} page(s), sha256 ${docSha.slice(0, 12)}…) — showing page(s) ${stored.map((s) => s.page).join(', ')}:`,
         ...stored.map((s) => `  page ${s.page}: objects/${s.sha} (${Math.round(s.bytes / 1024)} KiB)`),
