@@ -110,7 +110,17 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
       'Render a *.docspec.json document spec into polished artifacts next to it: a DOCX (deterministic bytes) ' +
       'and/or a PDF (printed via the system browser). Runs deterministic parse-back validation on every artifact ' +
       'and reports the verdict. Revise by editing the SPEC and re-rendering — never regenerate artifacts by hand. ' +
-      'Then inspect the PDF visually with inspect_pages.',
+      'Then inspect the PDF visually with inspect_pages.\n' +
+      'SPEC SHAPE: {version:1, meta:{title,author?,subject?,keywords?,language?}, page?:{size:"A4"|"Letter", ' +
+      'orientation?, margins?:{topMm,rightMm,bottomMm,leftMm}}, header?/footer?:{left?,center?,right?}, ' +
+      'styles?:{theme?:"default"|"compact"|"formal", bodyFont?, headingFont?, baseSizePt?, accentColor?:"#RRGGBB", ' +
+      'lineSpacing?}, blocks:[…]}. Block kinds: heading{level:1-4,runs}, paragraph{runs,align?}, ' +
+      'list{ordered?,items:[{runs,level?}]}, table{rows:[[runs,…],…], columnsPct?, headerRow?}, ' +
+      'image{path,widthMm?,caption?,align?}, code{text,language?}, quote{runs}, pageBreak. A "run" is ' +
+      '{text, bold?, italic?, underline?, code?, color?:"#RRGGBB", link?}. Header/footer strings may use the ' +
+      'tokens {pageNumber} {totalPages} {date} {title} — rendered as real field codes. The table header row is ' +
+      'shaded with styles.accentColor. Image paths are relative to the SPEC FILE. Validation errors come back ' +
+      'complete and verbatim with nothing written, so a rejected spec is a fix-and-resubmit, not a guess.',
     schema: RenderInput,
     // The fact has no ctx, so it declares WORKSPACE-RELATIVE outputs; the engine resolves both
     // sides through the shared validator before its consistency cross-check.

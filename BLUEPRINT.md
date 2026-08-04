@@ -69,21 +69,22 @@ verification gate, per-project plan scoping, and the audited limits table. Suite
 The end-to-end proof it owed was delivered by Session 16.5 (above). Details: `ROADMAP.md`
 Earlier Milestones, `ARCHITECTURE.md` "Project units" and "Project setup".
 
-### Session 17 — First Non-Coding Workflow Pack: Documents and PDF
+### Session 17 — First Non-Coding Workflow Pack: Documents and PDF — **DONE (v1.3.0)**
 
-Build the first optimized non-coding workflow on the existing kernel rather than creating a second
-agent or execution loop.
+Delivered, and the generalization question is answered: the coding-workflow contracts carried a
+non-coding workflow with **three per-session tools, ONE new policy fact, TWO additive event types
+and a module of pure format logic outside the kernel** — no second agent loop, no plugin system,
+no widened `CheckKind`. `read_document` (DOCX/PPTX/PDF by magic bytes, with a coverage verdict),
+`render_document` (byte-deterministic DOCX + browser-printed PDF, both parse-back validated), and
+`inspect_pages` (pages rasterized so a vision model judges the real thing) sit behind the
+spec-file revision loop, which inherits snapshots/undo/diff/attribution because the spec is an
+ordinary workspace file. Artifacts are products, never verification. Review: 4 lenses, 29
+findings, 19 fixed — including the structural discovery that the engine never evaluates
+`readsPaths` on a tool with a non-empty mutation plan. Suite 1373 → 1480. Details and honest
+limits (DOCX visual fidelity is Word's; PPTX read-only; Word COM cut; no plan-gate integration):
+`ROADMAP.md` Session 17, `ARCHITECTURE.md` "The documents workflow pack", CHANGELOG 1.3.0.
 
-A likely shape is:
-
-`request -> structured document model -> deterministic render -> artifact evidence -> structural /
-pagination checks -> visual inspection -> targeted revision -> delivery`
-
-Support useful DOCX/PDF production with repeatable styles, headings, tables, pagination, artifact
-metadata, visual review, bounded recovery, and explicit acceptance. The purpose is to prove that the
-coding workflow contracts generalize beyond source code.
-
-### Session 18 — Polyglot Repository Intelligence and Verification
+### Session 18 — Polyglot Repository Intelligence and Verification — **NEXT**
 
 Expand repository understanding and verification beyond the current Node/TypeScript and Python bias.
 Prioritize Rust, Go, C/C++, and representative embedded projects.
@@ -174,7 +175,9 @@ Before calling the next phase mature, Agent CLI should have demonstrated:
 - ~~a realistic dependency-bearing full-stack project built and verified locally~~ **(MET in
   S16.5: one live Kimi K3 session from natural-language request to `/accept` COMPLETE over a real
   two-package full stack, post-hoc validated 38/38)**;
-- a document/PDF workflow whose completion is based on artifact and visual evidence;
+- ~~a document/PDF workflow whose completion is based on artifact and visual evidence~~ **(MET in
+  S17: deterministic parse-back validation plus rasterized page inspection, live-proven on Kimi
+  K3 — the model saw its own cramped first render, revised the spec, and re-rendered)**;
 - polyglot retrieval and checks over several different build ecosystems;
 - source-backed research with bounded network authority and durable provenance;
 - explicit, previewed, user-approved remote Git/GitHub delivery;

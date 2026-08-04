@@ -7,6 +7,102 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.3.0] — 2026-08-05
+
+**The first non-coding workflow pack: documents and PDF.** The question this release exists to
+answer is whether the contracts that made the coding workflow trustworthy — one policy choke
+point, typed evidence, snapshot-backed undo, honest degradation, an explicit completion boundary
+— generalize beyond source code without a second agent loop, a plugin system, or a parallel
+framework. They do: the pack is three per-session tools, ONE new policy fact, TWO additive event
+types, and a module of pure format logic outside the kernel.
+
+The loop is spec-centred: **request → read sources → author a `*.docspec.json` → render →
+deterministic validation → SEE the pages → revise THE SPEC → re-render → deliver.** Because the
+spec is an ordinary workspace file, revision inherits snapshots, `/undo`, the session diff and
+attribution for free.
+
+### Added
+
+- **`read_document`** — DOCX / PPTX / PDF structure, text and metadata (XLSX: names only),
+  identified by MAGIC BYTES rather than the extension, always with an explicit coverage verdict
+  (`full` / `partial` / `structural`) and its reasons. A file that is not what it claims is
+  refused without echoing a byte of it. PPTX slide ORDER comes from the declared `sldIdLst`
+  resolved through the relationship map, not from file numbering.
+- **`render_document`** — a document spec into a **byte-deterministic DOCX** (hand-rolled OOXML:
+  real named styles with outline levels, one numbering instance per list, PAGE/NUMPAGES/DATE
+  field codes, embedded PNG/JPEG, fixed timestamps, no rsids — same spec in, same sha out) and a
+  **PDF printed through the system browser** from one self-contained page, then **parses each
+  artifact back** and reports the verdict: outline equality, table shapes, dangling
+  relationships, header/footer fields, page count, headings findable in the printed text.
+  Structural mismatches fail; layout observations are notes that never block.
+- **`inspect_pages`** — PDF pages rasterized so a vision model judges the real thing (breaks,
+  clipping, cramped tables, balance), each page stored as content-addressed session evidence.
+  `view_image` was widened in lockstep so those pages can be re-viewed after they age out.
+- **The `artifact` policy fact** (engine branch 0f) with its own rule ids: `render` auto-allows
+  in-workspace with a snapshot while its recorded reason names the headless browser launch and
+  states where spec-referenced reads are enforced; `inspect` splits admission by provenance —
+  an artifact this session rendered inherits that consent (content identity re-verified at
+  execute), anything else asks as grantable `sensitive`, secret-named paths are denied outright
+  because pixels cannot be redacted the way text can.
+- **`artifact.rendered` / `artifact.inspected`** events (additive, schema still v1) surfaced in
+  the report, `/status` and the REPL — and structurally unable to satisfy a verification gate,
+  pinned by the same asymmetry test the dependency-install path has.
+- Three pure-JS runtime dependencies with no install scripts and no native code loaded by Agent
+  CLI: `fflate`, `@rgrove/parse-xml`, `unpdf`.
+
+### Fixed (the pack's own adversarial review, all hand-verified before fixing)
+
+- Zip caps gated the uncompressed-size field while a STORED entry is materialized by its
+  COMPRESSED size — a forged central directory pulled 300 KB past a 1 KB cap before the
+  after-inflate check fired. Both caps now gate the larger of the two, before any inflation.
+- A 546-byte part nesting 5000 elements parsed fine and then overflowed the stack in the
+  recursive walk: an UNTYPED error that killed the turn instead of refusing the file. XML parsing
+  is depth-bounded (checked iteratively) and identification never throws.
+- A font name could carry `</style><script>` into the printed page — HTML rawtext ends at the
+  first `</style` regardless of CSS quoting. Font names are charset-constrained at the schema.
+- `render_document` read its SPEC with no policy classification at all (the artifact branch
+  returns before the engine's reads section), so pointing it at `.env` read the file and echoed a
+  fragment through the JSON parser. The spec path is validated at execute exactly as image paths
+  are, and JSON syntax errors report position only.
+- A render+inspect pair could show the model pixels of arbitrary workspace images with no
+  approval; inherited consent now requires a spec that embedded none.
+- Validation compared artifacts against the READER's display bounds, manufacturing "does not
+  match its spec" failures on correct renders — which the acceptance caveat then repeated as
+  fact. Validation reads at validation scale, normalizes both sides the way the renderer does,
+  and downgrades absence claims over a partial extraction to notes.
+- A FAILED PDF print was reported as "SKIPPED" with `ok: true`; degradation and failure are now
+  different answers. A locked output file is a typed failure instead of a throw escaping the tool.
+- The acceptance caveat counted layout notes as failures (and under-counted past the emit cap),
+  and never noticed an artifact that was deleted or undone.
+- OOXML details: run properties in schema sequence, transitional alignment values, code-block
+  tabs through the same conversion every other text path uses, and JPEG fill bytes no longer
+  refusing a valid image.
+
+### Fixed (found by the live runs, not the suite)
+
+- The inspection approval prompt claimed "a workspace document the harness did NOT produce" about
+  a PDF the harness had rendered minutes earlier; the real reason consent was not inherited is
+  the embedded logo, and the prompt now says so.
+- pdf.js font-substitution warnings went to stderr — the REPL's *chrome* stream — so library noise
+  rendered as harness output. Both PDF paths run at `verbosity: 0`.
+- `render_document`'s description now states the spec shape (block kinds, run fields, header/footer
+  tokens, where image paths resolve). The live agent wrote *"page-number tokens weren't documented,
+  so I probed the renderer"* and spent render calls rediscovering the schema.
+
+### Live proof
+
+Two Kimi K3 sessions in a fresh fixture workspace, both `/accept` COMPLETE. **Take 2 — 21 minutes,
+312 events, 49 turns, 48 tool calls, post-hoc validated 28/28 from persisted evidence alone**: one
+request → notes read → spec authored → both formats rendered and validated → pages SEEN → the
+model judged its own output cramped at one page, built a throwaway probe spec to isolate the
+page-break behaviour, applied the finding, re-rendered to two balanced pages → took a follow-up
+revision turn (navy table accent + a "Next Steps" section) → re-rendered and re-inspected → cleaned
+up its scratch files → accepted. Both admission paths of the new policy fact fired in that single
+run: the logo-bearing report ASKED, the image-free probe auto-allowed. Take 1 (26/26) is archived
+with its own honest note — its second turn was lost to a provider overload the harness recorded as
+a typed failure and continued past. Evidence, artifacts and limitations:
+`agent-cli-s17-live/DEMO.md`.
+
 ## [1.2.1] — 2026-08-03
 
 The Session 16 capability, now genuinely live-proven — and every defect that proving it exposed.

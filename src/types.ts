@@ -754,12 +754,20 @@ export interface ArtifactFact {
   /** 'inspect' only: the document path being rasterized. */
   path?: string;
   /**
-   * 'inspect' only: whether `path` names an artifact THIS SESSION rendered (a pure scan of
-   * `artifact.rendered` events by workspace-relative path). Session-rendered artifacts inherit
-   * the render's consent and auto-allow; anything else asks. Execute re-verifies by CONTENT
-   * sha, so a file swapped after the render refuses rather than riding the path claim.
+   * 'inspect' only: whether `path` names an artifact THIS SESSION rendered from a spec that
+   * embedded no workspace images (a pure scan of `artifact.rendered` events by
+   * workspace-relative path). Such artifacts inherit the render's consent and auto-allow;
+   * anything else asks. Execute re-verifies by CONTENT sha, so a file swapped after the render
+   * refuses rather than riding the path claim.
    */
   sessionRendered?: boolean;
+  /**
+   * 'inspect' only: this session DID render `path`, but its spec embedded workspace images, so
+   * consent is not inherited. Carried so the ask can state the true reason — a prompt saying
+   * "a document the harness did not produce" about an artifact it just produced is the kind of
+   * false record this project treats as a defect (found live, S17).
+   */
+  renderedWithEmbeddedImages?: boolean;
 }
 
 export interface Tool<I = unknown> {

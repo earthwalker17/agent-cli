@@ -96,7 +96,7 @@ export const rasterizePdfPages: Rasterize = async (bytes, pages, probe) => {
             getDocument: (o: object) => { promise: Promise<{ numPages: number; getPage: (n: number) => Promise<unknown> }>; destroy: () => Promise<void> };
           };
           const bin = Uint8Array.from(atob(args.pdfBase64), (c) => c.charCodeAt(0));
-          const task = pdfjs.getDocument({ data: bin, isEvalSupported: false, useWorkerFetch: false });
+          const task = pdfjs.getDocument({ data: bin, isEvalSupported: false, useWorkerFetch: false, verbosity: 0 });
           const doc = await task.promise;
           out.pageCount = doc.numPages;
           for (const pageNo of args.pages) {

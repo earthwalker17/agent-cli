@@ -657,9 +657,13 @@ export function decide<I>(
         'sensitive',
         'ask',
         'artifact.inspect-approval-required',
-        'rasterizes pages of a workspace document the harness did NOT produce, in the headless system browser (network access ' +
-          'blocked, script evaluation disabled in the PDF engine); the rendered pixels are shown to the model and stored as ' +
-          'session evidence; a session-scope answer covers further documents this session',
+        (fact.renderedWithEmbeddedImages === true
+          ? 'rasterizes pages of an artifact this session rendered — but its spec EMBEDDED workspace image files the harness ' +
+            'did not produce, so their pixels reach the model through this call and are not covered by the render approval'
+          : 'rasterizes pages of a workspace document the harness did NOT produce') +
+          ', in the headless system browser (network access blocked, script evaluation disabled in the PDF engine); the ' +
+          'rendered pixels are shown to the model and stored as session evidence; a session-scope answer covers further ' +
+          'documents this session',
         { noUndo: true },
       ),
       tool,

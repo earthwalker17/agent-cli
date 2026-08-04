@@ -54,6 +54,10 @@ src/
     types.ts               The zod FlowSpec (typed steps/asserts) + FlowRunResult contracts.
     probe.ts               Real launch probe (msedge→chrome→cache) + cheap plan-time guess.
     flow.ts                The deterministic flow executor (origin lock, typed taxonomy).
+  artifacts/               The documents workflow pack (Session 17) — bounded zip/XML substrate,
+                           format identification, DOCX/PPTX/PDF readers, the DocSpec model, the
+                           deterministic DOCX renderer, the self-contained HTML + browser PDF
+                           path, deterministic validators, and page rasterization.
   recovery/                Typed recovery. (FailureClass lives in types.ts.)
     catalogue.ts           The eleven-class recovery matrix, as DATA.
     classify.ts            Deterministic classification from persisted evidence.
@@ -82,7 +86,10 @@ src/
     run-check.ts           run_check — typed verification (parent-only).
     preview.ts             preview — the managed preview-server tool (parent-only).
     browser-flow.ts        browser_flow — typed browser verification (parent-only).
-    view-image.ts          view_image — session-artifact screenshot reads.
+    view-image.ts          view_image — session-artifact image reads (screenshots + pages).
+    artifact-read.ts       read_document — bounded document reads with a coverage verdict.
+    artifact-render.ts     render_document — spec → DOCX/PDF + deterministic validation.
+    artifact-inspect.ts    inspect_pages — PDF pages → pixels the model can judge.
     recover.ts             recover — the bounded repair ledger tool (parent-only).
     report-finding.ts      report_finding — the reviewer child's ONLY findings channel.
     review.ts              review — parent triage over recorded findings.
@@ -559,6 +566,109 @@ and a do-not-cite output line), matching the trace-omission honesty.
   DENIES, because the shared blob store also holds spilled output and snapshot pre-images) and
   re-checked at execute. Visual impressions can add findings but never discharge a gate or
   override a failed deterministic assertion.
+
+## The documents workflow pack (`artifacts/`, `tools/artifact-*.ts`)
+
+The first NON-CODING workflow, built to test whether the kernel's contracts generalize. It adds
+no orchestration layer, no plugin system and no second agent loop: three per-session tools, one
+policy fact, two additive event types, and a module of pure format logic outside the kernel.
+
+**The loop is spec-centred:** `request → read sources → author a *.docspec.json → render →
+deterministic validation → SEE the pages → revise THE SPEC → re-render → deliver`. The spec is an
+ordinary workspace file written with the ordinary file tools, which is what makes revision
+snapshot-backed, undoable, diffable and attributable for free — no incremental-artifact-patching
+machinery exists or is needed.
+
+- **Substrate.** `zip.ts` opens OOXML containers IN MEMORY ONLY (nothing is ever extracted to
+  disk, so zip-slip is structurally impossible rather than defended against), validating every
+  entry name and capping entries/bytes on `max(size, originalSize)` — a STORED entry is
+  materialized by its COMPRESSED size, and gating only the uncompressed field let a forged
+  central directory pull 300 KB past a 1 KB cap before the after-inflate check fired (S17
+  review). Writing is deterministic: sorted entries, FIXED mtime (fflate would stamp the live
+  clock into 2-second-resolution DOS fields), fixed level. `xml.ts` is a size- AND depth-bounded
+  strict parse (a 546-byte part nesting 5000 elements parsed fine and then overflowed the stack
+  in the recursive walk — an untyped RangeError that killed the turn instead of refusing the
+  file), plus the escapers every generated string must pass through, which also drop code points
+  XML 1.0 cannot carry.
+- **Identification is by MAGIC BYTES + the content-types part, never the extension**, and
+  `identifyDocument` NEVER throws: every failure is an `unsupported` verdict with a reason that
+  echoes no file content (a `.env` renamed `report.docx` must fail the sniff without leaking a
+  byte). OLE containers refuse honestly as the one thing this pack cannot disambiguate without
+  an OLE reader: legacy binary Office vs an encrypted OOXML document.
+- **Readers** (`docx-read` / `pptx-read` / `pdf-read` / `xlsx-read`) return ONE summary shape
+  whose first field is a **coverage verdict** — `full | partial | structural` with reasons — so
+  "we read it" can never quietly mean three different depths. PPTX slide ORDER comes from the
+  declared `sldIdLst` resolved through the relationship map (file numbering is a convention, not
+  the order), with a warned numeric fallback. PDF reading uses `unpdf` with `isEvalSupported`
+  off; password-protected and unopenable files degrade structurally rather than throwing.
+- **The DocSpec** (`model.ts`) is one strict zod schema with hard caps and a parse function that
+  returns the COMPLETE issue list with nothing written — the `update_plan` revision-loop pattern.
+  Image paths are spec-file-relative BY SCHEMA and re-validated at execute; font names are
+  charset-constrained because they are interpolated into a CSS block, and HTML rawtext ends at
+  the first `</style` regardless of CSS quoting.
+- **`docx-render.ts` is byte-deterministic**: fixed rIds, no `w:rsid`, FIXED docProps timestamps
+  (an artifact's identity is its content, not its render time), `{date}`/`{pageNumber}`/
+  `{totalPages}` as real `fldChar` field runs, real named styles carrying `outlineLvl`, ONE
+  numbering instance per list block (shared numIds are the classic restart bug), rPr children in
+  CT_RPr schema sequence, transitional `ST_Jc` values. Same spec + same image bytes ⇒ same
+  sha256, test-pinned by rendering twice. `html-render.ts` emits ONE self-contained page (no
+  script, no link, no external src — images are data: URIs) plus Playwright header/footer
+  templates, and `pdf-render.ts` prints it through the SHARED cached browser probe on an
+  `offline` context with http(s) route-abort. PDF bytes are NOT claimed deterministic (Chromium
+  embeds dates and ids); DOCX bytes are.
+- **Validation is deterministic and model-free** — the half a non-vision session still gets in
+  full. `validate.ts` parses each artifact BACK: outline equality, table shapes, dangling
+  `r:embed`/`r:id`/style/numId references, header/footer presence, a PAGE field whenever
+  `{pageNumber}` was asked for, printed page count, headings findable in the printed text.
+  Two severities, deliberately separate: structural mismatches are FAILURES; layout heuristics
+  (blank page, stranded heading) are NOTES that can never block, because the first false
+  positive would turn a guess into a gate. Validation reads with validation-scale bounds and
+  normalizes both sides the way the renderer does — comparing an artifact against the READER's
+  display bounds manufactured "does not match its spec" failures on correct renders (S17 review).
+- **`inspect_pages` closes the visual loop**: `pdf-pages.ts` injects unpdf's bundled pdf.js into
+  a blank page of the probed browser (the same zero-dep library that reads PDFs in Node renders
+  them where a real DOM exists — native-free by construction), enforcing a per-image byte
+  ceiling by re-rendering at reduced scale and DROPPING a page that still will not fit. Pages
+  become content-addressed blobs, ride the existing wire-image channel (so the vision choke and
+  image aging apply unchanged), and join `view_image`'s admission set in lockstep.
+
+**Policy: one new fact, two consequence shapes** (`tool.artifact`, engine branch 0f):
+
+- `render` writes workspace artifacts and may launch the browser. The generic mutation branch
+  would have described it as an "in-workspace file change" and — decisively — the engine NEVER
+  evaluates `readsPaths` on a tool with a non-empty mutation plan, so a render's claimed read
+  coverage was structurally void. The rule cross-checks the fact's outputs against `mutates()`
+  RESOLVED (the snapshot machinery follows `mutates()`; divergence denies) and says in the
+  recorded reason that spec-referenced reads are enforced AT EXECUTE — where the spec path
+  itself and every image path are validated for containment and secret names, refusing into the
+  error list with nothing written.
+- `inspect` is command-less and mutation-less: the S6 trap with a browser behind it. Admission
+  splits on provenance — an artifact THIS SESSION rendered from a spec that embedded no
+  workspace images inherits the render's consent (execute re-verifies CONTENT identity, and a
+  drifted file refuses naming cures that actually exist); anything else ASKS as grantable
+  `sensitive`; secret-named paths DENY outright, because pixels cannot be redacted the way text
+  can. The embedded-images clause is the anti-laundering rule: a spec may name any in-workspace
+  image, so without it a render+inspect pair showed the model arbitrary workspace pixels with no
+  approval at all.
+
+**Evidence: `artifact.rendered` / `artifact.inspected`** are additive event types on the S16
+setup pattern — they can NEVER satisfy a verification gate, and the report's asymmetry test pins
+it (a render exiting clean after a mutation leaves the file UNCHECKED). They are deliberately NOT
+in `WORK_EVENT_TYPES`: every render already emits snapshot-covered `file.mutated` events, which
+are what acceptance staleness counts. A failing LATEST validation per path is a loud acceptance
+CAVEAT, not unfinished work (blocker semantics need delete/undo resolution rules that do not
+exist yet; the caveat retires when the artifact is deleted or undone). Budgets are events-rebuilt
+like every other: `RENDERS_PER_SESSION = 20` counted over calls that produced an artifact or
+completed (a browserless PDF-only render legitimately emits no artifact event),
+`INSPECTED_PAGES_PER_SESSION = 40` over UNIQUE image shas with a 32 MiB blob budget.
+
+**Honest limits, stated in the product, not only here:** DOCX visual fidelity belongs to Word, so
+DOCX claims are structural and parse-back verified while visual judgment happens on the PDF twin
+rendered from the same spec; no browser ⇒ DOCX still renders and the PDF is skipped with a
+recorded reason (a print that FAILS is a different, `ok:false` answer); no image input ⇒
+inspection refuses and says the deterministic verdict is what remains. Editing pre-existing DOCX
+files, PPTX generation, footnotes, TOC fields, tracked changes, cell merges and RTL fidelity are
+out of scope rather than partially supported.
 
 ## Wire images
 
@@ -1334,6 +1444,7 @@ lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The a
 | setup | `setup.started` (a REAL spawn; a `WORK_EVENT_TYPES` member), `setup.completed` (`ok`/`failed`/`error`/`unsupported` — never `pass`, and never readable as verification) |
 | recovery | `repair.attempted` (+`projectId` — a proof must come from the project that failed), `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash) |
 | preview/browser | `preview.started`, `preview.ready`, `preview.ended`, `preview.swept`, `browser.flow` (+`traceOmittedBytes`, `screenshotsOmitted`) |
+| documents | `artifact.rendered` (validation verdict + `failureCount`; `embeddedWorkspaceImages` gates inherited inspect consent), `artifact.inspected` (page-image blob pointers) — PRODUCTS, never verification, and never `WORK_EVENT_TYPES` members |
 | review | `review.findings` (an EMPTY list is a recorded clean lens), `review.triage` (deliberately NO `review.completed` — a round is derived from its capture events) |
 | acceptance | `session.accepted {complete, summary, unfinished?, deliveryRef?, deliveryOid?}` |
 

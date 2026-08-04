@@ -34,6 +34,11 @@ What that means concretely:
   verification (the model names KINDS, the harness names COMMANDS), managed preview servers,
   Playwright browser flows over the *system* browser, a typed recovery policy, a **structural
   review gate**, and an explicit `/accept` delivery boundary.
+- **A documents workflow on the same kernel.** DOCX/PPTX/PDF reading with an honest coverage
+  verdict, a structured spec authored as an ordinary workspace file, byte-deterministic DOCX and
+  browser-printed PDF output, **parse-back validation of every artifact**, and page rasterization
+  so a vision model judges the real pages — revision means editing the spec and re-rendering, and
+  an artifact is a product that never counts as verification.
 - **Five model providers behind one runtime.** Anthropic, OpenAI, DeepSeek, Kimi (Moonshot) and
   GLM (Z.AI/Zhipu) through two genuinely different protocols, with a shipped **capability
   catalog** so differences degrade honestly instead of hiding behind a false
@@ -41,10 +46,14 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.2.1.** 1362 hermetic tests across 97 files (real-OS sandbox, real-repository git,
-> real browser flows, adversarial-review suites) plus opt-in live smokes. Proven live end-to-end
-> across eleven recorded runs — newest: **the full multi-project workflow in one 84-minute Kimi K3
-> session** (one natural-language request → plan → revision → sha-bound approval → `npm ci` in
+> **Status: v1.3.0.** 1469 hermetic tests across 107 files (real-OS sandbox, real-repository git,
+> real browser flows, real PDF print + rasterization, adversarial-review suites) plus opt-in live
+> smokes. Proven live end-to-end across twelve recorded runs — newest: **the documents workflow in
+> a 21-minute Kimi K3 session** (one request → source notes read → a document spec authored →
+> DOCX+PDF rendered and parse-back validated → the model SEEING its own pages, judging the first
+> render too cramped, isolating the fix in a throwaway probe spec, and revising the spec → a
+> follow-up revision turn → `/accept` COMPLETE, validated post hoc 28/28 from persisted evidence
+> alone). Before it: **the full multi-project workflow in one 84-minute Kimi K3 session** (one natural-language request → plan → revision → sha-bound approval → `npm ci` in
 > both packages → migrate → seed → per-project typed checks incl. lint → parallel worktree
 > executors → integration → two dev servers at once → three passing browser flows → a three-lens
 > adversarial review that caught the seeded XSS → mid-session kill → resume → `/accept` COMPLETE,
@@ -253,7 +262,10 @@ per-session tools the main agent (and only the main agent) receives:
 | `project_setup` | Dependency install / migrate / seed — the model names an intent, the harness resolves the command from the lockfile or the project's own script |
 | `preview` | A managed dev-server process with recorded readiness, logs, and teardown |
 | `browser_flow` | Typed browser steps against a running preview; screenshots + traces |
-| `view_image` | Re-read a screenshot this session actually captured |
+| `view_image` | Re-read an image this session recorded (browser screenshot or inspected page) |
+| `read_document` | DOCX / PPTX / PDF structure, text and metadata, with an honest coverage verdict |
+| `render_document` | A document spec → DOCX and/or PDF artifacts, with parse-back validation |
+| `inspect_pages` | Rasterize PDF pages so the model SEES them |
 | `recover` | The bounded repair ledger (classify → attempt → prove, or escalate) |
 | `review` | Parent triage over findings reviewers recorded |
 | `report_finding` | The reviewer child's ONLY findings channel (child-only) |
@@ -300,6 +312,47 @@ sandbox so a misjudgment can't do damage. Everything else — writes, installs, 
 with pipes/redirection/encoding/chaining, an unrecognized program, or a path that escapes the
 workspace — **requires approval**. A few catastrophic forms are hard-denied outright. Where no
 enforced sandbox is available, auto-run is **disabled** and every command asks (fail closed).
+
+## Documents and PDFs (the first non-coding workflow pack)
+
+The same kernel produces polished documents. Nothing about it is a second agent loop: the model
+authors a **document spec as an ordinary workspace JSON file** (`*.docspec.json` — headings,
+paragraphs, lists, tables, images, code, quotes, page setup, header/footer with `{pageNumber}` /
+`{totalPages}` / `{date}` / `{title}` tokens, bounded style themes), and the harness renders it
+deterministically:
+
+```
+request → read sources → spec file → render → deterministic validation → SEE the pages → revise the SPEC → re-render
+```
+
+- **`read_document`** identifies DOCX / PPTX / PDF (and XLSX, names only) by **magic bytes, never
+  the extension**, and returns outline, text, table shapes, slide order, page text, media
+  inventory and metadata — always with a **coverage verdict** (`full` / `partial` / `structural`)
+  and the reasons, so "we read it" can never quietly mean three different depths. A file that is
+  not what it claims is refused *without echoing a byte of it*.
+- **`render_document`** produces a **byte-deterministic DOCX** (hand-rolled OOXML: real named
+  styles, one numbering instance per list, PAGE/NUMPAGES/DATE field codes, embedded PNG/JPEG,
+  fixed timestamps — same spec in, same sha out) and a **PDF printed through the system browser**,
+  then **parses each artifact back** and reports what it found: outline equality, table shapes,
+  dangling relationships, header/footer fields, page count, headings findable in the printed
+  text. Structural mismatches are failures; layout observations are notes and never block.
+- **`inspect_pages`** rasterizes pages so a vision model can judge the real thing — page breaks,
+  clipping, cramped tables, whitespace, balance — and each page image is stored as session
+  evidence you can re-view.
+
+Revision is **the spec, not the artifact**: edit the spec file (an ordinary snapshotted write,
+so `/undo` and the session diff work as always) and re-render. Artifacts are **products, never
+verification** — a render never marks a file CHECKED and never satisfies a plan gate, pinned by
+the same asymmetry test the dependency-install path has.
+
+Honest limits: **DOCX visual fidelity is Word's**, so DOCX claims here are structural and
+parse-back verified while the *visual* check happens on the PDF twin rendered from the same spec.
+Without a system browser the DOCX still renders and the PDF is skipped with a recorded reason;
+without image input on the selected model, inspection refuses and says the deterministic
+validation is what remains. PDF bytes are not claimed deterministic (Chromium embeds dates/ids);
+DOCX bytes are. Editing pre-existing DOCX files, PPTX generation, footnotes, TOC fields, tracked
+changes, cell merges, and RTL/complex-script fidelity are **out of scope** — not partially
+supported.
 
 ## Plan mode, agent teams, and project memory
 

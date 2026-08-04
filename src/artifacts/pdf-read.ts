@@ -40,7 +40,10 @@ export async function readPdf(bytes: Uint8Array, bounds?: ReadBounds): Promise<P
     // `isEvalSupported: false` is a standard pdf.js DocumentInitParameters option (keeps the
     // PostScript-function eval path off for untrusted bytes); unpdf's bundled type stubs omit
     // it, so the cast widens the TYPE only — the runtime honors it.
-    doc = await getDocumentProxy(bytes.slice(), { isEvalSupported: false } as Parameters<typeof getDocumentProxy>[1]);
+    // `verbosity: 0` (ERRORS only) keeps pdf.js's font-substitution and internal-API warnings
+    // off the harness's stderr — which is the REPL's CHROME stream, so library noise rendered
+    // as harness output (found live, S17).
+    doc = await getDocumentProxy(bytes.slice(), { isEvalSupported: false, verbosity: 0 } as Parameters<typeof getDocumentProxy>[1]);
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
     if (name === 'PasswordException') {

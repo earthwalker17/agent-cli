@@ -265,10 +265,13 @@ describe('review fix: budgets and admission', () => {
         decision: 'allow',
       });
       const laundered = [ev({ ...base, embeddedWorkspaceImages: true }, 1)];
-      expect(decide(mk(laundered), { path: 'report.pdf' }, ctx, new Grants())).toMatchObject({
-        rule: 'artifact.inspect-approval-required',
-        decision: 'ask',
-      });
+      const d = decide(mk(laundered), { path: 'report.pdf' }, ctx, new Grants());
+      expect(d).toMatchObject({ rule: 'artifact.inspect-approval-required', decision: 'ask' });
+      // The RECORD must state the true reason: this session DID produce the artifact (found
+      // live — the first take's prompt claimed the opposite about a file it had just rendered).
+      expect(d.reason).toContain('this session rendered');
+      expect(d.reason).toContain('EMBEDDED workspace image');
+      expect(d.reason).not.toContain('did NOT produce');
     } finally {
       fs.rmSync(ws, { recursive: true, force: true });
     }

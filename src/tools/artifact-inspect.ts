@@ -101,6 +101,8 @@ export function createInspectPagesTool(deps: InspectPagesDeps): Tool<InspectInpu
     const render = latestRender(relPath);
     return render !== null && !render.embeddedWorkspaceImages;
   };
+  /** True when this session rendered the path but its spec embedded workspace images. */
+  const renderedWithEmbeddedImages = (relPath: string): boolean => latestRender(relPath)?.embeddedWorkspaceImages === true;
 
   return {
     name: 'inspect_pages',
@@ -112,7 +114,12 @@ export function createInspectPagesTool(deps: InspectPagesDeps): Tool<InspectInpu
       'judgment never overrides a failed deterministic validation.',
     schema: InspectInput,
     mutates: () => ({ paths: [] }),
-    artifact: (i) => ({ kind: 'inspect', path: i.path, sessionRendered: inheritsConsent(i.path) }),
+    artifact: (i) => ({
+      kind: 'inspect',
+      path: i.path,
+      sessionRendered: inheritsConsent(i.path),
+      ...(renderedWithEmbeddedImages(i.path) ? { renderedWithEmbeddedImages: true } : {}),
+    }),
     async execute(input, ctx) {
       const started = Date.now();
       const fail = (error: string): ToolResult => ({ ok: false, output: '', error, truncated: false, durationMs: Date.now() - started });
