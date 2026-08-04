@@ -14,7 +14,9 @@ export type ArtifactErrorReason =
   /** XML input exceeds the size bound. */
   | 'xml-bounds'
   /** XML is not well-formed. */
-  | 'xml-parse';
+  | 'xml-parse'
+  /** A render was handed unusable input (missing/undecodable image bytes). */
+  | 'render-input';
 
 /**
  * A bounded-read or render failure with a typed reason. Messages are safe to show a model but
