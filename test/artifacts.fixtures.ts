@@ -181,6 +181,19 @@ export function fixturePdf(text = 'Hello PDF'): Uint8Array {
   return new TextEncoder().encode(out);
 }
 
+/** A structurally valid PNG header (bogus body/CRC — dimension parsing needs only the IHDR). */
+export function pngFixture(width: number, height: number): Uint8Array {
+  const b = new Uint8Array(64);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  b.set([0, 0, 0, 13], 8);
+  b.set([0x49, 0x48, 0x44, 0x52], 12);
+  new DataView(b.buffer).setUint32(16, width);
+  new DataView(b.buffer).setUint32(20, height);
+  b[24] = 8; // bit depth
+  b[25] = 6; // RGBA
+  return b;
+}
+
 /** The OLE compound-container magic (legacy .doc/.ppt/.xls and encrypted OOXML). */
 export function fixtureOleHeader(): Uint8Array {
   const bytes = new Uint8Array(1024);

@@ -13,10 +13,10 @@
  */
 
 import type { DocSpec } from './model.js';
-import { openZipBounded } from './zip.js';
 import { attr, childElements, firstChild, parseXmlBounded, walkElements } from './xml.js';
 import { readDocx } from './docx-read.js';
 import { identifyDocument } from './inspect.js';
+import { readPdf } from './pdf-read.js';
 
 export interface ValidationReport {
   status: 'pass' | 'fail';
@@ -170,4 +170,79 @@ export function validateDocxAgainstSpec(bytes: Uint8Array, spec: DocSpec): Valid
   if (summary.text.trim().length === 0 && wantTables.length === 0) notes.push('document body has no text content');
 
   return done();
+}
+
+/** The longest literal fragment of a header/footer string once tokens are removed. */
+function literalFragment(s: string): string | null {
+  const parts = s.split(/\{(?:pageNumber|totalPages|date|title)\}/g).map((p) => p.trim());
+  const longest = parts.sort((a, b) => b.length - a.length)[0] ?? '';
+  return longest.length >= 3 ? longest : null;
+}
+
+export interface PdfValidationExtras {
+  pageCount: number;
+}
+
+/**
+ * Parse the printed PDF back and check it CONTAINS what the spec claims. Text-level only —
+ * pixels are inspect_pages' half of the story. Structural failures: unopenable output, a
+ * missing heading, a header/footer whose literal text never printed (the way a silently
+ * unsupported template path would manifest). Layout heuristics — blank pages, a heading
+ * stranded at a page bottom — are notes, never failures.
+ */
+export async function validatePdfAgainstSpec(
+  bytes: Uint8Array,
+  spec: DocSpec,
+): Promise<{ report: ValidationReport; extras: PdfValidationExtras }> {
+  const failures: string[] = [];
+  const notes: string[] = [];
+  const summary = await readPdf(bytes, { maxUnits: 200, maxTextChars: 500_000 });
+  if (summary.coverage === 'structural') {
+    failures.push(`printed PDF is unreadable: ${summary.coverageReasons.join('; ')}`);
+    return { report: { status: 'fail', failures, notes }, extras: { pageCount: 0 } };
+  }
+  const allText = summary.pages.map((p) => p.text).join('\n');
+  const squash = (s: string): string => s.replace(/\s+/g, ' ').trim();
+  const allSquashed = squash(allText);
+
+  for (const block of spec.blocks) {
+    if (block.kind !== 'heading') continue;
+    const text = squash(block.runs.map((r) => r.text).join(''));
+    if (text.length > 0 && !allSquashed.includes(text.slice(0, 120))) {
+      failures.push(`heading "${text.slice(0, 80)}" is not findable in the printed text`);
+    }
+  }
+
+  for (const [name, hf] of [
+    ['header', spec.header],
+    ['footer', spec.footer],
+  ] as const) {
+    if (hf === undefined) continue;
+    for (const s of Object.values(hf)) {
+      if (typeof s !== 'string') continue;
+      const fragment = literalFragment(s.includes('{title}') ? s.replace(/\{title\}/g, spec.meta.title) : s);
+      if (fragment !== null && !allSquashed.includes(squash(fragment))) {
+        failures.push(`${name} text "${fragment.slice(0, 60)}" did not print on any page`);
+        break;
+      }
+    }
+  }
+
+  for (const p of summary.pages) {
+    if (squash(p.text).length === 0) notes.push(`page ${p.page} has no extractable text (image-only or blank)`);
+  }
+  const headingTexts = spec.blocks.filter((b) => b.kind === 'heading').map((b) => squash(b.runs.map((r) => r.text).join('')));
+  for (const p of summary.pages) {
+    const end = squash(p.text).slice(-160);
+    for (const h of headingTexts) {
+      if (h.length >= 3 && end.endsWith(h)) {
+        notes.push(`heading "${h.slice(0, 60)}" sits at the very bottom of page ${p.page} (possible stranded heading)`);
+      }
+    }
+  }
+
+  return {
+    report: { status: failures.length > 0 ? 'fail' : 'pass', failures, notes },
+    extras: { pageCount: summary.pageCount },
+  };
 }

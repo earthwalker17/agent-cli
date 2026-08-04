@@ -18,6 +18,7 @@ import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type Previe
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
 import { readDocumentTool } from '../tools/artifact-read.js';
+import { createRenderDocumentTool, renderCapsFromEvents } from '../tools/artifact-render.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { effectiveIdentity } from '../report/report.js';
 import { cacheSuccessfulProbe, likelyBrowserAvailable, probeBrowser } from '../browser/probe.js';
@@ -564,6 +565,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     browserTool,
     viewImageTool,
     readDocumentTool,
+    createRenderDocumentTool({ probe: cachedProbe, caps: renderCapsFromEvents(session.log.events) }),
     createDelegateTool(
       {
         layout,

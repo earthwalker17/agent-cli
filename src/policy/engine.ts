@@ -557,18 +557,7 @@ export function decide<I>(
       if (outputs.length === 0) {
         return decision('sensitive', 'deny', 'artifact.no-outputs', 'a render must declare the artifact paths it will write');
       }
-      // The runtime snapshots from mutates(); a fact/mutates divergence would let a declared
-      // output escape snapshot coverage (or snapshot a path the fact never showed the human).
-      const planPaths = [...(plan?.paths ?? [])].sort();
-      const factPaths = [...outputs].sort();
-      if (plan === null || planPaths.length !== factPaths.length || planPaths.some((p, i) => p !== factPaths[i])) {
-        return decision(
-          'sensitive',
-          'deny',
-          'artifact.inconsistent-contract',
-          'a render must declare the SAME paths through artifact() and mutates() — the snapshot machinery follows mutates()',
-        );
-      }
+      const resolvedFact: string[] = [];
       for (const p of outputs) {
         let v;
         try {
@@ -582,6 +571,36 @@ export function decide<I>(
         if (v.protectedPath) {
           return decision('destructive', 'deny', 'artifact.output-protected', 'rendering an artifact to a protected path (.git / state dir) is not allowed');
         }
+        resolvedFact.push(caseFold(v.resolved));
+      }
+      // The runtime snapshots from mutates(); a fact/mutates divergence would let a declared
+      // output escape snapshot coverage (or snapshot a path the fact never showed the human).
+      // Compared RESOLVED (the fact may declare workspace-relative paths; mutates resolves).
+      if (plan === null) {
+        return decision(
+          'sensitive',
+          'deny',
+          'artifact.inconsistent-contract',
+          'a render must declare the SAME paths through artifact() and mutates() — the snapshot machinery follows mutates()',
+        );
+      }
+      const resolvedPlan: string[] = [];
+      for (const p of plan.paths) {
+        try {
+          resolvedPlan.push(caseFold(validatePath(ctx.workspaceRoot, p, stateOpt).resolved));
+        } catch (e) {
+          return denyFromError(e);
+        }
+      }
+      resolvedFact.sort();
+      resolvedPlan.sort();
+      if (resolvedPlan.length !== resolvedFact.length || resolvedPlan.some((p, i) => p !== resolvedFact[i])) {
+        return decision(
+          'sensitive',
+          'deny',
+          'artifact.inconsistent-contract',
+          'a render must declare the SAME paths through artifact() and mutates() — the snapshot machinery follows mutates()',
+        );
       }
       return decision(
         'reversible',

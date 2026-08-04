@@ -7,19 +7,7 @@ import { validateDocxAgainstSpec } from '../src/artifacts/validate.js';
 import { readDocx } from '../src/artifacts/docx-read.js';
 import { identifyDocument } from '../src/artifacts/inspect.js';
 import { openZipBounded, zipDeterministic } from '../src/artifacts/zip.js';
-
-/** A structurally valid PNG header (bogus body/CRC — dimension parsing needs only the IHDR). */
-export function pngFixture(width: number, height: number): Uint8Array {
-  const b = new Uint8Array(64);
-  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
-  b.set([0, 0, 0, 13], 8);
-  b.set([0x49, 0x48, 0x44, 0x52], 12);
-  new DataView(b.buffer).setUint32(16, width);
-  new DataView(b.buffer).setUint32(20, height);
-  b[24] = 8; // bit depth
-  b[25] = 6; // RGBA
-  return b;
-}
+import { pngFixture } from './artifacts.fixtures.js';
 
 const run = (text: string, extra: Record<string, unknown> = {}) => ({ text, ...extra });
 

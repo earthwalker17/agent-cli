@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type {
   ApprovalRequest,
+  ArtifactEvidence,
   BrowserFlowEvidence,
   ChatMessage,
   CheckEvidence,
@@ -977,6 +978,38 @@ function recordSetupEvidence(session: Session, callId: string, e: SetupEvidence)
   });
 }
 
+/** Persist a tool-reported document-artifact fact under the runtime-bound callId (Session 17). */
+function recordArtifactEvidence(session: Session, callId: string, e: ArtifactEvidence): void {
+  if (e.kind === 'rendered') {
+    // Findings are bounded AT THE EMIT SITE: they quote model-authored spec text and extracted
+    // document text, and an unbounded list would put untrusted bytes into the log at volume.
+    const findings = e.validation.findings.slice(0, 12).map((f) => (f.length > 300 ? `${f.slice(0, 300)}…` : f));
+    session.log.append({
+      type: 'artifact.rendered',
+      callId,
+      format: e.format,
+      path: e.path,
+      sha256: e.sha256,
+      bytes: e.bytes,
+      ...(e.pages !== undefined ? { pages: e.pages } : {}),
+      specPath: e.specPath,
+      specSha256: e.specSha256,
+      validation: { status: e.validation.status, findings, summary: e.validation.summary.slice(0, 400) },
+      durationMs: e.durationMs,
+    });
+    return;
+  }
+  session.log.append({
+    type: 'artifact.inspected',
+    callId,
+    path: e.path,
+    sha256: e.sha256,
+    source: e.source,
+    pages: e.pages,
+    warnings: e.warnings.slice(0, 12).map((w) => (w.length > 300 ? `${w.slice(0, 300)}…` : w)),
+  });
+}
+
 /** Persist a tool-reported preview lifecycle fact under the runtime-bound callId (Session 13). */
 function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvidence): void {
   if (e.kind === 'started') {
@@ -1255,6 +1288,7 @@ async function runExecution<I>(
     reportReview: (e) => recordReviewEvidence(session, callId, e),
     reportPreview: (e) => recordPreviewEvidence(session, callId, e),
     reportBrowser: (e) => recordBrowserEvidence(session, callId, e),
+    reportArtifact: (e) => recordArtifactEvidence(session, callId, e),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),
@@ -1277,6 +1311,11 @@ async function runExecution<I>(
         readFailed = (e as Error).message;
       }
       const afterSha256 = afterBytes !== null ? sha256(afterBytes) : null;
+      // Absent before AND absent after (readback did not fail) = the tool declared a target it
+      // then legitimately never wrote — e.g. a PDF output skipped on a browserless machine
+      // (S17). A mutation event must describe a mutation; recording a phantom 'create' with a
+      // null post-state gave /diff a created file that does not exist.
+      if (cf.beforeSha256 === null && afterSha256 === null && readFailed === null) continue;
       const kind = cf.beforeSha256 === null ? 'create' : afterSha256 === null ? 'delete' : 'modify';
       let createdDirs: string[] = [];
       try {

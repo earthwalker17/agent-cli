@@ -283,6 +283,47 @@ export interface BrowserFlowEvidence {
   screenshotsOmitted?: number;
 }
 
+/** Verdict of the deterministic render validators (Session 17). */
+export interface ArtifactValidation {
+  /** 'skipped' = the validator could not run (stated why in summary), never that it passed. */
+  status: 'pass' | 'fail' | 'skipped';
+  /** Structural spec↔artifact mismatches, bounded AT EMIT (count + length). */
+  findings: string[];
+  summary: string;
+}
+
+/**
+ * Structured facts about document-artifact operations (Session 17), reported through
+ * `ToolContext.reportArtifact`. 'rendered' = one produced artifact file (one event per format;
+ * a format that could not render — no browser — emits NO event: there is no artifact to
+ * describe, and the tool output states the skip). 'inspected' = one rasterization pass whose
+ * page images are content-addressed blobs. Same callId-binding contract as every channel.
+ */
+export type ArtifactEvidence =
+  | {
+      kind: 'rendered';
+      format: 'docx' | 'pdf';
+      /** Workspace-relative artifact path. */
+      path: string;
+      sha256: string;
+      bytes: number;
+      pages?: number;
+      /** Workspace-relative spec path + the spec content identity this render consumed. */
+      specPath: string;
+      specSha256: string;
+      validation: ArtifactValidation;
+      durationMs: number;
+    }
+  | {
+      kind: 'inspected';
+      path: string;
+      /** sha256 of the DOCUMENT bytes rasterized (the execute-time identity re-check's answer). */
+      sha256: string;
+      source: 'pdf';
+      pages: { page: number; imageSha256: string; bytes: number; mediaType: string }[];
+      warnings: string[];
+    };
+
 /**
  * Typed failure classes (Session 12) — the vocabulary the recovery catalogue, the repair ledger,
  * the DAG gate, and the report all key on. Classification happens BEFORE any repair is planned;
@@ -586,6 +627,8 @@ export interface ToolContext {
   reportPreview?: (e: PreviewEvidence) => void;
   /** Evidence channel for browser-flow detail (Session 13); persisted under this call's id. */
   reportBrowser?: (e: BrowserFlowEvidence) => void;
+  /** Evidence channel for document-artifact facts (Session 17); persisted under this call's id. */
+  reportArtifact?: (e: ArtifactEvidence) => void;
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -1362,6 +1405,35 @@ export type EventBody =
       traceOmittedBytes?: number;
       screenshotsOmitted?: number;
     })
+  /**
+   * One produced document artifact (Session 17, additive). Deliberately NOT a check event and
+   * NOT a WORK_EVENT_TYPES member: gates and CHECKED correlation never read it (the S16 setup
+   * asymmetry), and every render already emits snapshot-covered file.mutated events, which are
+   * what acceptance staleness counts — adding this too would double-count one unit of work.
+   */
+  | {
+      type: 'artifact.rendered';
+      callId: string;
+      format: 'docx' | 'pdf';
+      path: string;
+      sha256: string;
+      bytes: number;
+      pages?: number;
+      specPath: string;
+      specSha256: string;
+      validation: ArtifactValidation;
+      durationMs: number;
+    }
+  /** One rasterization pass (Session 17, additive): page images stored as evidence blobs. */
+  | {
+      type: 'artifact.inspected';
+      callId: string;
+      path: string;
+      sha256: string;
+      source: 'pdf';
+      pages: { page: number; imageSha256: string; bytes: number; mediaType: string }[];
+      warnings: string[];
+    }
   | {
       type: 'undo.applied';
       target: 'last' | 'all';
