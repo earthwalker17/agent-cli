@@ -506,7 +506,7 @@ export function decide<I>(
         'sensitive',
         'deny',
         'evidence.not-session-artifact',
-        `objects/${fact.sha256.slice(0, 12)}… is not a screenshot this session's browser flows recorded; other evidence blobs are deliberately not model-readable`,
+        `objects/${fact.sha256.slice(0, 12)}… is not a screenshot or inspected page image this session recorded; other evidence blobs are deliberately not model-readable`,
       );
     }
     return decision(

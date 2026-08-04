@@ -19,6 +19,7 @@ import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser
 import { createViewImageTool } from '../tools/view-image.js';
 import { readDocumentTool } from '../tools/artifact-read.js';
 import { createRenderDocumentTool, renderCapsFromEvents } from '../tools/artifact-render.js';
+import { createInspectPagesTool, inspectBudgetFromEvents } from '../tools/artifact-inspect.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { effectiveIdentity } from '../report/report.js';
 import { cacheSuccessfulProbe, likelyBrowserAvailable, probeBrowser } from '../browser/probe.js';
@@ -566,6 +567,16 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     viewImageTool,
     readDocumentTool,
     createRenderDocumentTool({ probe: cachedProbe, caps: renderCapsFromEvents(session.log.events) }),
+    createInspectPagesTool({
+      probe: cachedProbe,
+      putBlob: (bytes) => session.snapshots.putBlob(bytes),
+      events: () => session.log.events,
+      budget: inspectBudgetFromEvents(session.log.events),
+      modelInfo: () => ({
+        model: session.model,
+        visionInput: capsFor(session.provider.name as ProviderName, session.model).visionInput,
+      }),
+    }),
     createDelegateTool(
       {
         layout,

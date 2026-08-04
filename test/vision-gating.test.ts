@@ -144,6 +144,6 @@ describe('view_image refusal on text-only models', () => {
     });
     const notAdmitted = await open.execute({ sha256: 'cd'.repeat(32) }, {} as never);
     // Falls through to the normal admission check (not the vision gate).
-    expect(notAdmitted.error).toBe('not a session browser artifact');
+    expect(notAdmitted.error).toBe('not a session image artifact');
   });
 });
