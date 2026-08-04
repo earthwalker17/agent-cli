@@ -115,6 +115,24 @@ export interface ReportSetup {
   /** setup.started with no completion: the session died mid-install; the state is UNKNOWN. */
   neverCompleted?: boolean;
 }
+/** A produced or inspected document artifact (Session 17, additive). A PRODUCT, never verification. */
+export interface ReportArtifact {
+  kind: 'rendered' | 'inspected';
+  path: string;
+  sha256: string;
+  /** rendered only. */
+  format?: string;
+  bytes?: number;
+  pages?: number;
+  specPath?: string;
+  validationStatus?: string;
+  validationFindings?: string[];
+  validationSummary?: string;
+  /** inspected only: stored page images. */
+  pageImages?: { page: number; imageSha256: string; bytes: number }[];
+  warnings?: string[];
+}
+
 export interface ReportRepair {
   kind: 'attempt' | 'escalation';
   target: string;
@@ -199,6 +217,9 @@ export interface ReportJson {
   checks?: ReportCheck[];
   /** Project setup (Session 16, additive): installs, migrations, seeds. Absent when none ran. */
   setups?: ReportSetup[];
+  /** Document artifacts (Session 17, additive): renders with validation verdicts + inspections.
+   *  PRODUCTS, never verification — none of these mark a file CHECKED or satisfy a gate. */
+  artifacts?: ReportArtifact[];
   /** Bounded repair attempts and escalations (Session 12, additive); outcomes are DERIVED. */
   repairs?: ReportRepair[];
   /** Managed preview processes (Session 13, additive), in start order. */
@@ -820,6 +841,35 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     });
   }
 
+  // Document artifacts (Session 17). Like setup: a separate fold, never fed into
+  // `collectPassingEvidence` — a rendered file is a PRODUCT; its validation verdict is about
+  // the artifact matching its spec, not about any workspace file being correct.
+  const artifacts: ReportArtifact[] = [];
+  for (const e of events) {
+    if (e.type === 'artifact.rendered') {
+      artifacts.push({
+        kind: 'rendered',
+        path: e.path,
+        sha256: e.sha256,
+        format: e.format,
+        bytes: e.bytes,
+        ...(e.pages !== undefined ? { pages: e.pages } : {}),
+        specPath: e.specPath,
+        validationStatus: e.validation.status,
+        validationFindings: e.validation.findings,
+        validationSummary: e.validation.summary,
+      });
+    } else if (e.type === 'artifact.inspected') {
+      artifacts.push({
+        kind: 'inspected',
+        path: e.path,
+        sha256: e.sha256,
+        pageImages: e.pages.map((p) => ({ page: p.page, imageSha256: p.imageSha256, bytes: p.bytes })),
+        ...(e.warnings.length > 0 ? { warnings: e.warnings } : {}),
+      });
+    }
+  }
+
   // The bounded repair ledger (Session 12). Outcomes come from the same pure fold the gate and
   // acceptance read, so the report can never disagree with them about whether a repair was proven.
   const ledger = foldRepairs(events);
@@ -975,6 +1025,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     ...(accepted !== undefined ? { accepted } : {}),
     ...(checkRuns.length > 0 ? { checks: checkRuns } : {}),
     ...(setups.length > 0 ? { setups } : {}),
+    ...(artifacts.length > 0 ? { artifacts } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
     ...(previews.length > 0 ? { previews } : {}),
     ...(browserFlows.length > 0 ? { browserFlows } : {}),
@@ -1109,6 +1160,31 @@ function renderMarkdown(r: ReportJson): string {
       'Setup is WORK, not verification: an install exiting 0 means dependencies were fetched, and it never marks a ' +
         'file CHECKED or satisfies a plan gate. Installs execute third-party package code; migrations and seeds change ' +
         'local data the harness does not snapshot and cannot undo. Every one of these was individually approved.',
+    );
+    L.push('');
+  }
+
+  if (r.artifacts !== undefined && r.artifacts.length > 0) {
+    L.push(`## Document artifacts`);
+    for (const a of r.artifacts) {
+      if (a.kind === 'rendered') {
+        const verdict =
+          a.validationStatus === 'pass' ? 'validation PASS' : a.validationStatus === 'fail' ? 'validation FAILED' : 'validation skipped';
+        L.push(
+          `- rendered ${a.format ?? '?'} \`${a.path}\` (${a.bytes ?? 0} bytes${a.pages !== undefined ? `, ${a.pages} page(s)` : ''}, sha256 ${a.sha256.slice(0, 12)}…) from \`${a.specPath ?? '?'}\` — ${verdict}`,
+        );
+        for (const f of a.validationFindings ?? []) L.push(`    ${f}`);
+      } else {
+        const pages = (a.pageImages ?? []).map((p) => `${p.page} → objects/${p.imageSha256.slice(0, 12)}…`).join(', ');
+        L.push(`- inspected \`${a.path}\` (sha256 ${a.sha256.slice(0, 12)}…): page(s) ${pages}`);
+        for (const w of a.warnings ?? []) L.push(`    warning: ${w}`);
+      }
+    }
+    L.push('');
+    L.push(
+      'Artifacts are PRODUCTS, not verification: a rendered or inspected document never marks a file CHECKED and ' +
+        'never satisfies a plan gate. Validation verdicts say whether the artifact matches its spec; page images are ' +
+        'evidence of how pages LOOKED, judged (if at all) by a model.',
     );
     L.push('');
   }

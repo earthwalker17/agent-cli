@@ -247,6 +247,22 @@ export function createRenderer(opts: {
           chromeLine(`  ${mark} ${sanitizeLine(e.summary)}`);
           break;
         }
+        case 'artifact.rendered': {
+          const mark =
+            e.validation.status === 'pass' ? style.green(g.ok) : e.validation.status === 'fail' ? style.red(g.fail) : style.yellow(g.warn);
+          chromeLine(
+            `  ${mark} ${e.format} ${sanitizeLine(e.path)} (${String(e.bytes)} bytes${e.pages !== undefined ? `, ${String(e.pages)} page(s)` : ''}) — ${sanitizeLine(e.validation.summary)}`,
+          );
+          break;
+        }
+        case 'artifact.inspected': {
+          chromeLine(
+            style.dim(
+              `  ${g.arrow} inspected ${sanitizeLine(e.path)}: page(s) ${e.pages.map((p) => String(p.page)).join(', ')} stored as evidence`,
+            ),
+          );
+          break;
+        }
         case 'preview.started': {
           // No live output channel: a preview logs to a FILE (see preview/process.ts), so the
           // chrome shows lifecycle boundaries and /preview shows the tail.

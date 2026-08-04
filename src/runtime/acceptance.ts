@@ -263,6 +263,28 @@ export function computeAcceptance(
   // retired by the axes above, and a retired plan must not keep requiring reviews of new
   // unplanned work) — but the fold runs even without one, because recorded critical/high
   // findings block regardless of how the round came to run: evidence cannot be unseen. The
+  // Document artifacts (Session 17): the LATEST render per path speaks for the file on disk.
+  // A failing deterministic validation is a LOUD CAVEAT, deliberately not unfinished work this
+  // session: blocker semantics need delete/undo resolution rules that do not exist yet, and an
+  // abandoned draft artifact must not hold acceptance hostage. Never blocking ≠ never said.
+  {
+    const latestByPath = new Map<string, { format: string; findings: number }>();
+    for (const e of events) {
+      if (e.type !== 'artifact.rendered') continue;
+      if (e.validation.status === 'fail') {
+        latestByPath.set(e.path, { format: e.format, findings: e.validation.findings.length });
+      } else {
+        latestByPath.delete(e.path);
+      }
+    }
+    for (const [p, v] of latestByPath) {
+      caveats.push(
+        `artifact '${p}' (${v.format}): its LATEST render failed deterministic validation (${String(v.findings)} finding(s)) — ` +
+          'the delivered file does not match its spec; re-render or state why it is acceptable',
+      );
+    }
+  }
+
   // blockers and caveats arrive pre-rendered from the one fold /review also shows.
   // approvedCurrentGraph, not merely 'approved' (review): divergence is already its own
   // blocker; the shared filter keeps the ATTRIBUTION honest too (see its doc in canonical.ts).

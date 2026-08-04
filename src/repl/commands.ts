@@ -818,6 +818,20 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         setups.push(`  ${s.action} [${s.projectId}]: NO VERDICT — it started and never completed; dependency or local data state is UNKNOWN, re-run it`);
       }
       if (setups.length > 0) lines.push('', 'project setup (not verification):', ...setups);
+      // Document artifacts (Session 17) — products, labeled as such, never verification lines.
+      const renders: string[] = [];
+      let inspectedPages = 0;
+      for (const e of ctx.session.log.events) {
+        if (e.type === 'artifact.rendered') {
+          renders.push(`  ${e.format} ${sanitizeLine(e.path)}: validation ${e.validation.status}${e.pages !== undefined ? ` (${String(e.pages)} page(s))` : ''}`);
+        } else if (e.type === 'artifact.inspected') {
+          inspectedPages += e.pages.length;
+        }
+      }
+      if (renders.length > 0 || inspectedPages > 0) {
+        lines.push('', 'document artifacts (products, not verification):', ...renders);
+        if (inspectedPages > 0) lines.push(`  page images inspected: ${String(inspectedPages)}`);
+      }
       lines.push('', `checks run this session: ${ctx.checkCaps?.checksRun ?? 0}/${CHECKS_PER_SESSION}`);
       if (ctx.setupCaps !== undefined) lines.push(`project setups this session: ${ctx.setupCaps.setupsRun}/${SETUPS_PER_SESSION}`);
       ctx.modelOut.write(lines.join('\n') + '\n');
