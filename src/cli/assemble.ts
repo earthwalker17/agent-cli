@@ -17,6 +17,7 @@ import { createSharedWorkspace } from '../checks/session-workspace.js';
 import { createPreviewTool, previewCapsFromEvents, type PreviewCaps, type PreviewTool } from '../tools/preview.js';
 import { artifactBytesFromEvents, createBrowserFlowTool } from '../tools/browser-flow.js';
 import { createViewImageTool } from '../tools/view-image.js';
+import { readDocumentTool } from '../tools/artifact-read.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { effectiveIdentity } from '../report/report.js';
 import { cacheSuccessfulProbe, likelyBrowserAvailable, probeBrowser } from '../browser/probe.js';
@@ -562,6 +563,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     previewTool,
     browserTool,
     viewImageTool,
+    readDocumentTool,
     createDelegateTool(
       {
         layout,
