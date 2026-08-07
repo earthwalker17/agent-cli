@@ -25,7 +25,7 @@ import { createWebExtractTool } from '../tools/web-extract.js';
 import { createRecordSourceTool, type NoteAccumulator } from '../tools/record-source.js';
 import { researchBudgetFromEvents, type ResearchBudget } from '../tools/research-budget.js';
 import { createTavilyClient, noKeyMessage, tavilyKeyAvailability } from '../research/tavily.js';
-import type { ResearchClient } from '../research/types.js';
+import { EXTRACTS_PER_RESEARCH_TASK, type ResearchClient } from '../research/types.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { effectiveIdentity } from '../report/report.js';
 import { cacheSuccessfulProbe, likelyBrowserAvailable, probeBrowser } from '../browser/probe.js';
@@ -683,7 +683,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
               researchBudget,
               researchToolsFor: (acc: NoteAccumulator) => ({
                 webSearch: createWebSearchTool({ client: researchClient, budget: researchBudget }) as Tool,
-                webExtract: createWebExtractTool({ client: researchClient, budget: researchBudget }) as Tool,
+                // taskCap is per-INSTANCE, and this factory runs once per task — so the page
+                // ceiling is naturally per-task while the budget above stays shared. Added after
+                // the live S19 run, where one researcher spent 10 of the 12 session extracts and
+                // then timed out with nothing recorded.
+                webExtract: createWebExtractTool({
+                  client: researchClient,
+                  budget: researchBudget,
+                  taskCap: EXTRACTS_PER_RESEARCH_TASK,
+                }) as Tool,
                 recordSource: createRecordSourceTool({ acc }) as Tool,
               }),
             }

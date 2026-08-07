@@ -15,7 +15,7 @@ import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
 import { fixedClock } from '../src/shared/clock.js';
 import { seededIdGen } from '../src/shared/ids.js';
 import type { ExtractOutcome, ResearchClient, SearchOutcome } from '../src/research/types.js';
-import type { SessionEvent, Tool } from '../src/types.js';
+import type { ApprovalRequest, SessionEvent, Tool } from '../src/types.js';
 import type { WorkspaceMap } from '../src/workspace/map.js';
 
 /**
@@ -301,6 +301,37 @@ describe('the budget is genuinely shared', () => {
 });
 
 describe('spawning is gated, and refused honestly when research is unavailable', () => {
+  it('the SPAWN ask carries kind "research" so the prompt states what it really grants', async () => {
+    // Found in the live S19 run: the spawn is decided in the DELEGATION branch, so delegate_task
+    // carries no research fact and the ask rendered as a bare "[external] delegate_task" offering
+    // "[s] allow for the rest of this session" — the generic wording, for standing consent to
+    // spawn researchers. The kind now derives from the rule as well as the fact.
+    const budget = createResearchBudget();
+    const asks: ApprovalRequest[] = [];
+    const parent = startSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-parent',
+      mode: 'non-interactive',
+      provider: new MockProvider(spawn()),
+      approver: (req) => {
+        asks.push(req);
+        return Promise.resolve({ decision: 'deny' as const, scope: 'once' as const, source: 'user' as const });
+      },
+      tools: [],
+      saltHex: '00'.repeat(16),
+      clock: fixedClock(0, 1),
+      idGen: seededIdGen(),
+    });
+    parent.tools = [createDelegateTool(subagentDeps([[{ say: 'x' }]], budget), parent.id) as Tool];
+    await runTurn(parent, 'research it');
+    endSession(parent, 'completed');
+
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.kind).toBe('research');
+    expect(asks[0]!.classification).toBe('external');
+  });
+
   it('a denied spawn starts no child and records no research evidence', async () => {
     const budget = createResearchBudget();
     const parent = makeParent(spawn(), subagentDeps([[{ say: 'never runs' }]], budget), false);

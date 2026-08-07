@@ -52,7 +52,7 @@ describe('the role tables agree', () => {
   });
 
   it('carries a harness-fixed budget the model cannot influence', () => {
-    expect(ROLE_CONTRACTS.researcher.budget).toEqual({ maxSteps: 20, timeoutMs: 420_000, maxOutputTokens: 30_000 });
+    expect(ROLE_CONTRACTS.researcher.budget).toEqual({ maxSteps: 20, timeoutMs: 600_000, maxOutputTokens: 30_000 });
   });
 });
 

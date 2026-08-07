@@ -40,11 +40,12 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
               `[project setup — harness-resolved command; ${req.classification}]`
             : req.kind === 'research'
               ? // The fourth distinct consequence, and the only one that is not about running
-                // something HERE. Nothing executes, nothing on this machine changes — text goes
-                // OUT. The header says LEAVES THIS MACHINE because "[external]" alone reads like
-                // a severity label, and the question the human is actually answering is "may this
-                // text be sent to that host".
-                '[web research — LEAVES THIS MACHINE; read-only, nothing runs here]'
+                // something HERE. Nothing on this machine changes — text goes OUT. The header says
+                // LEAVE THIS MACHINE because "[external]" alone reads like a severity label, and
+                // the question the human is actually answering is "may this text be sent there".
+                // Worded to cover both doors: a direct search, and spawning the subagent that will
+                // run many of them.
+                '[web research — queries LEAVE THIS MACHINE; read-only, nothing here is written]'
               : `[${req.classification}]`;
   const lines = [
     '',

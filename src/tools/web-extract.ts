@@ -49,9 +49,22 @@ export interface WebExtractDeps {
   client: ResearchClient;
   /** The ONE session budget object, shared with web_search and every sibling researcher. */
   budget: ResearchBudget;
+  /**
+   * Per-TASK page ceiling (Session 19, from the live run). Absent = the parent's instance, which
+   * has no task to bound. A researcher's instance is built fresh per task, so this counter is
+   * naturally per-task while the session budget above stays shared.
+   */
+  taskCap?: number;
 }
 
 export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> {
+  // Per-task counter, closed over by THIS instance only.
+  let taskExtracts = 0;
+  const taskCapReached = (): string | undefined =>
+    deps.taskCap !== undefined && taskExtracts >= deps.taskCap
+      ? `${String(taskExtracts)} of ${String(deps.taskCap)} full-page reads used by this task`
+      : undefined;
+
   const factOf = (input: ExtractInputT): ResearchFact => {
     const depth = input.depth ?? 'basic';
     const targets: ResearchTarget[] = input.urls.map((raw) => {
@@ -59,7 +72,9 @@ export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> 
       return v.ok ? { url: v.url, host: v.host } : { url: raw.slice(0, 260), refusedReason: v.reason };
     });
     const credits = estimateExtractCredits(targets.length, depth);
-    const exhausted = deps.budget.exhausted('extract', credits);
+    // The per-task ceiling reports through the SAME field as the session budget, so the engine's
+    // one deny rule covers both and the child is told which ceiling it hit.
+    const exhausted = taskCapReached() ?? deps.budget.exhausted('extract', credits);
     return {
       kind: 'extract',
       providerHost: deps.client.host,
@@ -80,10 +95,7 @@ export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> 
     schema: ExtractInput,
     mutates: () => ({ paths: [] }),
     research: factOf,
-    approvalContext: (input) => {
-      const f = factOf(input);
-      return [`this call is one of a fixed session allowance — remaining: ${f.budgetRemaining ?? 'unknown'}`];
-    },
+    // No approvalContext — see web-search.ts: `describeCall` already renders the same numbers.
     async execute(input, ctx): Promise<ToolResult> {
       const started = Date.now();
       const depth = input.depth ?? 'basic';
@@ -101,6 +113,15 @@ export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> 
       if (bad !== undefined && !bad.v.ok) {
         return done(false, '', `'${bad.u.slice(0, 200)}' is not a citable public source (${bad.v.reason})`);
       }
+      const taskBlocked = taskCapReached();
+      if (taskBlocked !== undefined) {
+        return done(
+          false,
+          '',
+          `this task's page-reading allowance is spent (${taskBlocked}). Work from the snippets you already have, record what ` +
+            'you can support, and report what you could not read — a task that times out mid-reading loses everything it has not recorded',
+        );
+      }
       const blocked = deps.budget.exhausted('extract', estimateExtractCredits(input.urls.length, depth));
       if (blocked !== undefined) {
         return done(false, '', `the session research budget is spent (${blocked}); no further external reads this session`);
@@ -114,6 +135,7 @@ export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> 
       }
 
       const chars = outcome.pages.reduce((n, p) => n + p.chars, 0);
+      taskExtracts += 1;
       deps.budget.charge('extract', { credits: outcome.credits, contentChars: chars });
       ctx.reportResearch?.({
         kind: 'extracted',

@@ -25,7 +25,23 @@ export const MAX_EXTRACT_CHARS_PER_PAGE = 24_000;
 /** Total characters admitted from one extract call, across all pages. */
 export const MAX_EXTRACT_CHARS_PER_CALL = 60_000;
 export const SEARCH_TIMEOUT_MS = 20_000;
-export const EXTRACT_TIMEOUT_MS = 45_000;
+/**
+ * Tavily's own effective server-side ceiling is 10s basic / 30s advanced, so 30s is the honest
+ * bound rather than padding. It was 45s until the live S19 run showed why the difference matters:
+ * a researcher's wall clock is finite, and a per-call timeout larger than the provider's own is
+ * time the child can only ever lose.
+ */
+export const EXTRACT_TIMEOUT_MS = 30_000;
+/**
+ * Full-page reads ONE research task may make (Session 19, from the live run).
+ *
+ * The session cap alone was not enough: in the live proof a single researcher spent 10 of the 12
+ * session extracts, hit its wall clock, and TIMED OUT having recorded nothing — so the whole task
+ * was lost and the next one started with the allowance nearly gone. A per-task cap bounds both
+ * failures at once, and it is the bound that matches the actual advice ("extract sparingly"):
+ * four pages is a lot of reading for one bounded question.
+ */
+export const EXTRACTS_PER_RESEARCH_TASK = 4;
 
 // ── Per-session budget ─────────────────────────────────────────────────────────
 

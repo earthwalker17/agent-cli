@@ -157,8 +157,16 @@ describe('the rendered prompt', () => {
 
   it('headers the consequence rather than borrowing a bare class label', () => {
     const p = formatApprovalPrompt(req());
-    expect(p).toContain('[web research — LEAVES THIS MACHINE; read-only, nothing runs here]');
+    expect(p).toContain('[web research — queries LEAVE THIS MACHINE; read-only, nothing here is written]');
     expect(p).not.toContain('[external]  web_search');
+  });
+
+  it('uses the SAME kind for spawning a researcher — the live S19 run showed that ask rendering as a bare [external]', () => {
+    const p = formatApprovalPrompt(req({ tool: 'delegate_task', summary: 'delegate_task: 1 task(s) — researcher' }));
+    expect(p).toContain('[web research — queries LEAVE THIS MACHINE');
+    expect(p).not.toContain('[external]  delegate_task');
+    expect(p).not.toContain('[s] allow for the rest of this session');
+    expect(p).toContain('[s] allow further research this session, within the session budget');
   });
 
   it('offers [s] and names the budget as its bound, not the session', () => {

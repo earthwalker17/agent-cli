@@ -1,6 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { DEFAULT_MAX_STEPS } from '../src/runtime/session.js';
 import { EXECUTOR_BUDGET, ROLE_CONTRACTS } from '../src/runtime/roles.js';
+import {
+  CONTENT_CHARS_PER_SESSION,
+  CREDITS_PER_SESSION,
+  EXTRACTS_PER_RESEARCH_TASK,
+  EXTRACTS_PER_SESSION,
+  EXTRACT_TIMEOUT_MS,
+  MAX_RESULTS_PER_SEARCH,
+  MAX_URLS_PER_EXTRACT,
+  SEARCHES_PER_SESSION,
+  SEARCH_TIMEOUT_MS,
+} from '../src/research/types.js';
+import { MAX_NOTES_PER_RESEARCHER } from '../src/tools/record-source.js';
 import { SESSION_CHILD_OUTPUT_TOKEN_CAP, TASKS_PER_SESSION } from '../src/runtime/subagent.js';
 import { MAX_TASK_CHANGE_FILES, MAX_TASK_CHANGE_FILE_BYTES } from '../src/runtime/task-changes.js';
 import { CHECKS_PER_SESSION } from '../src/tools/run-check.js';
@@ -54,6 +66,31 @@ describe('scale bounds (Session 16 raised these)', () => {
     // Read-only roles are unchanged: they survey and report, and neither got bigger.
     expect(ROLE_CONTRACTS.explorer.budget).toEqual({ maxSteps: 15, timeoutMs: 300_000, maxOutputTokens: 30_000 });
     expect(ROLE_CONTRACTS.reviewer.budget).toEqual({ maxSteps: 24, timeoutMs: 480_000, maxOutputTokens: 30_000 });
+    // Session 19. 600s, not 420s: the live run showed a researcher timing out mid-reading with
+    // nothing recorded. Raising the ceiling alone would only move the cliff, so it landed with the
+    // per-task page cap and a per-call extract timeout that no longer exceeds the provider's own.
+    expect(ROLE_CONTRACTS.researcher.budget).toEqual({ maxSteps: 20, timeoutMs: 600_000, maxOutputTokens: 30_000 });
+  });
+
+  it('web research (Session 19)', () => {
+    // The bounds the approval prompt shows and the engine enforces. A quiet edit here widens a
+    // capability that leaves the machine, which is exactly what a pin is for.
+    expect(SEARCHES_PER_SESSION).toBe(24);
+    expect(EXTRACTS_PER_SESSION).toBe(12);
+    expect(CREDITS_PER_SESSION).toBe(80);
+    expect(CONTENT_CHARS_PER_SESSION).toBe(800_000);
+    expect(EXTRACTS_PER_RESEARCH_TASK).toBe(4);
+    expect(MAX_RESULTS_PER_SEARCH).toBe(10);
+    expect(MAX_URLS_PER_EXTRACT).toBe(5);
+    expect(MAX_NOTES_PER_RESEARCHER).toBe(10);
+    // Per-call time bounds. The extract ceiling must not exceed Tavily's own effective 30s, or it
+    // is time a researcher can only ever lose off its wall clock.
+    expect(SEARCH_TIMEOUT_MS).toBe(20_000);
+    expect(EXTRACT_TIMEOUT_MS).toBe(30_000);
+    // A single task must not be able to spend the whole session's page allowance.
+    expect(EXTRACTS_PER_RESEARCH_TASK).toBeLessThan(EXTRACTS_PER_SESSION);
+    // Nor should one task's reading alone be able to exhaust its own wall clock.
+    expect(EXTRACTS_PER_RESEARCH_TASK * EXTRACT_TIMEOUT_MS).toBeLessThan(ROLE_CONTRACTS.researcher.budget.timeoutMs / 2);
   });
 
   it('delegated work', () => {

@@ -202,6 +202,50 @@ describe('web_extract', () => {
     expect(e.failed[0]!.reason).toContain('refused by the harness');
   });
 
+  it('enforces a PER-TASK page ceiling that the shared session budget cannot see', async () => {
+    // From the live S19 run: one researcher spent 10 of the 12 session extracts and then timed
+    // out having recorded nothing. The session cap alone bounds the wrong thing.
+    const budget = createResearchBudget();
+    const t = createWebExtractTool({ client: fakeClient({ extract: () => Promise.resolve(EMPTY_EXTRACT) }), budget, taskCap: 2 });
+    for (let i = 0; i < 2; i++) {
+      expect((await t.execute({ urls: [`https://a.example/${String(i)}`] }, ctx())).ok).toBe(true);
+    }
+    const over = await t.execute({ urls: ['https://a.example/3'] }, ctx());
+    expect(over.ok).toBe(false);
+    expect(over.error).toContain('2 of 2 full-page reads used by this task');
+    expect(over.error).toContain('loses everything it has not recorded');
+    // The SESSION budget still had room — this ceiling is the task's own.
+    expect(budget.exhausted('extract', 1)).toBeUndefined();
+  });
+
+  it('reports the task ceiling through the same fact field, so the engine denies it too', () => {
+    const budget = createResearchBudget();
+    const t = createWebExtractTool({ client: fakeClient(), budget, taskCap: 0 });
+    expect(t.research!({ urls: ['https://a.example/1'] }).budgetExhausted).toContain('0 of 0 full-page reads');
+    expect(decide(t as unknown as Tool<unknown>, { urls: ['https://a.example/1'] }, ctx(), new Grants())).toMatchObject({
+      decision: 'deny',
+      rule: 'research.budget-exhausted',
+    });
+  });
+
+  it('the PARENT instance has no task ceiling — it has no task to bound', async () => {
+    const t = createWebExtractTool({ client: fakeClient({ extract: () => Promise.resolve(EMPTY_EXTRACT) }), budget: createResearchBudget() });
+    for (let i = 0; i < 6; i++) {
+      expect((await t.execute({ urls: [`https://a.example/${String(i)}`] }, ctx())).ok).toBe(true);
+    }
+  });
+
+  it('does not count a FAILED call against the task ceiling', async () => {
+    const t = createWebExtractTool({
+      client: fakeClient({ extract: () => Promise.reject(new ResearchError('boom', 'server')) }),
+      budget: createResearchBudget(),
+      taskCap: 1,
+    });
+    expect((await t.execute({ urls: ['https://a.example/1'] }, ctx())).ok).toBe(false);
+    // The ceiling is still intact: the failure consumed no page.
+    expect(t.research!({ urls: ['https://a.example/2'] }).budgetExhausted).toBeUndefined();
+  });
+
   it('caps the URL count through its schema', () => {
     const t = tool();
     const urls = (n: number): string[] => Array.from({ length: n }, (_v, i) => `https://a.example/${String(i)}`);

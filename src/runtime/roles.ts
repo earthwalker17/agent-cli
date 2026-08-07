@@ -89,10 +89,15 @@ const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 480_000, maxOutpu
  * Session 19: research is interleaved like review (search → read → corroborate → record → search
  * again), so it needs more than the 15-step read-only budget. The wall clock is generous relative
  * to the step count because a research step includes provider latency the child cannot control,
- * while the step count stays modest on purpose: a bounded question should not become a crawl, and
- * the SESSION research budget is the harder ceiling anyway.
+ * while the step count stays modest on purpose: a bounded question should not become a crawl.
+ *
+ * 420s → 600s after the live S19 run, where a researcher timed out mid-reading with NOTHING
+ * recorded. Raising the ceiling alone would only have moved the cliff, so it landed with two
+ * structural fixes: a per-task page cap (EXTRACTS_PER_RESEARCH_TASK) and a per-call extract
+ * timeout that no longer exceeds the provider's own. The budget-pressure supervision note reaches
+ * the PARENT, not the child, so a child cannot pace itself — the bounds have to do that for it.
  */
-const RESEARCHER_BUDGET: TaskBudget = { maxSteps: 20, timeoutMs: 420_000, maxOutputTokens: 30_000 };
+const RESEARCHER_BUDGET: TaskBudget = { maxSteps: 20, timeoutMs: 600_000, maxOutputTokens: 30_000 };
 
 /**
  * Executor budget is larger: mutating work takes more steps, and time spent WAITING on a

@@ -1204,11 +1204,17 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
             // keys, so it must not advertise an [s] that would silently do nothing.
             ...(decision.checkReplayKeys !== undefined ? { checkCount: decision.checkReplayKeys.length } : {}),
           }
-        : tool.research !== undefined
-          ? // Session 19: a fourth distinct CONSEQUENCE the generic header cannot state. Checks
-            // and setups run code here; this one sends text away from here, and the prompt has to
-            // say so in its own words rather than borrowing "[external]" and hoping.
-            { kind: 'research' as const }
+        : // Session 19: a fourth distinct CONSEQUENCE the generic header cannot state. Checks and
+          // setups run code here; this one sends text away from here, and the prompt has to say so
+          // in its own words rather than borrowing "[external]" and hoping.
+          //
+          // The rule check is not redundant with the fact check: SPAWNING a researcher is decided
+          // in the delegation branch, so `delegate_task` carries no research fact — and the live
+          // S19 run showed that ask rendering as a bare "[external] delegate_task" offering "[s]
+          // allow for the rest of this session", which is precisely the wording this kind exists
+          // to replace. Both doors, one kind.
+          tool.research !== undefined || decision.rule.startsWith('task.research-role')
+          ? { kind: 'research' as const }
           : {}),
     summary,
     detail: fullDetail,

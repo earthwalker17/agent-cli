@@ -100,10 +100,9 @@ export function createWebSearchTool(deps: WebSearchDeps): Tool<SearchInputT> {
     schema: SearchInput,
     mutates: () => ({ paths: [] }),
     research: factOf,
-    approvalContext: (input) => {
-      const f = factOf(input);
-      return [`this call is one of a fixed session allowance — remaining: ${f.budgetRemaining ?? 'unknown'}`];
-    },
+    // No approvalContext: `describeCall` already renders the bounds and the remaining allowance
+    // from this same fact. The live S19 run printed both, so the prompt said the same number twice
+    // in different words — noise in exactly the place a human is trying to read carefully.
     async execute(input, ctx): Promise<ToolResult> {
       const started = Date.now();
       const depth = input.depth ?? 'basic';
