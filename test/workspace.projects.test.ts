@@ -58,6 +58,26 @@ describe('the system prompt tells the model which projects exist', () => {
     expect(p).toContain('- web (node; npm; lockfile package-lock.json');
   });
 
+  it('rust/go/cmake units render their own facts, not npm vocabulary (Session 18)', () => {
+    fs.mkdirSync(path.join(ws, 'fw', '.cargo'), { recursive: true });
+    fs.writeFileSync(path.join(ws, 'fw', 'Cargo.toml'), '[package]\nname = "fw"\nedition = "2021"\n');
+    fs.writeFileSync(path.join(ws, 'fw', '.cargo', 'config.toml'), '[build]\ntarget = "thumbv7em-none-eabihf"\n');
+    fs.mkdirSync(path.join(ws, 'svc'));
+    fs.writeFileSync(path.join(ws, 'svc', 'go.mod'), 'module example.com/svc\n\ngo 1.22\n');
+    fs.mkdirSync(path.join(ws, 'native'));
+    fs.writeFileSync(path.join(ws, 'native', 'CMakeLists.txt'), 'project(native)\n');
+
+    const p = buildSystemPrompt(ws, MAP, undefined, undefined, undefined, detectWorkspace(ws));
+    // Toolchain presence is a MACHINE fact — assert only up to the stable prefix so this test
+    // holds whether or not rust/go are installed where it runs.
+    expect(p).toContain('- fw (rust; cargo; NO Cargo.lock; rust toolchain');
+    expect(p).toContain('cross-target thumbv7em-none-eabihf (rustup target ');
+    expect(p).toContain('tests cannot execute on this host');
+    expect(p).toContain('- svc (go; go module example.com/svc; go toolchain');
+    expect(p).toContain('- native (cmake; CMake project — checks unsupported (retrieval/index only))');
+    expect(p).not.toContain('- fw (rust; no package manager');
+  });
+
   it('warns that the harness refuses to guess ONLY when there is more than one project', () => {
     project('api', { scripts: { dev: 'x' } });
     expect(buildSystemPrompt(ws, MAP, undefined, undefined, undefined, detectWorkspace(ws))).not.toContain('REFUSES to guess');

@@ -48,10 +48,37 @@ function projectLines(ws?: DetectedWorkspace): string[] {
   const lines = ws.units.slice(0, MAX_PROMPT_PROJECTS).map((u) => {
     const kinds = u.kinds.length > 0 ? u.kinds.join('/') : 'unknown';
     const scripts = Object.keys(u.scripts).slice(0, 10);
+    // Per-ecosystem facts (Session 18): a cargo unit described in npm vocabulary read as
+    // "no package manager; NO lockfile" — Node's facts render only where Node evidence exists,
+    // and rust/go units say what actually decides whether their checks can run (the toolchain).
+    const isNodeish = u.kinds.includes('node') || u.kinds.includes('python') || u.kinds.length === 0;
     const bits = [
-      `${u.packageManager ?? 'no package manager'}`,
-      u.lockfile !== null ? `lockfile ${u.lockfile.name}` : 'NO lockfile',
-      u.hasDependencies ? (u.hasNodeModules ? 'dependencies installed' : 'dependencies NOT installed') : 'no declared dependencies',
+      ...(isNodeish
+        ? [
+            `${u.packageManager ?? 'no package manager'}`,
+            u.lockfile !== null ? `lockfile ${u.lockfile.name}` : 'NO lockfile',
+            u.hasDependencies ? (u.hasNodeModules ? 'dependencies installed' : 'dependencies NOT installed') : 'no declared dependencies',
+          ]
+        : []),
+      ...(u.kinds.includes('rust')
+        ? [
+            `cargo${u.rust?.workspaceRoot === true ? ' workspace root' : ''}`,
+            u.rust?.hasCargoLock === true ? 'Cargo.lock present' : 'NO Cargo.lock',
+            u.toolchains?.cargo != null ? 'rust toolchain installed' : 'rust toolchain NOT INSTALLED (install via rustup)',
+            ...(u.rust?.crossTarget != null
+              ? [
+                  `cross-target ${u.rust.crossTarget} (rustup target ${u.toolchains?.rustupTargets.includes(u.rust.crossTarget) === true ? 'installed' : 'MISSING'}; tests cannot execute on this host)`,
+                ]
+              : []),
+          ]
+        : []),
+      ...(u.kinds.includes('go')
+        ? [
+            `go module ${u.go?.module ?? '(name unreadable)'}`,
+            u.toolchains?.go != null ? 'go toolchain installed' : 'go toolchain NOT INSTALLED',
+          ]
+        : []),
+      ...(u.kinds.includes('cmake') ? ['CMake project — checks unsupported (retrieval/index only)'] : []),
       ...(u.envFiles.examples.length > 0 && u.envFiles.present.length === 0
         ? [`expects env config (${u.envFiles.examples.join(', ')}) — none present`]
         : []),
@@ -262,7 +289,7 @@ export function buildExecutorSystemPrompt(
     '- Tools: read_file, list_files, search, write_file, edit_file, run_command. Writes land only in this worktree; the user\'s workspace is untouched until the main agent applies your captured changes after review.',
     '- Approvals FORWARD to the user through the main session: a tool call needing approval pauses until the user answers, that wait counts against your wall-clock budget, and the user may deny it or stop your whole task. Do not stack speculative approval-needing calls.',
     ...sandboxRuleLines(sandbox),
-    '- The worktree was materialized WITHOUT gitignored files: no node_modules, no .env, no build outputs. A build/test may require installing dependencies first (which needs approval) — if you skip that, say plainly that the change is UNVERIFIED here.',
+    '- The worktree was materialized WITHOUT gitignored files: no node_modules, no .env, no build outputs. A build/test may require installing dependencies first (which needs approval) — if you skip that, say plainly that the change is UNVERIFIED here. (Cargo and Go projects need no install step: cargo/go fetch dependencies during the build itself.)',
     '- Never stage, commit, or otherwise modify version-control state (git add/commit/branch/checkout/restore/stash/…); your changes are captured automatically at task end.',
     '- Stay strictly within the files your task owns. Edits outside your assignment collide with sibling tasks and will be flagged as overlap conflicts at integration.',
     '- You run under a fixed budget (steps, tokens, wall clock). If you cannot finish, spend your last step writing the report with what you have.',

@@ -114,6 +114,28 @@ describe('install resolution is lockfile-driven', () => {
     expect(r.reason).toContain('virtual environment');
   });
 
+  it('cargo and go installs refuse with "nothing to install", never a missing feature (Session 18)', () => {
+    fs.writeFileSync(path.join(ws, 'Cargo.toml'), '[package]\nname = "x"\n');
+    const r = resolveSetup(unit('.'), 'install');
+    expect(r.resolved).toBeNull();
+    expect(r.reason).toContain('no separate install step');
+    expect(r.reason).toContain('run the check');
+
+    fs.rmSync(path.join(ws, 'Cargo.toml'));
+    fs.writeFileSync(path.join(ws, 'go.mod'), 'module example.com/m\n');
+    const g = resolveSetup(unit('.'), 'install');
+    expect(g.resolved).toBeNull();
+    expect(g.reason).toContain('module cache');
+  });
+
+  it('a non-Node unit asking for migrate is told where the intent lives (Session 18)', () => {
+    fs.writeFileSync(path.join(ws, 'Cargo.toml'), '[package]\nname = "x"\n');
+    const r = resolveSetup(unit('.'), 'migrate');
+    expect(r.resolved).toBeNull();
+    expect(r.reason).toContain('resolves from package.json scripts');
+    expect(r.reason).toContain('rust');
+  });
+
   it('binds ALL THREE files an install actually obeys — lockfile, package.json, .npmrc', () => {
     // `npm ci` looks like a command whose whole meaning is the lockfile. It is not: every package
     // manager executes package.json's preinstall/install/postinstall/prepare during an install,

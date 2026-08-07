@@ -91,13 +91,19 @@ function yarnInstallArgs(spec: string | null): { args: string[]; note: string; h
 /** The lockfile-driven install command. Pinned installs are the point; unpinned ones SAY SO. */
 function resolveInstall(p: DetectedProject): SetupResolution {
   if (!p.kinds.includes('node')) {
-    return {
-      resolved: null,
-      reason:
-        p.kinds.includes('python')
-          ? 'Python dependency installation is not supported: the harness cannot verify which interpreter or virtual environment a command would install into, and guessing would install into the wrong one. Install manually, then re-run the checks.'
-          : 'no Node project manifest was detected for this project, and only Node ecosystems have an install recipe',
-    };
+    // Session 18: cargo and go are not "unsupported installs" — they are ecosystems where a
+    // separate install step does not exist. Saying THAT is the honest answer; a generic
+    // "no install recipe" reads as a missing feature and invites a run_command workaround.
+    const reason = p.kinds.includes('python')
+      ? 'Python dependency installation is not supported: the harness cannot verify which interpreter or virtual environment a command would install into, and guessing would install into the wrong one. Install manually, then re-run the checks.'
+      : p.kinds.includes('rust')
+        ? 'Cargo has no separate install step: crates are fetched automatically during cargo build/check/test, and that network effect is declared in the check\'s own consent prompt. There is nothing to install — run the check.'
+        : p.kinds.includes('go')
+          ? 'Go has no separate install step: modules are fetched into the module cache automatically during go build/test/vet, and that network effect is declared in the check\'s own consent prompt. There is nothing to install — run the check.'
+          : p.kinds.includes('cmake')
+            ? 'this is a CMake/C-C++ project, which this version detects and indexes but cannot check or install'
+            : 'no Node project manifest was detected for this project, and only Node ecosystems have an install recipe';
+    return { resolved: null, reason };
   }
   const pm: PackageManager = p.packageManager ?? 'npm';
   const lock = p.lockfile;
@@ -172,9 +178,14 @@ function resolveScriptIntent(p: DetectedProject, action: Exclude<SetupAction, 'i
   const names = SCRIPT_NAMES[action];
   const candidates = names.filter((n) => p.scripts[n] !== undefined);
   if (p.packageManager === null || candidates.length === 0) {
+    // Session 18: a non-Node unit is told WHERE these intents live rather than scolded about a
+    // package.json it never had.
     return {
       resolved: null,
-      reason: `this project declares no ${action} script (looked for package.json scripts: ${names.join(', ')})`,
+      reason:
+        p.packageManager === null && !p.kinds.includes('node')
+          ? `${action} resolves from package.json scripts (${names.join(', ')}); this ${p.kinds.length > 0 ? p.kinds.join('/') : 'unrecognized'} project has none the harness can run`
+          : `this project declares no ${action} script (looked for package.json scripts: ${names.join(', ')})`,
     };
   }
   if (p.hasDependencies && !p.hasNodeModules) return { resolved: null, reason: NEEDS_NODE_MODULES, curable: true };
