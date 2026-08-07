@@ -2,9 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assembleSession } from '../src/cli/assemble.js';
+import { assembleSession, CHILD_ONLY_TOOL_NAMES, SESSION_TOOL_NAMES } from '../src/cli/assemble.js';
 import { childTools } from '../src/runtime/subagent.js';
 import { ROLE_CONTRACTS } from '../src/runtime/roles.js';
+import { TOOLS } from '../src/tools/index.js';
 import { MockProvider } from '../src/provider/mock.js';
 import { autoDenyApprover } from '../src/runtime/approvals.js';
 import { createNoneSandbox } from '../src/sandbox/none.js';
@@ -58,7 +59,7 @@ function nodeProject(rel: string, scripts: Record<string, string>): void {
 const assemble = () =>
   assembleSession({
     trust: { trusted: true, source: 'flag' },
-    config: { rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [] }, sources: [] },
+    config: { rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [] }, sources: [] },
     ctx: {
       ws,
       mode: 'non-interactive',
@@ -97,6 +98,58 @@ describe('the model actually receives the Session 16 tools', () => {
       expect(tools.some((t) => t.name === 'preview'), role).toBe(false);
     }
   });
+});
+
+/**
+ * `SESSION_TOOL_NAMES` is the vocabulary two other places read (the provider naming rule, the
+ * child-registry checks). A vocabulary that drifts from the registry is worse than no vocabulary,
+ * because everything downstream keeps passing while covering less — which is exactly how the
+ * naming rule went four names stale between S16 and S19. This is the pin that catches it.
+ */
+describe('the exported tool vocabulary matches the registry the model receives', () => {
+  it('every tool a real assembly attaches is either a static TOOL or a declared session name', async () => {
+    nodeProject('.', { test: 'vitest run' });
+    const a = await assemble();
+    try {
+      const statics = new Set(TOOLS.map((t) => t.name));
+      const declared = new Set<string>(SESSION_TOOL_NAMES);
+      for (const name of a.session.tools.map((t) => t.name)) {
+        expect(statics.has(name) || declared.has(name), `undeclared session tool: ${name}`).toBe(true);
+      }
+    } finally {
+      endSession(a.session, 'completed');
+    }
+  }, 60_000);
+
+  it('every UNCONDITIONAL session name is actually attached (a name nothing registers is a lie)', async () => {
+    nodeProject('.', { test: 'vitest run' });
+    const a = await assemble();
+    try {
+      const attached = new Set(a.session.tools.map((t) => t.name));
+      // `retrieve` needs a git-backed index and `web_search` needs a research credential; neither
+      // is present in this hermetic no-git, no-key assembly. Everything else is unconditional.
+      const conditional = new Set(['retrieve', 'web_search']);
+      for (const name of SESSION_TOOL_NAMES) {
+        if (conditional.has(name)) continue;
+        expect(attached.has(name), `declared but never registered: ${name}`).toBe(true);
+      }
+    } finally {
+      endSession(a.session, 'completed');
+    }
+  }, 60_000);
+
+  it('no CHILD-ONLY name leaks into the parent registry', async () => {
+    nodeProject('.', { test: 'vitest run' });
+    const a = await assemble();
+    try {
+      const attached = new Set(a.session.tools.map((t) => t.name));
+      for (const name of CHILD_ONLY_TOOL_NAMES) {
+        expect(attached.has(name), `child-only tool reached the parent: ${name}`).toBe(false);
+      }
+    } finally {
+      endSession(a.session, 'completed');
+    }
+  }, 60_000);
 });
 
 describe('ONE detection per session', () => {

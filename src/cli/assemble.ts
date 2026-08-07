@@ -20,6 +20,12 @@ import { createViewImageTool } from '../tools/view-image.js';
 import { readDocumentTool } from '../tools/artifact-read.js';
 import { createRenderDocumentTool, renderCapsFromEvents } from '../tools/artifact-render.js';
 import { createInspectPagesTool, inspectBudgetFromEvents } from '../tools/artifact-inspect.js';
+import { createWebSearchTool } from '../tools/web-search.js';
+import { createWebExtractTool } from '../tools/web-extract.js';
+import { createNoteAccumulator, createRecordSourceTool } from '../tools/record-source.js';
+import { researchBudgetFromEvents, type ResearchBudget } from '../tools/research-budget.js';
+import { createTavilyClient, noKeyMessage, tavilyKeyAvailability } from '../research/tavily.js';
+import type { ResearchClient } from '../research/types.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { effectiveIdentity } from '../report/report.js';
 import { cacheSuccessfulProbe, likelyBrowserAvailable, probeBrowser } from '../browser/probe.js';
@@ -51,6 +57,37 @@ import type { RunContext } from './context.js';
  * git probe run before the map and system prompt so both report the truth; the post-start records
  * land in a fixed order the report and tests rely on.
  */
+
+/**
+ * Every per-session tool name this assembly can attach to a PARENT session, in registration
+ * order. It is the VOCABULARY, not the runtime registry: a session legitimately omits `retrieve`
+ * without a git-backed index and `web_search` without a research credential.
+ *
+ * Exported because two other places need the same list and had been keeping their own copies —
+ * the provider naming-rule check had silently gone four names stale (Session 19), which is a rule
+ * that cannot enforce anything about a tool it does not know exists. One list, pinned against a
+ * real assembly in `assemble.projects.test.ts`.
+ */
+export const SESSION_TOOL_NAMES = [
+  'retrieve',
+  'run_check',
+  'project_setup',
+  'preview',
+  'browser_flow',
+  'view_image',
+  'read_document',
+  'web_search',
+  'render_document',
+  'inspect_pages',
+  'delegate_task',
+  'update_plan',
+  'apply_task_changes',
+  'recover',
+  'review',
+] as const;
+
+/** Tool names that exist only inside a CHILD session's registry, never the parent's. */
+export const CHILD_ONLY_TOOL_NAMES = ['report_finding', 'web_extract', 'record_source'] as const;
 
 export interface AssembleDeps {
   /** Structural proof the trust gate ran and PASSED — assembly is impossible untrusted. */
@@ -123,6 +160,17 @@ export interface Assembled {
   setupTool: ProjectSetupTool;
   /** The live setup counter (Session 16, events-rebuilt). */
   setupCaps: SetupCaps;
+  /**
+   * The live session research budget (Session 19, events-rebuilt) — ONE object shared by the
+   * parent's web_search and every researcher child's instances. `/research` reads it.
+   */
+  researchBudget: ResearchBudget;
+  /**
+   * Why research is unavailable this session, or undefined when it is available. Present means
+   * the tools were never registered and the system prompt says nothing about them — the honest
+   * shape for a capability whose credential is absent.
+   */
+  researchUnavailable?: string;
   /** The managed-preview tool instance (Session 13) — /preview reads its live handles. */
   previewTool: PreviewTool;
   /** The live preview-start counter (Session 13, events-rebuilt). */
@@ -507,6 +555,27 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     }),
   });
 
+  // Web research (Session 19). The credential is discovered ENV-ONLY, by name — configuration
+  // structurally cannot express one, and it never reaches argv, an event, or a prompt.
+  //
+  // No credential means the tools are NOT REGISTERED at all (the `retrieveTool` precedent) rather
+  // than registered and refusing. A tool the model can see but can never use costs a step and a
+  // retry loop every time it looks useful; absence plus a `/research` line explaining the cure is
+  // the honest shape. The system prompt's research paragraph is conditional on the same flag, so
+  // the model is never told about a capability its registry does not contain.
+  const researchKey = tavilyKeyAvailability(process.env);
+  const researchClient: ResearchClient | null =
+    researchKey.present && researchKey.keyEnv !== undefined
+      ? createTavilyClient({
+          apiKey: (process.env[researchKey.keyEnv] ?? '').trim(),
+          blockedDomains: deps.config.rules.researchBlockedDomains,
+        })
+      : null;
+  // ONE budget object for the whole session, seeded from the parent's events so a resume cannot
+  // refill it, and handed by reference to the parent's tool AND to every researcher child's.
+  const researchBudget: ResearchBudget = researchBudgetFromEvents(session.log.events);
+  const researchUnavailable = researchClient === null ? noKeyMessage() : undefined;
+
   // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the
   // handle died with the process's owner); the sweep above already dealt with the process, so
   // tell the model what happened rather than let a stale "ready" claim stand.
@@ -566,6 +635,10 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     browserTool,
     viewImageTool,
     readDocumentTool,
+    // Session 19: the parent gets web_search ONLY. web_extract (full page text) and record_source
+    // are researcher-only, which is what makes "the main agent never receives raw webpages" a
+    // property of the registry rather than a hope about behaviour.
+    ...(researchClient !== null ? [createWebSearchTool({ client: researchClient, budget: researchBudget })] : []),
     createRenderDocumentTool({ probe: cachedProbe, caps: renderCapsFromEvents(session.log.events) }),
     createInspectPagesTool({
       probe: cachedProbe,
@@ -666,6 +739,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     memory,
     retrieval: ranked.handle,
     delegateCaps,
+    researchBudget,
+    ...(researchUnavailable !== undefined ? { researchUnavailable } : {}),
     checkTool,
     checkCaps,
     setupTool,

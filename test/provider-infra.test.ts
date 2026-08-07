@@ -13,6 +13,8 @@ import { COMPAT_PROFILES } from '../src/provider/profiles.js';
 import { ProviderError, classifyHttpStatus, retryAfterMs, withRetry } from '../src/provider/errors.js';
 import { sseEvents, SSE_DONE, type SseEvent } from '../src/provider/sse.js';
 import { TOOLS } from '../src/tools/index.js';
+import { CHILD_ONLY_TOOL_NAMES, SESSION_TOOL_NAMES } from '../src/cli/assemble.js';
+import { ROLE_CONTRACTS } from '../src/runtime/roles.js';
 
 // ── Catalog invariants ─────────────────────────────────────────────────────────────────────
 
@@ -79,20 +81,19 @@ describe('provider catalog invariants', () => {
 
   it('every session tool name satisfies the strictest provider naming rules (kimi regex, glm charset)', () => {
     // Registered file/shell tools plus every per-session tool the assembly attaches.
+    //
+    // This list was hand-maintained until Session 19 and had silently gone stale by four names
+    // (project_setup from S16; read_document/render_document/inspect_pages from S17) — a naming
+    // rule that does not see a tool cannot enforce anything about it, and nothing failed. It is
+    // now derived from the same tables the runtime uses, so a new tool is covered on the day it
+    // is written: `SESSION_TOOL_NAMES` is the parent registry (pinned against a real assembly in
+    // assemble.projects.test.ts) and the role contracts supply every child-visible name.
     const perSession = [
-      'retrieve',
-      'run_check',
-      'preview',
-      'browser_flow',
-      'view_image',
-      'recover',
-      'review',
-      'report_finding',
-      'delegate_task',
-      'update_plan',
-      'apply_task_changes',
+      ...SESSION_TOOL_NAMES,
+      ...CHILD_ONLY_TOOL_NAMES,
+      ...Object.values(ROLE_CONTRACTS).flatMap((c) => [...c.toolNames]),
     ];
-    const names = [...TOOLS.map((t) => t.name), ...perSession];
+    const names = [...new Set([...TOOLS.map((t) => t.name), ...perSession])];
     for (const n of names) {
       expect(n, `kimi name rule: ${n}`).toMatch(/^[a-zA-Z_][a-zA-Z0-9-_]{2,63}$/);
       expect(n, `glm name rule: ${n}`).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
