@@ -55,8 +55,8 @@
     "diff": "^8.0.4",
     "fflate": "^0.8.3",
     "ignore": "^7.0.6",
-    "playwright-core": "^1.62.0",
-    "undici": "^7.28.0",
+    "playwright-core": "^1.62.1",
+    "undici": "^7.29.0",
     "unpdf": "^1.8.0",
     "zod": "^4.4.3"
   },
