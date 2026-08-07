@@ -116,6 +116,15 @@ Cargo.toml. The S16 silent-inertness bug, one axis over.
   preview surface stays package.json-only this session.
 - The go `test-targeted` all-paths-outside-the-unit case degrades to the argv-null `no-recipe`
   answer rather than `bad-request` (matches long-standing argv-null semantics; noted, not fixed).
+- **Review status, honestly:** the planned 4-lens adversarial fleet was killed by the account's
+  session usage limit before any lens completed; the review that DID happen is a bounded HAND
+  pass over the four lens areas (consent/TOCTOU, gate honesty, injection surfaces,
+  probe/Windows), which found no defect and one accepted-precedent design note: a
+  `.cargo/config.toml` edit changes what an approved `cargo build` does without changing the
+  command string — consistent with tsconfig/eslint-config behavior under existing consent
+  identity (the S14.5 rule binds a command's OWN definition), declared via `workspaceAuthored`
+  at the prompt, and recorded in the deferred pool as a candidate for install-config-style
+  identity binding. An independent lens round remains owed if the record is to match S14–S17.
 
 ### Recommended next step
 
@@ -633,7 +642,13 @@ ever bites.
 languages as data-shaped table additions; a user config knob for the map budget; a post-group
 child read-set overlap metric; retrieval-aware journal topics.
 
-**Verification/recovery (amended S16.5):** multi-kind `run_check` batches re-probe drift once,
+**Verification/recovery (amended S18):** cargo/go config files that steer an approved command's
+behavior (`.cargo/config.toml`, `rust-toolchain*`, `go.work`) are drift-visible (stamped,
+re-detected) but not part of check replay-consent identity — the same stance tsconfig/eslint
+configs have always had; an install-config-style identity binding (sha over the steering files)
+is the candidate shape if this ever needs closing. Preview recipes for `cargo run`/`go run`
+servers have no representation (the wording "declares no preview-capable script" is
+node-voiced at a rust/go unit). Multi-kind `run_check` batches re-probe drift once,
 before the first spawn — a workspace-authored script run by an earlier kind could rewrite a later
 kind's body within one approved batch (per-iteration re-probe is the likely shape); run_check's
 `planTouches` fact reads the plan document at decide and the plan file is outside the drift
