@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { sha256 } from '../shared/hash.js';
-import type { DetectedLockfile, DetectedProject, ManifestStamp, PackageManager, ProjectKind } from './types.js';
+import type { DetectedLockfile, DetectedProject, ManifestStamp, PackageManager, ProjectKind, ToolchainFacts } from './types.js';
 
 /**
  * Project detection for typed checks (Session 12): bounded, never-throwing, stat-first.
@@ -206,8 +206,13 @@ function detectLockfile(root: string, pm: PackageManager | null): DetectedLockfi
  *
  * `id` is this unit's workspace-relative identity (`'.'` for the workspace root). It defaults to
  * `'.'` so every pre-Session-16 caller keeps its exact meaning: one project, at the root.
+ *
+ * `toolchains` (Session 18) is the ONE machine-toolchain probe `detectWorkspace` performed,
+ * shared by reference across every unit of a detection — a per-unit re-probe would answer the
+ * same question at multiplied cost. Optional so direct callers and tests keep their meaning;
+ * recipes treat absence as "not gated by a probe".
  */
-export function detectProject(root: string, id = '.'): DetectedProject {
+export function detectProject(root: string, id = '.', toolchains?: ToolchainFacts): DetectedProject {
   const stamps = probeStamps(root);
   const kinds: ProjectKind[] = [];
   const evidence: string[] = [];
@@ -348,5 +353,6 @@ export function detectProject(root: string, id = '.'): DetectedProject {
     envFiles,
     evidence,
     stamps,
+    ...(toolchains !== undefined ? { toolchains } : {}),
   };
 }

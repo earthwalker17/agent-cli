@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { caseFold, isInside, normalizeRelPrefix, realpathBoundary } from '../shared/pathutil.js';
 import { detectProject, probeStamps } from './detect.js';
+import { probeToolchainState, toolchainStamps } from './toolchain.js';
 import type { DetectedProject, DetectedWorkspace, ManifestStamp } from './types.js';
 
 /**
@@ -260,10 +261,15 @@ function stampsFor(root: string, id: string): ManifestStamp[] {
  * The cheap TOCTOU fingerprint of a whole workspace: re-discover the unit set, then stat each
  * unit's candidates. Cheap enough to run per call (stats plus at most two small bounded reads),
  * and it is what lets a check approved in `api` notice that `web` grew a manifest.
+ *
+ * Session 18 appends the machine's TOOLCHAIN pseudo-stamps (`~toolchain/…`) — the same seam, so
+ * installing a compiler mid-session flips staleness and the shared holder re-detects. The order
+ * (unit stamps first, toolchain stamps last) must match `detectWorkspace`'s union exactly:
+ * `stampsEqual` compares positionally.
  */
 export function probeWorkspaceStamps(root: string): ManifestStamp[] {
   const { ids } = discoverUnitIds(root);
-  return [ROOT_UNIT_ID, ...ids].flatMap((id) => stampsFor(root, id));
+  return [...[ROOT_UNIT_ID, ...ids].flatMap((id) => stampsFor(root, id)), ...toolchainStamps()];
 }
 
 /**
@@ -275,17 +281,23 @@ export function detectWorkspace(root: string): DetectedWorkspace {
   const { ids, notes } = discoverUnitIds(root);
   const units: DetectedProject[] = [];
 
-  const rootUnit = detectProject(root, ROOT_UNIT_ID);
+  // ONE machine-toolchain probe per detection (Session 18), shared by reference across units,
+  // and folded into the stamp union so a toolchain appearing or vanishing mid-session is drift
+  // the TOCTOU guard can see — never a cached absence (the S16.5 probe-caching lesson).
+  const toolchainState = probeToolchainState();
+
+  const rootUnit = detectProject(root, ROOT_UNIT_ID, toolchainState.facts);
   if (rootUnit.kinds.length > 0) units.push(rootUnit);
 
   for (const id of ids) {
-    const unit = detectProject(path.join(root, id), id);
+    const unit = detectProject(path.join(root, id), id, toolchainState.facts);
     if (unit.kinds.length > 0) units.push(unit);
   }
 
   // The stamp union covers the ROOT even when it is not a unit: a package.json appearing at the
   // root changes the answer, and a fingerprint that could not see it would never re-detect.
-  const stamps = [ROOT_UNIT_ID, ...ids].flatMap((id) => stampsFor(root, id));
+  // Toolchain pseudo-stamps LAST — the same order `probeWorkspaceStamps` produces.
+  const stamps = [...[ROOT_UNIT_ID, ...ids].flatMap((id) => stampsFor(root, id)), ...toolchainState.stamps];
 
   return { root, rootUnit, units, stamps, notes };
 }

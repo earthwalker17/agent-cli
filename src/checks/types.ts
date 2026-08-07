@@ -19,6 +19,30 @@ export type { CheckFinding, CheckKind, CheckStatus } from '../types.js';
 /** Ecosystems with recipe rows. Everything else detects as no kinds and refuses honestly. */
 export type ProjectKind = 'node' | 'python';
 
+/** A toolchain binary found on PATH: the name probed and the absolute path that answered. */
+export interface ToolProbe {
+  name: string;
+  path: string;
+}
+
+/**
+ * Machine toolchain availability (Session 18) — stat-only facts probed by `toolchain.ts`, shared
+ * by every unit of one detection. Presence, not health: a findable binary that is broken still
+ * fails at run time with a real signal. `clippy`/`rustfmt`/`rustupTargets` are probed under the
+ * rustup TOOLCHAIN directories (never `~/.cargo/bin`, whose proxy shims exist for every component
+ * name whether or not the component does), unioned across installed toolchains — an approximation
+ * the module doc states.
+ */
+export interface ToolchainFacts {
+  cargo: ToolProbe | null;
+  rustc: ToolProbe | null;
+  go: ToolProbe | null;
+  clippy: boolean;
+  rustfmt: boolean;
+  /** Installed rust target triples (charset-filtered, capped, sorted). */
+  rustupTargets: string[];
+}
+
 export type PackageManager = 'npm' | 'pnpm' | 'yarn';
 
 /**
@@ -119,6 +143,13 @@ export interface DetectedProject {
   /** Human-readable provenance for /checks, prompts, and refusals. */
   evidence: string[];
   stamps: ManifestStamp[];
+  /**
+   * Machine toolchain facts, when the detection that produced this unit probed them (Session 18).
+   * One probe per `detectWorkspace`, the same reference on every unit. Optional so every existing
+   * caller and test literal keeps compiling — recipes treat absence as "not gated by a probe" and
+   * degrade to the pythonToolRecipe pattern (fail at run, classify via signals).
+   */
+  toolchains?: ToolchainFacts;
 }
 
 /**
