@@ -2000,6 +2000,17 @@ export type EventBody =
       source: 'user-sigil' | 'model';
       reason?: string;
     }
+  /**
+   * The user routed a turn to the web (Session 19, `@research` / `@search`). Recorded for the
+   * same reason `plan.route` is: a routing decision the USER made is evidence about how the turn
+   * was framed, and it must be distinguishable from the model deciding to search on its own.
+   * It grants nothing — the policy gate still asks.
+   */
+  | {
+      type: 'research.route';
+      mode: 'research' | 'search';
+      source: 'user-sigil';
+    }
   | {
       /**
        * The USER approved the plan (/plan approve) — the execution consent record (V0.7).

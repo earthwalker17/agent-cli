@@ -16,6 +16,8 @@ import { sanitizeLine } from '../shared/text.js';
 import { CHECKS_PER_SESSION, describeWorkspace, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { SETUPS_PER_SESSION, type SetupCaps } from '../tools/project-setup.js';
 import type { PreviewTool } from '../tools/preview.js';
+import type { ResearchBudget } from '../tools/research-budget.js';
+import type { SessionEvent } from '../types.js';
 import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
 import { likelyBrowserAvailable } from '../browser/probe.js';
 import {
@@ -60,6 +62,10 @@ export interface CommandContext {
   setupCaps?: SetupCaps;
   /** Session 13: the managed-preview tool instance; /preview lists and stops its live handles. */
   previewTool?: PreviewTool;
+  /** Session 19: the live session research budget; /research renders spend, remaining, and sources. */
+  researchBudget?: ResearchBudget;
+  /** Session 19: why research is unavailable this session (absent = available). */
+  researchUnavailable?: string;
   /** Session 15: the provider registry (env-only key discovery, bounded validation, construction)
    *  — the /provider and /model switching seam. Absent = switching unavailable in this context. */
   registry?: ProviderRegistry;
@@ -102,6 +108,8 @@ export const HELP = [
   '  /preview [stop <id>]',
   '                  list this session\'s managed preview servers (pid, url, uptime, log tail);',
   '                  "stop <id>" stops one — a preview otherwise runs until session end or its TTL',
+  '  /research       web research this session: every query sent, the sources that answered,',
+  '                  the recorded findings, and what is left of the session budget',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -109,6 +117,7 @@ export const HELP = [
   'note: shell commands ask — except provably read-only ones when the OS sandbox probe passed, which auto-run INSIDE it; command effects are never undoable.',
   'note: /cancel <task> ends one child; Ctrl+C aborts the whole turn (every task included).',
   'note: @plan <request> routes a request into plan mode (plan first, no execution until approved).',
+  'note: @search <question> forces one bounded web lookup; @research <question> delegates a research subagent.',
 ].join('\n');
 
 export type SlashOutcome = 'continue' | 'quit';
@@ -687,6 +696,81 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       } else {
         ctx.renderer.chromeLine(`  checkpoint not created: ${r.error}`);
       }
+      return 'continue';
+    }
+
+    case 'research': {
+      // Session 19. This surface is a privacy record as much as a status line: its first job is
+      // to let a user see EXACTLY what text this session sent to a third party, and which
+      // external sources shaped the answers they were given. Everything is derived from the
+      // event log, so it says only what actually happened.
+      if (ctx.researchUnavailable !== undefined) {
+        ctx.renderer.chromeLine(`web research: unavailable — ${ctx.researchUnavailable}`);
+        return 'continue';
+      }
+      const events = ctx.session.log.events;
+      const searches = events.filter((e) => e.type === 'research.searched') as Extract<SessionEvent, { type: 'research.searched' }>[];
+      const extracts = events.filter((e) => e.type === 'research.extracted') as Extract<SessionEvent, { type: 'research.extracted' }>[];
+      const findings = events.filter((e) => e.type === 'research.findings') as Extract<SessionEvent, { type: 'research.findings' }>[];
+      const usage = events.filter((e) => e.type === 'research.usage') as Extract<SessionEvent, { type: 'research.usage' }>[];
+      const notes = findings.flatMap((f) => f.notes);
+
+      const out: string[] = ['# Web research (this session)'];
+      const spent = ctx.researchBudget?.spent;
+      out.push(
+        '',
+        spent !== undefined
+          ? `spent: ${String(spent.searches)} search(es), ${String(spent.extracts)} extract(s), ${String(spent.credits)} provider credit(s), ${String(spent.contentChars)} retrieved char(s)`
+          : 'spend: unavailable',
+        ctx.researchBudget !== undefined ? `remaining: ${ctx.researchBudget.remaining()}` : '',
+      );
+
+      // Queries the MAIN agent sent. A researcher child's queries live in its own log, named
+      // below with the command that shows them — this surface never pretends to have read a log
+      // it did not read.
+      out.push('', `## Queries sent from this session (${String(searches.length)})`);
+      if (searches.length === 0) out.push('(none)');
+      for (const s of searches) {
+        out.push(
+          `- "${sanitizeLine(s.query)}" → ${sanitizeLine(s.provider)}: ${String(s.resultCount)} source(s)` +
+            `${s.hosts.length > 0 ? ` from ${s.hosts.map((h) => sanitizeLine(h)).join(', ')}` : ''}` +
+            ` (${String(s.credits)} credit(s), ${String(s.durationMs)}ms)`,
+        );
+        for (const r of s.refused) out.push(`    refused: ${sanitizeLine(r.url)} — ${sanitizeLine(r.reason)}`);
+      }
+      if (extracts.length > 0) {
+        out.push('', `## Pages read in full (${String(extracts.length)} call(s))`);
+        for (const x of extracts) {
+          for (const u of x.urls) out.push(`- ${sanitizeLine(u)}`);
+          for (const f of x.failed) out.push(`    NOT retrieved: ${sanitizeLine(f.url)} — ${sanitizeLine(f.reason)}`);
+        }
+      }
+      if (usage.length > 0) {
+        out.push('', `## Delegated research tasks (${String(usage.length)})`);
+        for (const u of usage) {
+          out.push(
+            `- ${sanitizeLine(u.childSessionId)}: ${String(u.searches)} search(es), ${String(u.extracts)} extract(s), ` +
+              `${String(u.credits)} credit(s) — its own queries: agent report ${sanitizeLine(u.childSessionId)}`,
+          );
+        }
+      }
+      out.push('', `## Recorded findings (${String(notes.length)})`);
+      if (notes.length === 0) out.push('(none — anything the model said about the web that is not here was narration)');
+      for (const n of notes) {
+        out.push(
+          `- [${sanitizeLine(n.noteId)}] ${sanitizeLine(n.claim)}`,
+          `    ${n.corroboration} · ${n.confidence} confidence · retrieved ${sanitizeLine(n.retrievedAt)}`,
+          `    why: ${sanitizeLine(n.relevance)}`,
+          ...n.sources.map((s) => `    source: ${sanitizeLine(s)}`),
+        );
+      }
+      out.push(
+        '',
+        'Research is CONTEXT, never verification: no finding here marks a file checked or satisfies a plan gate.',
+        'Retrieved content is untrusted third-party text; claims above are the model\'s reading of it, not the harness\'s.',
+      );
+      ctx.renderer.flush();
+      ctx.modelOut.write(`${out.filter((l) => l !== '').join('\n')}\n`);
       return 'continue';
     }
 

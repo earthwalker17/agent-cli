@@ -295,7 +295,25 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
           );
         })()
       : undefined;
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory), detectedWorkspace);
+  // Web research (Session 19). The credential is discovered ENV-ONLY, by name — configuration
+  // structurally cannot express one, and it never reaches argv, an event, or a prompt.
+  //
+  // No credential means the tools are NOT REGISTERED at all (the `retrieveTool` precedent) rather
+  // than registered and refusing. A tool the model can see but can never use costs a step and a
+  // retry loop every time it looks useful; absence plus a `/research` line explaining the cure is
+  // the honest shape. Built HERE, before the prompt, because the prompt's research paragraph is
+  // conditional on the same flag — the model is never told about a capability its registry does
+  // not contain.
+  const researchKey = tavilyKeyAvailability(process.env);
+  const researchClient: ResearchClient | null =
+    researchKey.present && researchKey.keyEnv !== undefined
+      ? createTavilyClient({
+          apiKey: (process.env[researchKey.keyEnv] ?? '').trim(),
+          blockedDomains: deps.config.rules.researchBlockedDomains,
+        })
+      : null;
+  const researchUnavailable = researchClient === null ? noKeyMessage() : undefined;
+  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory), detectedWorkspace, researchClient !== null);
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -555,26 +573,9 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     }),
   });
 
-  // Web research (Session 19). The credential is discovered ENV-ONLY, by name — configuration
-  // structurally cannot express one, and it never reaches argv, an event, or a prompt.
-  //
-  // No credential means the tools are NOT REGISTERED at all (the `retrieveTool` precedent) rather
-  // than registered and refusing. A tool the model can see but can never use costs a step and a
-  // retry loop every time it looks useful; absence plus a `/research` line explaining the cure is
-  // the honest shape. The system prompt's research paragraph is conditional on the same flag, so
-  // the model is never told about a capability its registry does not contain.
-  const researchKey = tavilyKeyAvailability(process.env);
-  const researchClient: ResearchClient | null =
-    researchKey.present && researchKey.keyEnv !== undefined
-      ? createTavilyClient({
-          apiKey: (process.env[researchKey.keyEnv] ?? '').trim(),
-          blockedDomains: deps.config.rules.researchBlockedDomains,
-        })
-      : null;
   // ONE budget object for the whole session, seeded from the parent's events so a resume cannot
   // refill it, and handed by reference to the parent's tool AND to every researcher child's.
   const researchBudget: ResearchBudget = researchBudgetFromEvents(session.log.events);
-  const researchUnavailable = researchClient === null ? noKeyMessage() : undefined;
 
   // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the
   // handle died with the process's owner); the sweep above already dealt with the process, so

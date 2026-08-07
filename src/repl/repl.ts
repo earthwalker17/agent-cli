@@ -166,6 +166,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   }
 
   const pendingNotes: string[] = [];
+  const researchUnavailable = assembled.researchUnavailable;
   const commandCtx: CommandContext = {
     session,
     layout,
@@ -178,6 +179,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     checkCaps: assembled.checkCaps,
     setupCaps: assembled.setupCaps,
     previewTool: assembled.previewTool,
+    researchBudget: assembled.researchBudget,
+    ...(assembled.researchUnavailable !== undefined ? { researchUnavailable: assembled.researchUnavailable } : {}),
     registry,
     ...(assembled.pruneHarnessRefs !== undefined ? { pruneHarnessRefs: assembled.pruneHarnessRefs } : {}),
   };
@@ -261,6 +264,32 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         session.log.append({ type: 'plan.route', mode: 'direct', source: 'user-sigil' });
         pendingNotes.push(
           'the user explicitly chose the DIRECT path for this request: skip the plan document and do the work with your own tools, keeping it bounded. If it genuinely requires multi-step mutating orchestration, SAY SO instead of silently planning. Executor delegation still requires an approved plan.',
+        );
+      } else if (/^@(research|search)\b/i.test(line)) {
+        // Session 19: the same sigil shape, for the other axis of routing. @research and @search
+        // differ in SIZE, not in permission — neither grants anything the policy gate would not
+        // have asked for anyway; they tell the model the user wants the web consulted and how
+        // much ceremony to spend on it.
+        const deep = /^@research\b/i.test(line);
+        const rest = line.replace(/^@(research|search)\b/i, '').trim();
+        if (rest.length === 0) {
+          renderer.chromeLine(
+            deep
+              ? 'usage: @research <question> — delegate a read-only research subagent and answer from sources'
+              : 'usage: @search <question> — one bounded web lookup, answered from snippets',
+          );
+          continue;
+        }
+        if (researchUnavailable !== undefined) {
+          renderer.chromeLine(`web research is unavailable: ${researchUnavailable}`);
+          continue;
+        }
+        line = rest;
+        session.log.append({ type: 'research.route', mode: deep ? 'research' : 'search', source: 'user-sigil' });
+        pendingNotes.push(
+          deep
+            ? 'the user explicitly requested WEB RESEARCH for this request: delegate a `researcher` task with the question and the concrete claims it must settle, then answer from its RECORDED findings, citing the sources. Verify anything load-bearing yourself before acting on it, and say plainly what could not be established.'
+            : 'the user explicitly requested a WEB LOOKUP for this request: run ONE bounded web_search and answer from the snippets with their URLs. Do not spawn a researcher subagent for this; if one lookup genuinely cannot settle it, say so and offer @research.',
         );
       }
 

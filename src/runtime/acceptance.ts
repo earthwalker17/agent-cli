@@ -336,6 +336,51 @@ export function computeAcceptance(
     }
   }
 
+  // Web research (Session 19). Never a blocker and never work: research events stay out of
+  // WORK_EVENT_TYPES, exactly like artifacts, because reading the web changes nothing here.
+  //
+  // But a session accepted as COMPLETE whose conclusions rest on external sources should not hide
+  // that provenance behind the word "complete". Two things a later reader needs and cannot
+  // reconstruct: that external material shaped this work at all, and that some of it rested on a
+  // single source or on sources that disagreed — the two shapes most likely to be wrong. Named,
+  // never blocking.
+  {
+    let searches = 0;
+    let extracts = 0;
+    let notes = 0;
+    let single = 0;
+    let conflicting = 0;
+    const childTasks = new Set<string>();
+    for (const e of events) {
+      if (e.type === 'research.searched') searches++;
+      else if (e.type === 'research.extracted') extracts++;
+      else if (e.type === 'research.usage') {
+        childTasks.add(e.childSessionId);
+        searches += e.searches;
+        extracts += e.extracts;
+      } else if (e.type === 'research.findings') {
+        notes += e.notes.length;
+        single += e.notes.filter((n) => n.corroboration === 'single-source').length;
+        conflicting += e.notes.filter((n) => n.corroboration === 'sources-disagree').length;
+      }
+    }
+    if (searches > 0 || extracts > 0) {
+      caveats.push(
+        `this session consulted the WEB (${String(searches)} search(es), ${String(extracts)} page read(s)` +
+          `${childTasks.size > 0 ? `, ${String(childTasks.size)} delegated research task(s)` : ''}` +
+          `${notes > 0 ? `, ${String(notes)} recorded finding(s)` : ''}) — external information is context, ` +
+          'never verification; nothing it produced marks a file CHECKED (`/research` shows every query and source)',
+      );
+    }
+    if (single > 0 || conflicting > 0) {
+      caveats.push(
+        `research findings needing a second look: ${String(single)} rest on a SINGLE source` +
+          `${conflicting > 0 ? ` and ${String(conflicting)} record SOURCES THAT DISAGREE` : ''} — ` +
+          'verify any of these that load-bearing work depends on',
+      );
+    }
+  }
+
   // blockers and caveats arrive pre-rendered from the one fold /review also shows.
   // approvedCurrentGraph, not merely 'approved' (review): divergence is already its own
   // blocker; the shared filter keeps the ATTRIBUTION honest too (see its doc in canonical.ts).

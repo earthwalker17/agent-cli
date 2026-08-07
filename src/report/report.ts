@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { caseFold } from '../shared/pathutil.js';
-import type { CommandTermination, SessionEvent } from '../types.js';
+import type { CommandTermination, ResearchNote, SessionEvent } from '../types.js';
 import type { PlanGraph } from '../plan/schema.js';
 import { foldRepairs } from '../recovery/ledger.js';
 import { foldReview } from '../review/ledger.js';
@@ -133,6 +133,18 @@ export interface ReportArtifact {
   warnings?: string[];
 }
 
+/**
+ * One recorded external-read fact (Session 19, additive). CONTEXT, never verification.
+ *
+ * `query` is carried VERBATIM on purpose: this section is the durable answer to "what did this
+ * session send to a third party", and a summarized query cannot answer it.
+ */
+export type ReportResearch =
+  | { kind: 'search'; provider: string; query: string; resultCount: number; hosts: string[]; refused?: { url: string; reason: string }[]; credits: number; contentChars: number }
+  | { kind: 'extract'; provider: string; urls: string[]; pageCount: number; failed?: { url: string; reason: string }[]; credits: number; contentChars: number }
+  | { kind: 'findings'; childSessionId: string; notes: ResearchNote[] }
+  | { kind: 'usage'; childSessionId: string; searches: number; extracts: number; credits: number; contentChars: number };
+
 export interface ReportRepair {
   kind: 'attempt' | 'escalation';
   target: string;
@@ -220,6 +232,9 @@ export interface ReportJson {
   /** Document artifacts (Session 17, additive): renders with validation verdicts + inspections.
    *  PRODUCTS, never verification — none of these mark a file CHECKED or satisfy a gate. */
   artifacts?: ReportArtifact[];
+  /** Web research (Session 19, additive): queries sent, sources read, findings recorded, spend.
+   *  CONTEXT, never verification — nothing here marks a file CHECKED or satisfies a gate. */
+  research?: ReportResearch[];
   /** Bounded repair attempts and escalations (Session 12, additive); outcomes are DERIVED. */
   repairs?: ReportRepair[];
   /** Managed preview processes (Session 13, additive), in start order. */
@@ -870,6 +885,51 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     }
   }
 
+  // Web research (Session 19). A separate fold for the same reason as artifacts and setup:
+  // research is CONTEXT, never verification, so it must never reach `collectPassingEvidence`.
+  //
+  // Two things this section owes a reader that no other section does. First, the exact text this
+  // session sent to a third party — that is a privacy record, and a summarized query cannot serve
+  // as one. Second, an honest boundary: a researcher child's own queries live in ITS log, so the
+  // parent report names the child and the command that shows them rather than implying it read a
+  // log it never opened.
+  const research: ReportResearch[] = [];
+  for (const e of events) {
+    if (e.type === 'research.searched') {
+      research.push({
+        kind: 'search',
+        provider: e.provider,
+        query: e.query,
+        resultCount: e.resultCount,
+        hosts: e.hosts,
+        ...(e.refused.length > 0 ? { refused: e.refused } : {}),
+        credits: e.credits,
+        contentChars: e.contentChars,
+      });
+    } else if (e.type === 'research.extracted') {
+      research.push({
+        kind: 'extract',
+        provider: e.provider,
+        urls: e.urls,
+        pageCount: e.pageCount,
+        ...(e.failed.length > 0 ? { failed: e.failed } : {}),
+        credits: e.credits,
+        contentChars: e.contentChars,
+      });
+    } else if (e.type === 'research.findings') {
+      research.push({ kind: 'findings', childSessionId: e.childSessionId, notes: e.notes });
+    } else if (e.type === 'research.usage') {
+      research.push({
+        kind: 'usage',
+        childSessionId: e.childSessionId,
+        searches: e.searches,
+        extracts: e.extracts,
+        credits: e.credits,
+        contentChars: e.contentChars,
+      });
+    }
+  }
+
   // The bounded repair ledger (Session 12). Outcomes come from the same pure fold the gate and
   // acceptance read, so the report can never disagree with them about whether a repair was proven.
   const ledger = foldRepairs(events);
@@ -1026,6 +1086,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     ...(checkRuns.length > 0 ? { checks: checkRuns } : {}),
     ...(setups.length > 0 ? { setups } : {}),
     ...(artifacts.length > 0 ? { artifacts } : {}),
+    ...(research.length > 0 ? { research } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
     ...(previews.length > 0 ? { previews } : {}),
     ...(browserFlows.length > 0 ? { browserFlows } : {}),
@@ -1185,6 +1246,40 @@ function renderMarkdown(r: ReportJson): string {
       'Artifacts are PRODUCTS, not verification: a rendered or inspected document never marks a file CHECKED and ' +
         'never satisfies a plan gate. Validation verdicts say whether the artifact matches its spec; page images are ' +
         'evidence of how pages LOOKED, judged (if at all) by a model.',
+    );
+    L.push('');
+  }
+  if (r.research !== undefined && r.research.length > 0) {
+    L.push(`## Web research`);
+    for (const x of r.research) {
+      if (x.kind === 'search') {
+        L.push(
+          `- SENT to ${x.provider}: "${x.query}" → ${x.resultCount} source(s)` +
+            `${x.hosts.length > 0 ? ` from ${x.hosts.join(', ')}` : ''} (${x.credits} credit(s), ${x.contentChars} chars)`,
+        );
+        for (const f of x.refused ?? []) L.push(`    refused by the harness: ${f.url} — ${f.reason}`);
+      } else if (x.kind === 'extract') {
+        L.push(`- READ IN FULL via ${x.provider}: ${x.pageCount} of ${x.urls.length} page(s) (${x.credits} credit(s), ${x.contentChars} chars)`);
+        for (const u of x.urls) L.push(`    ${u}`);
+        for (const f of x.failed ?? []) L.push(`    NOT retrieved: ${f.url} — ${f.reason}`);
+      } else if (x.kind === 'findings') {
+        L.push(`- findings recorded by ${x.childSessionId} (${x.notes.length}):`);
+        for (const n of x.notes) {
+          L.push(`    [${n.noteId}] ${n.claim}`);
+          L.push(`      ${n.corroboration} · ${n.confidence} confidence · retrieved ${n.retrievedAt} · ${n.sources.join(' , ')}`);
+        }
+      } else {
+        L.push(
+          `- delegated research task ${x.childSessionId} spent ${x.searches} search(es), ${x.extracts} extract(s), ` +
+            `${x.credits} credit(s) — its own queries are in its log (agent report ${x.childSessionId})`,
+        );
+      }
+    }
+    L.push('');
+    L.push(
+      'Research is CONTEXT, never verification: nothing here marks a file CHECKED or satisfies a plan gate. ' +
+        'The queries above are the exact text this session sent to a third party. Retrieved content is untrusted ' +
+        'external text, and every claim recorded above is a MODEL\'s reading of it, not a harness verification.',
     );
     L.push('');
   }
