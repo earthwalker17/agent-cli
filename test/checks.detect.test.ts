@@ -138,7 +138,8 @@ describe('detectProject — rust, go, cmake (Session 18)', () => {
     write('Cargo.toml', '[package]\nname = "meterkit"\nedition = "2021"\n\n[dependencies]\n');
     const p = detectProject(ws);
     expect(p.kinds).toEqual(['rust']);
-    expect(p.rust).toEqual({ workspaceRoot: false, hasCargoLock: false, edition: '2021', crossTarget: null, toolchainFile: null });
+    expect(p.rust).toMatchObject({ workspaceRoot: false, hasCargoLock: false, edition: '2021', crossTarget: null, toolchainFile: null });
+    expect(p.rust!.consentSha).toMatch(/^[0-9a-f]{64}$/);
     expect(p.evidence.join(' ')).toContain('Cargo.toml');
 
     write('Cargo.lock', '# lock');
@@ -146,6 +147,29 @@ describe('detectProject — rust, go, cmake (Session 18)', () => {
     const q = detectProject(ws);
     expect(q.rust!.hasCargoLock).toBe(true);
     expect(q.rust!.toolchainFile).toBe('rust-toolchain.toml');
+  });
+
+  it('the rust consent digest changes with EVERY steering file — the S18-review body binding', () => {
+    write('Cargo.toml', '[package]\nname = "a"\n');
+    const base = detectProject(ws).rust!.consentSha;
+    write('.cargo/config.toml', '[source.crates-io]\nreplace-with = "evil"\n');
+    const afterConfig = detectProject(ws).rust!.consentSha;
+    expect(afterConfig).not.toBe(base);
+    write('Cargo.lock', '# pinned');
+    const afterLock = detectProject(ws).rust!.consentSha;
+    expect(afterLock).not.toBe(afterConfig);
+    // Deterministic for unchanged bytes.
+    expect(detectProject(ws).rust!.consentSha).toBe(afterLock);
+  });
+
+  it('the go consent digest changes when go.mod or go.sum change', () => {
+    write('go.mod', 'module m\n');
+    const base = detectProject(ws).go!.consentSha;
+    write('go.sum', 'example.com/x v1.0.0 h1:abc\n');
+    const withSum = detectProject(ws).go!.consentSha;
+    expect(withSum).not.toBe(base);
+    write('go.mod', 'module m\n\nrequire example.com/x v1.0.0\n');
+    expect(detectProject(ws).go!.consentSha).not.toBe(withSum);
   });
 
   it('a [workspace] section marks the cargo workspace root — including a virtual one', () => {
@@ -171,7 +195,8 @@ describe('detectProject — rust, go, cmake (Session 18)', () => {
     write('go.mod', 'module example.com/svc\n\ngo 1.22\n');
     const p = detectProject(ws);
     expect(p.kinds).toEqual(['go']);
-    expect(p.go).toEqual({ module: 'example.com/svc', goDirective: '1.22', hasGoSum: false, hasVendorDir: false });
+    expect(p.go).toMatchObject({ module: 'example.com/svc', goDirective: '1.22', hasGoSum: false, hasVendorDir: false });
+    expect(p.go!.consentSha).toMatch(/^[0-9a-f]{64}$/);
 
     write('go.sum', '');
     fs.mkdirSync(path.join(ws, 'vendor'));

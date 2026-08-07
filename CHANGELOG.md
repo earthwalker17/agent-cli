@@ -84,6 +84,33 @@ no new loop, no plugin system, no parser dependencies, schema still v1.
   (same kind, re-resolved, PASSED) while `cargo test` kept refusing with the reason; `/accept`
   COMPLETE on GREEN gates. 9.3 minutes, 170 events, 15 real spawns + exactly 2 honest refusals.
 
+### Fixed (the session's own adversarial review — 4 lenses, 10 unique findings, all hand-verified, all fixed)
+
+- An all-outside-unit `test-targeted` scope resolved to gate-WAIVING `no-recipe` instead of
+  `bad-request` — a caller mistake could discharge a user-approved gate. Three lenses found it
+  independently.
+- **Cargo/go replay consent bound no content identity, although for these ecosystems the check
+  IS the install**: one `[s]` on `cargo build` survived an auto-allowed `.cargo/config.toml`
+  write redirecting the crates registry. The steering files (Cargo.toml, Cargo.lock,
+  `.cargo/config*`, `rust-toolchain*`; go.mod + go.sum) now ride the consent body, so both the
+  replay key and the execute-time drift refusal change when any of them does — the S16
+  install-identity rule, applied to the ecosystems whose build fetches.
+- A stale waiver survived a LATER recorded failure of the same kind: toolchain-unavailable
+  recorded, the user installs the toolchain, the re-run FAILS — accepted as "COMPLETE, its
+  TOOLCHAIN IS NOT INSTALLED", false twice. Both gate folds now apply a recency rule: a waiver
+  older than a real fail/error of the same kind is refuted evidence and the gate stays pending.
+- Non-rustup Rust installs (apt/scoop/standalone) read as missing clippy/rustfmt, falsely
+  waiving lint/format gates: the PATH-shim distrust now applies only where rustup actually
+  manages the install (a machine with no toolchains dir has no proxy shims either).
+- Caveat rendering: mixed waiver reasons for one gate kind split (the toolchain sentence is
+  never asserted about a project whose waiver was a genuine capability answer), and `'.'` in
+  `gates.projects` renders as "the workspace root" instead of being silently filtered.
+- Cargo member / go.work entries carrying control characters (or oversize go.work lines) are
+  refused at ingestion and counted in a note — never echoed; eight dated nightlies can no
+  longer evict the stable toolchain from the bounded component scan; a leaked PATHEXT on POSIX
+  no longer loses the bare binary name; the rustlib walk is entry-capped; `go build ./...`
+  declares `writesOutputs: true` (a single-main-package build writes the exe into the cwd).
+
 ### Honest limits
 
 Live claims cover the rustup **gnu** host and go.dev Go on one Windows 11 machine — MSVC-hosted

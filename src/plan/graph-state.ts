@@ -199,8 +199,15 @@ export function foldGraphState(
         }
         return true;
       });
+      // A waiver is only as good as its RECENCY (S18 review): "this kind cannot run here" is
+      // refuted by a LATER run of the same kind that failed — the failing run proves it CAN run,
+      // so the kind folds to missing/pending, never to an excused waiver. Sequence that found
+      // it: toolchain-unavailable recorded, the user installs the toolchain mid-session, the
+      // re-run FAILS — the old fold accepted with "TOOLCHAIN IS NOT INSTALLED", false twice.
+      const newestWaiver = Math.max(...after.filter((r) => r.status === 'unsupported' && r.capabilityUnsupported).map((r) => r.seq), -1);
+      const newestVerdict = Math.max(...after.filter((r) => r.status === 'fail' || r.status === 'error').map((r) => r.seq), -1);
       if (after.some((r) => r.status === 'pass')) satisfied.push(kind);
-      else if (after.some((r) => r.status === 'unsupported' && r.capabilityUnsupported)) {
+      else if (newestWaiver > newestVerdict) {
         waived.push(kind);
         if (after.some((r) => r.status === 'unsupported' && r.toolchainUnavailable)) toolchainUnavailable.push(kind);
       } else missing.push(kind);
@@ -446,7 +453,17 @@ function boundaryGate(
         passedIn.push(label);
         continue;
       }
-      if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && waivesGate(e.unsupportedReason))) {
+      // Recency rule (S18 review), same as the per-task fold: a waiver older than a real
+      // fail/error of the same kind in this scope is refuted evidence, not an excuse.
+      const newestWaiver = Math.max(
+        ...after.filter((e) => e.type === 'check.completed' && e.status === 'unsupported' && waivesGate(e.unsupportedReason)).map((e) => e.seq),
+        -1,
+      );
+      const newestVerdict = Math.max(
+        ...after.filter((e) => e.type === 'check.completed' && (e.status === 'fail' || e.status === 'error')).map((e) => e.seq),
+        -1,
+      );
+      if (newestWaiver > newestVerdict) {
         waivedIn.push(label);
         // Session 18: a toolchain-gap waiver is tracked apart so acceptance can say WHY loudly.
         if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && e.unsupportedReason === 'toolchain-unavailable')) {

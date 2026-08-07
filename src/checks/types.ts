@@ -32,6 +32,17 @@ export interface RustFacts {
   /** `[package] edition`, display evidence only. */
   edition: string | null;
   /**
+   * One digest over every file that decides what a cargo command FETCHES and EXECUTES —
+   * Cargo.toml, Cargo.lock, `.cargo/config.toml`/`.cargo/config` (registry replacement,
+   * rustc-wrapper, build target), `rust-toolchain*` — names included. This is the cargo rows'
+   * consent BODY (S18 review): a cargo check is the ecosystem's install step, and the Node
+   * install binds exactly this class (`installConfigSha256`); without it, one `[s]` on
+   * `cargo build` survived an auto-allowed `.cargo/config.toml` write that redirected the
+   * registry. An oversize steering file contributes its stat identity instead of granting an
+   * unbound replay.
+   */
+  consentSha: string;
+  /**
    * `[build] target` from `.cargo/config.toml` / `.cargo/config`, charset-filtered. When set,
    * every compile targets that triple: build/check/clippy need the rustup target installed, and
    * `cargo test` builds binaries this HOST cannot execute — the embedded honesty split.
@@ -45,6 +56,8 @@ export interface RustFacts {
 export interface GoFacts {
   /** The `module` directive path, charset-filtered — display and evidence only. */
   module: string | null;
+  /** Digest over go.mod + go.sum — the go rows' consent body (see RustFacts.consentSha). */
+  consentSha: string;
   /** The `go` version directive, display only. */
   goDirective: string | null;
   hasGoSum: boolean;
@@ -251,6 +264,13 @@ export interface CheckRecipe {
    * the bounded text for display.
    */
   bodyScript?(p: DetectedProject): string | null;
+  /**
+   * A direct consent-body digest for rows whose command is a stable string steered by workspace
+   * FILES rather than a named script (S18: cargo/go — see `RustFacts.consentSha`). Consulted
+   * only when `bodyScript` yields nothing; the resulting sha rides `ResolvedCheck.bodySha`, so
+   * both the replay key and the execute-time drift comparison change when a steering file does.
+   */
+  bodyShaOf?(p: DetectedProject): string | null;
   timeoutMs: number;
   effects: CheckEffects;
 }

@@ -230,9 +230,17 @@ function declaredCargoMembers(root: string): { patterns: string[]; note?: string
   let inWorkspace = false;
   let inMembersArray = false;
   let sawMembersKey = false;
+  let dropped = 0;
   const takeQuoted = (fragment: string): void => {
     for (const m of fragment.matchAll(/"([^"]{1,256})"/g)) {
       if (patterns.length >= MAX_WORKSPACE_PATTERNS) return;
+      // Control characters are refused AT INGESTION (S18 review): a rejected pattern is later
+      // interpolated into a note rendered on harness-attributed surfaces. The refusal itself is
+      // still recorDED — as a count, never as an echo of the bytes.
+      if (/[\x00-\x1f\x7f]/.test(m[1]!)) {
+        dropped++;
+        continue;
+      }
       patterns.push(m[1]!);
     }
   };
@@ -260,7 +268,9 @@ function declaredCargoMembers(root: string): { patterns: string[]; note?: string
     patterns,
     ...(sawMembersKey && patterns.length === 0
       ? { note: 'Cargo.toml declares [workspace] members but no entries could be read from it' }
-      : {}),
+      : dropped > 0
+        ? { note: `${String(dropped)} Cargo.toml workspace member entr${dropped === 1 ? 'y' : 'ies'} ignored (control characters)` }
+        : {}),
   };
 }
 
@@ -269,6 +279,7 @@ function declaredGoWorkUses(root: string): { patterns: string[]; note?: string }
   const text = readBounded(path.join(root, 'go.work'), MAX_YAML_BYTES);
   if (text === null) return { patterns: [] };
   const patterns: string[] = [];
+  let droppedUses = 0;
   let inBlock = false;
   for (const line of text.split(/\r?\n/)) {
     if (patterns.length >= MAX_WORKSPACE_PATTERNS) break;
@@ -278,7 +289,13 @@ function declaredGoWorkUses(root: string): { patterns: string[]; note?: string }
         inBlock = false;
         continue;
       }
-      if (stripped !== '' && stripped !== '(') patterns.push(stripped);
+      // Capped and control-filtered at ingestion (S18 review): the single-line form's \S{1,256}
+      // bounded this; the block form pushed the raw line unbounded. Refusals are recorded as a
+      // count — never as an echo of the bytes.
+      if (stripped !== '' && stripped !== '(') {
+        if (stripped.length <= 256 && !/[\x00-\x1f\x7f]/.test(stripped)) patterns.push(stripped);
+        else droppedUses++;
+      }
       continue;
     }
     if (/^use\s*\(\s*$/.test(stripped)) {
@@ -290,7 +307,11 @@ function declaredGoWorkUses(root: string): { patterns: string[]; note?: string }
   }
   return {
     patterns,
-    ...(patterns.length === 0 ? { note: 'go.work is present but no `use` directives could be read from it' } : {}),
+    ...(patterns.length === 0
+      ? { note: 'go.work is present but no `use` directives could be read from it' }
+      : droppedUses > 0
+        ? { note: `${String(droppedUses)} go.work use entr${droppedUses === 1 ? 'y' : 'ies'} ignored (control characters or oversize)` }
+        : {}),
   };
 }
 

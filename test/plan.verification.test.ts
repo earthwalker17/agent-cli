@@ -476,6 +476,51 @@ describe('acceptance: gates are completion blockers', () => {
     expect(gate.toolchainUnavailable).toEqual(['build']);
   });
 
+  it('a waiver older than a real FAILURE of the same kind is refuted evidence, not an excuse (S18 review)', () => {
+    // The sequence that found it: toolchain-unavailable recorded, the user installs the
+    // toolchain mid-session, the re-run FAILS. The old fold accepted with "TOOLCHAIN IS NOT
+    // INSTALLED" — false twice: it is installed, and the check ran and failed.
+    reset();
+    const g = graphOf({ gates: { completion: ['build'] } }, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);
+    const events = [
+      mutated(),
+      ev({
+        type: 'check.completed',
+        callId: 'k1',
+        check: 'build',
+        recipeId: 'cargo.build',
+        status: 'unsupported',
+        unsupportedReason: 'toolchain-unavailable',
+        exitCode: null,
+        durationMs: 0,
+        summary: 'install via rustup',
+      }),
+      checkDone('build', 'fail'),
+    ];
+    const gate = completionGateState(g, events);
+    expect(gate.waived).toEqual([]);
+    expect(gate.pending).toEqual(['build']);
+
+    // A waiver NEWER than the failure still waives: the project stopped being checkable after
+    // the failure (e.g. the kind's recipe genuinely went away).
+    const reversed = [
+      mutated(),
+      checkDone('build', 'fail'),
+      ev({
+        type: 'check.completed',
+        callId: 'k2',
+        check: 'build',
+        recipeId: '(none)',
+        status: 'unsupported',
+        unsupportedReason: 'no-recipe',
+        exitCode: null,
+        durationMs: 0,
+        summary: 'no build recipe',
+      }),
+    ];
+    expect(completionGateState(g, reversed).waived).toEqual(['build']);
+  });
+
   it('the acceptance caveat for a toolchain waiver NAMES the missing toolchain loudly (Session 18)', () => {
     reset();
     const g = graphOf({ gates: { completion: ['build'] } }, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);

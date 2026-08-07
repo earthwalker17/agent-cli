@@ -199,18 +199,32 @@ export function computeAcceptance(
           // compiler (the recorded check evidence names the install cure)" and "this project
           // cannot run the kind" are different statements to hand a reader of the acceptance.
           const s = scopeOf(kind);
-          const waivedIn = s?.waivedIn.filter((p) => p !== '.') ?? [];
-          const passedIn = s?.passedIn.filter((p) => p !== '.') ?? [];
-          const tcIn = s?.toolchainUnavailableIn?.filter((p) => p !== '.') ?? [];
+          // S18 review, two rendering rules: '.' is a REAL, nameable scope whenever the gate is
+          // project-scoped (filtering it as the unscoped placeholder silently dropped a root
+          // toolchain waiver), and mixed reasons SPLIT — the toolchain sentence must never be
+          // asserted about a project whose waiver was a genuine capability answer.
+          const rawWaived = s?.waivedIn ?? [];
+          const rawTc = s?.toolchainUnavailableIn ?? [];
+          const passedIn = s?.passedIn ?? [];
+          const name = (p: string): string => (p === '.' ? 'the workspace root' : `project ${p}`);
+          const names = (list: string[]): string => list.map(name).join(', ');
           const tcUnscoped = gate.toolchainUnavailable?.includes(kind) === true;
-          if (waivedIn.length > 0) {
-            caveats.push(
-              tcIn.length > 0
-                ? `completion gate '${kind}' NEVER RAN in project ${waivedIn.join(', ')} — its TOOLCHAIN IS NOT INSTALLED on this machine; the recorded check evidence names the install cure` +
-                  (passedIn.length > 0 ? `; it passed in ${passedIn.join(', ')}` : '')
-                : `completion gate '${kind}' NEVER RAN in project ${waivedIn.join(', ')} (unsupported there)` +
-                  (passedIn.length > 0 ? `; it passed in ${passedIn.join(', ')}` : ''),
-            );
+          if (rawWaived.length > 0) {
+            const tcScopes = rawWaived.filter((p) => rawTc.includes(p));
+            const plainScopes = rawWaived.filter((p) => !rawTc.includes(p));
+            const passedClause = passedIn.length > 0 ? `; it passed in ${names(passedIn)}` : '';
+            if (plainScopes.length > 0) {
+              caveats.push(
+                `completion gate '${kind}' NEVER RAN in ${names(plainScopes)} (unsupported there)` +
+                  (tcScopes.length === 0 ? passedClause : ''),
+              );
+            }
+            if (tcScopes.length > 0) {
+              caveats.push(
+                `completion gate '${kind}' NEVER RAN in ${names(tcScopes)} — its TOOLCHAIN IS NOT INSTALLED on this machine; the recorded check evidence names the install cure` +
+                  passedClause,
+              );
+            }
           } else {
             caveats.push(
               tcUnscoped

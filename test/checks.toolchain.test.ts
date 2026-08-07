@@ -102,6 +102,33 @@ describe('probeToolchains — rustup components and targets', () => {
     write('rustup-as-file');
     expect(probeToolchains(env({ RUSTUP_HOME: path.join(tmp, 'rustup-as-file') })).rustupTargets).toEqual([]);
   });
+
+  it('a NON-rustup install trusts PATH components — the shim hazard exists only under rustup (S18 review)', () => {
+    // No toolchains dir at all: a PATH hit for cargo-clippy/rustfmt is real evidence (apt,
+    // scoop, standalone MSI installs have no proxy shims), and refusing to look there falsely
+    // waived lint/format gates on such machines.
+    write('bin/cargo.exe');
+    write('bin/cargo-clippy.exe');
+    write('bin/rustfmt.exe');
+    const facts = probeToolchains(env());
+    expect(facts.clippy).toBe(true);
+    expect(facts.rustfmt).toBe(true);
+    // The moment rustup MANAGES the install (a toolchains dir exists), PATH is distrusted again.
+    mkdir('.rustup/toolchains/stable-x86_64-pc-windows-gnu/bin');
+    const managed = probeToolchains(env());
+    expect(managed.clippy).toBe(false);
+    expect(managed.rustfmt).toBe(false);
+  });
+
+  it('eight nightlies cannot evict the stable toolchain from the bounded scan (S18 review)', () => {
+    for (let i = 0; i < 9; i++) mkdir(`.rustup/toolchains/nightly-2024-01-0${String(i)}/bin`);
+    const tc = '.rustup/toolchains/stable-x86_64-pc-windows-gnu';
+    write(`${tc}/bin/cargo-clippy.exe`);
+    write(`${tc}/bin/rustfmt.exe`);
+    const facts = probeToolchains(env());
+    expect(facts.clippy).toBe(true);
+    expect(facts.rustfmt).toBe(true);
+  });
 });
 
 describe('toolchain pseudo-stamps', () => {

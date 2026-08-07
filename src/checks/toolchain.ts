@@ -38,6 +38,7 @@ const MAX_PATH_ENTRIES = 64;
 const MAX_PATHEXT_ENTRIES = 12;
 const MAX_RUSTUP_TOOLCHAINS = 8;
 const MAX_RUSTUP_TARGETS = 32;
+const MAX_RUSTLIB_ENTRIES = 256;
 
 /** Target triples end up in prompts and refusal reasons — charset-filtered at ingestion. */
 const TRIPLE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -68,6 +69,9 @@ function readdirSafe(p: string): string[] {
  * name only.
  */
 function pathExts(env: NodeJS.ProcessEnv): string[] {
+  // PATHEXT is a Windows concept. Honoring one that leaked into a POSIX env (WSLENV, CI images)
+  // would stat `cargo.EXE` and never the bare `cargo` — losing every real binary (S18 review).
+  if (process.platform !== 'win32') return [''];
   const raw = env['PATHEXT'];
   if (typeof raw === 'string' && raw.trim() !== '') {
     const exts = raw
@@ -77,7 +81,7 @@ function pathExts(env: NodeJS.ProcessEnv): string[] {
       .slice(0, MAX_PATHEXT_ENTRIES);
     if (exts.length > 0) return exts;
   }
-  return process.platform === 'win32' ? ['.EXE', '.CMD', '.BAT'] : [''];
+  return ['.EXE', '.CMD', '.BAT'];
 }
 
 /** PATH entries, quoted-entry tolerant, bounded. A plain object env (tests) is read literally. */
@@ -154,9 +158,19 @@ export function probeToolchainState(env: NodeJS.ProcessEnv = process.env): Probe
   let rustfmt = false;
   const targets = new Set<string>();
   const home = rustupHome(env);
+  let sawRustupToolchains = false;
   if (home !== null) {
     const toolchainsDir = path.join(home, 'toolchains');
-    const toolchains = readdirSafe(toolchainsDir).sort().slice(0, MAX_RUSTUP_TOOLCHAINS);
+    // stable-* first (S18 review): a bisect workflow accumulates dated nightlies that sort
+    // BEFORE `stable-…`, and eight minimal-profile nightlies would otherwise evict the default
+    // toolchain — the one actually holding clippy/rustfmt — from the bounded scan. Both
+    // partitions stay sorted, so the order (and the stamps) remain deterministic.
+    const all = readdirSafe(toolchainsDir).sort();
+    const toolchains = [...all.filter((t) => t.startsWith('stable-')), ...all.filter((t) => !t.startsWith('stable-'))].slice(
+      0,
+      MAX_RUSTUP_TOOLCHAINS,
+    );
+    sawRustupToolchains = toolchains.length > 0;
     const exts = pathExts(env);
     for (const tc of toolchains) {
       for (const [bin, set] of [
@@ -173,7 +187,9 @@ export function probeToolchainState(env: NodeJS.ProcessEnv = process.env): Probe
         }
       }
       const rustlib = path.join(toolchainsDir, tc, 'lib', 'rustlib');
-      for (const entry of readdirSafe(rustlib).sort()) {
+      // The entry cap bounds the WALK, not just the yield: without it every junk entry in a
+      // hostile rustlib still cost two stats (S18 review — the module promises hard bounds).
+      for (const entry of readdirSafe(rustlib).sort().slice(0, MAX_RUSTLIB_ENTRIES)) {
         if (targets.size >= MAX_RUSTUP_TARGETS) break;
         if (!TRIPLE_RE.test(entry)) continue;
         // A real installed target ships a lib/ directory; manifest files and version markers in
@@ -183,6 +199,26 @@ export function probeToolchainState(env: NodeJS.ProcessEnv = process.env): Probe
         targets.add(entry);
         const dir = statSafe(path.join(rustlib, entry));
         if (dir !== null) stamp(`target/${entry}`, dir);
+      }
+    }
+  }
+
+  // A NON-rustup install (apt, scoop, standalone MSI) has no toolchains dir — and therefore no
+  // proxy shims either: the shim false-positive exists only where rustup manages the install.
+  // So when rustup shows nothing, a PATH hit for the component binaries is REAL evidence, and
+  // refusing to look there falsely waived lint/format gates on such machines (S18 review).
+  if (!sawRustupToolchains) {
+    for (const [bin, set] of [
+      ['cargo-clippy', (): void => void (clippy = true)],
+      ['rustfmt', (): void => void (rustfmt = true)],
+    ] as const) {
+      const hit = findOnPath(bin, env);
+      if (hit !== null) {
+        const st = statSafe(hit.path);
+        if (st !== null) {
+          set();
+          stamp(`component/${bin}`, st);
+        }
       }
     }
   }

@@ -243,7 +243,7 @@ function rustProject(over: Partial<DetectedProject> = {}, tc: ToolchainFacts | u
     kinds: ['rust'],
     packageManager: null,
     hasDependencies: false,
-    rust: { workspaceRoot: false, hasCargoLock: true, edition: '2021', crossTarget: null, toolchainFile: null },
+    rust: { workspaceRoot: false, hasCargoLock: true, edition: '2021', consentSha: sha256('rust-steering'), crossTarget: null, toolchainFile: null },
     ...(tc !== undefined ? { toolchains: tc } : {}),
     ...over,
   });
@@ -254,7 +254,7 @@ function goProject(over: Partial<DetectedProject> = {}, tc: ToolchainFacts | und
     kinds: ['go'],
     packageManager: null,
     hasDependencies: false,
-    go: { module: 'example.com/svc', goDirective: '1.22', hasGoSum: true, hasVendorDir: false },
+    go: { module: 'example.com/svc', consentSha: sha256('go-steering'), goDirective: '1.22', hasGoSum: true, hasVendorDir: false },
     ...(tc !== undefined ? { toolchains: tc } : {}),
     ...over,
   });
@@ -303,7 +303,7 @@ describe('resolveChecks — Rust (Session 18)', () => {
   });
 
   it('cross-target: fmt stays host-verifiable, compiles gate on the rustup target, tests refuse permanently', () => {
-    const cross = { workspaceRoot: false, hasCargoLock: true, edition: '2021', crossTarget: 'thumbv7em-none-eabihf', toolchainFile: null };
+    const cross = { workspaceRoot: false, hasCargoLock: true, edition: '2021', consentSha: sha256('rust-steering'), crossTarget: 'thumbv7em-none-eabihf', toolchainFile: null };
     // Target NOT installed: every compile is toolchain-unavailable naming `rustup target add`.
     const missing = resolveChecks(rustProject({ rust: cross }), ['build', 'typecheck', 'lint', 'format', 'test']);
     const un1 = Object.fromEntries(missing.unsupported.map((u) => [u.kind, u]));
@@ -343,7 +343,10 @@ describe('resolveChecks — Go (Session 18)', () => {
     expect(byKind['typecheck']!.command).toBe('go build ./...');
     expect(byKind['typecheck']!.recipeId).toBe('go.typecheck.build');
     expect(byKind['static-analysis']!.command).toBe('go vet ./...');
-    expect(byKind['build']!.effects).toEqual({ writesOutputs: false, network: true, workspaceAuthored: false });
+    // S18 review: `go build ./...` matching one main package writes the exe into the cwd —
+    // the build rows say so; test/vet stay non-writing.
+    expect(byKind['build']!.effects).toEqual({ writesOutputs: true, network: true, workspaceAuthored: false });
+    expect(byKind['test']!.effects).toEqual({ writesOutputs: false, network: true, workspaceAuthored: false });
   });
 
   it('maps path scopes onto package patterns for test-targeted — Go selection IS path-shaped', () => {
@@ -387,6 +390,32 @@ describe('the precondition WHY is row-owned (Session 18)', () => {
     expect(r.unsupported[0]!.why).toBe('no-recipe');
     expect(r.unsupported[0]!.reason).toContain('CMake/C-C++ project');
     expect(r.unsupported[0]!.reason).not.toContain('no supported project manifest');
+  });
+
+  it('an all-outside-unit scope is a BAD-REQUEST, never a gate-waiving no-recipe (S18 review)', () => {
+    // Three lenses independently found this: goTargetedArgs dropping every path yielded the
+    // argv-null 'no-recipe', which waivesGate() honors — a caller mistake discharging a
+    // user-approved gate. The empty-scope path already refuses as 'bad-request'; the
+    // all-dropped path must carry the same tag.
+    const unit = goProject({ id: 'svc', root: 'C:/ws/svc' });
+    const r = resolveChecks(unit, ['test-targeted'], ['web/app.ts', 'api/server.ts']);
+    expect(r.resolved).toEqual([]);
+    expect(r.unsupported[0]!.why).toBe('bad-request');
+    expect(r.unsupported[0]!.reason).toContain("outside project 'svc'");
+  });
+
+  it('cargo/go consent binds the steering-file digest as the body (S18 review)', () => {
+    // The check IS the ecosystem's install step: after one [s] on `cargo build`, an
+    // auto-allowed .cargo/config.toml write must invalidate the grant exactly as a
+    // package.json rewrite invalidates a script grant. The digest rides bodySha, which both
+    // the replay key and the execute-time drift comparison consume.
+    const a = resolveChecks(rustProject(), ['build']).resolved[0]!;
+    expect(a.bodySha).toBe(sha256('rust-steering'));
+    const edited = rustProject({
+      rust: { workspaceRoot: false, hasCargoLock: true, edition: '2021', consentSha: sha256('rust-steering-EDITED'), crossTarget: null, toolchainFile: null },
+    });
+    expect(resolveChecks(edited, ['build']).resolved[0]!.bodySha).not.toBe(a.bodySha);
+    expect(resolveChecks(goProject(), ['test']).resolved[0]!.bodySha).toBe(sha256('go-steering'));
   });
 
   it('recipe ids are a consent surface: the exact table is pinned', () => {

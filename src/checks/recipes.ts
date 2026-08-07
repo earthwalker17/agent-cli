@@ -79,12 +79,15 @@ const TOOL_WRITES: CheckEffects = { writesOutputs: true, network: false, workspa
  */
 const CARGO_COMPILE: CheckEffects = { writesOutputs: true, network: true, workspaceAuthored: true };
 /**
- * Go rows: the build/module caches live OUTSIDE the workspace (GOCACHE/GOMODCACHE), so nothing
- * is written in-workspace; modules may be fetched on first run. `go test` executing workspace
- * test code follows the vitest precedent (`workspaceAuthored: false` — the flag means "a script
- * DEFINED by the workspace names this command's behavior", which `go test ./...` is not).
+ * Go rows: the build/module caches live OUTSIDE the workspace (GOCACHE/GOMODCACHE); modules may
+ * be fetched on first run. `go test` executing workspace test code follows the vitest precedent
+ * (`workspaceAuthored: false` — the flag means "a script DEFINED by the workspace names this
+ * command's behavior", which `go test ./...` is not). BUILD rows declare `writesOutputs: true`
+ * (S18 review): `go build ./...` matching a single main package writes the executable into the
+ * unit's cwd — the declaration must not lie for the most common single-package CLI layout.
  */
 const GO_TOOL_NET: CheckEffects = { writesOutputs: false, network: true, workspaceAuthored: false };
+const GO_BUILD_NET: CheckEffects = { writesOutputs: true, network: true, workspaceAuthored: false };
 
 const NEEDS_NODE_MODULES =
   'dependencies are not installed (node_modules is absent) — run `project_setup` with action "install" for this ' +
@@ -256,6 +259,12 @@ function cargoRecipe(
     applies: (p) => p.kinds.includes('rust'),
     unmetPrecondition: (p) => cargoUnmet(p, opts),
     argv: () => ['cargo', ...args],
+    // `cargo build` is a stable string whose fetch-and-execute behavior lives in the steering
+    // files (Cargo.toml/lock, .cargo/config*, rust-toolchain*) — and for cargo/go the check IS
+    // the ecosystem's install step, the consequence class the Node install binds files for
+    // (S18 review). Binding their digest as the consent body makes both the replay key and the
+    // execute-time drift refusal change when any of them does.
+    bodyShaOf: (p) => p.rust?.consentSha ?? null,
     timeoutMs,
     effects,
   };
@@ -277,6 +286,7 @@ function goRecipe(
   kind: CheckKind,
   buildArgs: (p: DetectedProject, scope: readonly string[]) => string[] | null,
   timeoutMs: number,
+  effects: CheckEffects = GO_TOOL_NET,
 ): CheckRecipe {
   return {
     id,
@@ -287,8 +297,11 @@ function goRecipe(
       const args = buildArgs(p, scope);
       return args === null ? null : ['go', ...args];
     },
+    // go.mod + go.sum are the steering files a granted `go …` fetches and trusts by (see the
+    // cargo rows' note — the same S18-review consent-body rule).
+    bodyShaOf: (p) => p.go?.consentSha ?? null,
     timeoutMs,
-    effects: GO_TOOL_NET,
+    effects,
   };
 }
 
@@ -323,7 +336,7 @@ export const RECIPES: readonly CheckRecipe[] = [
   // ---- build ----
   nodeScriptRecipe('node.script.build', 'build', ['build', 'compile'], 600_000),
   cargoRecipe('cargo.build', 'build', ['build'], 600_000, CARGO_COMPILE, { compilesForTarget: true }),
-  goRecipe('go.build', 'build', () => ['build', './...'], 600_000),
+  goRecipe('go.build', 'build', () => ['build', './...'], 600_000, GO_BUILD_NET),
 
   // ---- test ----
   nodeScriptRecipe('node.script.test', 'test', ['test'], 900_000),
@@ -346,7 +359,7 @@ export const RECIPES: readonly CheckRecipe[] = [
   cargoRecipe('cargo.check', 'typecheck', ['check'], 600_000, CARGO_COMPILE, { compilesForTarget: true }),
   // Go's compiler IS its typechecker; the deliberate duplication with `go.build` keeps the KIND
   // honest (a typecheck gate on a Go project means "it compiles") instead of `no-recipe`-waiving.
-  goRecipe('go.typecheck.build', 'typecheck', () => ['build', './...'], 300_000),
+  goRecipe('go.typecheck.build', 'typecheck', () => ['build', './...'], 300_000, GO_BUILD_NET),
 
   // ---- lint ----
   nodeScriptRecipe('node.script.lint', 'lint', ['lint'], 300_000),
@@ -518,13 +531,27 @@ export function resolveChecks(
     }
     const argv = argvWithBinary(ready, project, kindTakesScope(kind) ? paths : []);
     if (argv === null) {
-      unsupported.push({ kind, why: 'no-recipe', reason: `recipe ${ready.id} could not produce a command for this project` });
+      // For a scope-taking kind with a NON-EMPTY scope, a null argv means every supplied path
+      // fell outside this unit — a CALLER mistake exactly like the empty-scope case above, and
+      // it must carry the same 'bad-request' tag (S18 review: three lenses independently found
+      // that the old 'no-recipe' answer let a mis-scoped go test-targeted call WAIVE a declared
+      // gate). A scope-less null argv remains a genuine capability answer.
+      const scopedMiss = kindTakesScope(kind) && paths.length > 0;
+      unsupported.push({
+        kind,
+        why: scopedMiss ? 'bad-request' : 'no-recipe',
+        reason: scopedMiss
+          ? `every supplied scope path lies outside project '${project.id}' (${paths.join(', ')}) — name paths inside the project this check should verify`
+          : `recipe ${ready.id} could not produce a command for this project`,
+      });
       continue;
     }
     // Consent binds the UNTRUNCATED body: project.scripts is display-capped at 200 chars, so
     // hashing it would let an append past that cap ride the earlier approval (S14.5 finding).
+    // Rows without a named script may bind a direct consent-body digest instead (S18: the
+    // cargo/go steering files).
     const bodyName = ready.bodyScript?.(project) ?? null;
-    const bodySha = bodyName !== null ? (project.scriptShas[bodyName] ?? null) : null;
+    const bodySha = bodyName !== null ? (project.scriptShas[bodyName] ?? null) : (ready.bodyShaOf?.(project) ?? null);
     resolved.push({
       kind,
       recipeId: qualifyRecipeId(ready.id, project.id),

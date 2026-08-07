@@ -183,6 +183,24 @@ function readBounded(file: string): string | null {
   }
 }
 
+/**
+ * One `name:identity` part for a consent-body digest (S18). A readable file contributes its
+ * content sha; an OVERSIZE file contributes its stat identity (`unhashable:size:mtime`) so it
+ * still binds SOMETHING that changes when the file does — the alternative (skipping it) would
+ * grant a replay key blind to the very file it exists to watch. Absent files contribute nothing:
+ * absence is part of the digest because names are included and the part list changes.
+ */
+function steeringPart(root: string, rel: string, cap: number): string | null {
+  try {
+    const st = fs.statSync(path.join(root, rel));
+    if (!st.isFile()) return null;
+    if (st.size > cap) return `${rel}:unhashable:${String(st.size)}:${String(Math.floor(st.mtimeMs))}`;
+    return `${rel}:${sha256(fs.readFileSync(path.join(root, rel)))}`;
+  } catch {
+    return null;
+  }
+}
+
 function exists(root: string, rel: string): boolean {
   try {
     return fs.existsSync(path.join(root, rel));
@@ -373,7 +391,21 @@ export function detectProject(root: string, id = '.', toolchains?: ToolchainFact
       const raw = tomlString(tomlSectionLines(cargoConfig, 'build'), 'target');
       if (raw !== null && TRIPLE_RE.test(raw)) crossTarget = raw;
     }
-    rust = { workspaceRoot, hasCargoLock, edition, crossTarget, toolchainFile };
+    // The consent body for every cargo row (S18 review): the files that decide what a granted
+    // `cargo …` fetches and executes. Cargo.lock gets the lockfile-scale cap.
+    const consentSha = sha256(
+      [
+        `Cargo.toml:${sha256(cargoText)}`,
+        steeringPart(root, 'Cargo.lock', MAX_LOCKFILE_BYTES),
+        steeringPart(root, '.cargo/config.toml', MAX_MANIFEST_BYTES),
+        steeringPart(root, '.cargo/config', MAX_MANIFEST_BYTES),
+        steeringPart(root, 'rust-toolchain.toml', MAX_MANIFEST_BYTES),
+        steeringPart(root, 'rust-toolchain', MAX_MANIFEST_BYTES),
+      ]
+        .filter((p): p is string => p !== null)
+        .join('\n'),
+    );
+    rust = { workspaceRoot, hasCargoLock, edition, consentSha, crossTarget, toolchainFile };
     evidence.push(
       `Cargo.toml (${[
         edition !== null ? `edition ${edition}` : null,
@@ -398,6 +430,12 @@ export function detectProject(root: string, id = '.', toolchains?: ToolchainFact
     const goRaw = /^go\s+([0-9][0-9.]{0,15})\s*$/m.exec(goModText)?.[1] ?? null;
     goFacts = {
       module: moduleRaw !== null && GO_MODULE_RE.test(moduleRaw) ? moduleRaw : null,
+      // go.mod + go.sum decide what a granted `go …` fetches and trusts (see RustFacts).
+      consentSha: sha256(
+        [`go.mod:${sha256(goModText)}`, steeringPart(root, 'go.sum', MAX_LOCKFILE_BYTES)]
+          .filter((p): p is string => p !== null)
+          .join('\n'),
+      ),
       goDirective: goRaw !== null && GO_VERSION_RE.test(goRaw) ? goRaw : null,
       hasGoSum: exists(root, 'go.sum'),
       hasVendorDir: exists(root, 'vendor'),

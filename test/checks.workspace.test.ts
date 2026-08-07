@@ -386,6 +386,15 @@ describe('unit discovery — rust, go, cmake (Session 18)', () => {
     expect(ids()).toEqual(['api', 'workers/queue']);
   });
 
+  it('control characters and oversize go.work lines are refused at ingestion, counted not echoed (S18 review)', () => {
+    write('go.work', `go 1.22\n\nuse (\n\t./api\n\t./bad[31mdir\n\t./${'x'.repeat(300)}\n)\n`);
+    write('api/go.mod', 'module example.com/api\n');
+    const w = detectWorkspace(ws);
+    expect(w.units.map((u) => u.id)).toEqual(['api']);
+    expect(w.notes.join(' ')).toContain('2 go.work use entries ignored');
+    for (const n of w.notes) expect(/[\x00-\x1f\x7f]/.test(n)).toBe(false);
+  });
+
   it('skips target/ and vendor/ during the conventional scan', () => {
     write('Cargo.toml', '[package]\nname = "root"\n');
     write('target/debug-junk/Cargo.toml', '[package]\nname = "junk"\n');
