@@ -3,6 +3,9 @@ import { startSession, runTurn, endSession, recordSandboxStatus, recordGitContex
 import type { ElisionOptions } from './elision.js';
 import { ROLE_CONTRACTS } from './roles.js';
 import { TOOLS } from '../tools/index.js';
+import { FACT_KINDS, type FactKind } from '../policy/engine.js';
+import type { NoteAccumulator } from '../tools/record-source.js';
+import type { ResearchBudget } from '../tools/research-budget.js';
 import type { WorkspaceMap } from '../workspace/map.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
@@ -46,26 +49,67 @@ export const TASKS_PER_SESSION = 16;
 export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 200_000;
 
 /**
- * A child's tool registry (Session 10): the static TOOLS filtered by the role contract, plus —
- * for roles that NAME it — the parent's per-session retrieve instance, admitted only when it is
- * structurally free of command/delegates/planDoc/check/browser/evidenceRead facts. Fail closed
- * by dropping: a wrongly-shaped instance simply never reaches a child.
+ * Which policy FACTS a named per-session instance may carry into a child registry.
+ *
+ * `satisfies Record<FactKind, boolean>` is the point of this table (Session 19). The predicate it
+ * replaces was a hand-written DENY-list of the facts that existed when it was written, which is
+ * fail-OPEN by construction: every fact invented afterwards passed silently, which is exactly how
+ * `artifact` came to be missing from it. Now the next fact added to the engine's `FACT_KINDS`
+ * breaks THIS file's typecheck until someone decides whether a child may hold it.
+ *
+ * Only `research` is admissible, and only because it is genuinely gated elsewhere: the engine's
+ * research branch re-decides every call inside the child, the delegated-role admission is keyed on
+ * runtime lineage rather than on the instance, and the session budget is shared with the parent.
+ * Everything else would hand a child authority the depth-1 contract exists to deny.
  */
-export function childTools(toolNames: readonly string[], retrieveTool?: Tool, reportFindingTool?: Tool): Tool[] {
+const CHILD_ADMISSIBLE_FACTS = {
+  command: false,
+  delegates: false,
+  planDoc: false,
+  check: false,
+  browser: false,
+  evidenceRead: false,
+  artifact: false,
+  research: true,
+} satisfies Record<FactKind, boolean>;
+
+/** The three per-task research instances a researcher child receives. */
+export interface ResearchToolBundle {
+  webSearch: Tool;
+  webExtract: Tool;
+  recordSource: Tool;
+}
+
+/**
+ * The NAMED per-session instances a child may be given. Deliberately a fixed record rather than a
+ * generic extra-tools list: depth-1 stays a property of construction, and every entry here is one
+ * a role contract must also name by string before it is admitted.
+ */
+export interface NamedChildTools {
+  /** Session 10: the parent's ranked-index lookup. */
+  retrieve?: Tool;
+  /** Session 14: the reviewer's only findings channel. */
+  reportFinding?: Tool;
+  /** Session 19: the researcher's three instances, built per task by the research factory. */
+  webSearch?: Tool;
+  webExtract?: Tool;
+  recordSource?: Tool;
+}
+
+/**
+ * A child's tool registry (Session 10): the static TOOLS filtered by the role contract, plus —
+ * for roles that NAME them — per-session instances admitted only when their declared facts are
+ * child-admissible. Fail closed by dropping: a wrongly-shaped instance simply never reaches a
+ * child, and the role prompt is told which instances actually landed so it never promises one
+ * that did not.
+ */
+export function childTools(toolNames: readonly string[], named: NamedChildTools = {}): Tool[] {
   const tools: Tool[] = TOOLS.filter((t) => toolNames.includes(t.name));
   const admissible = (t: Tool | undefined): t is Tool =>
-    t !== undefined &&
-    toolNames.includes(t.name) &&
-    t.command === undefined &&
-    t.delegates === undefined &&
-    t.planDoc === undefined &&
-    t.check === undefined &&
-    t.browser === undefined &&
-    t.evidenceRead === undefined;
-  if (admissible(retrieveTool)) tools.push(retrieveTool);
-  // Session 14: the reviewer's findings channel — the second NAMED single-tool seam (still
-  // deliberately not a generic extra-tools list; depth-1 stays a property of construction).
-  if (admissible(reportFindingTool)) tools.push(reportFindingTool);
+    t !== undefined && toolNames.includes(t.name) && FACT_KINDS.every((k) => CHILD_ADMISSIBLE_FACTS[k] || t[k] === undefined);
+  for (const t of [named.retrieve, named.reportFinding, named.webSearch, named.webExtract, named.recordSource]) {
+    if (admissible(t)) tools.push(t);
+  }
   return tools;
 }
 
@@ -134,6 +178,30 @@ export interface SubagentDeps {
    * instance passes the same structural fact check as retrieve.
    */
   reportFindingTool?: Tool;
+  /**
+   * Session 19: the PER-TASK research instances for a researcher child. A FACTORY, not finished
+   * instances, because these three cannot be built where `createReportFindingTool(acc)` can:
+   * they need the credential, the proxy transport, the operator denylist and — crucially — the
+   * ONE shared session budget, all of which live in assembly. The factory closes over those and
+   * takes only the per-task accumulator, so each researcher's findings stay its own while every
+   * researcher spends the same allowance.
+   *
+   * Absent means research is unavailable this session (no credential); the delegate refuses a
+   * researcher spawn outright rather than starting a child that would find its own tools missing.
+   */
+  researchToolsFor?: (acc: NoteAccumulator) => ResearchToolBundle;
+  /**
+   * The instances for THIS task, produced by the delegate from `researchToolsFor` and a per-task
+   * accumulator — the `reportFindingTool` shape exactly. The runner only ever reads this one;
+   * the factory above is what the delegate calls.
+   */
+  researchTools?: ResearchToolBundle;
+  /**
+   * The ONE shared session budget. The delegate reads it before and after each researcher task to
+   * derive that task's spend for the parent-log `research.usage` capture — the child's own
+   * `research.*` events are in a log the parent's fold never reads.
+   */
+  researchBudget?: ResearchBudget;
   /**
    * Session 11: task-scoped cancellation seam. Called once the child session exists with a
    * handle that cancels THIS child only (cause 'user-cancelled' → status 'cancelled'); the
@@ -283,7 +351,14 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       : autoDenyApprover;
   // Tools first, prompt second: the prompt states exactly the registry this child actually has
   // (retrieve is admitted per-session; the wording must not promise an absent tool).
-  const tools = childTools(contract.toolNames, deps.retrieveTool, deps.reportFindingTool);
+  const researchTools = deps.researchTools;
+  const tools = childTools(contract.toolNames, {
+    ...(deps.retrieveTool !== undefined ? { retrieve: deps.retrieveTool } : {}),
+    ...(deps.reportFindingTool !== undefined ? { reportFinding: deps.reportFindingTool } : {}),
+    ...(researchTools !== undefined
+      ? { webSearch: researchTools.webSearch, webExtract: researchTools.webExtract, recordSource: researchTools.recordSource }
+      : {}),
+  });
   let system: string;
   try {
     system = contract.buildPrompt({
@@ -293,6 +368,8 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
       git: deps.gitFacts,
       agentMd: deps.agentMd,
       retrieve: tools.some((t) => t.name === 'retrieve'),
+      webSearch: tools.some((t) => t.name === 'web_search'),
+      webExtract: tools.some((t) => t.name === 'web_extract'),
     });
   } catch (err) {
     return fail(`subagent failed to start: ${(err as Error).message}`);

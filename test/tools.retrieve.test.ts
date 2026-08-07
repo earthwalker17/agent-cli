@@ -160,9 +160,9 @@ describe('retrieve — child admission (childTools)', () => {
 
   it('admits the instance for roles that name it; executor registry never receives it', () => {
     const t = fakeRetrieve();
-    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, t).map((x) => x.name)).toContain('retrieve');
-    expect(childTools(ROLE_CONTRACTS.executor.toolNames, t).map((x) => x.name)).not.toContain('retrieve');
-    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, undefined).map((x) => x.name)).not.toContain('retrieve');
+    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, { retrieve: t }).map((x) => x.name)).toContain('retrieve');
+    expect(childTools(ROLE_CONTRACTS.executor.toolNames, { retrieve: t }).map((x) => x.name)).not.toContain('retrieve');
+    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, {}).map((x) => x.name)).not.toContain('retrieve');
   });
 
   it('FAIL-CLOSED: a command/delegates/planDoc-bearing instance is dropped, never admitted', () => {
@@ -171,12 +171,12 @@ describe('retrieve — child admission (childTools)', () => {
       fakeRetrieve({ delegates: () => ({ roles: ['explorer'] }) }),
       fakeRetrieve({ planDoc: () => true as never }),
     ]) {
-      expect(childTools(ROLE_CONTRACTS.explorer.toolNames, bad).map((x) => x.name)).not.toContain('retrieve');
+      expect(childTools(ROLE_CONTRACTS.explorer.toolNames, { retrieve: bad }).map((x) => x.name)).not.toContain('retrieve');
     }
   });
 
   it('the real tool instance passes admission', () => {
     const tool = createRetrieveTool(makeHandle({ 'a.ts': 'export const a = 1;' }));
-    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, tool).map((x) => x.name)).toContain('retrieve');
+    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, { retrieve: tool }).map((x) => x.name)).toContain('retrieve');
   });
 });

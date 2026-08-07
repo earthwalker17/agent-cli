@@ -155,13 +155,13 @@ describe('childTools admission (the second named seam)', () => {
 
   it('admitted iff the contract names it AND the instance is structurally fact-free', () => {
     const tool = createReportFindingTool(createFindingAccumulator()) as Tool;
-    const admitted = childTools(ROLE_CONTRACTS.reviewer.toolNames, undefined, tool);
+    const admitted = childTools(ROLE_CONTRACTS.reviewer.toolNames, { reportFinding: tool });
     expect(admitted.some((t) => t.name === 'report_finding')).toBe(true);
     // Not named by the contract → dropped.
-    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, undefined, tool).some((t) => t.name === 'report_finding')).toBe(false);
+    expect(childTools(ROLE_CONTRACTS.explorer.toolNames, { reportFinding: tool }).some((t) => t.name === 'report_finding')).toBe(false);
     // Named but carrying a command fact → dropped (fail closed by construction).
     const armed = { ...tool, command: () => ({ command: 'evil' }) } as unknown as Tool;
-    expect(childTools(ROLE_CONTRACTS.reviewer.toolNames, undefined, armed).some((t) => t.name === 'report_finding')).toBe(false);
+    expect(childTools(ROLE_CONTRACTS.reviewer.toolNames, { reportFinding: armed }).some((t) => t.name === 'report_finding')).toBe(false);
   });
 });
 

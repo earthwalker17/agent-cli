@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { z } from 'zod';
 import { REVIEW_SEVERITIES, type ReviewFinding, type SessionEvent, type SubagentRoleName, type TaskChangeFile, type Tool, type ToolContext, type ToolResult } from '../types.js';
+import { createNoteAccumulator } from './record-source.js';
 import { createFindingAccumulator, createReportFindingTool } from './report-finding.js';
 import { MAX_REVIEW_ROUNDS } from '../review/ledger.js';
 import { sanitizeLine } from '../shared/text.js';
@@ -49,8 +50,13 @@ import type { SnapshotStore } from '../store/snapshots.js';
 const TaskSpec = z
   .object({
     role: z
-      .enum(['explorer', 'planner', 'reviewer', 'executor'])
-      .describe('explorer: read-only survey/search. planner: read-only plan drafting. reviewer: read-only adversarial diff review. executor: implements changes in an ISOLATED git worktree (requires your approval to spawn; its approvals forward to the user).'),
+      .enum(['explorer', 'planner', 'reviewer', 'executor', 'researcher'])
+      .describe(
+        'explorer: read-only survey/search. planner: read-only plan drafting. reviewer: read-only adversarial diff review. ' +
+          'researcher: read-only WEB research — searches, corroborates and records source-backed findings, and returns claims with ' +
+          'their provenance instead of raw pages (requires your approval to spawn; spends a shared session research budget). ' +
+          'executor: implements changes in an ISOLATED git worktree (requires your approval to spawn; its approvals forward to the user).',
+      ),
     task: z.string().min(1).max(4000).describe('What to do, with the concrete questions the report must answer'),
     context: z
       .string()
@@ -573,6 +579,17 @@ export function createDelegateTool(
         );
       }
 
+      // Session 19: a researcher with no research factory would start, find its own tools missing
+      // and burn a task budget discovering that. Group-atomic like every other cap, and the
+      // refusal names the cure rather than leaving the model to guess why the role is inert.
+      if (input.tasks.some((t) => t.role === 'researcher') && deps.researchToolsFor === undefined) {
+        return refuse(
+          'web research is unavailable in this session: no research credential is configured (set TAVILY_API_KEY in the environment; ' +
+            'get a key at https://app.tavily.com). Nothing was spawned. Continue without external research and say so plainly rather ' +
+            'than presenting recalled information as current',
+        );
+      }
+
       // Executor preconditions — all checked BEFORE anything spawns, so a refusal spawns nothing.
       const executorCount = input.tasks.filter((t) => t.role === 'executor').length;
       let gate: PlanGateInfo | null = null;
@@ -778,6 +795,46 @@ export function createDelegateTool(
                 : []),
             ];
             return { result, notes, capturedPaths: [], findings };
+          }
+          if (spec.role === 'researcher') {
+            // One accumulator + one instance bundle PER task (parallel researchers must never
+            // interleave findings), while the factory's closure keeps them all spending the ONE
+            // session budget. The reviewer precedent, with a factory instead of a bare
+            // constructor because these tools need the credential, transport and budget.
+            const acc = createNoteAccumulator();
+            const budget = deps.researchBudget;
+            const before = budget !== undefined ? { ...budget.spent } : undefined;
+            const result = await runSubagentTask({ ...taskDeps, researchTools: deps.researchToolsFor!(acc) }, spec, ctx.signal);
+            const notes: string[] = [];
+            if (result.childSessionId !== '') {
+              const recorded = acc.items.map((it, i) => ({ ...it, noteId: `${result.childSessionId}#${String(i + 1)}` }));
+              ctx.reportResearch?.({ kind: 'findings', childSessionId: result.childSessionId, notes: recorded });
+              // The spend record the PARENT log needs: every search this child ran was recorded
+              // in the CHILD's log, so without this the budget silently refills on resume.
+              if (budget !== undefined && before !== undefined) {
+                ctx.reportResearch?.({
+                  kind: 'usage',
+                  childSessionId: result.childSessionId,
+                  searches: budget.spent.searches - before.searches,
+                  extracts: budget.spent.extracts - before.extracts,
+                  credits: budget.spent.credits - before.credits,
+                  contentChars: budget.spent.contentChars - before.contentChars,
+                });
+              }
+              const captureLanded = ctx.reportResearch !== undefined;
+              const disagreements = recorded.filter((n) => n.corroboration === 'sources-disagree').length;
+              const single = recorded.filter((n) => n.corroboration === 'single-source').length;
+              notes.push(
+                !captureLanded && recorded.length > 0
+                  ? `[harness] WIRING ERROR: ${String(recorded.length)} finding(s) could NOT be recorded (evidence channel missing)`
+                  : recorded.length > 0
+                    ? `[harness] ${String(recorded.length)} source-backed finding(s) RECORDED` +
+                      `${single > 0 ? `, ${String(single)} SINGLE-SOURCE` : ''}${disagreements > 0 ? `, ${String(disagreements)} where SOURCES DISAGREE` : ''}` +
+                      ` — verify anything load-bearing yourself before acting on it: ${recorded.map((n) => `${n.noteId} ${n.claim}`).join(' · ')}`
+                    : '[harness] ZERO findings recorded via record_source — the prose below is narration, not sourced evidence',
+              );
+            }
+            return { result, notes, capturedPaths: [] };
           }
           if (spec.role !== 'executor') {
             return { result: await runSubagentTask(taskDeps, spec, ctx.signal), notes: [], capturedPaths: [] };

@@ -22,7 +22,7 @@ import { createRenderDocumentTool, renderCapsFromEvents } from '../tools/artifac
 import { createInspectPagesTool, inspectBudgetFromEvents } from '../tools/artifact-inspect.js';
 import { createWebSearchTool } from '../tools/web-search.js';
 import { createWebExtractTool } from '../tools/web-extract.js';
-import { createNoteAccumulator, createRecordSourceTool } from '../tools/record-source.js';
+import { createRecordSourceTool, type NoteAccumulator } from '../tools/record-source.js';
 import { researchBudgetFromEvents, type ResearchBudget } from '../tools/research-budget.js';
 import { createTavilyClient, noKeyMessage, tavilyKeyAvailability } from '../research/tavily.js';
 import type { ResearchClient } from '../research/types.js';
@@ -48,7 +48,7 @@ import { randomSaltHex } from '../shared/hash.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
 import type { TrustDecision } from '../trust/gate.js';
-import type { EventBody, HarnessRefKind, SessionEvent } from '../types.js';
+import type { EventBody, HarnessRefKind, SessionEvent, Tool } from '../types.js';
 import type { RunContext } from './context.js';
 
 /**
@@ -672,6 +672,21 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         map,
         forwardAsk: (req, signal) => forwarder.ask(req, signal),
         ...(retrieveTool !== undefined ? { retrieveTool } : {}),
+        // Session 19: a FACTORY, not finished instances. These three need the credential, the
+        // proxy transport, the operator denylist and the ONE shared budget — none of which the
+        // delegate has — so assembly closes over them and the delegate supplies only the per-task
+        // accumulator. Absent when no credential is configured, which is what makes the delegate
+        // refuse a researcher spawn instead of starting a child with no tools.
+        ...(researchClient !== null
+          ? {
+              researchBudget,
+              researchToolsFor: (acc: NoteAccumulator) => ({
+                webSearch: createWebSearchTool({ client: researchClient, budget: researchBudget }) as Tool,
+                webExtract: createWebExtractTool({ client: researchClient, budget: researchBudget }) as Tool,
+                recordSource: createRecordSourceTool({ acc }) as Tool,
+              }),
+            }
+          : {}),
         ...(memory.agent.status === 'ok' || memory.agent.status === 'oversize'
           ? { agentMd: { text: memory.agent.text, truncated: memory.agent.truncated } }
           : {}),

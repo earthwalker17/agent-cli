@@ -40,8 +40,8 @@ import { analyzeCommand } from './command-review.js';
  * absent from all six until someone remembers to add it, and nothing fails if they do not. With
  * the table, adding a member to `FactKind` breaks the `FACT_LABELS` record at compile time.
  */
-const FACT_KINDS = ['command', 'delegates', 'planDoc', 'check', 'browser', 'evidenceRead', 'artifact', 'research'] as const;
-type FactKind = (typeof FACT_KINDS)[number];
+export const FACT_KINDS = ['command', 'delegates', 'planDoc', 'check', 'browser', 'evidenceRead', 'artifact', 'research'] as const;
+export type FactKind = (typeof FACT_KINDS)[number];
 
 const FACT_LABELS: Record<FactKind, string> = {
   command: 'a shell command',
