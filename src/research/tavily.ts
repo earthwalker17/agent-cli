@@ -2,11 +2,14 @@ import { z } from 'zod';
 import { createTransport } from '../net/transport.js';
 import { sanitizeLine } from '../shared/text.js';
 import { ResearchError, type ResearchErrorReason } from './errors.js';
-import { domainMatches, refusal, sanitizeBlock, validateSourceUrl } from './sanitize.js';
+import { domainMatches, MAX_URL_CHARS, refusal, sanitizeBlock, validateSourceUrl } from './sanitize.js';
 import {
+  CREDITS_PER_SESSION,
+  EXTRACT_TIMEOUT_MS,
   MAX_EXTRACT_CHARS_PER_CALL,
   MAX_EXTRACT_CHARS_PER_PAGE,
   MAX_SEARCH_CONTENT_CHARS,
+  SEARCH_TIMEOUT_MS,
   type ExtractOutcome,
   type ExtractRequest,
   type RefusedUrl,
@@ -219,7 +222,7 @@ export function createTavilyClient(opts: TavilyClientOptions): ResearchClient {
           ...(exclude.length > 0 ? { exclude_domains: exclude } : {}),
           ...(req.timeRange !== undefined ? { time_range: req.timeRange } : {}),
         },
-        opts.searchTimeoutMs ?? 20_000,
+        opts.searchTimeoutMs ?? SEARCH_TIMEOUT_MS,
         o.signal,
       );
 
@@ -298,7 +301,7 @@ export function createTavilyClient(opts: TavilyClientOptions): ResearchClient {
       const raw = await post(
         '/extract',
         { urls: admitted.map((a) => a.url), extract_depth: req.depth, format: 'markdown', include_images: false, include_usage: true },
-        opts.extractTimeoutMs ?? 45_000,
+        opts.extractTimeoutMs ?? EXTRACT_TIMEOUT_MS,
         o.signal,
       );
       const parsed = ExtractResponseWire.safeParse(raw);
@@ -311,7 +314,12 @@ export function createTavilyClient(opts: TavilyClientOptions): ResearchClient {
       let used = 0;
       let droppedChars = 0;
       for (const r of body.results ?? []) {
-        const match = admitted.find((a) => a.url === r.url) ?? { url: r.url, host: '', idn: false };
+        // The fallback used to carry `r.url` VERBATIM — the one provider string in this file that
+        // escaped the ingestion contract this module's header promises. It is rendered inside the
+        // untrusted fence and written to the durable log, so a response whose url did not
+        // byte-match the request could close the fence early with harness-looking text (S19
+        // review). Sanitized like every sibling field now.
+        const match = admitted.find((a) => a.url === r.url) ?? { url: sanitizeLine(r.url).slice(0, MAX_URL_CHARS), host: '', idn: false };
         const full = sanitizeBlock(r.raw_content ?? '');
         const room = Math.min(MAX_EXTRACT_CHARS_PER_PAGE, Math.max(0, MAX_EXTRACT_CHARS_PER_CALL - used));
         const content = full.length <= room ? full : full.slice(0, room);
@@ -349,9 +357,18 @@ function clampScore(n: number | null | undefined): number {
   return typeof n === 'number' && Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
 }
 
-/** Trust a provider-reported credit count only when it is a sane non-negative number. */
+/**
+ * Trust a provider-reported credit count only when it is a sane non-negative number, and CLAMP it.
+ *
+ * The clamp matters because this figure is charged into a budget that survives into the event log
+ * and is rebuilt on every resume: one absurd number (a units change, a bug, a hostile response)
+ * would not merely refuse the next call, it would permanently disable research for the session AND
+ * every resume of it, with no way to tell why (S19 review). A single call cannot legitimately cost
+ * more than the whole session's allowance.
+ */
 function reportedCredits(n: number | null | undefined): number | undefined {
-  return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : undefined;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return undefined;
+  return Math.min(n, CREDITS_PER_SESSION);
 }
 
 async function parseJson(res: Response): Promise<unknown> {

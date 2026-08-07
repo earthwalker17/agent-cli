@@ -681,19 +681,25 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         ...(researchClient !== null
           ? {
               researchBudget,
-              researchToolsFor: (acc: NoteAccumulator) => ({
-                webSearch: createWebSearchTool({ client: researchClient, budget: researchBudget }) as Tool,
-                // taskCap is per-INSTANCE, and this factory runs once per task — so the page
-                // ceiling is naturally per-task while the budget above stays shared. Added after
-                // the live S19 run, where one researcher spent 10 of the 12 session extracts and
-                // then timed out with nothing recorded.
-                webExtract: createWebExtractTool({
-                  client: researchClient,
-                  budget: researchBudget,
-                  taskCap: EXTRACTS_PER_RESEARCH_TASK,
-                }) as Tool,
-                recordSource: createRecordSourceTool({ acc }) as Tool,
-              }),
+              researchToolsFor: (acc: NoteAccumulator) => {
+                // Per-TASK state, created fresh on each call because this factory runs once per
+                // task: the page ceiling and the spend counter are the task's own, while the
+                // budget closed over above stays shared across the whole session.
+                const taskSpend = { searches: 0, extracts: 0, credits: 0, contentChars: 0 };
+                return {
+                  taskSpend,
+                  webSearch: createWebSearchTool({ client: researchClient, budget: researchBudget, taskSpend }) as Tool,
+                  // The page cap came from the live S19 run, where one researcher spent 10 of the
+                  // 12 session extracts and then timed out with nothing recorded.
+                  webExtract: createWebExtractTool({
+                    client: researchClient,
+                    budget: researchBudget,
+                    taskCap: EXTRACTS_PER_RESEARCH_TASK,
+                    taskSpend,
+                  }) as Tool,
+                  recordSource: createRecordSourceTool({ acc }) as Tool,
+                };
+              },
             }
           : {}),
         ...(memory.agent.status === 'ok' || memory.agent.status === 'oversize'

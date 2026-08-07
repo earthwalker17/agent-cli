@@ -105,7 +105,13 @@ export function validateSourceUrl(raw: string): UrlVerdict {
     return { ok: false, reason: 'URL carries embedded credentials' };
   }
 
-  const host = u.hostname.toLowerCase();
+  // The trailing dot is stripped BEFORE any name-based check (S19 review, verified live).
+  // WHATWG `URL` preserves it on non-IPv4 hosts, so `http://localhost./` has hostname
+  // `'localhost.'` — which is not `'localhost'`, does not end with `.local`, and does contain a
+  // dot, so it defeated the loopback check, every private-suffix check, and the single-label
+  // check at once. `shared/domain.ts` already normalized it away for the operator denylist; this
+  // validator did not, so the two disagreed about what an internal name is.
+  const host = u.hostname.toLowerCase().replace(/\.$/, '');
   if (host === '') return { ok: false, reason: 'URL has no host' };
 
   if (host.startsWith('[')) {

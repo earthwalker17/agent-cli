@@ -11,7 +11,7 @@ import {
 } from '../research/types.js';
 import { truncateForModel } from '../shared/hash.js';
 import type { ResearchFact, Tool, ToolResult } from '../types.js';
-import type { ResearchBudget } from './research-budget.js';
+import type { ResearchBudget, ResearchSpend } from './research-budget.js';
 
 /**
  * web_search (Session 19) — bounded external search returning SNIPPETS, not pages.
@@ -64,13 +64,26 @@ export interface WebSearchDeps {
   client: ResearchClient;
   /** The ONE session budget object, shared with every other research instance. */
   budget: ResearchBudget;
+  /**
+   * This instance's own running spend, when it belongs to a delegated task (Session 19 review).
+   *
+   * The delegate used to derive a task's spend by diffing the shared budget around the task. Under
+   * `Promise.all` that is wrong: two researchers in one group interleave, so each one's "delta"
+   * includes its sibling's spend and the parent log records N times the truth — a resumed session
+   * then rebuilds an inflated budget and refuses research it never used. A per-instance counter
+   * cannot be confused by a sibling, because siblings hold different instances.
+   */
+  taskSpend?: ResearchSpend;
 }
 
 export function createWebSearchTool(deps: WebSearchDeps): Tool<SearchInputT> {
   const factOf = (input: SearchInputT): ResearchFact => {
     const depth = input.depth ?? 'basic';
     const credits = estimateSearchCredits(depth);
-    const domains = [...(input.include_domains ?? []), ...(input.exclude_domains ?? [])];
+    // ONLY the include list. Excluding a denylisted domain is the model AGREEING with the
+    // operator, and denying it with 'this workspace forbids research from reaching it' asserted
+    // the opposite of what the call did (S19 review).
+    const domains = [...(input.include_domains ?? [])];
     const exhausted = deps.budget.exhausted('search', credits);
     return {
       kind: 'search',
@@ -140,10 +153,13 @@ export function createWebSearchTool(deps: WebSearchDeps): Tool<SearchInputT> {
       }
 
       // Charge the REAL cost, not the estimate — the provider reports what it actually billed.
-      deps.budget.charge('search', {
-        credits: outcome.credits,
-        contentChars: outcome.results.reduce((n, r) => n + r.snippet.length, 0),
-      });
+      const chars = outcome.results.reduce((n, r) => n + r.snippet.length, 0);
+      deps.budget.charge('search', { credits: outcome.credits, contentChars: chars });
+      if (deps.taskSpend !== undefined) {
+        deps.taskSpend.searches += 1;
+        deps.taskSpend.credits += Math.max(0, outcome.credits);
+        deps.taskSpend.contentChars += Math.max(0, chars);
+      }
       ctx.reportResearch?.({
         kind: 'searched',
         provider: deps.client.host,

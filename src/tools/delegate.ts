@@ -802,26 +802,32 @@ export function createDelegateTool(
             // session budget. The reviewer precedent, with a factory instead of a bare
             // constructor because these tools need the credential, transport and budget.
             const acc = createNoteAccumulator();
-            const budget = deps.researchBudget;
-            const before = budget !== undefined ? { ...budget.spent } : undefined;
-            const result = await runSubagentTask({ ...taskDeps, researchTools: deps.researchToolsFor!(acc) }, spec, ctx.signal);
+            const bundle = deps.researchToolsFor!(acc);
+            const result = await runSubagentTask({ ...taskDeps, researchTools: bundle }, spec, ctx.signal);
             const notes: string[] = [];
             if (result.childSessionId !== '') {
               const recorded = acc.items.map((it, i) => ({ ...it, noteId: `${result.childSessionId}#${String(i + 1)}` }));
               ctx.reportResearch?.({ kind: 'findings', childSessionId: result.childSessionId, notes: recorded });
-              // The spend record the PARENT log needs: every search this child ran was recorded
-              // in the CHILD's log, so without this the budget silently refills on resume.
-              if (budget !== undefined && before !== undefined) {
-                ctx.reportResearch?.({
-                  kind: 'usage',
-                  childSessionId: result.childSessionId,
-                  searches: budget.spent.searches - before.searches,
-                  extracts: budget.spent.extracts - before.extracts,
-                  credits: budget.spent.credits - before.credits,
-                  contentChars: budget.spent.contentChars - before.contentChars,
-                });
-              }
+              // The spend record the PARENT log needs: every search this child ran was recorded in
+              // the CHILD's log, so without this the budget silently refills on resume.
+              //
+              // Read from the task's OWN counter, never from a diff of the shared budget. The
+              // whole group fans out under one Promise.all, so every sibling snapshots the same
+              // "before" and then subtracts it from a total that includes the others' spend —
+              // three parallel researchers each recorded the whole group's usage, and a resume
+              // rebuilt three times the truth (S19 review, reproduced: live 2, rebuilt 4).
+              ctx.reportResearch?.({ kind: 'usage', childSessionId: result.childSessionId, ...bundle.taskSpend });
               const captureLanded = ctx.reportResearch !== undefined;
+              // Spend that could not be recorded is stated as loudly as findings that could not
+              // be. An unrecorded spend does not merely lose a number: it makes the next resume
+              // believe the allowance is still there (S19 review).
+              if (!captureLanded && (bundle.taskSpend.searches > 0 || bundle.taskSpend.extracts > 0)) {
+                notes.push(
+                  `[harness] WIRING ERROR: this task's research spend (${String(bundle.taskSpend.searches)} search(es), ` +
+                    `${String(bundle.taskSpend.extracts)} extract(s)) could NOT be recorded — a resumed session will ` +
+                    'believe that allowance is unspent',
+                );
+              }
               const disagreements = recorded.filter((n) => n.corroboration === 'sources-disagree').length;
               const single = recorded.filter((n) => n.corroboration === 'single-source').length;
               notes.push(

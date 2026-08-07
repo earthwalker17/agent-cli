@@ -5,7 +5,7 @@ import { ROLE_CONTRACTS } from './roles.js';
 import { TOOLS } from '../tools/index.js';
 import { FACT_KINDS, type FactKind } from '../policy/engine.js';
 import type { NoteAccumulator } from '../tools/record-source.js';
-import type { ResearchBudget } from '../tools/research-budget.js';
+import type { ResearchBudget, ResearchSpend } from '../tools/research-budget.js';
 import type { WorkspaceMap } from '../workspace/map.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
@@ -78,6 +78,12 @@ export interface ResearchToolBundle {
   webSearch: Tool;
   webExtract: Tool;
   recordSource: Tool;
+  /**
+   * THIS task's running spend, accumulated by the two instances above and read by the delegate
+   * for the parent-log usage record. It exists because a diff of the SHARED budget around a task
+   * is wrong under Promise.all: siblings interleave, so every task's delta would include theirs.
+   */
+  taskSpend: ResearchSpend;
 }
 
 /**

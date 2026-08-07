@@ -9,8 +9,9 @@ import {
   type ResearchClient,
 } from '../research/types.js';
 import { truncateForModel } from '../shared/hash.js';
+import { sanitizeLine } from '../shared/text.js';
 import type { ResearchFact, ResearchTarget, Tool, ToolResult } from '../types.js';
-import type { ResearchBudget } from './research-budget.js';
+import type { ResearchBudget, ResearchSpend } from './research-budget.js';
 import { researchFailure } from './web-search.js';
 
 /**
@@ -55,6 +56,8 @@ export interface WebExtractDeps {
    * naturally per-task while the session budget above stays shared.
    */
   taskCap?: number;
+  /** This task's own running spend — see web-search.ts for why a shared-budget diff is wrong. */
+  taskSpend?: ResearchSpend;
 }
 
 export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> {
@@ -69,7 +72,10 @@ export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> 
     const depth = input.depth ?? 'basic';
     const targets: ResearchTarget[] = input.urls.map((raw) => {
       const v = validateSourceUrl(raw);
-      return v.ok ? { url: v.url, host: v.host } : { url: raw.slice(0, 260), refusedReason: v.reason };
+      // A REFUSED url is untrusted model text that the engine renders verbatim into its deny
+      // reason, which reaches the log and the terminal. Sanitize BEFORE slicing, so escape
+      // expansion cannot exceed the bound (S19 review).
+      return v.ok ? { url: v.url, host: v.host } : { url: sanitizeLine(raw).slice(0, 260), refusedReason: v.reason };
     });
     const credits = estimateExtractCredits(targets.length, depth);
     // The per-task ceiling reports through the SAME field as the session budget, so the engine's
@@ -137,10 +143,19 @@ export function createWebExtractTool(deps: WebExtractDeps): Tool<ExtractInputT> 
       const chars = outcome.pages.reduce((n, p) => n + p.chars, 0);
       taskExtracts += 1;
       deps.budget.charge('extract', { credits: outcome.credits, contentChars: chars });
+      if (deps.taskSpend !== undefined) {
+        deps.taskSpend.extracts += 1;
+        deps.taskSpend.credits += Math.max(0, outcome.credits);
+        deps.taskSpend.contentChars += Math.max(0, chars);
+      }
       ctx.reportResearch?.({
         kind: 'extracted',
         provider: deps.client.host,
-        urls: outcome.pages.map((p) => p.url),
+        // The REQUESTED urls, not the retrieved ones. Reporting `pages.map(...)` made pageCount
+        // and urls.length identical by construction, so a partial extract rendered as "2 of 2
+        // page(s)" in the report and /research — a silent success (S19 review). The failures are
+        // listed separately below; both are needed to read the outcome honestly.
+        urls: [...input.urls],
         pageCount: outcome.pages.length,
         failed: [
           ...outcome.failed.map((f) => ({ url: f.url, reason: f.error })),

@@ -113,7 +113,10 @@ describe('the approval request shows what actually leaves the machine', () => {
   it('states the provider, the per-call bounds and the remaining session budget', async () => {
     const { asks } = await run({});
     const d = asks[0]!.detail;
-    expect(d).toContain('provider: api.tavily.com (the only host contacted)');
+    // The claim is about the DESTINATION, not the wire. "the only host contacted" was false
+    // whenever a proxy was configured, and this prompt is where that mattered most (S19 review).
+    expect(d).toContain('provider: api.tavily.com (the only research destination');
+    expect(d).toContain('a configured proxy still carries the connection');
     expect(d).toContain('max results: 5');
     expect(d).toContain('12000 retrieved chars');
     expect(d).toContain('20000 ms');

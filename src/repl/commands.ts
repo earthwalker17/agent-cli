@@ -704,10 +704,9 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       // to let a user see EXACTLY what text this session sent to a third party, and which
       // external sources shaped the answers they were given. Everything is derived from the
       // event log, so it says only what actually happened.
-      if (ctx.researchUnavailable !== undefined) {
-        ctx.renderer.chromeLine(`web research: unavailable — ${ctx.researchUnavailable}`);
-        return 'continue';
-      }
+      // An absent credential does NOT hide the record. This surface exists so a user can audit
+      // what was sent, and a resumed session without the key is exactly when they are most likely
+      // to be asking (S19 review). The unavailability is reported as a line, not as a wall.
       const events = ctx.session.log.events;
       const searches = events.filter((e) => e.type === 'research.searched') as Extract<SessionEvent, { type: 'research.searched' }>[];
       const extracts = events.filter((e) => e.type === 'research.extracted') as Extract<SessionEvent, { type: 'research.extracted' }>[];

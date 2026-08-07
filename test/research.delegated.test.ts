@@ -94,11 +94,16 @@ function subagentDeps(childScripts: ScriptTurn[][], budget: ResearchBudget, with
     ...(withResearch
       ? {
           researchBudget: budget,
-          researchToolsFor: (acc: NoteAccumulator) => ({
-            webSearch: createWebSearchTool({ client, budget }) as Tool,
-            webExtract: createWebExtractTool({ client, budget }) as Tool,
-            recordSource: createRecordSourceTool({ acc, today: () => '2026-08-07' }) as Tool,
-          }),
+          researchToolsFor: (acc: NoteAccumulator) => {
+            // Mirrors production: per-task state created fresh here, shared budget closed over.
+            const taskSpend = { searches: 0, extracts: 0, credits: 0, contentChars: 0 };
+            return {
+              taskSpend,
+              webSearch: createWebSearchTool({ client, budget, taskSpend }) as Tool,
+              webExtract: createWebExtractTool({ client, budget, taskSpend }) as Tool,
+              recordSource: createRecordSourceTool({ acc, today: () => '2026-08-07' }) as Tool,
+            };
+          },
         }
       : {}),
   };
@@ -281,6 +286,50 @@ describe('the budget is genuinely shared', () => {
     expect(usages).toHaveLength(2);
     // Each record is that task's OWN delta, not a running total.
     expect(usages.every((u) => u.searches === 1)).toBe(true);
+  });
+
+  it('PARALLEL researchers each record only their OWN spend, not the group\'s', async () => {
+    // S19 review, reproduced: the delegate derived a task's spend by diffing the SHARED budget
+    // around it. The whole group fans out under one Promise.all, so every sibling snapshotted the
+    // same "before" and then subtracted it from a total containing the others' spend — two
+    // researchers doing one search each produced live=2 but rebuilt-on-resume=4.
+    const budget = createResearchBudget();
+    const parent = makeParent(
+      [
+        {
+          say: 'both',
+          calls: [
+            {
+              name: 'delegate_task',
+              input: {
+                tasks: [
+                  { role: 'researcher', task: 'first independent question about the api' },
+                  { role: 'researcher', task: 'second independent question about the api' },
+                ],
+              },
+            },
+          ],
+        },
+        { say: 'done' },
+      ],
+      subagentDeps(
+        [
+          [{ say: 's', calls: [{ name: 'web_search', input: { query: 'first query here' } }] }, { say: 'done' }],
+          [{ say: 's', calls: [{ name: 'web_search', input: { query: 'second query here' } }] }, { say: 'done' }],
+        ],
+        budget,
+      ),
+    );
+    await runTurn(parent, 'research both');
+    endSession(parent, 'completed');
+
+    const usages = parent.log.events.filter((e) => e.type === 'research.usage') as Extract<SessionEvent, { type: 'research.usage' }>[];
+    expect(usages).toHaveLength(2);
+    for (const u of usages) expect(u.searches).toBe(1);
+    // The live object and a fresh fold of the parent log must agree — that equality IS the
+    // property, and it is exactly what the diff broke.
+    expect(budget.spent.searches).toBe(2);
+    expect(researchSpendFromEvents(parent.log.events)).toEqual(budget.spent);
   });
 
   it('a child cannot spend past an allowance the parent already drained', async () => {

@@ -33,6 +33,7 @@ import { SnapshotStore, type CapturedFile } from '../store/snapshots.js';
 import { decide, Grants, escalateOnSnapshotFailure } from '../policy/engine.js';
 import { TOOLS, toToolSchema } from '../tools/index.js';
 import { sha256, redactSecret } from '../shared/hash.js';
+import { sanitizeLine } from '../shared/text.js';
 import { isInside } from '../shared/pathutil.js';
 import { systemClock, type Clock } from '../shared/clock.js';
 import { systemIdGen, type IdGen } from '../shared/ids.js';
@@ -1049,7 +1050,9 @@ function recordResearchEvidence(session: Session, callId: string, e: ResearchEvi
       type: 'research.searched',
       callId,
       provider: e.provider,
-      query: cap(e.query, 1_000),
+      // Sanitized like every other string here. The query is model-authored and is written
+      // verbatim by /report and /research, neither of which escapes at the render site.
+      query: cap(sanitizeLine(e.query), 1_000),
       resultCount: e.resultCount,
       hosts: [...new Set(e.hosts)].slice(0, 20).map((h) => cap(h, 260)),
       refused: e.refused.slice(0, 10).map((r) => ({ url: cap(r.url, 260), reason: cap(r.reason, 200) })),
@@ -1293,7 +1296,11 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
     if (fact !== undefined) {
       const b = fact.bounds;
       const common = [
-        `provider: ${fact.providerHost} (the only host contacted)`,
+        // "the only host contacted" was false whenever a proxy is configured — the connection goes
+        // to the proxy, which sees the request (S19 review). The honest claim is about the
+        // DESTINATION, which is what a human is deciding about; the transport is a separate fact
+        // the banner already prints.
+        `provider: ${fact.providerHost} (the only research destination; a configured proxy still carries the connection)`,
         `bounds: ≤${String(b.maxContentChars)} retrieved chars · ${String(b.timeoutMs)} ms · ~${String(b.credits)} credit(s)`,
         ...(fact.budgetRemaining !== undefined ? [`session budget remaining: ${fact.budgetRemaining}`] : []),
       ];

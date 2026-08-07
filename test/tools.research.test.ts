@@ -61,10 +61,23 @@ describe('web_search', () => {
     expect(t.research!({ query: 'x', depth: 'advanced' }).bounds.credits).toBe(2);
   });
 
-  it('declares model-chosen domains so the engine can check them against the denylist', () => {
+  it('declares the INCLUDE list only, so the engine checks what the call would reach', () => {
     const t = createWebSearchTool({ client: fakeClient(), budget: createResearchBudget() });
     const f = t.research!({ query: 'x', include_domains: ['a.example'], exclude_domains: ['b.example'] });
-    expect(f.domains).toEqual(['a.example', 'b.example']);
+    expect(f.domains).toEqual(['a.example']);
+  });
+
+  it('EXCLUDING a denylisted domain is allowed — that is agreeing with the operator, not defying it', () => {
+    // S19 review: the fact merged include+exclude, so a call that told the provider to AVOID a
+    // blocked domain was denied with a reason asserting it had tried to reach it.
+    const t = createWebSearchTool({ client: fakeClient(), budget: createResearchBudget() }) as unknown as Tool<unknown>;
+    const c = ctx({ rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: ['evil.example'] } });
+    expect(decide(t, { query: 'abc', exclude_domains: ['evil.example'] }, c, new Grants())).toMatchObject({ decision: 'ask' });
+    // ...while trying to TARGET it is still denied.
+    expect(decide(t, { query: 'abc', include_domains: ['evil.example'] }, c, new Grants())).toMatchObject({
+      decision: 'deny',
+      rule: 'research.blocked-domain',
+    });
   });
 
   it('is gated as external and asks — never observe', () => {

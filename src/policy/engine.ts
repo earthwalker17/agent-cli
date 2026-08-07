@@ -803,7 +803,11 @@ export function decide<I>(
         'sensitive',
         'deny',
         'research.budget-exhausted',
-        `the session research budget is spent (${fact.budgetExhausted}); further external reads are refused for this session`,
+        // The fact's own sentence says WHICH ceiling was hit, and the two mean different things:
+        // a spent SESSION budget ends research for the session, while a spent per-TASK page cap
+        // only ends this task's reading. Asserting the former for both told a researcher its
+        // session was over when it still had 8 searches left (S19 review).
+        `a research bound is spent (${fact.budgetExhausted}); this call is refused`,
       );
     }
 

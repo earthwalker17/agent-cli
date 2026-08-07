@@ -197,3 +197,20 @@ describe('hostOf / refusal', () => {
     expect(r.reason).toBe('because');
   });
 });
+
+describe('review regressions (Session 19)', () => {
+  it('a TRAILING DOT does not defeat any name-based internal-host refusal', () => {
+    // The bypass the review found and reproduced live: WHATWG URL preserves the dot on non-IPv4
+    // hosts, so 'localhost.' was not 'localhost', did not end with '.local', and did contain a
+    // dot — defeating the loopback check, every private-suffix check, and the single-label check
+    // at once. shared/domain.ts had always stripped it; this validator had not.
+    for (const url of ['http://localhost./', 'http://intranet.local./x', 'http://wiki.internal./v2', 'http://myhost./']) {
+      expect(validateSourceUrl(url).ok, url).toBe(false);
+    }
+  });
+
+  it('still accepts an ordinary public host written with a trailing dot', () => {
+    const v = validateSourceUrl('https://docs.example.com./guide');
+    expect(v).toMatchObject({ ok: true, host: 'docs.example.com' });
+  });
+});

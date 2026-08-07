@@ -364,7 +364,9 @@ export function computeAcceptance(
         conflicting += e.notes.filter((n) => n.corroboration === 'sources-disagree').length;
       }
     }
-    if (searches > 0 || extracts > 0) {
+    // Findings alone are enough to trigger it: a session whose conclusions rest on recorded web
+    // claims must say so even if the spend counters happen to read zero (S19 review).
+    if (searches > 0 || extracts > 0 || notes > 0) {
       caveats.push(
         `this session consulted the WEB (${String(searches)} search(es), ${String(extracts)} page read(s)` +
           `${childTasks.size > 0 ? `, ${String(childTasks.size)} delegated research task(s)` : ''}` +
