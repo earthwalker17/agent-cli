@@ -52,7 +52,7 @@ export const RECOVERY_CATALOGUE: Record<FailureClass, RecoveryEntry> = {
       'whether the toolchain is absent or merely unresolved (does the manifest list it?)',
     ],
     diagnostics: [
-      'read the manifest (package.json / pyproject.toml) and confirm whether the missing name is declared',
+      'read the manifest (package.json / pyproject.toml / Cargo.toml / go.mod) and confirm whether the missing name is declared',
       'list the expected location (node_modules/.bin, the venv) with list_files rather than assuming',
       '/checks names each detected project and whether its dependencies are installed — read it before assuming which project is missing them',
     ],
@@ -64,6 +64,8 @@ export const RECOVERY_CATALOGUE: Record<FailureClass, RecoveryEntry> = {
       // third-party code over the network, and is never auto-eligible below.
       'run project_setup install for the project that is missing them (it names the project and asks for approval; installing executes third-party code with network access, so the user decides)',
       'for Python, ask the user to install: the harness cannot verify which interpreter or virtualenv a command would install into',
+      // Session 18: same doctrine one level up — a missing toolchain is a USER install.
+      'a missing Rust/Go toolchain, rustup component, or rustup target is a USER install: the recorded check reason names the exact command (e.g. `rustup target add <triple>`); the harness never runs it',
     ],
     regressionChecks: ['build', 'typecheck'],
     autoEligible: false,
@@ -77,7 +79,7 @@ export const RECOVERY_CATALOGUE: Record<FailureClass, RecoveryEntry> = {
   'compile-type': {
     class: 'compile-type',
     label: 'compile / type',
-    signals: ['ts-error', 'syntax-error', 'type-error', 'a failing typecheck or build check'],
+    signals: ['ts-error', 'syntax-error', 'type-error', 'rust-error', 'go-error', 'a failing typecheck or build check'],
     requiredEvidence: [
       'the first few diagnostics with file, line, and error code (the check findings carry them)',
       'the current bytes of each named file — read them, do not repair from memory',

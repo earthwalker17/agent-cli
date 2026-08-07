@@ -151,3 +151,42 @@ describe('unsupportedResult', () => {
     expect(r.summary).toContain('no lint recipe applies');
   });
 });
+
+describe('rust and go signals/findings (Session 18)', () => {
+  it('detects rustc/cargo compile errors and the modern backticked assertion form', () => {
+    expect(extractSignals('error[E0308]: mismatched types')).toContain('rust-error');
+    expect(extractSignals('error: could not compile `meterkit` (lib) due to 1 previous error')).toContain('rust-error');
+    expect(extractSignals("error: cannot find crate for `core`")).toContain('rust-error');
+    // Rust >=1.73: "assertion" and "failed" are no longer adjacent.
+    expect(extractSignals('assertion `left == right` failed\n  left: 300\n right: 299')).toContain('assertion-failed');
+  });
+
+  it('detects go compiler/vet diagnostics, including the lowercase syntax error', () => {
+    expect(extractSignals('.\\main.go:5:2: undefined: Scale')).toContain('go-error');
+    const s = extractSignals('calc/table.go:3:1: syntax error: unexpected } after top level declaration');
+    expect(s).toEqual(['syntax-error', 'go-error']); // table order: widened rule first, appended rule last
+  });
+
+  it('the appended ids keep the pinned table order — new rules extend, never reorder', () => {
+    const text = ['error TS1005: oops', 'syntax error: unexpected token', 'error[E0308]: mismatched types', 'main.go:1:1: undefined: x'].join('\n');
+    expect(extractSignals(text)).toEqual(['ts-error', 'syntax-error', 'rust-error', 'go-error']);
+  });
+
+  it('extracts rustc two-line diagnostics with file and line — Windows and POSIX path spellings', () => {
+    const out = 'error[E0308]: mismatched types\n  --> src\\main.rs:5:9\n   |\n5 |     let x: i64 = "no";';
+    expect(extractFindings('typecheck', out)[0]).toMatchObject({ file: 'src\\main.rs', line: 5, message: 'E0308: mismatched types' });
+    const posix = 'error: expected one of `!` or `::`, found `fn`\n  --> src/lib.rs:2:5';
+    expect(extractFindings('build', posix)[0]).toMatchObject({ file: 'src/lib.rs', line: 2 });
+  });
+
+  it('extracts go diagnostics with file and line, and per-test failures for test kinds only', () => {
+    expect(extractFindings('build', './calc/table.go:14:6: undefined: Scale')[0]).toMatchObject({
+      file: './calc/table.go',
+      line: 14,
+      message: 'undefined: Scale',
+    });
+    const fails = extractFindings('test', '--- FAIL: TestScale (0.00s)\n    table_test.go:12: got 299, want 300');
+    expect(fails.some((f) => f.message === 'test failed: TestScale')).toBe(true);
+    expect(extractFindings('build', '--- FAIL: TestScale (0.00s)')).toEqual([]);
+  });
+});

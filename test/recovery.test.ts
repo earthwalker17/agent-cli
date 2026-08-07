@@ -139,6 +139,17 @@ describe('classification is structural and attributable', () => {
     expect(c(check({ signals: ['network-error'] }))).toMatchObject({ class: 'dependency-setup', confidence: 'medium' });
   });
 
+  it('classifies cargo and go compiler failures as compile-type by their own signals (Session 18)', () => {
+    expect(c(check({ check: 'build', signals: ['rust-error'] }))).toMatchObject({ class: 'compile-type', confidence: 'high' });
+    // A go test run failing with COMPILE errors is a compile failure — the signal outranks the
+    // kind fallback, which is exactly why the signal exists.
+    expect(c(check({ check: 'test', signals: ['go-error'] }))).toMatchObject({ class: 'compile-type', confidence: 'high' });
+    const r = c(check({ check: 'build', signals: ['rust-error'] }));
+    expect(r.signals).toContain('rust-error');
+    // An unrecognized cargo failure still lands via the kind fallback at medium confidence.
+    expect(c(check({ check: 'build', signals: [] }))).toMatchObject({ class: 'compile-type', confidence: 'medium' });
+  });
+
   it('a delegated task ending in a bare error stays UNKNOWN and points at the child log', () => {
     const r = c({ source: 'task', seq: 1, planTaskId: 'api', childSessionId: 'ch1', status: 'error', supervision: [] });
     expect(r.class).toBe('unknown');

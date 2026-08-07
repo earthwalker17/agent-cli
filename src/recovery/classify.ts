@@ -168,10 +168,10 @@ function classifyCheck(e: Extract<FailureEvidence, { source: 'check' }>): Failur
     cls = 'runtime-process';
     confidence = 'high';
     fired.push('permission-denied');
-  } else if (s.has('ts-error') || s.has('syntax-error')) {
+  } else if (s.has('ts-error') || s.has('syntax-error') || s.has('rust-error') || s.has('go-error')) {
     cls = 'compile-type';
     confidence = 'high';
-    for (const k of ['ts-error', 'syntax-error']) if (s.has(k)) fired.push(k);
+    for (const k of ['ts-error', 'syntax-error', 'rust-error', 'go-error']) if (s.has(k)) fired.push(k);
   } else if (e.check === 'typecheck' || e.check === 'build') {
     cls = 'compile-type';
     confidence = s.has('type-error') ? 'high' : 'medium';
