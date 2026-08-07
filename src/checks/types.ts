@@ -16,8 +16,46 @@ export type { CheckFinding, CheckKind, CheckStatus } from '../types.js';
  * gate — so the split survives: a check still means "we verified", never "we fetched".
  */
 
-/** Ecosystems with recipe rows. Everything else detects as no kinds and refuses honestly. */
-export type ProjectKind = 'node' | 'python';
+/**
+ * Ecosystems the harness can NAME. Everything else detects as no kinds and refuses honestly.
+ * Naming is not capability: `rust` and `go` carry recipe rows (Session 18); `cmake` is detected
+ * so refusals say "a CMake project whose checks are unsupported" instead of the falsehood "no
+ * supported project manifest was detected" — retrieval indexes its files either way.
+ */
+export type ProjectKind = 'node' | 'python' | 'rust' | 'go' | 'cmake';
+
+/** Rust/Cargo unit facts (Session 18). Bounded extraction, never TOML-parsed by a dependency. */
+export interface RustFacts {
+  /** Cargo.toml declares a `[workspace]` section (this unit is a cargo workspace root). */
+  workspaceRoot: boolean;
+  hasCargoLock: boolean;
+  /** `[package] edition`, display evidence only. */
+  edition: string | null;
+  /**
+   * `[build] target` from `.cargo/config.toml` / `.cargo/config`, charset-filtered. When set,
+   * every compile targets that triple: build/check/clippy need the rustup target installed, and
+   * `cargo test` builds binaries this HOST cannot execute — the embedded honesty split.
+   */
+  crossTarget: string | null;
+  /** `rust-toolchain.toml` / `rust-toolchain` file present (name only; the harness never overrides it). */
+  toolchainFile: string | null;
+}
+
+/** Go module unit facts (Session 18). */
+export interface GoFacts {
+  /** The `module` directive path, charset-filtered — display and evidence only. */
+  module: string | null;
+  /** The `go` version directive, display only. */
+  goDirective: string | null;
+  hasGoSum: boolean;
+  /** A `vendor/` directory exists (affects nothing the harness runs; a fact worth naming). */
+  hasVendorDir: boolean;
+}
+
+/** CMake unit facts (Session 18) — detection names the ecosystem; checks stay unsupported. */
+export interface CmakeFacts {
+  projectName: string | null;
+}
 
 /** A toolchain binary found on PATH: the name probed and the absolute path that answered. */
 export interface ToolProbe {
@@ -140,6 +178,12 @@ export interface DetectedProject {
    * server that dies during startup for no visible reason.
    */
   envFiles: { examples: string[]; present: string[] };
+  /** Rust/Cargo facts when `kinds` includes 'rust' (Session 18). */
+  rust?: RustFacts;
+  /** Go module facts when `kinds` includes 'go' (Session 18). */
+  go?: GoFacts;
+  /** CMake facts when `kinds` includes 'cmake' (Session 18). */
+  cmake?: CmakeFacts;
   /** Human-readable provenance for /checks, prompts, and refusals. */
   evidence: string[];
   stamps: ManifestStamp[];

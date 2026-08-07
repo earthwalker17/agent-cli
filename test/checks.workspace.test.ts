@@ -337,3 +337,59 @@ describe('determinism', () => {
     expect(ids()).toEqual([ROOT_UNIT_ID, 'api']);
   });
 });
+
+describe('unit discovery — rust, go, cmake (Session 18)', () => {
+  it('discovers cargo, go, and cmake units too', () => {
+    write('svc/go.mod', 'module example.com/svc\n');
+    write('fw/Cargo.toml', '[package]\nname = "fw"\n');
+    write('native/CMakeLists.txt', 'project(native)\n');
+    const w = detectWorkspace(ws);
+    expect(w.units.map((u) => u.id)).toEqual(['fw', 'native', 'svc']);
+    expect(w.units.find((u) => u.id === 'svc')!.kinds).toEqual(['go']);
+    expect(w.units.find((u) => u.id === 'fw')!.kinds).toEqual(['rust']);
+    expect(w.units.find((u) => u.id === 'native')!.kinds).toEqual(['cmake']);
+  });
+
+  it('expands cargo [workspace] members — the declaration reaches OUTSIDE the container conventions', () => {
+    // `crates` is not a conventional container dir, so only the declaration can find depth-2 units.
+    write('Cargo.toml', '[workspace]\nmembers = [\n  "crates/alpha",\n  "crates/beta",\n]\n');
+    write('crates/alpha/Cargo.toml', '[package]\nname = "alpha"\n');
+    write('crates/beta/Cargo.toml', '[package]\nname = "beta"\n');
+    expect(ids()).toEqual([ROOT_UNIT_ID, 'crates/alpha', 'crates/beta']);
+  });
+
+  it('expands the inline members form and the single trailing /* pattern', () => {
+    write('Cargo.toml', '[workspace]\nmembers = ["crates/*"]\n');
+    write('crates/alpha/Cargo.toml', '[package]\nname = "alpha"\n');
+    write('crates/beta/Cargo.toml', '[package]\nname = "beta"\n');
+    expect(ids()).toEqual([ROOT_UNIT_ID, 'crates/alpha', 'crates/beta']);
+  });
+
+  it('refuses a rich cargo member glob into a note, never half-interprets it', () => {
+    write('Cargo.toml', '[workspace]\nmembers = ["crates/**"]\n');
+    write('crates/deep/nested/Cargo.toml', '[package]\nname = "x"\n');
+    const w = detectWorkspace(ws);
+    expect(w.units.map((u) => u.id)).toEqual([ROOT_UNIT_ID]);
+    expect(w.notes.join(' ')).toContain("'crates/**' ignored");
+  });
+
+  it('notes a members key nothing could be read from', () => {
+    write('Cargo.toml', '[workspace]\nmembers = [ bare_unquoted ]\n');
+    const w = detectWorkspace(ws);
+    expect(w.notes.join(' ')).toContain('no entries could be read');
+  });
+
+  it('discovers go.work `use` units in both directive forms', () => {
+    write('go.work', 'go 1.22\n\nuse ./api\nuse (\n\t./workers/queue\n)\n');
+    write('api/go.mod', 'module example.com/api\n');
+    write('workers/queue/go.mod', 'module example.com/queue\n');
+    expect(ids()).toEqual(['api', 'workers/queue']);
+  });
+
+  it('skips target/ and vendor/ during the conventional scan', () => {
+    write('Cargo.toml', '[package]\nname = "root"\n');
+    write('target/debug-junk/Cargo.toml', '[package]\nname = "junk"\n');
+    write('vendor/dep/go.mod', 'module vendored\n');
+    expect(ids()).toEqual([ROOT_UNIT_ID]);
+  });
+});

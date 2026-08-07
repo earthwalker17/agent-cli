@@ -47,10 +47,30 @@ export const ROOT_UNIT_ID = '.';
  */
 const CONTAINER_DIRS = ['apps', 'packages', 'services', 'libs', 'modules'] as const;
 
-/** Manifests whose presence makes a directory a unit. Mirrors `detect.ts`'s ecosystems. */
-const UNIT_MANIFESTS = ['package.json', 'pyproject.toml', 'setup.cfg'] as const;
+/**
+ * Manifests whose presence makes a directory a unit. Mirrors `detect.ts`'s ecosystems.
+ * Session 18: `Cargo.toml`, `go.mod` and `CMakeLists.txt` join — a unit does NOT require recipe
+ * rows to exist (a cmake unit is named so refusals are honest). `go.work` is deliberately absent:
+ * it marks a CONTAINER whose `use` directives name the units, exactly as pnpm-workspace.yaml does.
+ */
+const UNIT_MANIFESTS = ['package.json', 'pyproject.toml', 'setup.cfg', 'Cargo.toml', 'go.mod', 'CMakeLists.txt'] as const;
 
-const SKIP_DIRS = new Set(['node_modules', '.git', '.agent-cli', 'dist', 'build', 'coverage', '.next', '.venv', 'venv', '__pycache__']);
+// Session 18 adds `target` (cargo build output) and `vendor` (vendored deps — real source, but
+// never a project UNIT; retrieval still sees the files) to the discovery skip set.
+const SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '.agent-cli',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.venv',
+  'venv',
+  '__pycache__',
+  'target',
+  'vendor',
+]);
 
 function isDir(p: string): boolean {
   try {
@@ -197,6 +217,84 @@ function declaredPnpmWorkspaces(root: string): { patterns: string[]; note?: stri
 }
 
 /**
+ * Cargo `[workspace] members` — extracted, not TOML-parsed (the pnpm-YAML precedent, one format
+ * over). Bounded to the `[workspace]` section; accepts the inline `members = ["a", "crates/*"]`
+ * and the multiline-array forms; quoted strings only. Patterns feed the same `expandPattern`
+ * vocabulary (a literal directory or one trailing `/*`), so anything richer refuses into a note
+ * rather than half-interpreting into a unit set cargo itself would not use.
+ */
+function declaredCargoMembers(root: string): { patterns: string[]; note?: string } {
+  const text = readBounded(path.join(root, 'Cargo.toml'), MAX_PKG_BYTES);
+  if (text === null) return { patterns: [] };
+  const patterns: string[] = [];
+  let inWorkspace = false;
+  let inMembersArray = false;
+  let sawMembersKey = false;
+  const takeQuoted = (fragment: string): void => {
+    for (const m of fragment.matchAll(/"([^"]{1,256})"/g)) {
+      if (patterns.length >= MAX_WORKSPACE_PATTERNS) return;
+      patterns.push(m[1]!);
+    }
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const header = /^\s*\[([^\]]{1,128})\]\s*(?:#.*)?$/.exec(line);
+    if (header !== null) {
+      inWorkspace = header[1]!.trim() === 'workspace';
+      inMembersArray = false;
+      continue;
+    }
+    if (!inWorkspace) continue;
+    if (inMembersArray) {
+      takeQuoted(line);
+      if (line.includes(']')) inMembersArray = false;
+      continue;
+    }
+    const members = /^\s*members\s*=\s*\[(.*)$/.exec(line);
+    if (members !== null) {
+      sawMembersKey = true;
+      takeQuoted(members[1]!);
+      if (!members[1]!.includes(']')) inMembersArray = true;
+    }
+  }
+  return {
+    patterns,
+    ...(sawMembersKey && patterns.length === 0
+      ? { note: 'Cargo.toml declares [workspace] members but no entries could be read from it' }
+      : {}),
+  };
+}
+
+/** `go.work` `use` directives: the single-line form and the `use ( … )` block form. */
+function declaredGoWorkUses(root: string): { patterns: string[]; note?: string } {
+  const text = readBounded(path.join(root, 'go.work'), MAX_YAML_BYTES);
+  if (text === null) return { patterns: [] };
+  const patterns: string[] = [];
+  let inBlock = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (patterns.length >= MAX_WORKSPACE_PATTERNS) break;
+    const stripped = line.replace(/\/\/.*$/, '').trim();
+    if (inBlock) {
+      if (stripped === ')') {
+        inBlock = false;
+        continue;
+      }
+      if (stripped !== '' && stripped !== '(') patterns.push(stripped);
+      continue;
+    }
+    if (/^use\s*\(\s*$/.test(stripped)) {
+      inBlock = true;
+      continue;
+    }
+    const single = /^use\s+(\S{1,256})$/.exec(stripped);
+    if (single !== null) patterns.push(single[1]!);
+  }
+  return {
+    patterns,
+    ...(patterns.length === 0 ? { note: 'go.work is present but no `use` directives could be read from it' } : {}),
+  };
+}
+
+/**
  * The candidate unit ids for a workspace, in deterministic order, WITHOUT reading manifests for
  * content. Shared by `detectWorkspace` and `probeWorkspaceStamps` so a re-probe sees exactly the
  * unit set a re-detect would — otherwise a newly added `api/package.json` would be invisible to
@@ -223,7 +321,7 @@ export function discoverUnitIds(root: string): { ids: string[]; notes: string[] 
     ids.push(id);
   };
 
-  for (const src of [declaredNpmWorkspaces(root), declaredPnpmWorkspaces(root)]) {
+  for (const src of [declaredNpmWorkspaces(root), declaredPnpmWorkspaces(root), declaredCargoMembers(root), declaredGoWorkUses(root)]) {
     if (src.note !== undefined) notes.push(src.note);
     for (const pattern of src.patterns) {
       const { ids: expanded, note } = expandPattern(root, pattern);

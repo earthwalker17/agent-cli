@@ -1,7 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { sha256 } from '../shared/hash.js';
-import type { DetectedLockfile, DetectedProject, ManifestStamp, PackageManager, ProjectKind, ToolchainFacts } from './types.js';
+import type {
+  CmakeFacts,
+  DetectedLockfile,
+  DetectedProject,
+  GoFacts,
+  ManifestStamp,
+  PackageManager,
+  ProjectKind,
+  RustFacts,
+  ToolchainFacts,
+} from './types.js';
 
 /**
  * Project detection for typed checks (Session 12): bounded, never-throwing, stat-first.
@@ -39,6 +49,14 @@ const PM_SPEC_RE = /^[A-Za-z0-9][A-Za-z0-9@.+_\-]{0,255}$/;
 const NODE_TOOLS = ['typescript', 'vitest', 'jest', 'eslint', 'prettier'] as const;
 /** Python tool names looked for as literal substrings in pyproject.toml / setup.cfg. */
 const PYTHON_TOOLS = ['pytest', 'mypy', 'ruff'] as const;
+
+/** Target triples / editions / go versions end up in prompts and reasons — filtered at ingestion. */
+const TRIPLE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+const EDITION_RE = /^[0-9]{4}$/;
+const GO_VERSION_RE = /^[0-9][0-9.]{0,15}$/;
+/** Go module paths: host/path segments. Anything richer is dropped, not escaped. */
+const GO_MODULE_RE = /^[A-Za-z0-9][A-Za-z0-9._~\/-]{0,255}$/;
+const CMAKE_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 
 const ESLINT_CONFIGS = [
   '.eslintrc',
@@ -91,6 +109,13 @@ const ENV_PRESENT = ['.env', '.env.local', '.env.development', '.env.development
  * names (they decide whether a unit reads as configured). Both only ever change what the harness
  * DESCRIBES; a re-detect refuses a call solely when the resolved COMMAND changed, so widening the
  * fingerprint costs a cheap re-detect and buys a surface that is never stale.
+ *
+ * Session 18 additions: the Rust/Go/CMake manifests and the files that change what cargo/go
+ * would DO (`.cargo/config.toml` selects a cross target; `rust-toolchain*` selects a toolchain;
+ * `go.work` reshapes the unit set). `target/` is deliberately NOT stamped — its mtime moves on
+ * every build while nothing the harness resolves depends on it, so stamping it would flap the
+ * fingerprint once per check for zero resolution change (unlike `node_modules`, which gates
+ * precondition curability).
  */
 const CANDIDATES: readonly string[] = [
   'package.json',
@@ -101,6 +126,16 @@ const CANDIDATES: readonly string[] = [
   'tsconfig.json',
   'pyproject.toml',
   'setup.cfg',
+  'Cargo.toml',
+  'Cargo.lock',
+  'rust-toolchain.toml',
+  'rust-toolchain',
+  '.cargo/config.toml',
+  '.cargo/config',
+  'go.mod',
+  'go.sum',
+  'go.work',
+  'CMakeLists.txt',
   'node_modules',
   ...ESLINT_CONFIGS,
   ...PRETTIER_CONFIGS,
@@ -201,6 +236,39 @@ function detectLockfile(root: string, pm: PackageManager | null): DetectedLockfi
 }
 
 /**
+ * Bounded TOML-shaped extraction (Session 18) — the pnpm-workspace precedent: no TOML dependency
+ * for three key reads. `hasTomlSection` answers presence; `tomlSectionLines` yields the lines
+ * between one `[section]` header and the next `[` header; `tomlString` reads a simple
+ * `key = "value"` line from them. A value these miss degrades to null, never to a wrong value.
+ * `section`/`key` are harness literals, never workspace bytes.
+ */
+function hasTomlSection(text: string, section: string): boolean {
+  return new RegExp(`^\\s*\\[${section}\\]\\s*(?:#.*)?$`, 'm').test(text);
+}
+
+function tomlSectionLines(text: string, section: string): string[] {
+  const out: string[] = [];
+  let inSection = false;
+  for (const line of text.split(/\r?\n/)) {
+    const header = /^\s*\[([^\]]{1,128})\]\s*(?:#.*)?$/.exec(line);
+    if (header !== null) {
+      inSection = header[1]!.trim() === section;
+      continue;
+    }
+    if (inSection) out.push(line);
+  }
+  return out;
+}
+
+function tomlString(lines: readonly string[], key: string): string | null {
+  for (const line of lines) {
+    const m = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]{1,256})"`).exec(line);
+    if (m !== null) return m[1]!;
+  }
+  return null;
+}
+
+/**
  * Detect what one project unit can be checked with. Pure with respect to the harness: it reads
  * files under `root` and returns a snapshot — it writes nothing, spawns nothing, and never throws.
  *
@@ -282,6 +350,77 @@ export function detectProject(root: string, id = '.', toolchains?: ToolchainFact
     );
   }
 
+  // Rust/Cargo (Session 18). Everything read is bounded and charset-filtered; a value the
+  // extraction misses is null, never a guess.
+  let rust: RustFacts | null = null;
+  const cargoText = readBounded(path.join(root, 'Cargo.toml'));
+  if (cargoText !== null) {
+    kinds.push('rust');
+    const editionRaw = tomlString(tomlSectionLines(cargoText, 'package'), 'edition');
+    const edition = editionRaw !== null && EDITION_RE.test(editionRaw) ? editionRaw : null;
+    const workspaceRoot = hasTomlSection(cargoText, 'workspace');
+    const hasCargoLock = exists(root, 'Cargo.lock');
+    const toolchainFile = exists(root, 'rust-toolchain.toml')
+      ? 'rust-toolchain.toml'
+      : exists(root, 'rust-toolchain')
+        ? 'rust-toolchain'
+        : null;
+    // `.cargo/config.toml` (modern name) wins over legacy `.cargo/config` — cargo's own order.
+    // Only a plain string `target = "<triple>"` is read; an array form degrades to null.
+    let crossTarget: string | null = null;
+    const cargoConfig = readBounded(path.join(root, '.cargo', 'config.toml')) ?? readBounded(path.join(root, '.cargo', 'config'));
+    if (cargoConfig !== null) {
+      const raw = tomlString(tomlSectionLines(cargoConfig, 'build'), 'target');
+      if (raw !== null && TRIPLE_RE.test(raw)) crossTarget = raw;
+    }
+    rust = { workspaceRoot, hasCargoLock, edition, crossTarget, toolchainFile };
+    evidence.push(
+      `Cargo.toml (${[
+        edition !== null ? `edition ${edition}` : null,
+        workspaceRoot ? 'workspace root' : null,
+        hasCargoLock ? 'Cargo.lock present' : 'no Cargo.lock',
+      ]
+        .filter((s): s is string => s !== null)
+        .join('; ')})`,
+    );
+    if (crossTarget !== null) {
+      evidence.push(`.cargo config sets [build].target = ${crossTarget} — every compile targets that triple`);
+    }
+    if (toolchainFile !== null) evidence.push(`${toolchainFile} pins the rust toolchain (the harness never overrides it)`);
+  }
+
+  // Go modules (Session 18).
+  let goFacts: GoFacts | null = null;
+  const goModText = readBounded(path.join(root, 'go.mod'));
+  if (goModText !== null) {
+    kinds.push('go');
+    const moduleRaw = /^module\s+(\S{1,256})\s*$/m.exec(goModText)?.[1] ?? null;
+    const goRaw = /^go\s+([0-9][0-9.]{0,15})\s*$/m.exec(goModText)?.[1] ?? null;
+    goFacts = {
+      module: moduleRaw !== null && GO_MODULE_RE.test(moduleRaw) ? moduleRaw : null,
+      goDirective: goRaw !== null && GO_VERSION_RE.test(goRaw) ? goRaw : null,
+      hasGoSum: exists(root, 'go.sum'),
+      hasVendorDir: exists(root, 'vendor'),
+    };
+    evidence.push(
+      `go.mod (${goFacts.module ?? 'module name unreadable'}` +
+        `${goFacts.goDirective !== null ? `; go ${goFacts.goDirective}` : ''}` +
+        `${goFacts.hasGoSum ? '; go.sum present' : '; no go.sum'})`,
+    );
+    if (goFacts.hasVendorDir) evidence.push('vendor/ directory present');
+  }
+
+  // CMake (Session 18): NAMED, not supported — detection exists so the refusal can say what this
+  // is instead of claiming no manifest was found. Checks stay unsupported; retrieval indexes it.
+  let cmake: CmakeFacts | null = null;
+  const cmakeText = readBounded(path.join(root, 'CMakeLists.txt'));
+  if (cmakeText !== null) {
+    kinds.push('cmake');
+    const nameRaw = /^\s*project\s*\(\s*([A-Za-z0-9_.-]{1,64})/im.exec(cmakeText)?.[1] ?? null;
+    cmake = { projectName: nameRaw !== null && CMAKE_NAME_RE.test(nameRaw) ? nameRaw : null };
+    evidence.push(`CMakeLists.txt (${cmake.projectName !== null ? `project ${cmake.projectName}` : 'no project() name read'})`);
+  }
+
   const hasNodeModules = exists(root, 'node_modules');
   const hasTsconfig = exists(root, 'tsconfig.json');
   const hasEslintConfig = ESLINT_CONFIGS.some((c) => exists(root, c));
@@ -351,6 +490,9 @@ export function detectProject(root: string, id = '.', toolchains?: ToolchainFact
     npmrcSha256,
     installConfigSha256,
     envFiles,
+    ...(rust !== null ? { rust } : {}),
+    ...(goFacts !== null ? { go: goFacts } : {}),
+    ...(cmake !== null ? { cmake } : {}),
     evidence,
     stamps,
     ...(toolchains !== undefined ? { toolchains } : {}),

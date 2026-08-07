@@ -132,3 +132,85 @@ describe('probeStamps / stampsEqual', () => {
     expect(stampsEqual(a, probeStamps(ws))).toBe(false);
   });
 });
+
+describe('detectProject — rust, go, cmake (Session 18)', () => {
+  it('detects a cargo crate with edition, lockfile, and workspace-root facts', () => {
+    write('Cargo.toml', '[package]\nname = "meterkit"\nedition = "2021"\n\n[dependencies]\n');
+    const p = detectProject(ws);
+    expect(p.kinds).toEqual(['rust']);
+    expect(p.rust).toEqual({ workspaceRoot: false, hasCargoLock: false, edition: '2021', crossTarget: null, toolchainFile: null });
+    expect(p.evidence.join(' ')).toContain('Cargo.toml');
+
+    write('Cargo.lock', '# lock');
+    write('rust-toolchain.toml', '[toolchain]\nchannel = "stable"\n');
+    const q = detectProject(ws);
+    expect(q.rust!.hasCargoLock).toBe(true);
+    expect(q.rust!.toolchainFile).toBe('rust-toolchain.toml');
+  });
+
+  it('a [workspace] section marks the cargo workspace root — including a virtual one', () => {
+    write('Cargo.toml', '[workspace]\nmembers = ["crates/a"]\n');
+    const p = detectProject(ws);
+    expect(p.kinds).toEqual(['rust']);
+    expect(p.rust!.workspaceRoot).toBe(true);
+  });
+
+  it('reads [build].target from .cargo/config.toml, charset-filtered, section-bounded', () => {
+    write('Cargo.toml', '[package]\nname = "fw"\n');
+    write('.cargo/config.toml', '[build]\ntarget = "thumbv7em-none-eabihf"\n');
+    expect(detectProject(ws).rust!.crossTarget).toBe('thumbv7em-none-eabihf');
+
+    // A hostile triple is refused at ingestion; a target key OUTSIDE [build] is not a cross target.
+    write('.cargo/config.toml', '[build]\ntarget = "bad triple; rm -rf"\n');
+    expect(detectProject(ws).rust!.crossTarget).toBeNull();
+    write('.cargo/config.toml', '[target.thumbv7em-none-eabihf]\nrunner = "qemu"\n');
+    expect(detectProject(ws).rust!.crossTarget).toBeNull();
+  });
+
+  it('detects a go module with module path, go directive, and go.sum', () => {
+    write('go.mod', 'module example.com/svc\n\ngo 1.22\n');
+    const p = detectProject(ws);
+    expect(p.kinds).toEqual(['go']);
+    expect(p.go).toEqual({ module: 'example.com/svc', goDirective: '1.22', hasGoSum: false, hasVendorDir: false });
+
+    write('go.sum', '');
+    fs.mkdirSync(path.join(ws, 'vendor'));
+    const q = detectProject(ws);
+    expect(q.go!.hasGoSum).toBe(true);
+    expect(q.go!.hasVendorDir).toBe(true);
+  });
+
+  it('a hostile module path is dropped, not escaped', () => {
+    write('go.mod', 'module bad`path$(x)\n');
+    const p = detectProject(ws);
+    expect(p.kinds).toEqual(['go']);
+    expect(p.go!.module).toBeNull();
+  });
+
+  it('names a CMake project without claiming any capability for it', () => {
+    write('CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)\nproject(hello VERSION 1.0)\n');
+    const p = detectProject(ws);
+    expect(p.kinds).toEqual(['cmake']);
+    expect(p.cmake).toEqual({ projectName: 'hello' });
+
+    write('CMakeLists.txt', 'add_subdirectory(src)\n');
+    expect(detectProject(ws).cmake).toEqual({ projectName: null });
+  });
+
+  it('a polyglot unit lists every ecosystem in detection order', () => {
+    write('package.json', '{}');
+    write('Cargo.toml', '[package]\nname = "x"\n');
+    write('go.mod', 'module m\n');
+    expect(detectProject(ws).kinds).toEqual(['node', 'rust', 'go']);
+  });
+
+  it('the fingerprint notices Cargo.toml and nested .cargo/config.toml edits (fixed candidate list)', () => {
+    write('Cargo.toml', '[package]\nname = "a"\n');
+    const a = probeStamps(ws);
+    write('Cargo.toml', '[package]\nname = "a"\nedition = "2021"\n');
+    const b = probeStamps(ws);
+    expect(stampsEqual(a, b)).toBe(false);
+    write('.cargo/config.toml', '[build]\ntarget = "thumbv7em-none-eabihf"\n');
+    expect(stampsEqual(b, probeStamps(ws))).toBe(false);
+  });
+});
