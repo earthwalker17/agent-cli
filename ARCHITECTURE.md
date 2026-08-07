@@ -41,6 +41,7 @@ src/
   checks/                  Typed verification.
     types.ts               CheckRecipe / DetectedProject / CheckResult contracts.
     detect.ts              Bounded never-throwing manifest detection + stat fingerprint.
+    toolchain.ts           Stat-only machine-toolchain probe + drift pseudo-stamps (S18).
     recipes.ts             The declarative recipe table + toCommand (the single composer).
     normalize.ts           Exit-code-is-the-verdict normalization + named signal extraction.
   preview/                 Managed preview processes.
@@ -99,7 +100,7 @@ src/
     update-plan.ts         update_plan — the model's ONLY plan write path.
     apply-changes.ts       apply_task_changes + the captured-changes registry.
   retrieval/               Git-backed inventory (+ path-SET digest) → regex symbol/import
-                           extraction (ts/js + python) → import-graph PageRank → a persisted
+                           extraction (ts/js, python, rust, go, c/c++) → import-graph PageRank → a persisted
                            incremental index written ONLY at assembly → ranking with traceable
                            signals → tiered render under a HARD char budget; any failure falls
                            back to the flat map.
@@ -267,8 +268,23 @@ Large-repo understanding is selective and ranked, not a broad file dump. One in-
 - **Inventory:** `git ls-files` + per-file size/mtime + dirty paths (`status --porcelain=v2 -z
   -uall`, subdir-prefix aware), capped at 20k files. `inventorySha256` digests the sorted path
   SET — deliberately independent of rendering, so map-format changes cannot flap staleness.
-- **Extraction:** line-anchored regex symbols/imports for the ts/js family + python ONLY
-  (declared everywhere; other languages rank via path/git signals). Injection defense is
+- **Extraction:** line-anchored regex symbols/imports for the ts/js family, Python, Rust, Go,
+  and C/C++ (S18; one `c-cpp` id — a `.h` is not attributable to either language; every other
+  language ranks via path/git signals, declared everywhere). Pattern TABLES per language, all
+  column-0 anchored (module-level items only — Rust `impl` methods and Python nested defs stay
+  invisible by design): Rust items with `pub` as the exported surface plus `mod x;` emitted as
+  `mod::x` pseudo-specifiers; Go funcs/types/consts with the language's own case rule for
+  exported, single AND block import forms; C/C++ aggregates, `#define` macros, one conservative
+  function pattern, `#include` edges, a header's declarations reading as its public surface.
+  Resolution (graph.ts): Rust through sibling/`mod.rs` and the nearest `lib.rs`/`main.rs` crate
+  root (`super::`/`self::` dirname arithmetic; external crates drop); Go by DIRECTORY-SUFFIX
+  matching onto one deterministic representative file (module paths are unknowable without
+  go.mod in a per-file resolver — wrong only toward missing edges; single-segment specs drop as
+  stdlib); C/C++ includer-relative then `include/`/`src/` roots. `SymbolKind` gained
+  struct/trait/mod/macro with NO index version bump (strings in JSON; newly eligible files
+  extract on the next warm load — the pinned convergence). `LangId` (per-file extraction) and
+  `ProjectKind` (per-unit build system) are deliberately SEPARATE vocabularies: a lone `.rs`
+  scratch file indexes without any cargo unit existing. Injection defense is
   structural: symbol captures are bounded identifier classes, import specifiers are
   charset-filtered — repo prose cannot enter the system prompt through extraction. Secret-named,
   binary, and >256 KiB files are never read.
@@ -306,9 +322,14 @@ gate unrunnable).
 
 - **Discovery** is bounded, stat-first and NEVER throwing (the `detect.ts` discipline): the root
   when it has a manifest, whatever the root `package.json` `workspaces` / `pnpm-workspace.yaml`
-  `packages:` declare, every depth-1 directory holding a manifest, and the children of
-  conventional containers (`apps`/`packages`/`services`/`libs`/`modules`). Depth 1 is scanned
-  GENERALLY rather than against a name list — a Python service in `svc/` is a real project.
+  `packages:` / root `Cargo.toml` `[workspace] members` / `go.work` `use` directives declare
+  (S18 — cargo members and go.work uses are hand-extracted bounded scans, the pnpm-YAML
+  precedent), every depth-1 directory holding a manifest, and the children of conventional
+  containers (`apps`/`packages`/`services`/`libs`/`modules`). Unit manifests:
+  `package.json`, `pyproject.toml`, `setup.cfg`, `Cargo.toml`, `go.mod`, `CMakeLists.txt` —
+  a cmake unit is NAMED without recipe rows so refusals say what the project is. Depth 1 is
+  scanned GENERALLY rather than against a name list — a Python service in `svc/` is a real
+  project; `target/` and `vendor/` join the scan skip set.
   Caps: `MAX_PROJECT_UNITS = 12`, `MAX_UNIT_DEPTH = 2`, 200 directories per listing.
 - **Two rules are load-bearing.** A unit exists only where a MANIFEST exists (directory names are
   candidates, never units). And everything NOT interpreted is RECORDED as a `note`: the glob
@@ -333,6 +354,24 @@ gate unrunnable).
   secret-classified read, but "ships `.env.example`, has no `.env`" is a fact worth surfacing
   rather than a dev server that dies during startup for no visible reason). The stamp union
   qualifies every `relPath` by unit, so the TOCTOU guard notices a manifest appearing in ANY unit.
+  S18 adds optional per-ecosystem sub-records — `rust` (workspace root, Cargo.lock, edition, the
+  `[build].target` cross triple from `.cargo/config.toml`, rust-toolchain file), `go` (module
+  path, go directive, go.sum, vendor/), `cmake` (project name) — and `ProjectKind` widens to
+  `node | python | rust | go | cmake`. The stat-candidate list covers the new manifests plus
+  `.cargo/config.toml` and `rust-toolchain*`, so a Cargo.toml edit is drift the guard can see;
+  `target/` is deliberately NOT stamped (its mtime moves per build while nothing resolution-
+  relevant depends on it).
+- **Toolchain facts (S18, `checks/toolchain.ts`)** — machine availability as a first-class fact,
+  stat-only and never spawning: cargo/rustc/go probed on PATH (PATHEXT-aware, bounded), rustup
+  components and installed targets probed under the TOOLCHAIN dirs — never `~/.cargo/bin`, whose
+  proxy shims exist for every component name whether or not the component does (union across
+  installed toolchains, an approximation the module states). One probe per `detectWorkspace`,
+  shared by reference across units. Freshness rides the existing TOCTOU seam instead of a second
+  cache: present toolchains become pseudo-stamps under the reserved `~toolchain/` prefix,
+  appended identically by `detectWorkspace` and `probeWorkspaceStamps` — installing Go (or
+  `rustup target add`) mid-session flips staleness and the shared holder re-detects; absence is
+  never cached across a session (the S16.5 probe lesson). A presence probe is not a health
+  check: a findable-but-broken toolchain still fails at run with a real signal.
 - **One detection per session, one LIVE holder.** Assembly detects once, before the system prompt,
   and `checks/session-workspace.ts` publishes that snapshot to `run_check`, `preview` and
   `project_setup` through a single `SharedWorkspace`. Per-tool copies protected a window that does
@@ -413,13 +452,40 @@ argument, and everything else follows from it.
   applicable row wins — resolution is deterministic, which is what consent can bind to.
   `toCommand` is the single composer: bare-safe tokens pass through, everything else is
   single-quoted, and an unrepresentable argument throws rather than being hand-escaped. Node/TS
-  is first-class, Python minimal, everything else `unsupported` **with the reason**. A script
+  is first-class, Python minimal, **Rust/Cargo and Go modules first-class (S18)**, CMake
+  detected-but-unsupported, everything else `unsupported` **with the reason**. A script
   recipe requires `node_modules` only when the project actually DECLARES dependencies.
+  The cargo rows: `cargo build`/`cargo test`/`cargo check` (typecheck)/`cargo clippy -- -D
+  warnings` (lint; clippy's plain exit ignores lint findings, so the strict CI form IS the
+  recipe)/`cargo fmt --check` — compile rows carry `workspaceAuthored: true` because build.rs
+  and proc-macros execute workspace code at build time. The go rows: `go build ./...` (build AND
+  typecheck — Go's compiler is its typechecker, and the deliberate duplication keeps a typecheck
+  gate honest instead of no-recipe-waived), `go test ./...`, `go vet ./...`
+  (static-analysis), and a `test-targeted` row that maps path scopes onto `./pkg/...` package
+  patterns (Go selection is path-shaped; the unit prefix is stripped, `.go` files fold to their
+  package dir). Holes are DECISIONS with stated reasons via `ECOSYSTEM_KIND_NOTES`: no rust
+  test-targeted (cargo selects tests by NAME), no go format (`gofmt -l` exits 0 either way, and
+  an output-parsed verdict would break the contract below). Preconditions are ROW-OWNED
+  (`UnmetPrecondition {reason, why}`, S18): whether a blocker is an uninstalled project
+  (curable), a missing machine toolchain (waives loudly), or a host incapability (waives
+  quietly) is a fact only the row can state — the old central curable rule was Node's answer
+  (`hasDependencies && !hasNodeModules`) hard-coded into generic control flow, and the node rows
+  still give byte-identical answers, test-pinned. Cross-target crates (a `[build].target` triple
+  in `.cargo/config.toml`) split honestly: `cargo fmt` stays host-verifiable, compiles gate on
+  the installed rustup target (else `toolchain-unavailable` naming `rustup target add <triple>`),
+  and `cargo test` refuses permanently as `precondition` — cross-compiled test binaries cannot
+  execute on this host, and the harness manages no hardware or emulators.
 - **Normalization:** **THE EXIT CODE IS THE VERDICT.** `exited`+0 ⇒ pass, `exited`+non-zero ⇒
   fail, every non-exit termination ⇒ `error` — never `pass`. Parsers only enrich
   `summary`/`findings`/`signals`. The named **signals** are the durable half: full output is
   truncated and only spilled to a blob, so failure classification later reads the signal ids
-  persisted on the event, not text that has left the context.
+  persisted on the event, not text that has left the context. S18 appended `rust-error` and
+  `go-error` (order pinned — SIGNAL_RULES is append-only), widened `syntax-error` (Go's
+  lowercase spelling) and `assertion-failed` (Rust ≥1.73's backticked form), and added rustc
+  two-line / Go one-line finding extractors. Known hazard, documented not fixed: gcc/clang's
+  `fatal error: foo.h: No such file or directory` would false-fire `command-not-found` →
+  dependency-setup — unreachable today because no C/C++ recipe exists to emit such output, and
+  narrowing the generic rule would break real not-found detection for zero current benefit.
 - **`run_check`** (per-session factory, PARENT-ONLY): holds the detected project SNAPSHOT,
   because the policy `check()` fact must be pure and because the command the human approved must
   be the command that runs. Executors are deliberately excluded — a worktree materializes without
@@ -433,11 +499,18 @@ argument, and everything else follows from it.
 - **Evidence:** `check.started` is emitted from `onSpawn` ONLY, so it means exactly what
   `command.started` means — a process really started. An `unsupported` kind records a completed
   event alone carrying `unsupportedReason` (`no-recipe` | `precondition` | `precondition-curable`
-  | `bad-request`), which is what lets a gate distinguish "this project cannot" from "you asked
-  wrong" — and, since v1.2.1, from "this project is not installed yet". `precondition-curable` is
+  | `bad-request` | `toolchain-unavailable` (S18)), which is what lets a gate distinguish "this
+  project cannot" from "you asked wrong" — and, since v1.2.1, from "this project is not
+  installed yet". `toolchain-unavailable` is the MACHINE-capability answer (no cargo/go on PATH,
+  a rustup component or target missing), produced before anything spawns and naming the exact
+  user cure; it waives a gate — the browser-unavailable precedent: an absence the harness will
+  never install on its own must not strand acceptance — but LOUDLY: the gate folds track these
+  waivers apart (`toolchainUnavailable`/`toolchainUnavailableIn`) and the acceptance caveat says
+  "TOOLCHAIN IS NOT INSTALLED on this machine" instead of the generic "unsupported".
+  `precondition-curable` is
   produced when the project DECLARES dependencies and has no `node_modules`: a transient state with
-  a named cure (`project_setup install`), decided once from the project's own facts rather than
-  from whichever recipe row complained. It does NOT waive a gate. Waiving it let a session that
+  a named cure (`project_setup install`), decided by the node rows themselves (row-owned `why`,
+  S18) exactly as the old central rule did. It does NOT waive a gate. Waiving it let a session that
   installed `api` and forgot `web` be accepted as COMPLETE with its own caveat claiming a project
   shipping a build and a test suite *cannot* run them — an uninstalled project is unverified, not
   unverifiable. `reconstruct` replays an interrupted check as "produced no verdict; effects
@@ -1054,10 +1127,14 @@ is green**. The mechanism is one predicate, not a new state.
   For `test-targeted` the SCOPE is the check: the run's recorded `scopePaths` must overlap the
   task's `touches`.
 - **Waivers, honestly:** an `unsupported` result waives the kind — but ONLY when the reason is a
-  project-CAPABILITY one. Neither a `bad-request` nor a `precondition-curable` may (the latter
+  capability one. Neither a `bad-request` nor a `precondition-curable` may (the latter
   means the project simply has not been installed yet, and `project_setup install` is the named
   cure — waiving it let a session that installed half a stack be accepted as COMPLETE claiming the
-  other half *cannot* be tested). A waiver is recorded as a caveat in the fold note, both plan
+  other half *cannot* be tested). `toolchain-unavailable` (S18) waives DELIBERATELY — a machine
+  without the compiler is the browser-unavailable case one toolchain over — but the folds track
+  it apart and its caveat names the missing toolchain and points at the recorded cure, so "the
+  machine lacks cargo" can never read as "this project cannot be tested". A waiver is recorded
+  as a caveat in the fold note, both plan
   views, `/tasks`, and `AcceptanceState.caveats`, so a recorded "complete" can never quietly mean
   "the declared check never ran".
 - **A boundary gate keeps its per-scope detail.** With `gates.projects`, a kind is satisfied only

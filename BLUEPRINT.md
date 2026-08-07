@@ -84,15 +84,21 @@ findings, 19 fixed — including the structural discovery that the engine never 
 limits (DOCX visual fidelity is Word's; PPTX read-only; Word COM cut; no plan-gate integration):
 `ROADMAP.md` Session 17, `ARCHITECTURE.md` "The documents workflow pack", CHANGELOG 1.3.0.
 
-### Session 18 — Polyglot Repository Intelligence and Verification — **NEXT**
+### Session 18 — Polyglot Repository Intelligence and Verification — **DONE (v1.4.0)**
 
-Expand repository understanding and verification beyond the current Node/TypeScript and Python bias.
-Prioritize Rust, Go, C/C++, and representative embedded projects.
-
-Treat support as a combination of language, build system, and available toolchain—not merely file
-extensions. Improve indexing, symbol/import relationships, entry-point detection, project maps, and
-typed check recipes. Unsupported compilers, boards, targets, or hardware-dependent tests must refuse
-or downgrade claims honestly rather than simulating coverage.
+Delivered: Rust/Cargo and Go modules as the complete path (units incl. cargo `[workspace]
+members` + `go.work`, symbols/imports/entry points, `cargo`/`go` recipe rows, rust-error/go-error
+signals, compiler-aware classification), C/C++ (CMake) as detection+indexing with honest named
+refusals, and **toolchain availability as a first-class stat-only fact** — missing toolchains
+produce explicit `toolchain-unavailable` states naming the exact cure, gates waive LOUDLY
+("TOOLCHAIN IS NOT INSTALLED"), and cross-target embedded crates split into host-verifiable
+checks vs a permanent named refusal for what needs hardware. **Live-proven three ways** (all
+post-hoc validated): the v1.3.0 BEFORE-defect capture (17/17 — gates waived silently on a Rust
+crate), proof A on the pre-install machine (17/17 — six honest unavailable states, zero spawns),
+and proof B after the rustup(gnu)+Go installs (27/27 — seeded E0308 and failing go test found,
+classified and fixed; mid-session `rustup target add` noticed by the drift seam; `/accept` on
+green gates). Suite 1480 → 1539. Details: `ROADMAP.md` Session 18, `ARCHITECTURE.md` (toolchain
+facts, typed verification, retrieval), `agent-cli-s18-live/DEMO.md`, CHANGELOG 1.4.0.
 
 ### Session 19 — Source-Backed Web Research
 
@@ -178,7 +184,9 @@ Before calling the next phase mature, Agent CLI should have demonstrated:
 - ~~a document/PDF workflow whose completion is based on artifact and visual evidence~~ **(MET in
   S17: deterministic parse-back validation plus rasterized page inspection, live-proven on Kimi
   K3 — the model saw its own cramped first render, revised the spec, and re-rendered)**;
-- polyglot retrieval and checks over several different build ecosystems;
+- ~~polyglot retrieval and checks over several different build ecosystems~~ **(MET in S18:
+  Rust/Cargo + Go modules full-path live-proven, C/C++ indexed with honest refusals, missing
+  toolchains and cross-target embedded crates answering explicitly — three validated runs)**;
 - source-backed research with bounded network authority and durable provenance;
 - explicit, previewed, user-approved remote Git/GitHub delivery;
 - bounded project/global memory that can be inspected, edited, compacted, and removed;

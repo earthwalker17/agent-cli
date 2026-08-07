@@ -34,6 +34,14 @@ What that means concretely:
   verification (the model names KINDS, the harness names COMMANDS), managed preview servers,
   Playwright browser flows over the *system* browser, a typed recovery policy, a **structural
   review gate**, and an explicit `/accept` delivery boundary.
+- **Polyglot repository intelligence.** Node/TS, Python, **Rust/Cargo and Go modules** are
+  first-class: unit discovery (cargo workspace members, `go.work`), symbols and import graphs,
+  typed check recipes (`cargo build/test/check/clippy/fmt`, `go build/test/vet` with path-scoped
+  targeted tests), and compiler-aware failure classification. C/C++ (CMake) is detected and
+  indexed with checks honestly unsupported. A **missing toolchain is a first-class answer**:
+  stat-only probing produces explicit `toolchain-unavailable` states naming the exact install
+  cure — never a runnable-looking recipe — and cross-target embedded crates split honestly into
+  host-verifiable checks and a named refusal for what needs hardware.
 - **A documents workflow on the same kernel.** DOCX/PPTX/PDF reading with an honest coverage
   verdict, a structured spec authored as an ordinary workspace file, byte-deterministic DOCX and
   browser-printed PDF output, **parse-back validation of every artifact**, and page rasterization
@@ -270,13 +278,24 @@ per-session tools the main agent (and only the main agent) receives:
 | `review` | Parent triage over findings reviewers recorded |
 | `report_finding` | The reviewer child's ONLY findings channel (child-only) |
 
-**A workspace may hold several projects.** Agent CLI discovers each one (declared npm/pnpm
-workspaces, any depth-1 directory with a manifest, the children of `apps`/`packages`/`services`),
+**A workspace may hold several projects — across ecosystems.** Agent CLI discovers each one
+(declared npm/pnpm workspaces, root `Cargo.toml` `[workspace] members`, `go.work` `use`
+directives, any depth-1 directory with a manifest — `package.json`, `pyproject.toml`,
+`Cargo.toml`, `go.mod`, `CMakeLists.txt` — and the children of `apps`/`packages`/`services`),
 and `run_check`, `preview` and `project_setup` each take a `project`. Commands run in that
 project's own directory and the evidence records which project it was, so a green test in `web/`
 is never mistaken for evidence about `api/` — including in plan gates, which can require a kind to
 pass in *each* named project. When several projects exist and a call names none, the harness
 **refuses rather than guessing**.
+
+**Toolchain availability is a fact, not an assumption.** Detection probes cargo/rustc/go on
+PATH and rustup components/targets on disk (stat-only, never spawning); a missing toolchain
+resolves the check to an explicit `toolchain-unavailable` with the exact cure (`install via
+rustup`, `rustup target add thumbv7em-none-eabihf`) *before anything is put in front of you for
+approval*, and installing a toolchain mid-session is noticed by the same drift guard that
+notices an edited manifest. A declared gate waived this way appears in the acceptance as a LOUD
+caveat naming the missing toolchain — never a quiet "unsupported". Cargo and Go have no
+separate install step, and `project_setup` says so instead of pretending otherwise.
 
 **Dependencies, migrations and seed data go through `project_setup`, never a raw shell command.**
 You name an intent; the harness resolves the command from the lockfile (`npm ci`,
@@ -449,6 +468,18 @@ Read this before trusting the harness with anything sensitive.
   limits of that run, including two review lenses that hit their budget wall after capturing).
 - **yarn is implemented from documentation, not live-proven.** npm is exercised; pnpm is
   implemented and unit-tested; yarn is not installed on the development machine.
+- **Polyglot support is a defined, bounded surface.** Rust and Go recipes are live-proven with
+  the toolchains this machine has (rustup **gnu** host, stable; Go from go.dev); MSVC-hosted
+  Rust, cgo, build tags, cargo features, and `rust-toolchain` version pinning are untouched
+  facts the harness records but never manipulates. Symbol/import extraction is declared
+  heuristic (column-0 regex, no tree-sitter): Rust `impl` methods, C++ templates and Go
+  generated code are invisible to the map (live reads always see them). The Go import graph is
+  resolved by directory-suffix matching, wrong only toward missing edges. C/C++ is
+  detection+indexing only — no configure/build recipes — and a gcc/clang `fatal error:
+  foo.h: No such file or directory` would today false-fire the `command-not-found` signal if
+  such output ever entered check normalization (it cannot yet: no C/C++ recipe exists to emit
+  it). Embedded validation splits at the host boundary: cross builds are verifiable, anything
+  needing a board, emulator or runner refuses with the reason — the harness manages no hardware.
 - **External database servers, Docker and containers are out of scope.** What is supported is
   file-backed local databases and the project's own declared migrate/seed scripts.
 - **Undo is file-only.** It reverts `write_file` / `edit_file` changes via content-addressed

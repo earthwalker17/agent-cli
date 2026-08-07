@@ -6,6 +6,124 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 18 (2026-08-07) — Polyglot repository intelligence and verification
+
+### Objective
+
+Extend repository intelligence and typed verification beyond the Node/TS + Python bias —
+Rust/Cargo and Go modules as the complete path (units → indexing → symbols/imports → recipes →
+signals → classification), C/C++ (CMake) as detection + indexing with honest refusals, and
+embedded as a Rust cross-target honesty story — with support meaning **language + build system +
+layout + AVAILABLE TOOLCHAIN**, never file-extension recognition. Three audits first (checks/
+detection, retrieval, recovery/reporting); the finding that shaped everything: an unrecognized
+ecosystem resolved every check to `no-recipe`, and `no-recipe` WAIVES declared gates — a Rust
+repo session reached `/accept` COMPLETE having verified nothing, claiming "no supported project
+manifest was detected (Node/TS and Python are supported)" about a workspace holding a
+Cargo.toml. The S16 silent-inertness bug, one axis over.
+
+### The three-run proof structure (`agent-cli-s18-live/`, all validated post hoc)
+
+- **BEFORE (v1.3.0, 17/17):** the defect on the record — approved build+test gates on a real
+  Rust crate, both waived as `no-recipe`, `/accept` COMPLETE with zero checks ever run.
+- **Proof A (S18 build, toolchains still absent, 17/17):** the machine's pre-install state used
+  as a one-shot fixture. 6 units named across four ecosystems (cargo `[workspace] members`,
+  go.work-less go module, CMake, embedded), 8 polyglot files symbol-indexed, and six explicit
+  `toolchain-unavailable` states naming exact cures (install via rustup / go.dev) with ZERO
+  spawns; the gates waive LOUDLY — "TOOLCHAIN IS NOT INSTALLED on this machine" — never the old
+  claim. 2.6 min, 62 events.
+- **Proof B (after `winget` Go 1.26.5 + rustup gnu-host stable 1.97.1, 27/27):** the full path.
+  `go test` FAILS with the `--- FAIL: TestScale` finding → the CODE fixed, test untouched →
+  path-scoped `go test ./calc/...` targeted proof (`scopePaths: gosvc/calc` on the event) →
+  `go vet` → `cargo build` FAILS firing `rust-error` with a file:line finding into main.rs →
+  fixed → PASS → gates re-proven → embedded: `cargo fmt --check` passes host-side, the cross
+  build refuses naming `rustup target add thumbv7em-none-eabihf`, the USER installs the target
+  mid-session (driver-executed between turns), the toolchain pseudo-stamp flips the TOCTOU
+  fingerprint, re-detection sees it, and the SAME kind cross-compiles and PASSES — while
+  `cargo test` still refuses: cross binaries cannot execute on this host, and the harness
+  manages no hardware. `/accept` COMPLETE on GREEN gates, no waivers. 9.3 min, 170 events, 15
+  real spawns + exactly 2 honest refusals, `[s]` replay consent exercised.
+
+### What landed (commits `5bcb2cf`…`286bcdc` + docs; suite 1480 → 1539)
+
+- **`checks/toolchain.ts`** — machine toolchain availability as a stat-only fact (PATH probe
+  PATHEXT-aware; rustup components/targets under toolchain dirs, never the `~/.cargo/bin` proxy
+  shims — verified against the real install, which ships exactly the false-positive shims the
+  design predicted). Freshness rides the TOCTOU seam as `~toolchain/` pseudo-stamps: absence is
+  never cached (S16.5 lesson), and the mid-session install re-detect in proof B is this seam
+  working on camera.
+- **Detection**: `ProjectKind` += rust/go/cmake with optional per-ecosystem facts (bounded
+  hand-extraction, no TOML dependency): cargo workspace root/members, edition, Cargo.lock,
+  rust-toolchain files, the `[build].target` cross triple; go module path/directive/go.sum/
+  vendor; CMake project name. Units: Cargo.toml/go.mod/CMakeLists.txt join `UNIT_MANIFESTS`;
+  cargo members + go.work `use` join the declared sources; target/ + vendor/ join the skip set;
+  every new manifest joins the stat-candidate fingerprint.
+- **Recipes**: `cargo.` and `go.` rows (build/test/check/clippy `-D warnings`/fmt; go
+  build/test/vet with typecheck-as-build and a path→package `test-targeted` mapping only Go can
+  honestly express). Holes are decisions with stated reasons (`ECOSYSTEM_KIND_NOTES`): no rust
+  test-targeted (name-based selection), no go format (`gofmt -l` exits 0 — the exit code is the
+  verdict). **`UnsupportedReason` += `toolchain-unavailable`**: waives gates (the
+  browser-unavailable precedent) but tracked apart through the folds so the acceptance caveat
+  names the missing toolchain and its recorded cure. The precondition WHY moved into the rows;
+  Node/Python answers byte-identical, test-pinned; the recipe-id table pinned as a consent
+  surface.
+- **Signals/classification**: `rust-error` + `go-error` appended (order pinned); `syntax-error`
+  widened for Go's lowercase spelling, `assertion-failed` for Rust ≥1.73's backticked form;
+  classify.ts changed ONE line (both ids → compile-type). rustc two-line and Go one-line finding
+  extractors carry file:line.
+- **Retrieval**: `LangId` += rust/go/c-cpp, `SymbolKind` += struct/trait/mod/macro (no index
+  version bump — warm-load convergence is the pinned behavior); pattern tables with pub/case
+  exported rules; import edges a polyglot repo entirely lacked (rust `use`/`mod` through the
+  crate root; go directory-suffix matching onto a deterministic representative; C `#include`);
+  Cargo.toml/go.mod/CMakeLists manifests, lib/mod entry stems, `_test.go` penalty; honesty
+  strings now say ts/js/py/rust/go/c-cpp everywhere.
+- **Surfaces**: setup refusals say "nothing to install — cargo/go fetch during the build" instead
+  of implying a missing feature; the prompt's project block renders per-ecosystem facts
+  (toolchain installed/NOT INSTALLED, the cross-target line) instead of npm vocabulary.
+
+### Decisions (and why)
+
+- **A missing toolchain is `toolchain-unavailable`, and it WAIVES — loudly.** Machine capability
+  is the browser-unavailable case one toolchain over; an absence the harness will never install
+  must not strand acceptance. The loudness is structural (folds track it apart), not prose.
+- **Rows own the precondition WHY.** The old central curable rule was Node's answer hard-coded
+  into generic control flow; only a row knows whether its blocker is curable, a machine gap, or
+  a host incapability.
+- **`cargo test` under a cross target refuses PERMANENTLY as `precondition`** — installed target
+  or not, cross binaries cannot execute here, and the harness manages no hardware or emulators.
+  That is the embedded line: host-verifiable vs target-dependent, drawn in the recipe table.
+- **Go's typecheck deliberately duplicates build** (its compiler IS its typechecker) — an honest
+  gate beats a `no-recipe` waiver. **gofmt has no format row** — an output-parsed verdict would
+  break THE EXIT CODE IS THE VERDICT.
+- **LangId and ProjectKind stay separate vocabularies** (per-file extraction vs per-unit build
+  system); a lone `.rs` scratch file indexes without any cargo unit existing.
+- **Go import edges by directory-suffix matching** — module paths are unknowable in a per-file
+  resolver without go.mod context; centrality is a signal, never a claim, and the error mode is
+  a missing edge, not a wrong claim.
+
+### Open issues / boundaries
+
+- Live claims cover the rustup **gnu** host and go.dev Go on this one Windows 11 machine; MSVC
+  Rust, cgo, cargo features/build tags, `rust-toolchain` version selection are recorded facts
+  the harness never manipulates. clippy/rustfmt/target probing unions across installed rustup
+  toolchains (stated approximation; rustup's active-toolchain selection is not re-implemented).
+- C/C++ is detection + indexing only; the gcc/clang missing-header output would false-fire
+  `command-not-found` if it ever entered check normalization (unreachable today — no C recipe
+  exists; documented in ARCHITECTURE).
+- Rust `impl` methods, C++ templates and generated Go code are invisible to the map (column-0
+  heuristics by design; live reads see them). `_test.go` penalty covers the basename convention
+  only.
+- No preview recipes for cargo/go servers (`cargo run`/`go run` have no representation) — the
+  preview surface stays package.json-only this session.
+- The go `test-targeted` all-paths-outside-the-unit case degrades to the argv-null `no-recipe`
+  answer rather than `bad-request` (matches long-standing argv-null semantics; noted, not fixed).
+
+### Recommended next step
+
+Session 19 per BLUEPRINT: source-backed web research (`@research`, bounded network authority,
+provenance-bearing findings), now that polyglot retrieval and checks are live-proven.
+
+---
+
 ## Session 17 (2026-08-04/05) — The first non-coding workflow pack: documents and PDF
 
 ### Objective
