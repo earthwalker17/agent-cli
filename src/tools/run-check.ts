@@ -444,7 +444,11 @@ export function createRunCheckTool(deps: CheckToolDeps): RunCheckTool {
 /** What one project unit can be verified with — the per-unit block of the /checks surface. */
 export function describeProject(project: DetectedProject): string[] {
   const lines: string[] = [];
-  lines.push(project.kinds.length > 0 ? `project: ${project.kinds.join(', ')}` : 'project: no supported manifest detected (Node/TS and Python are supported)');
+  lines.push(
+    project.kinds.length > 0
+      ? `project: ${project.kinds.join(', ')}`
+      : 'project: no supported manifest detected (Node/TS, Python, Rust/Cargo and Go are supported; CMake is detected but unsupported)',
+  );
   if (project.packageManager !== null) lines.push(`package manager: ${project.packageManager}`);
   for (const e of project.evidence) lines.push(`evidence: ${e}`);
   const kinds = availableKinds(project);

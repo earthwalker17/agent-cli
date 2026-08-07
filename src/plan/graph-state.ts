@@ -54,6 +54,12 @@ export interface TaskVerification {
   satisfied: CheckKind[];
   /** Kinds satisfied only because the project cannot run them — recorded, never silent. */
   waived: CheckKind[];
+  /**
+   * The subset of `waived` whose waiver was a MISSING TOOLCHAIN (Session 18) — the acceptance
+   * caveat names it distinctly, because "this machine lacks the compiler (cure recorded)" and
+   * "this project cannot run the kind" are different statements to hand a reader.
+   */
+  toolchainUnavailable?: CheckKind[];
   missing: CheckKind[];
   status: 'none' | 'green' | 'waived' | 'pending';
 }
@@ -64,12 +70,16 @@ export interface BoundaryGateScope {
   passedIn: string[];
   waivedIn: string[];
   missingIn: string[];
+  /** The subset of `waivedIn` whose waiver was a missing toolchain (Session 18). */
+  toolchainUnavailableIn?: string[];
 }
 
 export interface BoundaryGateState {
   required: CheckKind[];
   pending: CheckKind[];
   waived: CheckKind[];
+  /** Kinds whose waiver (in any scope) was a missing toolchain (Session 18) — additive. */
+  toolchainUnavailable?: CheckKind[];
   byKind: BoundaryGateScope[];
 }
 
@@ -127,6 +137,7 @@ export function foldGraphState(
     scopePaths: string[];
     projectId: string;
     capabilityUnsupported: boolean;
+    toolchainUnavailable: boolean;
   }[] = [];
 
   for (const e of events) {
@@ -152,6 +163,7 @@ export function foldGraphState(
         // Session 16: absent = the root/only project, which is what every pre-S16 event means.
         projectId: e.projectId ?? '.',
         capabilityUnsupported: waivesGate(e.unsupportedReason),
+        toolchainUnavailable: e.unsupportedReason === 'toolchain-unavailable',
       });
     }
   }
@@ -171,6 +183,7 @@ export function foldGraphState(
     if (required.length === 0) return { required: [], satisfied: [], waived: [], missing: [], status: 'none' };
     const satisfied: CheckKind[] = [];
     const waived: CheckKind[] = [];
+    const toolchainUnavailable: CheckKind[] = [];
     const missing: CheckKind[] = [];
     for (const kind of required) {
       const after = checkRuns.filter((r) => {
@@ -187,13 +200,16 @@ export function foldGraphState(
         return true;
       });
       if (after.some((r) => r.status === 'pass')) satisfied.push(kind);
-      else if (after.some((r) => r.status === 'unsupported' && r.capabilityUnsupported)) waived.push(kind);
-      else missing.push(kind);
+      else if (after.some((r) => r.status === 'unsupported' && r.capabilityUnsupported)) {
+        waived.push(kind);
+        if (after.some((r) => r.status === 'unsupported' && r.toolchainUnavailable)) toolchainUnavailable.push(kind);
+      } else missing.push(kind);
     }
     return {
       required: [...required],
       satisfied,
       waived,
+      ...(toolchainUnavailable.length > 0 ? { toolchainUnavailable } : {}),
       missing,
       status: missing.length > 0 ? 'pending' : waived.length > 0 ? 'waived' : 'green',
     };
@@ -413,12 +429,14 @@ function boundaryGate(
 ): BoundaryGateState {
   const pending: CheckKind[] = [];
   const waived: CheckKind[] = [];
+  const toolchainUnavailable: CheckKind[] = [];
   const byKind: BoundaryGateScope[] = [];
   const scopes = projects !== undefined && projects.length > 0 ? projects : [undefined];
   for (const kind of required) {
     const passedIn: string[] = [];
     const waivedIn: string[] = [];
     const missingIn: string[] = [];
+    const toolchainUnavailableIn: string[] = [];
     for (const scope of scopes) {
       const after = events.filter(
         (e) => e.type === 'check.completed' && e.check === kind && e.seq > afterSeq && (scope === undefined || (e.projectId ?? '.') === scope),
@@ -430,6 +448,10 @@ function boundaryGate(
       }
       if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && waivesGate(e.unsupportedReason))) {
         waivedIn.push(label);
+        // Session 18: a toolchain-gap waiver is tracked apart so acceptance can say WHY loudly.
+        if (after.some((e) => e.type === 'check.completed' && e.status === 'unsupported' && e.unsupportedReason === 'toolchain-unavailable')) {
+          toolchainUnavailableIn.push(label);
+        }
         continue;
       }
       missingIn.push(label);
@@ -439,12 +461,15 @@ function boundaryGate(
     // multi-project workspace refuses as ambiguous, and re-running it in the project that already
     // passed returns the byte-identical blocker.
     if (projects !== undefined && projects.length > 0) {
-      byKind.push({ kind, passedIn, waivedIn, missingIn });
+      byKind.push({ kind, passedIn, waivedIn, missingIn, ...(toolchainUnavailableIn.length > 0 ? { toolchainUnavailableIn } : {}) });
     }
     if (missingIn.length > 0) pending.push(kind);
-    else if (waivedIn.length > 0) waived.push(kind);
+    else if (waivedIn.length > 0) {
+      waived.push(kind);
+      if (toolchainUnavailableIn.length > 0) toolchainUnavailable.push(kind);
+    }
   }
-  return { required: [...required], pending, waived, byKind };
+  return { required: [...required], pending, waived, ...(toolchainUnavailable.length > 0 ? { toolchainUnavailable } : {}), byKind };
 }
 
 /**
@@ -460,6 +485,14 @@ function boundaryGate(
  *   not unverifiable.
  *
  * A legacy event with no reason keeps the old permissive reading — it predates the distinction.
+ *
+ * `'toolchain-unavailable'` (Session 18) WAIVES — deliberately, not by accident of the
+ * permissive default: a machine without the compiler is the browser-unavailable case one
+ * toolchain over, and an absence the harness will never install on its own must not strand
+ * acceptance forever. The loudness lives downstream: the gate folds track these waivers apart
+ * (`toolchainUnavailable`/`toolchainUnavailableIn`) and the acceptance caveat names the missing
+ * toolchain instead of the generic "unsupported". Pinned in test so a future narrowing here is a
+ * deliberate act.
  *
  * ONE implementation: this predicate is consent-bearing and used to be spelled three times in
  * this file, in three places that had to agree with nothing enforcing that they did.

@@ -242,8 +242,8 @@ export interface CheckRecipe {
   kind: CheckKind;
   /** Ecosystem evidence says this row could run here. */
   applies(p: DetectedProject): boolean;
-  /** A precondition that is NOT satisfied right now, stated for the human; null when ready. */
-  unmetPrecondition(p: DetectedProject): string | null;
+  /** A precondition that is NOT satisfied right now, with the row-owned WHY; null when ready. */
+  unmetPrecondition(p: DetectedProject): UnmetPrecondition | null;
   argv(p: DetectedProject, scope: readonly string[]): string[] | null;
   /**
    * The workspace-authored script this recipe invokes, when it invokes one: the NAME, so the
@@ -294,8 +294,28 @@ export interface ResolvedCheck {
  *
  * Old events carry no reason at all and keep the permissive reading; events written before this
  * distinction existed carry 'precondition' and also keep it. The narrowing applies going forward.
+ *
+ * `'toolchain-unavailable'` (Session 18) is the machine-capability answer: the project could be
+ * checked, this MACHINE cannot check it (no cargo/go on PATH, a rustup component or target not
+ * installed). It WAIVES a gate — the browser-unavailable precedent: an absence the harness will
+ * never install on its own must not strand acceptance forever — but LOUDLY: the acceptance
+ * caveat names the missing toolchain, and the recorded reason names the exact install cure. It
+ * is deliberately not 'precondition-curable': the cure there is a harness call
+ * (`project_setup install`); the cure here is a user act on the machine.
  */
-export type UnsupportedReason = 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
+export type UnsupportedReason = 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request' | 'toolchain-unavailable';
+
+/**
+ * A precondition that is not satisfied right now (Session 18: rows own the WHY). The `why` is
+ * the row's own classification of its refusal — the distinction that decides whether a declared
+ * gate is waived, stays pending, or is waived loudly — because only the row knows whether its
+ * blocker is a missing install (curable by `project_setup`), a machine-level toolchain gap, or a
+ * genuine host incapability.
+ */
+export interface UnmetPrecondition {
+  reason: string;
+  why: 'precondition' | 'precondition-curable' | 'toolchain-unavailable';
+}
 
 export interface UnsupportedCheck {
   kind: CheckKind;

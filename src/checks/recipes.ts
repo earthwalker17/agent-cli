@@ -7,7 +7,9 @@ import {
   type CheckRecipe,
   type CheckResolution,
   type DetectedProject,
+  type ProjectKind,
   type ResolvedCheck,
+  type UnmetPrecondition,
   type UnsupportedCheck,
 } from './types.js';
 
@@ -24,8 +26,15 @@ import {
  *    charset-validated at ingestion and then quoted by `toCommand`. A fragment that cannot be
  *    represented safely is dropped or refuses — it is never escaped into the command by hand.
  *
- * Coverage is deliberately narrow and honest: Node/TS first-class, Python minimal, everything
- * else `unsupported` with the reason stated. `applies()` is the seam for later ecosystems.
+ * Coverage is deliberately narrow and honest: Node/TS first-class, Python minimal, Rust/Cargo
+ * and Go modules first-class (Session 18), CMake detected-but-unsupported, everything else
+ * `unsupported` with the reason stated. `applies()` is the seam for later ecosystems.
+ *
+ * Session 18 also moves the precondition WHY into the rows (`UnmetPrecondition`): only a row
+ * knows whether its blocker is an uninstalled project (curable by `project_setup install`), a
+ * missing machine toolchain (`toolchain-unavailable`, waives loudly), or a genuine host
+ * incapability (`precondition`, waives quietly). The old central rule — curable iff
+ * `hasDependencies && !hasNodeModules` — was a Node fact sitting in generic control flow.
  */
 
 const isWin = process.platform === 'win32';
@@ -64,6 +73,18 @@ const PY = isWin ? 'python' : 'python3';
 const SCRIPT_EFFECTS: CheckEffects = { writesOutputs: true, network: true, workspaceAuthored: true };
 const TOOL_READONLY: CheckEffects = { writesOutputs: false, network: false, workspaceAuthored: false };
 const TOOL_WRITES: CheckEffects = { writesOutputs: true, network: false, workspaceAuthored: false };
+/**
+ * Cargo compile rows: write `target/`, may fetch crates on first run, and — decisive for the
+ * approval prompt — EXECUTE workspace-authored code at build time (`build.rs`, proc-macros).
+ */
+const CARGO_COMPILE: CheckEffects = { writesOutputs: true, network: true, workspaceAuthored: true };
+/**
+ * Go rows: the build/module caches live OUTSIDE the workspace (GOCACHE/GOMODCACHE), so nothing
+ * is written in-workspace; modules may be fetched on first run. `go test` executing workspace
+ * test code follows the vitest precedent (`workspaceAuthored: false` — the flag means "a script
+ * DEFINED by the workspace names this command's behavior", which `go test ./...` is not).
+ */
+const GO_TOOL_NET: CheckEffects = { writesOutputs: false, network: true, workspaceAuthored: false };
 
 const NEEDS_NODE_MODULES =
   'dependencies are not installed (node_modules is absent) — run `project_setup` with action "install" for this ' +
@@ -104,8 +125,10 @@ function nodeScriptRecipe(
     // actually DECLARES dependencies. A script that shells out to Node built-ins (`node --test`,
     // a local build script) needs nothing installed, and refusing it would have made typed
     // verification unavailable to exactly the smallest, cheapest projects. When deps ARE declared
-    // and absent, the honest refusal still fires before anything spawns.
-    unmetPrecondition: (p) => (!p.hasDependencies || p.hasNodeModules ? null : NEEDS_NODE_MODULES),
+    // and absent, the honest refusal still fires before anything spawns — and it is CURABLE by
+    // construction: this branch is reachable only when dependencies are declared.
+    unmetPrecondition: (p) =>
+      !p.hasDependencies || p.hasNodeModules ? null : { reason: NEEDS_NODE_MODULES, why: 'precondition-curable' },
     argv: (p, scope) => {
       const name = firstScript(p, names);
       if (name === null) return null;
@@ -134,7 +157,11 @@ function nodeToolRecipe(
     id,
     kind,
     applies: (p) => p.nodeTools.includes(tool) && extraApplies(p),
-    unmetPrecondition: (p) => (p.hasNodeModules ? null : NEEDS_NODE_MODULES),
+    // Curable exactly when the old central rule said so: `nodeTools` is parsed from declared
+    // dependencies, so `hasDependencies` is true whenever this row applies — the branch keeps
+    // the rule spelled out so the equivalence is checkable, not assumed.
+    unmetPrecondition: (p) =>
+      p.hasNodeModules ? null : { reason: NEEDS_NODE_MODULES, why: p.hasDependencies ? 'precondition-curable' : 'precondition' },
     argv: (p, scope) => ['npx', '--no', tool, ...buildArgs(p, scope)],
     timeoutMs,
     effects,
@@ -163,41 +190,216 @@ function pythonToolRecipe(
 }
 
 /**
+ * Rust/Cargo toolchain gating (Session 18). The probe is a stat-only PATH/rustup fact carried on
+ * the project; `undefined` means no probe ran (tests, direct `detectProject` callers) and the row
+ * degrades to the documented pythonToolRecipe pattern — fail at run, classify via the
+ * command-not-found signal. Every refusal names the exact user cure: a missing toolchain is a
+ * machine fact the harness will never install on its own.
+ */
+function cargoUnmet(
+  p: DetectedProject,
+  opts: { component?: 'clippy' | 'rustfmt'; compilesForTarget?: boolean; executesTargetBinaries?: boolean },
+): UnmetPrecondition | null {
+  const tc = p.toolchains;
+  // The PERMANENT host incapability outranks the transient install gaps: cross-compiled test
+  // binaries cannot execute here whether or not anything else is installed.
+  if (opts.executesTargetBinaries === true) {
+    const triple = p.rust?.crossTarget ?? null;
+    if (triple !== null) {
+      return {
+        why: 'precondition',
+        reason:
+          `.cargo config sets [build].target = ${triple}: cross-compiled test binaries cannot execute on this host, ` +
+          'and the harness does not manage target hardware or emulators. Host-verifiable checks (cargo fmt --check, ' +
+          'and cargo build/check/clippy once the rustup target is installed) still run.',
+      };
+    }
+  }
+  if (tc === undefined) return null;
+  if (tc.cargo === null) {
+    return {
+      why: 'toolchain-unavailable',
+      reason:
+        'the Rust toolchain is not installed on this machine (cargo was not found on PATH) — install it via rustup ' +
+        '(https://rustup.rs), then re-run this check. A missing toolchain is a machine fact, not a project defect.',
+    };
+  }
+  if (opts.component === 'clippy' && !tc.clippy) {
+    return { why: 'toolchain-unavailable', reason: 'the clippy component is not installed — run: rustup component add clippy' };
+  }
+  if (opts.component === 'rustfmt' && !tc.rustfmt) {
+    return { why: 'toolchain-unavailable', reason: 'the rustfmt component is not installed — run: rustup component add rustfmt' };
+  }
+  // Every compile row (build/check/test/clippy — NOT fmt) targets the cross triple when one is
+  // declared, so each needs the rustup target installed.
+  const triple = p.rust?.crossTarget ?? null;
+  if (opts.compilesForTarget === true && triple !== null && !tc.rustupTargets.includes(triple)) {
+    return {
+      why: 'toolchain-unavailable',
+      reason: `.cargo config targets ${triple} and that rustup target is not installed — run: rustup target add ${triple}, then re-run this check`,
+    };
+  }
+  return null;
+}
+
+function cargoRecipe(
+  id: string,
+  kind: CheckKind,
+  args: readonly string[],
+  timeoutMs: number,
+  effects: CheckEffects,
+  opts: { component?: 'clippy' | 'rustfmt'; compilesForTarget?: boolean; executesTargetBinaries?: boolean } = {},
+): CheckRecipe {
+  return {
+    id,
+    kind,
+    applies: (p) => p.kinds.includes('rust'),
+    unmetPrecondition: (p) => cargoUnmet(p, opts),
+    argv: () => ['cargo', ...args],
+    timeoutMs,
+    effects,
+  };
+}
+
+function goUnmet(p: DetectedProject): UnmetPrecondition | null {
+  const tc = p.toolchains;
+  if (tc === undefined || tc.go !== null) return null;
+  return {
+    why: 'toolchain-unavailable',
+    reason:
+      'the Go toolchain is not installed on this machine (go was not found on PATH) — install it from ' +
+      'https://go.dev/dl (winget: GoLang.Go), then re-run this check. A missing toolchain is a machine fact, not a project defect.',
+  };
+}
+
+function goRecipe(
+  id: string,
+  kind: CheckKind,
+  buildArgs: (p: DetectedProject, scope: readonly string[]) => string[] | null,
+  timeoutMs: number,
+): CheckRecipe {
+  return {
+    id,
+    kind,
+    applies: (p) => p.kinds.includes('go'),
+    unmetPrecondition: goUnmet,
+    argv: (p, scope) => {
+      const args = buildArgs(p, scope);
+      return args === null ? null : ['go', ...args];
+    },
+    timeoutMs,
+    effects: GO_TOOL_NET,
+  };
+}
+
+/**
+ * Map workspace-relative scope prefixes onto Go package patterns for `go test`. Go's test
+ * selection IS path-shaped, which is why this mapping exists here and has no cargo counterpart:
+ * strip this unit's prefix (a path outside the unit is dropped), fold a `.go` file to its
+ * package directory, and render `./dir/...`. All inputs already passed `normalizeRelPrefix`;
+ * the output charset is `./x/...`, which `toCommand` passes bare. Deterministic: inputs arrive
+ * sorted and deduped, and the package set is re-sorted after folding.
+ */
+function goTargetedArgs(p: DetectedProject, scope: readonly string[]): string[] | null {
+  const pkgs = new Set<string>();
+  for (const s of scope) {
+    let rel: string;
+    if (p.id === '.') rel = s;
+    else if (s === p.id) rel = '';
+    else if (s.startsWith(`${p.id}/`)) rel = s.slice(p.id.length + 1);
+    else continue; // outside this unit — a green run over it would prove nothing here anyway
+    if (rel.endsWith('.go')) rel = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+    pkgs.add(rel === '' ? './...' : `./${rel}/...`);
+  }
+  if (pkgs.size === 0) return null;
+  return ['test', ...[...pkgs].sort()];
+}
+
+/**
  * Ordered most-specific-first WITHIN each kind. A project's own script always wins over a guessed
  * tool invocation: the workspace author already declared how this project is checked.
  */
 export const RECIPES: readonly CheckRecipe[] = [
   // ---- build ----
   nodeScriptRecipe('node.script.build', 'build', ['build', 'compile'], 600_000),
+  cargoRecipe('cargo.build', 'build', ['build'], 600_000, CARGO_COMPILE, { compilesForTarget: true }),
+  goRecipe('go.build', 'build', () => ['build', './...'], 600_000),
 
   // ---- test ----
   nodeScriptRecipe('node.script.test', 'test', ['test'], 900_000),
   nodeToolRecipe('node.vitest', 'test', 'vitest', () => ['run'], 900_000, TOOL_WRITES),
   nodeToolRecipe('node.jest', 'test', 'jest', () => ['--ci'], 900_000, TOOL_WRITES),
   pythonToolRecipe('py.pytest', 'test', 'pytest', () => ['-q'], 900_000),
+  cargoRecipe('cargo.test', 'test', ['test'], 900_000, CARGO_COMPILE, { compilesForTarget: true, executesTargetBinaries: true }),
+  goRecipe('go.test', 'test', () => ['test', './...'], 900_000),
 
-  // ---- test-targeted ----
+  // ---- test-targeted ---- (no cargo row: cargo selects tests by NAME, not path — see notes)
   nodeScriptRecipe('node.script.test.targeted', 'test-targeted', ['test'], 300_000, { scoped: true }),
   nodeToolRecipe('node.vitest.targeted', 'test-targeted', 'vitest', (_p, scope) => ['run', ...scope], 300_000, TOOL_WRITES),
   pythonToolRecipe('py.pytest.targeted', 'test-targeted', 'pytest', (_p, scope) => ['-q', ...scope], 300_000),
+  goRecipe('go.test.targeted', 'test-targeted', goTargetedArgs, 300_000),
 
   // ---- typecheck ----
   nodeScriptRecipe('node.script.typecheck', 'typecheck', ['typecheck', 'type-check', 'tsc'], 300_000),
   nodeToolRecipe('node.tsc', 'typecheck', 'typescript', () => ['--noEmit'], 300_000, TOOL_READONLY, (p) => p.hasTsconfig),
   pythonToolRecipe('py.mypy', 'typecheck', 'mypy', () => ['.'], 300_000),
+  cargoRecipe('cargo.check', 'typecheck', ['check'], 600_000, CARGO_COMPILE, { compilesForTarget: true }),
+  // Go's compiler IS its typechecker; the deliberate duplication with `go.build` keeps the KIND
+  // honest (a typecheck gate on a Go project means "it compiles") instead of `no-recipe`-waiving.
+  goRecipe('go.typecheck.build', 'typecheck', () => ['build', './...'], 300_000),
 
   // ---- lint ----
   nodeScriptRecipe('node.script.lint', 'lint', ['lint'], 300_000),
   nodeToolRecipe('node.eslint', 'lint', 'eslint', () => ['.'], 300_000, TOOL_READONLY, (p) => p.hasEslintConfig),
   pythonToolRecipe('py.ruff', 'lint', 'ruff', () => ['check', '.'], 300_000),
+  // Clippy's plain exit status ignores lint findings; `-D warnings` is the CI-conventional strict
+  // form and the exit code stays the verdict. Displayed verbatim for consent like every command.
+  cargoRecipe('cargo.clippy', 'lint', ['clippy', '--', '-D', 'warnings'], 600_000, CARGO_COMPILE, {
+    component: 'clippy',
+    compilesForTarget: true,
+  }),
 
-  // ---- format ----
+  // ---- format ---- (no go row: gofmt exits 0 on unformatted files — see notes)
   nodeScriptRecipe('node.script.format-check', 'format', ['format:check', 'fmt:check', 'format-check'], 180_000),
   nodeToolRecipe('node.prettier', 'format', 'prettier', () => ['--check', '.'], 180_000, TOOL_READONLY, (p) => p.hasPrettierConfig),
   pythonToolRecipe('py.ruff.format', 'format', 'ruff', () => ['format', '--check', '.'], 180_000),
+  // Deliberately NOT target-gated: rustfmt parses, it never compiles — the host-verifiable half
+  // of a cross-target project.
+  cargoRecipe('cargo.fmt', 'format', ['fmt', '--check'], 180_000, TOOL_READONLY, { component: 'rustfmt' }),
 
   // ---- static-analysis ----
   nodeScriptRecipe('node.script.analyze', 'static-analysis', ['analyze', 'static-analysis', 'audit:code'], 600_000),
+  goRecipe('go.vet', 'static-analysis', () => ['vet', './...'], 300_000),
+];
+
+/**
+ * Honest reasons for kind+ecosystem holes that are DECISIONS, not gaps. Consulted by
+ * `resolveChecks`' no-recipe branch so the refusal explains itself instead of reading like a
+ * missing feature. One entry fires per (kind, first matching project kind).
+ */
+const ECOSYSTEM_KIND_NOTES: readonly { kind: CheckKind; when: ProjectKind; note: string }[] = [
+  {
+    kind: 'format',
+    when: 'go',
+    note:
+      'gofmt lists unformatted files but exits 0 either way; a verdict parsed from output would violate ' +
+      '"the exit code is the verdict", so Go has no format recipe. Gate formatting via a project script if you need it.',
+  },
+  {
+    kind: 'test-targeted',
+    when: 'rust',
+    note: 'cargo selects tests by NAME, not by path; mapping path scopes onto a name filter would be a guess. Run the full `cargo test` (kind "test") instead.',
+  },
+  {
+    kind: 'lint',
+    when: 'go',
+    note: 'Go ships no linter in the standard distribution; `go vet` is available as the static-analysis kind.',
+  },
+  {
+    kind: 'static-analysis',
+    when: 'rust',
+    note: '`cargo clippy` is the lint kind for Rust; there is no separate static-analysis recipe.',
+  },
 ];
 
 /** The `typescript` dependency provides the `tsc` binary; npx resolves the binary, not the package. */
@@ -270,13 +472,19 @@ export function resolveChecks(
     const rows = RECIPES.filter((r) => r.kind === kind);
     const applicable = rows.filter((r) => r.applies(project));
     if (applicable.length === 0) {
+      const note = ECOSYSTEM_KIND_NOTES.find((n) => n.kind === kind && project.kinds.includes(n.when));
+      const cmakeOnly = project.kinds.includes('cmake') && !project.kinds.some((k) => k === 'node' || k === 'python' || k === 'rust' || k === 'go');
       unsupported.push({
         kind,
         why: 'no-recipe',
         reason:
           project.kinds.length === 0
-            ? 'no supported project manifest was detected in this workspace (Node/TS and Python are supported)'
-            : `no ${kind} recipe applies to this project (detected: ${project.kinds.join(', ')})`,
+            ? 'no supported project manifest was detected in this workspace (Node/TS, Python, Rust/Cargo and Go are supported; CMake is detected but its checks are unsupported)'
+            : note !== undefined
+              ? `no ${kind} recipe applies to this project (detected: ${project.kinds.join(', ')}). ${note.note}`
+              : cmakeOnly
+                ? `no ${kind} recipe applies: this is a CMake/C-C++ project, which this version detects and indexes but cannot check`
+                : `no ${kind} recipe applies to this project (detected: ${project.kinds.join(', ')})`,
       });
       continue;
     }
@@ -294,16 +502,17 @@ export function resolveChecks(
     }
     const ready = applicable.find((r) => r.unmetPrecondition(project) === null);
     if (ready === undefined) {
-      // A project that DECLARES dependencies and has no node_modules is not a project that
-      // cannot be checked — it is a project that has not been installed yet, and Session 16 gave
-      // the harness the call that fixes it. That distinction decides whether a declared gate is
-      // waived or stays pending, so it is made here, once, from the project's own facts rather
-      // than from which row happened to complain.
-      const curable = project.hasDependencies && !project.hasNodeModules;
+      // The WHY comes from the most specific applicable ROW (Session 18): whether a blocker is
+      // an uninstalled project (curable by `project_setup install`, keeps the gate pending), a
+      // missing machine toolchain (waives the gate LOUDLY, cure named), or a genuine host
+      // incapability (waives quietly) is a fact only the row can state. The old central rule —
+      // curable iff `hasDependencies && !hasNodeModules` — was Node's answer hard-coded into
+      // everyone's control flow; the node rows still give exactly that answer.
+      const unmet = applicable[0]!.unmetPrecondition(project);
       unsupported.push({
         kind,
-        why: curable ? 'precondition-curable' : 'precondition',
-        reason: applicable[0]!.unmetPrecondition(project) ?? 'precondition not met',
+        why: unmet?.why ?? 'precondition',
+        reason: unmet?.reason ?? 'precondition not met',
       });
       continue;
     }

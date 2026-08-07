@@ -449,6 +449,90 @@ describe('acceptance: gates are completion blockers', () => {
     expect(gate.pending).toEqual([]);
     expect(gate.waived).toEqual(['lint']);
   });
+
+  it('a toolchain-unavailable result WAIVES the gate — deliberately, and tracked apart (Session 18)', () => {
+    // The browser-unavailable precedent one toolchain over: a machine-capability absence the
+    // harness will never install on its own must not strand acceptance forever. Pinned so a
+    // future narrowing of waivesGate is a deliberate act, not a side effect.
+    reset();
+    const g = graphOf({ gates: { completion: ['build'] } }, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);
+    const events = [
+      mutated(),
+      ev({
+        type: 'check.completed',
+        callId: 'k',
+        check: 'build',
+        recipeId: 'cargo.build',
+        status: 'unsupported',
+        unsupportedReason: 'toolchain-unavailable',
+        exitCode: null,
+        durationMs: 0,
+        summary: 'the Rust toolchain is not installed on this machine (cargo was not found on PATH) — install it via rustup',
+      }),
+    ];
+    const gate = completionGateState(g, events);
+    expect(gate.pending).toEqual([]);
+    expect(gate.waived).toEqual(['build']);
+    expect(gate.toolchainUnavailable).toEqual(['build']);
+  });
+
+  it('the acceptance caveat for a toolchain waiver NAMES the missing toolchain loudly (Session 18)', () => {
+    reset();
+    const g = graphOf({ gates: { completion: ['build'] } }, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v' }]);
+    const events = [
+      started('a', 'ch1'),
+      endedOk('ch1'),
+      changed('ch1', 'x'),
+      appliedAll('ch1', ['x']),
+      mutated(),
+      ev({
+        type: 'check.completed',
+        callId: 'k',
+        check: 'build',
+        recipeId: 'cargo.build',
+        status: 'unsupported',
+        unsupportedReason: 'toolchain-unavailable',
+        exitCode: null,
+        durationMs: 0,
+        summary: 'install via rustup',
+      }),
+      ...reviewRound('rv'),
+    ];
+    const acc = computeAcceptance(planState(g), foldGraphState(g, events), events);
+    expect(acc.complete).toBe(true);
+    expect(acc.caveats.join(' ')).toContain('TOOLCHAIN IS NOT INSTALLED');
+    expect(acc.caveats.join(' ')).toContain('names the install cure');
+  });
+
+  it('a per-task toolchain waiver carries its own loud caveat (Session 18)', () => {
+    reset();
+    const g = graphOf({}, [{ id: 'a', title: 'A', intent: 'i', role: 'executor', verify: 'v', checks: ['build'] }]);
+    const events = [
+      started('a', 'ch1'),
+      endedOk('ch1'),
+      changed('ch1', 'x'),
+      appliedAll('ch1', ['x']),
+      ev({
+        type: 'check.completed',
+        callId: 'k',
+        check: 'build',
+        recipeId: 'cargo.build',
+        status: 'unsupported',
+        unsupportedReason: 'toolchain-unavailable',
+        exitCode: null,
+        durationMs: 0,
+        summary: 'install via rustup',
+      }),
+      ...reviewRound('rv'),
+    ];
+    const state = foldGraphState(g, events);
+    const task = state.tasks.find((t) => t.id === 'a')!;
+    expect(task.verification.status).toBe('waived');
+    expect(task.verification.toolchainUnavailable).toEqual(['build']);
+    const acc = computeAcceptance(planState(g), state, events);
+    expect(acc.complete).toBe(true);
+    expect(acc.caveats.join(' ')).toContain("task 'a' check(s) build NEVER RAN — the TOOLCHAIN IS NOT INSTALLED");
+  });
 });
 
 describe('views render the gate the user approves', () => {

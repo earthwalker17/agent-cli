@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { availableKinds, normalizeScopePaths, resolveChecks, toCommand } from '../src/checks/recipes.js';
+import { availableKinds, normalizeScopePaths, resolveChecks, toCommand, RECIPES } from '../src/checks/recipes.js';
 import { sha256 } from '../src/shared/hash.js';
-import type { DetectedProject } from '../src/checks/types.js';
+import type { DetectedProject, ToolchainFacts } from '../src/checks/types.js';
 
 function project(over: Partial<DetectedProject> = {}): DetectedProject {
   const scripts = over.scripts ?? {};
@@ -222,5 +222,203 @@ describe('availableKinds', () => {
     expect(availableKinds(project({ scripts: { build: 'x', test: 'y' } }))).toEqual(['build', 'test', 'test-targeted']);
     expect(availableKinds(project({ scripts: { build: 'x' }, hasNodeModules: false, hasDependencies: true }))).toEqual([]);
     expect(availableKinds(project({ kinds: [], packageManager: null }))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Session 18: Rust/Cargo and Go modules — plus the row-owned precondition WHY.
+// ---------------------------------------------------------------------------------------------
+
+const TC_ALL: ToolchainFacts = {
+  cargo: { name: 'cargo', path: 'C:/tc/cargo.exe' },
+  rustc: { name: 'rustc', path: 'C:/tc/rustc.exe' },
+  go: { name: 'go', path: 'C:/tc/go.exe' },
+  clippy: true,
+  rustfmt: true,
+  rustupTargets: ['x86_64-pc-windows-gnu'],
+};
+
+function rustProject(over: Partial<DetectedProject> = {}, tc: ToolchainFacts | undefined = TC_ALL): DetectedProject {
+  return project({
+    kinds: ['rust'],
+    packageManager: null,
+    hasDependencies: false,
+    rust: { workspaceRoot: false, hasCargoLock: true, edition: '2021', crossTarget: null, toolchainFile: null },
+    ...(tc !== undefined ? { toolchains: tc } : {}),
+    ...over,
+  });
+}
+
+function goProject(over: Partial<DetectedProject> = {}, tc: ToolchainFacts | undefined = TC_ALL): DetectedProject {
+  return project({
+    kinds: ['go'],
+    packageManager: null,
+    hasDependencies: false,
+    go: { module: 'example.com/svc', goDirective: '1.22', hasGoSum: true, hasVendorDir: false },
+    ...(tc !== undefined ? { toolchains: tc } : {}),
+    ...over,
+  });
+}
+
+describe('resolveChecks — Rust (Session 18)', () => {
+  it('resolves the cargo rows with the harness-named commands and honest effects', () => {
+    const r = resolveChecks(rustProject(), ['build', 'test', 'typecheck', 'lint', 'format']);
+    expect(r.unsupported).toEqual([]);
+    const byKind = Object.fromEntries(r.resolved.map((c) => [c.kind, c]));
+    expect(byKind['build']!.command).toBe('cargo build');
+    expect(byKind['build']!.recipeId).toBe('cargo.build');
+    expect(byKind['test']!.command).toBe('cargo test');
+    expect(byKind['typecheck']!.command).toBe('cargo check');
+    expect(byKind['lint']!.command).toBe('cargo clippy -- -D warnings');
+    expect(byKind['format']!.command).toBe('cargo fmt --check');
+    // build.rs/proc-macros execute workspace code at build time; fmt only parses.
+    expect(byKind['build']!.effects.workspaceAuthored).toBe(true);
+    expect(byKind['format']!.effects).toEqual({ writesOutputs: false, network: false, workspaceAuthored: false });
+  });
+
+  it('a missing cargo is toolchain-unavailable naming the rustup cure — and NEVER curable by project_setup', () => {
+    const r = resolveChecks(rustProject({}, { ...TC_ALL, cargo: null }), ['build', 'test', 'format']);
+    expect(r.resolved).toEqual([]);
+    expect(r.unsupported.length).toBe(3);
+    for (const u of r.unsupported) {
+      expect(u.why).toBe('toolchain-unavailable');
+      expect(u.reason).toContain('rustup');
+      expect(u.reason).not.toContain('project_setup');
+    }
+  });
+
+  it('without a probe the rows degrade to the python pattern: resolve, fail at run, classify by signal', () => {
+    const r = resolveChecks(rustProject({}, undefined), ['build']);
+    expect(r.unsupported).toEqual([]);
+    expect(r.resolved[0]!.command).toBe('cargo build');
+  });
+
+  it('missing clippy/rustfmt components gate their rows with the exact component cure', () => {
+    const r = resolveChecks(rustProject({}, { ...TC_ALL, clippy: false, rustfmt: false }), ['lint', 'format', 'build']);
+    const un = Object.fromEntries(r.unsupported.map((u) => [u.kind, u]));
+    expect(un['lint']!.why).toBe('toolchain-unavailable');
+    expect(un['lint']!.reason).toContain('rustup component add clippy');
+    expect(un['format']!.reason).toContain('rustup component add rustfmt');
+    expect(r.resolved.map((c) => c.kind)).toEqual(['build']);
+  });
+
+  it('cross-target: fmt stays host-verifiable, compiles gate on the rustup target, tests refuse permanently', () => {
+    const cross = { workspaceRoot: false, hasCargoLock: true, edition: '2021', crossTarget: 'thumbv7em-none-eabihf', toolchainFile: null };
+    // Target NOT installed: every compile is toolchain-unavailable naming `rustup target add`.
+    const missing = resolveChecks(rustProject({ rust: cross }), ['build', 'typecheck', 'lint', 'format', 'test']);
+    const un1 = Object.fromEntries(missing.unsupported.map((u) => [u.kind, u]));
+    for (const kind of ['build', 'typecheck', 'lint'] as const) {
+      expect(un1[kind]!.why).toBe('toolchain-unavailable');
+      expect(un1[kind]!.reason).toContain('rustup target add thumbv7em-none-eabihf');
+    }
+    expect(missing.resolved.map((c) => c.kind)).toEqual(['format']);
+    // Tests refuse as a HOST incapability whether or not the target is installed.
+    expect(un1['test']!.why).toBe('precondition');
+    expect(un1['test']!.reason).toContain('cannot execute on this host');
+
+    const installed = resolveChecks(
+      rustProject({ rust: cross }, { ...TC_ALL, rustupTargets: ['thumbv7em-none-eabihf'] }),
+      ['build', 'test', 'format'],
+    );
+    expect(installed.resolved.map((c) => c.kind).sort()).toEqual(['build', 'format']);
+    expect(installed.unsupported.map((u) => [u.kind, u.why])).toEqual([['test', 'precondition']]);
+  });
+
+  it('rust holes are decisions with stated reasons, not silent gaps', () => {
+    const r = resolveChecks(rustProject(), ['test-targeted', 'static-analysis'], ['src/lib.rs']);
+    const un = Object.fromEntries(r.unsupported.map((u) => [u.kind, u]));
+    expect(un['test-targeted']!.why).toBe('no-recipe');
+    expect(un['test-targeted']!.reason).toContain('by NAME, not by path');
+    expect(un['static-analysis']!.reason).toContain('clippy');
+  });
+});
+
+describe('resolveChecks — Go (Session 18)', () => {
+  it('resolves the go rows, with typecheck deliberately duplicating build', () => {
+    const r = resolveChecks(goProject(), ['build', 'test', 'typecheck', 'static-analysis']);
+    expect(r.unsupported).toEqual([]);
+    const byKind = Object.fromEntries(r.resolved.map((c) => [c.kind, c]));
+    expect(byKind['build']!.command).toBe('go build ./...');
+    expect(byKind['test']!.command).toBe('go test ./...');
+    expect(byKind['typecheck']!.command).toBe('go build ./...');
+    expect(byKind['typecheck']!.recipeId).toBe('go.typecheck.build');
+    expect(byKind['static-analysis']!.command).toBe('go vet ./...');
+    expect(byKind['build']!.effects).toEqual({ writesOutputs: false, network: true, workspaceAuthored: false });
+  });
+
+  it('maps path scopes onto package patterns for test-targeted — Go selection IS path-shaped', () => {
+    const unit = goProject({ id: 'svc', root: 'C:/ws/svc' });
+    const r = resolveChecks(unit, ['test-targeted'], ['svc/calc/table.go', 'svc/util', 'elsewhere/x']);
+    expect(r.resolved[0]!.command).toBe('go test ./calc/... ./util/...');
+
+    const root = resolveChecks(goProject(), ['test-targeted'], ['calc', 'main.go']);
+    expect(root.resolved[0]!.command).toBe('go test ./... ./calc/...');
+  });
+
+  it('a missing go toolchain is toolchain-unavailable naming the install cure', () => {
+    const r = resolveChecks(goProject({}, { ...TC_ALL, go: null }), ['build', 'test']);
+    expect(r.resolved).toEqual([]);
+    for (const u of r.unsupported) {
+      expect(u.why).toBe('toolchain-unavailable');
+      expect(u.reason).toContain('go.dev');
+    }
+  });
+
+  it('go holes are decisions with stated reasons: gofmt exits 0, vet is the linter', () => {
+    const r = resolveChecks(goProject(), ['format', 'lint']);
+    const un = Object.fromEntries(r.unsupported.map((u) => [u.kind, u]));
+    expect(un['format']!.why).toBe('no-recipe');
+    expect(un['format']!.reason).toContain('the exit code is the verdict');
+    expect(un['lint']!.reason).toContain('go vet');
+  });
+});
+
+describe('the precondition WHY is row-owned (Session 18)', () => {
+  it('node curability is byte-identical to the old central rule', () => {
+    const uninstalled = project({ scripts: { test: 'vitest run' }, hasNodeModules: false, hasDependencies: true });
+    const r = resolveChecks(uninstalled, ['test']);
+    expect(r.unsupported[0]!.why).toBe('precondition-curable');
+    expect(r.unsupported[0]!.reason).toContain('project_setup');
+  });
+
+  it('a cmake-only project is NAMED in the refusal instead of "no supported manifest"', () => {
+    const cm = project({ kinds: ['cmake'], packageManager: null, cmake: { projectName: 'native' } });
+    const r = resolveChecks(cm, ['build']);
+    expect(r.unsupported[0]!.why).toBe('no-recipe');
+    expect(r.unsupported[0]!.reason).toContain('CMake/C-C++ project');
+    expect(r.unsupported[0]!.reason).not.toContain('no supported project manifest');
+  });
+
+  it('recipe ids are a consent surface: the exact table is pinned', () => {
+    expect(RECIPES.map((r) => r.id)).toEqual([
+      'node.script.build',
+      'cargo.build',
+      'go.build',
+      'node.script.test',
+      'node.vitest',
+      'node.jest',
+      'py.pytest',
+      'cargo.test',
+      'go.test',
+      'node.script.test.targeted',
+      'node.vitest.targeted',
+      'py.pytest.targeted',
+      'go.test.targeted',
+      'node.script.typecheck',
+      'node.tsc',
+      'py.mypy',
+      'cargo.check',
+      'go.typecheck.build',
+      'node.script.lint',
+      'node.eslint',
+      'py.ruff',
+      'cargo.clippy',
+      'node.script.format-check',
+      'node.prettier',
+      'py.ruff.format',
+      'cargo.fmt',
+      'node.script.analyze',
+      'go.vet',
+    ]);
   });
 });

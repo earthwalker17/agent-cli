@@ -152,7 +152,7 @@ export type CheckEvidence =
       /** Session 16: which project UNIT this verified — what a `project`-scoped plan gate matches on. */
       projectId?: string;
       /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request' | 'toolchain-unavailable';
       /** null unless the process genuinely exited (killed checks have no exit code). */
       exitCode: number | null;
       termination?: CommandTermination;
@@ -197,7 +197,7 @@ export type SetupEvidence =
       recipeId: string;
       status: SetupStatus;
       /** Why an `unsupported` action could not run — the check taxonomy, same meanings. */
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request' | 'toolchain-unavailable';
       /** null unless the process genuinely exited (a killed setup has no exit code). */
       exitCode: number | null;
       termination?: CommandTermination;
@@ -1240,7 +1240,7 @@ export type EventBody =
       /** Session 16 (additive): the project UNIT verified — a `project`-scoped gate matches on it. */
       projectId?: string;
       /** Why an `unsupported` kind could not run — only a PROJECT-capability reason may waive a gate. */
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request' | 'toolchain-unavailable';
       exitCode: number | null;
       termination?: CommandTermination;
       durationMs: number;
@@ -1285,7 +1285,7 @@ export type EventBody =
       projectId: string;
       recipeId: string;
       status: SetupStatus;
-      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request';
+      unsupportedReason?: 'no-recipe' | 'precondition' | 'precondition-curable' | 'bad-request' | 'toolchain-unavailable';
       exitCode: number | null;
       termination?: CommandTermination;
       durationMs: number;

@@ -176,7 +176,9 @@ export function computeAcceptance(
       const graph = planState.canonical?.graph ?? null;
       if (graph !== null) {
         const gate = completionGateState(graph, events);
-        const scopeOf = (kind: string): { missingIn: string[]; passedIn: string[]; waivedIn: string[] } | undefined =>
+        const scopeOf = (
+          kind: string,
+        ): { missingIn: string[]; passedIn: string[]; waivedIn: string[]; toolchainUnavailableIn?: string[] } | undefined =>
           gate.byKind.find((b) => b.kind === kind);
         for (const kind of gate.pending) {
           // Name the project that is actually missing. "prove with run_check test" is a call a
@@ -193,15 +195,29 @@ export function computeAcceptance(
         for (const kind of gate.waived) {
           // "NEVER RAN" was false whenever the kind passed somewhere and was unsupported
           // elsewhere — the caveat has to say which half of the stack it is talking about.
+          // Session 18: a MISSING-TOOLCHAIN waiver says so loudly. "This machine lacks the
+          // compiler (the recorded check evidence names the install cure)" and "this project
+          // cannot run the kind" are different statements to hand a reader of the acceptance.
           const s = scopeOf(kind);
           const waivedIn = s?.waivedIn.filter((p) => p !== '.') ?? [];
           const passedIn = s?.passedIn.filter((p) => p !== '.') ?? [];
-          caveats.push(
-            waivedIn.length > 0
-              ? `completion gate '${kind}' NEVER RAN in project ${waivedIn.join(', ')} (unsupported there)` +
-                (passedIn.length > 0 ? `; it passed in ${passedIn.join(', ')}` : '')
-              : `completion gate '${kind}' NEVER RAN (unsupported in this project)`,
-          );
+          const tcIn = s?.toolchainUnavailableIn?.filter((p) => p !== '.') ?? [];
+          const tcUnscoped = gate.toolchainUnavailable?.includes(kind) === true;
+          if (waivedIn.length > 0) {
+            caveats.push(
+              tcIn.length > 0
+                ? `completion gate '${kind}' NEVER RAN in project ${waivedIn.join(', ')} — its TOOLCHAIN IS NOT INSTALLED on this machine; the recorded check evidence names the install cure` +
+                  (passedIn.length > 0 ? `; it passed in ${passedIn.join(', ')}` : '')
+                : `completion gate '${kind}' NEVER RAN in project ${waivedIn.join(', ')} (unsupported there)` +
+                  (passedIn.length > 0 ? `; it passed in ${passedIn.join(', ')}` : ''),
+            );
+          } else {
+            caveats.push(
+              tcUnscoped
+                ? `completion gate '${kind}' NEVER RAN — the TOOLCHAIN IS NOT INSTALLED on this machine; the recorded check evidence names the install cure`
+                : `completion gate '${kind}' NEVER RAN (unsupported in this project)`,
+            );
+          }
         }
       }
       // A waived per-task gate is not a blocker, but it must not vanish either: a recorded
@@ -210,9 +226,17 @@ export function computeAcceptance(
       for (const t of graphState.tasks) {
         if (t.verification.waived.length > 0) {
           const p = planState.canonical?.graph?.tasks.find((x) => x.id === t.id)?.project;
-          caveats.push(
-            `task '${t.id}' check(s) ${t.verification.waived.join(', ')} NEVER RAN (unsupported in ${p !== undefined && p !== '.' ? `project ${p}` : 'this project'})`,
-          );
+          const where = p !== undefined && p !== '.' ? `project ${p}` : 'this project';
+          const tc = t.verification.toolchainUnavailable ?? [];
+          const plain = t.verification.waived.filter((k) => !tc.includes(k));
+          if (plain.length > 0) {
+            caveats.push(`task '${t.id}' check(s) ${plain.join(', ')} NEVER RAN (unsupported in ${where})`);
+          }
+          if (tc.length > 0) {
+            caveats.push(
+              `task '${t.id}' check(s) ${tc.join(', ')} NEVER RAN — the TOOLCHAIN IS NOT INSTALLED on this machine; the recorded check evidence names the install cure`,
+            );
+          }
         }
       }
     }
