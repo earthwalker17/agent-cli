@@ -1113,8 +1113,13 @@ export interface ApprovalRequest {
    * 'setup' = a harness-resolved dependency install / migration / seed (Session 16): the prompt
    * must state the third distinct consequence — third-party code and network for an install,
    * un-undoable local data change for a migration — and offers `[s]` only for the install.
+   * 'research' = a bounded external read (Session 19): the fourth distinct consequence, and the
+   * only one that is not about running something HERE. Nothing executes and nothing changes on
+   * this machine; text goes OUT, to one named host, and what comes back is untrusted. The prompt
+   * must show what is being sent, name the host, and state that a session answer is bounded by
+   * the session research budget rather than open-ended.
    */
-  kind?: 'command' | 'check' | 'preview' | 'setup';
+  kind?: 'command' | 'check' | 'preview' | 'setup' | 'research';
   /** kind 'check'/'preview'/'setup': how many distinct commands a session-scope answer would consent to re-run. */
   checkCount?: number;
   /** One-line summary (command string or "edit src/x.ts"). */
@@ -1640,6 +1645,62 @@ export type EventBody =
       source: 'pdf';
       pages: { page: number; imageSha256: string; bytes: number; mediaType: string }[];
       warnings: string[];
+    }
+  /**
+   * Bounded external reads (Session 19). Additive, so `EVENT_SCHEMA_VERSION` stays 1 — the log
+   * reader rejects only a HIGHER version, and an older reader that meets one of these arms
+   * renders it as an unknown type rather than failing.
+   *
+   * The query is recorded verbatim on purpose. This is the only durable answer to "what did this
+   * session send to a third party", and a summarized query cannot answer it.
+   */
+  | {
+      type: 'research.searched';
+      callId: string;
+      provider: string;
+      query: string;
+      resultCount: number;
+      /** Hosts of the admitted results — the origins whose text actually reached a context. */
+      hosts: string[];
+      /** Results the harness refused after the provider returned them. Never silent. */
+      refused: { url: string; reason: string }[];
+      credits: number;
+      contentChars: number;
+      durationMs: number;
+      requestId?: string;
+    }
+  | {
+      type: 'research.extracted';
+      callId: string;
+      provider: string;
+      urls: string[];
+      pageCount: number;
+      /** URLs the PROVIDER could not retrieve — distinct from a harness refusal. */
+      failed: { url: string; reason: string }[];
+      credits: number;
+      contentChars: number;
+      durationMs: number;
+      requestId?: string;
+    }
+  | {
+      type: 'research.findings';
+      callId: string;
+      childSessionId: string;
+      notes: ResearchNote[];
+    }
+  /**
+   * One researcher task's spend, captured into the PARENT log at task end. Without it a resumed
+   * session rebuilds its research budget from parent events alone and sees zero — because every
+   * search the child ran was recorded in the child's own log.
+   */
+  | {
+      type: 'research.usage';
+      callId: string;
+      childSessionId: string;
+      searches: number;
+      extracts: number;
+      credits: number;
+      contentChars: number;
     }
   | {
       type: 'undo.applied';

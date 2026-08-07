@@ -107,10 +107,15 @@ describe('decide: search approval', () => {
   });
 
   it('refuses an empty query rather than sending a blank request', () => {
-    for (const q of ['', '   ', undefined]) {
-      const d = decide(researchTool({ ...SEARCH, ...(q === undefined ? { query: undefined } : { query: q }) }), {}, ctx(), new Grants());
-      expect(d).toMatchObject({ decision: 'deny', rule: 'research.empty-request' });
+    for (const q of ['', '   ']) {
+      expect(decide(researchTool({ ...SEARCH, query: q }), {}, ctx(), new Grants())).toMatchObject({
+        decision: 'deny',
+        rule: 'research.empty-request',
+      });
     }
+    // ...and an absent query is the same refusal, not a fall-through.
+    const { query: _dropped, ...noQuery } = SEARCH;
+    expect(decide(researchTool(noQuery), {}, ctx(), new Grants())).toMatchObject({ decision: 'deny', rule: 'research.empty-request' });
   });
 });
 

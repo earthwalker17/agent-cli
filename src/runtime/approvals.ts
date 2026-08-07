@@ -38,7 +38,14 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
               // a migration writes local data nothing here can undo. The class is real, not a
               // best-effort label, so it belongs in the header beside the shape.
               `[project setup — harness-resolved command; ${req.classification}]`
-            : `[${req.classification}]`;
+            : req.kind === 'research'
+              ? // The fourth distinct consequence, and the only one that is not about running
+                // something HERE. Nothing executes, nothing on this machine changes — text goes
+                // OUT. The header says LEAVES THIS MACHINE because "[external]" alone reads like
+                // a severity label, and the question the human is actually answering is "may this
+                // text be sent to that host".
+                '[web research — LEAVES THIS MACHINE; read-only, nothing runs here]'
+              : `[${req.classification}]`;
   const lines = [
     '',
     `  ⚠ approval required  ${cls}  ${req.tool}`,
@@ -91,11 +98,18 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
         ? // A preview [s] consents to RE-STARTS of the exact command(s) (body-bound, this session
           // only) — not to any other script, and not across sessions (grants are never restored).
           `   [s] allow re-starts of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'} this session`
-        : grantable
-          ? forwarded
-            ? '   [s] allow for the rest of THIS TASK'
-            : '   [s] allow for the rest of this session'
-          : '';
+        : req.kind === 'research'
+          ? // A research [s] IS a real class-scoped grant (unlike check/preview/setup, whose
+            // consent lives in the replay store), so it is offered — but the wording must name
+            // what actually bounds it. "Allow for the rest of this session" would read as an open
+            // line to the internet; the truth is that the session research budget is the ceiling,
+            // and the reason line above states what remains of it.
+            '   [s] allow further research this session, within the session budget'
+          : grantable
+            ? forwarded
+              ? '   [s] allow for the rest of THIS TASK'
+              : '   [s] allow for the rest of this session'
+            : '';
   lines.push(
     `  [y] allow once${sPart}   [n] deny   ` +
       (forwarded ? '[q] deny & stop THIS TASK (the rest of the turn continues)' : '[q] deny & stop'),

@@ -15,6 +15,8 @@ import type {
   Provider,
   ProviderRequest,
   RepairEvidence,
+  ResearchEvidence,
+  ResearchFact,
   ReviewEvidence,
   SessionEvent,
   SessionMode,
@@ -74,6 +76,13 @@ export interface Session {
   onModelRequest?: (inFlight: boolean) => void;
   /** Narrowing-only policy additions from config; passed to every tool/policy context. */
   rules?: PolicyRules;
+  /**
+   * Present only for subagent child sessions: who spawned this session and as what role — the
+   * same value recorded on `session.started`. Carried on the live session (Session 19) because
+   * the policy engine reads it through `ToolContext.lineage` to admit a researcher child's
+   * external reads. It is runtime state stamped at construction, never derived from model input.
+   */
+  lineage?: { parentSessionId: string; role: string };
   /** The session's execution sandbox backend + its probed enforcement facts (both or neither). */
   sandbox?: SandboxBackend;
   sandboxFacts?: EnforcementFacts;
@@ -201,6 +210,9 @@ function buildSession(id: string, opts: StartOptions, log: EventLog, clock: Cloc
   if (opts.onCommandOutput) base.onCommandOutput = opts.onCommandOutput;
   if (opts.onModelRequest) base.onModelRequest = opts.onModelRequest;
   if (opts.rules) base.rules = opts.rules;
+  // Session 19: the SAME value that goes onto session.started, so the live session and its
+  // recorded provenance can never disagree about what role this child is.
+  if (opts.lineage) base.lineage = opts.lineage;
   if (opts.sandbox) base.sandbox = opts.sandbox;
   if (opts.sandboxFacts) base.sandboxFacts = opts.sandboxFacts;
   if (opts.gitFacts) base.gitFacts = opts.gitFacts;
@@ -463,6 +475,10 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
     // the engine reads `enforced` to gate command auto-run. The per-call enforcing wrap is built
     // in runExecution once the boundary is known.
     ...(session.sandboxFacts ? { sandbox: availabilitySandbox(session.sandboxFacts) } : {}),
+    // Session 19: this is the context `decide()` reads, so the research branch's delegated-role
+    // admission depends on lineage being HERE, not only on the execute-time context. Stamped by
+    // startSession from the same value that lands on session.started; absent for a parent.
+    ...(session.lineage !== undefined ? { lineage: session.lineage } : {}),
   };
   let denials = 0;
   let steps = 0;
@@ -1017,6 +1033,71 @@ function recordArtifactEvidence(session: Session, callId: string, e: ArtifactEvi
   });
 }
 
+/**
+ * Persist a tool-reported external-read fact under the runtime-bound callId (Session 19).
+ *
+ * Every model-authored and provider-authored string is bounded AT THE EMIT SITE, for the reason
+ * the artifact recorder states: this is untrusted text entering the durable log, and the log is
+ * read back by `/report`, the journal, and a human. The query is kept whole up to a generous cap
+ * because a truncated query would make the record unable to answer the one question it exists to
+ * answer — what actually left this machine.
+ */
+function recordResearchEvidence(session: Session, callId: string, e: ResearchEvidence): void {
+  const cap = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+  if (e.kind === 'searched') {
+    session.log.append({
+      type: 'research.searched',
+      callId,
+      provider: e.provider,
+      query: cap(e.query, 1_000),
+      resultCount: e.resultCount,
+      hosts: [...new Set(e.hosts)].slice(0, 20).map((h) => cap(h, 260)),
+      refused: e.refused.slice(0, 10).map((r) => ({ url: cap(r.url, 260), reason: cap(r.reason, 200) })),
+      credits: e.credits,
+      contentChars: e.contentChars,
+      durationMs: e.durationMs,
+      ...(e.requestId !== undefined ? { requestId: cap(e.requestId, 80) } : {}),
+    });
+    return;
+  }
+  if (e.kind === 'extracted') {
+    session.log.append({
+      type: 'research.extracted',
+      callId,
+      provider: e.provider,
+      urls: e.urls.slice(0, 20).map((u) => cap(u, 260)),
+      pageCount: e.pageCount,
+      failed: e.failed.slice(0, 20).map((f) => ({ url: cap(f.url, 260), reason: cap(f.reason, 200) })),
+      credits: e.credits,
+      contentChars: e.contentChars,
+      durationMs: e.durationMs,
+      ...(e.requestId !== undefined ? { requestId: cap(e.requestId, 80) } : {}),
+    });
+    return;
+  }
+  if (e.kind === 'findings') {
+    session.log.append({
+      type: 'research.findings',
+      callId,
+      childSessionId: e.childSessionId,
+      notes: e.notes,
+    });
+    return;
+  }
+  // 'usage': the cross-log accounting record. A researcher spends the session budget from inside
+  // a CHILD session with its own event log, so without this capture in the PARENT log a resumed
+  // session would rebuild a budget that had silently refilled.
+  session.log.append({
+    type: 'research.usage',
+    callId,
+    childSessionId: e.childSessionId,
+    searches: e.searches,
+    extracts: e.extracts,
+    credits: e.credits,
+    contentChars: e.contentChars,
+  });
+}
+
 /** Persist a tool-reported preview lifecycle fact under the runtime-bound callId (Session 13). */
 function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvidence): void {
   if (e.kind === 'started') {
@@ -1123,7 +1204,12 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
             // keys, so it must not advertise an [s] that would silently do nothing.
             ...(decision.checkReplayKeys !== undefined ? { checkCount: decision.checkReplayKeys.length } : {}),
           }
-        : {}),
+        : tool.research !== undefined
+          ? // Session 19: a fourth distinct CONSEQUENCE the generic header cannot state. Checks
+            // and setups run code here; this one sends text away from here, and the prompt has to
+            // say so in its own words rather than borrowing "[external]" and hoping.
+            { kind: 'research' as const }
+          : {}),
     summary,
     detail: fullDetail,
     reason: decision.reason,
@@ -1185,6 +1271,44 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
         )
         .join('\n'),
     };
+  }
+  // Bounded external reads (Session 19): the same argument as typed checks, one step further out.
+  // A check's prompt must show the command because consent binds that command; a research prompt
+  // must show the QUERY OR THE URLS because they are the thing that leaves the machine. Without
+  // this branch the call falls through to the bare `${tool.name}` form with an empty detail, and
+  // "allow web_search?" is not a question anyone can answer.
+  if (tool.research !== undefined) {
+    let fact: ResearchFact | undefined;
+    try {
+      fact = tool.research(input);
+    } catch {
+      fact = undefined;
+    }
+    if (fact !== undefined) {
+      const b = fact.bounds;
+      const common = [
+        `provider: ${fact.providerHost} (the only host contacted)`,
+        `bounds: ≤${String(b.maxContentChars)} retrieved chars · ${String(b.timeoutMs)} ms · ~${String(b.credits)} credit(s)`,
+        ...(fact.budgetRemaining !== undefined ? [`session budget remaining: ${fact.budgetRemaining}`] : []),
+      ];
+      if (fact.kind === 'search') {
+        const q = fact.query ?? '';
+        return {
+          summary: `${tool.name}: "${q.slice(0, 100)}" → ${fact.providerHost}`,
+          detail: [
+            `query (sent verbatim): ${q}`,
+            ...(fact.domains !== undefined && fact.domains.length > 0 ? [`domains: ${fact.domains.join(', ')}`] : []),
+            `max results: ${String(b.maxResults ?? 0)}`,
+            ...common,
+          ].join('\n'),
+        };
+      }
+      const urls = (fact.targets ?? []).map((t) => t.url);
+      return {
+        summary: `${tool.name}: ${String(urls.length)} page(s) via ${fact.providerHost}`,
+        detail: [...urls.map((u) => `fetch: ${u}`), ...common].join('\n'),
+      };
+    }
   }
   const i = input as Record<string, unknown>;
   // Delegation groups: the human must see WHO would be spawned to do WHAT — a bare tool name
@@ -1296,6 +1420,11 @@ async function runExecution<I>(
     reportPreview: (e) => recordPreviewEvidence(session, callId, e),
     reportBrowser: (e) => recordBrowserEvidence(session, callId, e),
     reportArtifact: (e) => recordArtifactEvidence(session, callId, e),
+    reportResearch: (e) => recordResearchEvidence(session, callId, e),
+    // Session 19: the child's own lineage, so the policy engine can tell a researcher subagent's
+    // call from a parent's. Runtime state stamped at startSession — never tool state, never model
+    // input, absent entirely for a parent session.
+    ...(session.lineage !== undefined ? { lineage: session.lineage } : {}),
     ...(session.onCommandOutput
       ? { onOutput: (chunk: string, stream: 'stdout' | 'stderr') => session.onCommandOutput!(callId, chunk, stream) }
       : {}),

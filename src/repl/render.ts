@@ -263,6 +263,50 @@ export function createRenderer(opts: {
           );
           break;
         }
+        // Session 19. A research turn that renders nothing looks like a hang, and this is the one
+        // capability whose chrome doubles as a privacy surface: the user should be able to watch
+        // what left the machine and where the answers came from, without opening a report.
+        case 'research.searched': {
+          const hosts = e.hosts.slice(0, 4).map((h) => sanitizeLine(h)).join(', ');
+          chromeLine(
+            `  ${style.green(g.ok)} searched ${sanitizeLine(e.provider)}: "${sanitizeLine(e.query).slice(0, 80)}" ${g.arrow} ` +
+              `${String(e.resultCount)} source(s)${hosts !== '' ? ` (${hosts}${e.hosts.length > 4 ? ', …' : ''})` : ''} · ` +
+              `${String(e.credits)} credit(s), ${String(e.durationMs)}ms`,
+          );
+          for (const r of e.refused.slice(0, 3)) {
+            chromeLine(style.yellow(`    ${g.warn} refused ${sanitizeLine(r.url)} — ${sanitizeLine(r.reason)}`));
+          }
+          break;
+        }
+        case 'research.extracted': {
+          chromeLine(
+            `  ${style.green(g.ok)} extracted ${String(e.pageCount)} of ${String(e.urls.length)} page(s) via ${sanitizeLine(e.provider)} · ` +
+              `${String(e.contentChars)} chars, ${String(e.credits)} credit(s), ${String(e.durationMs)}ms`,
+          );
+          for (const f of e.failed.slice(0, 3)) {
+            chromeLine(style.yellow(`    ${g.warn} not retrieved ${sanitizeLine(f.url)} — ${sanitizeLine(f.reason)}`));
+          }
+          break;
+        }
+        case 'research.findings': {
+          chromeLine(
+            style.dim(`  ${g.arrow} ${String(e.notes.length)} research finding(s) recorded by ${sanitizeLine(e.childSessionId)}`),
+          );
+          for (const n of e.notes.slice(0, 5)) {
+            const flag = n.corroboration === 'sources-disagree' ? style.yellow('sources disagree') : n.corroboration;
+            chromeLine(style.dim(`      • ${sanitizeLine(n.claim).slice(0, 100)} [${String(n.sources.length)} src, ${flag}]`));
+          }
+          break;
+        }
+        case 'research.usage': {
+          chromeLine(
+            style.dim(
+              `  ${g.arrow} research spend by ${sanitizeLine(e.childSessionId)}: ${String(e.searches)} search(es), ` +
+                `${String(e.extracts)} extract(s), ${String(e.credits)} credit(s)`,
+            ),
+          );
+          break;
+        }
         case 'preview.started': {
           // No live output channel: a preview logs to a FILE (see preview/process.ts), so the
           // chrome shows lifecycle boundaries and /preview shows the tail.
