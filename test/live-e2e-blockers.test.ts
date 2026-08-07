@@ -39,7 +39,10 @@ import type { BrowserFlowEvidence, CheckEvidence, SessionEvent, ToolContext } fr
  * amount of single-project testing.
  */
 
-const tmpdir = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'agent-e2e-blockers-'));
+// realpath: the house pattern (65 other files). Without it a workspace root keeps an unresolved
+// form — an 8.3 short TEMP on a CI runner — while every path the harness validates is resolved, so
+// containment checks and project detection disagree about the same directory.
+const tmpdir = (): string => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-e2e-blockers-')));
 
 /** The literal bytes Vite writes to a log file on win32: picocolors forces colour off-TTY. */
 const VITE_BANNER =

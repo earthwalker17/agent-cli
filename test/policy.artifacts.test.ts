@@ -29,7 +29,11 @@ function artifactTool(fact: ArtifactFact, overrides: Partial<Tool<unknown>> = {}
 }
 
 function ctx(): ToolContext {
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-policy-'));
+  // realpath: validatePath resolves the deepest existing ancestor, so a workspace root left
+  // unresolved compares against a resolved candidate and containment silently flips. On a runner
+  // whose TEMP carries an 8.3 short name this made an out-of-workspace path read as INSIDE — the
+  // dangerous direction. 65 other test files already use this form; these did not (CI red since S18).
+  const ws = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-policy-')));
   return { workspaceRoot: ws, stateDir: path.join(ws, 'state') };
 }
 
