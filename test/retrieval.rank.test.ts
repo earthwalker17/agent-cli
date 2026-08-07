@@ -70,6 +70,104 @@ describe('buildImportGraph', () => {
     expect(g.pagerank.get('hub.ts')!).toBeGreaterThan(g.pagerank.get('leaf.ts')!);
     expect(g.pagerank.get('hub.ts')!).toBeGreaterThan(g.pagerank.get('a.ts')!);
   });
+
+  it('resolves rust mod declarations to sibling files and mod.rs dirs (Session 18)', () => {
+    const files = new Set(['src/main.rs', 'src/engine.rs', 'src/api/mod.rs']);
+    const g = buildImportGraph([{ relPath: 'src/main.rs', lang: 'rust', imports: ['mod::engine', 'mod::api', 'mod::missing'] }], files);
+    expect(g.edges.get('src/main.rs')).toEqual(['src/engine.rs', 'src/api/mod.rs']);
+  });
+
+  it('resolves crate:: paths through the crate root, with item-in-file fallback; external crates drop', () => {
+    const files = new Set(['src/lib.rs', 'src/engine/core.rs', 'src/util.rs', 'crates/x/src/lib.rs']);
+    const g = buildImportGraph(
+      [
+        {
+          relPath: 'src/lib.rs',
+          lang: 'rust',
+          imports: ['crate::engine::core', 'crate::util::helper', 'serde::Deserialize', 'std::fmt'],
+        },
+      ],
+      files,
+    );
+    // `crate::engine::core` → the file itself; `crate::util::helper` → an item INSIDE util.rs.
+    expect(g.edges.get('src/lib.rs')).toEqual(['src/engine/core.rs', 'src/util.rs']);
+  });
+
+  it('resolves super:: through dirname arithmetic', () => {
+    const files = new Set(['src/lib.rs', 'src/api/handlers.rs', 'src/shared.rs']);
+    const g = buildImportGraph([{ relPath: 'src/api/handlers.rs', lang: 'rust', imports: ['super::shared'] }], files);
+    expect(g.edges.get('src/api/handlers.rs')).toEqual(['src/shared.rs']);
+  });
+
+  it('resolves go module imports by directory suffix to one deterministic representative (Session 18)', () => {
+    const files = new Set(['cmd/main.go', 'calc/calc.go', 'calc/table.go', 'calc/calc_test.go', 'util/strings.go']);
+    const g = buildImportGraph(
+      [
+        {
+          relPath: 'cmd/main.go',
+          lang: 'go',
+          imports: ['example.com/mod/calc', 'example.com/mod/util', 'fmt', 'net/http'],
+        },
+      ],
+      files,
+    );
+    // `<dir>/<lastSeg>.go` preferred; else first non-test file. Stdlib singles drop; `net/http`
+    // finds no repo dir and drops too.
+    expect(g.edges.get('cmd/main.go')).toEqual(['calc/calc.go', 'util/strings.go']);
+  });
+
+  it('resolves #include edges relative to the includer, then include/ and src/ roots (Session 18)', () => {
+    const files = new Set(['src/geo.c', 'src/local.h', 'include/geo.h', 'src/deep/impl.c']);
+    const g = buildImportGraph(
+      [
+        { relPath: 'src/geo.c', lang: 'c-cpp', imports: ['local.h', 'geo.h', 'stdio.h'] },
+        { relPath: 'src/deep/impl.c', lang: 'c-cpp', imports: ['../local.h'] },
+      ],
+      files,
+    );
+    expect(g.edges.get('src/geo.c')).toEqual(['src/local.h', 'include/geo.h']);
+    expect(g.edges.get('src/deep/impl.c')).toEqual(['src/local.h']);
+  });
+});
+
+describe('rankStructural — rust/go/c-cpp heuristics (Session 18)', () => {
+  it('boosts the new manifests, lib/mod entry stems, and penalizes _test.go siblings', () => {
+    const handle = makeHandle({
+      'Cargo.toml': '[package]\nname = "x"\n',
+      'go.mod': 'module example.com/x\n',
+      'CMakeLists.txt': 'project(x)\n',
+      'src/lib.rs': 'pub fn core() {}\n',
+      'calc/table.go': 'func Scale() {}\n',
+      'calc/table_test.go': 'func TestScale() {}\n',
+      'notes.txt': 'nothing structural\n',
+    });
+    const ranked = rankStructural(handle, 10);
+    const at = (p: string): number => ranked.findIndex((r) => r.relPath === p);
+    const sig = (p: string): string => ranked[at(p)]!.signals.join(' ');
+    for (const m of ['Cargo.toml', 'go.mod', 'CMakeLists.txt']) {
+      expect(sig(m), m).toContain('project manifest');
+      expect(at(m), m).toBeLessThan(at('notes.txt'));
+    }
+    expect(sig('src/lib.rs')).toContain('entry-point name');
+    expect(sig('calc/table_test.go')).toContain('test/vendor path');
+    expect(at('calc/table.go')).toBeLessThan(at('calc/table_test.go'));
+  });
+
+  it('a rust/go repo now earns real symbols and graph edges through the pipeline', () => {
+    const handle = makeHandle({
+      'src/main.rs': 'mod engine;\n\nfn main() {}\n',
+      'src/engine.rs': 'pub fn run() {}\n',
+      'cmd/main.go': 'import (\n\t"example.com/x/calc"\n)\n\nfunc main() {}\n',
+      'calc/calc.go': 'func Scale() {}\n',
+    });
+    expect(handle.indexedFiles).toBe(4);
+    // The graph now carries REAL cross-file edges for both ecosystems (the `imported by` signal
+    // needs in-degree ≥ 3; a two-file crate earns the edge, not the label).
+    expect(handle.graph.inDegree.get('src/engine.rs')).toBe(1);
+    expect(handle.graph.inDegree.get('calc/calc.go')).toBe(1);
+    const engine = rankStructural(handle, 10).find((r) => r.relPath === 'src/engine.rs')!;
+    expect(engine.score).toBeGreaterThan(0);
+  });
 });
 
 describe('rankStructural', () => {

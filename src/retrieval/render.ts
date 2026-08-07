@@ -106,7 +106,7 @@ export function renderRepoMap(handle: RetrievalHandle, opts: { budget?: number }
   // Tier 1 — header (unconditional; bounded, and the budget floor of 400 covers it).
   for (const h of [
     `Repository map — ranked overview. It is SELECTIVE: the complete listing is always reachable via list_files, search, and the retrieve tool; line numbers come only from live file reads.`,
-    `${inv.files.length} files${inv.capped ? ' (inventory capped)' : ''}; symbols indexed for ${handle.indexedFiles} (ts/js/py only — other languages rank by path/git signals)${handle.state === 'partial' ? '; index PARTIAL (build budget) — some files are unindexed or carry stale symbols until a later session catches up (excerpts/line numbers are always live)' : ''}.`,
+    `${inv.files.length} files${inv.capped ? ' (inventory capped)' : ''}; symbols indexed for ${handle.indexedFiles} (ts/js/py/rust/go/c-cpp only — other languages rank by path/git signals)${handle.state === 'partial' ? '; index PARTIAL (build budget) — some files are unindexed or carry stale symbols until a later session catches up (excerpts/line numbers are always live)' : ''}.`,
   ]) {
     lines.push(h);
     used += h.length + 1;

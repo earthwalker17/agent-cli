@@ -80,6 +80,123 @@ function resolvePy(fromRel: string, spec: string, files: ReadonlySet<string>): s
   return null;
 }
 
+/**
+ * Rust (Session 18). Two edge families, both bounded:
+ * - `mod::x` (from a `mod x;` declaration): the crate's file-tree edge — sibling `x.rs` or
+ *   `x/mod.rs` of the DECLARING file's directory.
+ * - `crate::a::b` paths: the crate root is the nearest ancestor directory holding `lib.rs` or
+ *   `main.rs`; path segments then try `a/b.rs`, `a/b/mod.rs`, and progressively shorter
+ *   prefixes (an item inside `a.rs` still lands on `a.rs`). `super::`/`self::` do dirname
+ *   arithmetic. External crate names resolve to nothing, like bare TS specifiers.
+ */
+function resolveRust(fromRel: string, spec: string, files: ReadonlySet<string>): string | null {
+  const tryModule = (dir: string, name: string): string | null => {
+    const flat = normalizePosix(`${dir}/${name}.rs`);
+    if (flat !== null && files.has(flat)) return flat;
+    const nested = normalizePosix(`${dir}/${name}/mod.rs`);
+    if (nested !== null && files.has(nested)) return nested;
+    return null;
+  };
+  if (spec.startsWith('mod::')) {
+    return tryModule(posixDirname(fromRel), spec.slice('mod::'.length));
+  }
+  const segs = spec.split('::').filter((s) => s.length > 0);
+  if (segs.length === 0) return null;
+  let baseDir: string;
+  if (segs[0] === 'crate') {
+    let root = posixDirname(fromRel);
+    for (let hops = 0; hops < 8; hops++) {
+      if (files.has(root === '' ? 'lib.rs' : `${root}/lib.rs`) || files.has(root === '' ? 'main.rs' : `${root}/main.rs`)) break;
+      if (root === '') return null;
+      root = posixDirname(root);
+    }
+    baseDir = root;
+    segs.shift();
+  } else if (segs[0] === 'self' || segs[0] === 'super') {
+    baseDir = posixDirname(fromRel);
+    while (segs[0] === 'super') {
+      if (baseDir === '') return null;
+      baseDir = posixDirname(baseDir);
+      segs.shift();
+    }
+    if (segs[0] === 'self') segs.shift();
+  } else {
+    return null; // an external crate — outside the repo, like a bare TS specifier
+  }
+  // Longest-first: `crate::a::b` may be file `a/b.rs`, module dir `a/b/mod.rs`, or an item
+  // inside `a.rs`. Two prefix drops bound the walk.
+  for (let take = segs.length; take > 0 && take >= segs.length - 2; take--) {
+    const head = segs.slice(0, take - 1).join('/');
+    const dir = [baseDir, head].filter((s) => s.length > 0).join('/');
+    const hit = tryModule(dir === '' ? '.' : dir, segs[take - 1]!);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+/** Directories holding `.go` files → their sorted non-test files. Precomputed once per build. */
+export function goPackageDirs(allFiles: ReadonlySet<string>): Map<string, string[]> {
+  const dirs = new Map<string, string[]>();
+  for (const f of allFiles) {
+    if (!f.endsWith('.go')) continue;
+    const dir = posixDirname(f);
+    const list = dirs.get(dir);
+    if (list === undefined) dirs.set(dir, [f]);
+    else list.push(f);
+  }
+  for (const list of dirs.values()) list.sort();
+  return dirs;
+}
+
+/**
+ * Go (Session 18): SUFFIX-DIRECTORY matching. An import like `example.com/mod/pkg/sub` cannot be
+ * resolved without the module path in go.mod, which a per-file resolver does not have — so the
+ * trailing segments are matched against the repo's go-package directories instead, longest
+ * suffix first, and the edge lands on ONE deterministic representative file (`<dir>/<last>.go`
+ * when it exists, else the lexicographically first non-test file). Chosen over threading module
+ * paths through the resolver: centrality is a signal, never a claim, and the suffix match is
+ * bounded, pure, and wrong only toward MISSING edges plus the rare same-named-directory hit.
+ * Single-segment specs (`fmt`, `os`) are dropped as stdlib.
+ */
+function resolveGo(spec: string, goDirs: ReadonlyMap<string, string[]>): string | null {
+  const segs = spec.split('/').filter((s) => s.length > 0);
+  if (segs.length < 2) return null;
+  for (let k = Math.min(4, segs.length); k >= 1; k--) {
+    const suffix = segs.slice(segs.length - k).join('/');
+    const matches: string[] = [];
+    for (const dir of goDirs.keys()) {
+      if (dir === suffix || dir.endsWith(`/${suffix}`)) matches.push(dir);
+    }
+    if (matches.length === 0) continue;
+    matches.sort();
+    const dir = matches[0]!;
+    const filesIn = goDirs.get(dir)!;
+    const preferred = dir === '' ? `${segs[segs.length - 1]!}.go` : `${dir}/${segs[segs.length - 1]!}.go`;
+    if (filesIn.includes(preferred)) return preferred;
+    const nonTest = filesIn.find((f) => !f.endsWith('_test.go'));
+    return nonTest ?? filesIn[0]!;
+  }
+  return null;
+}
+
+/**
+ * C/C++ (Session 18): `#include` names resolve relative to the includer first (the quoted-form
+ * rule), then against the conventional repo roots. The angle/quote distinction is deliberately
+ * not preserved — for repo-internal headers both forms appear in the wild, and a wrong guess
+ * costs a missing edge, never a wrong claim.
+ */
+function resolveC(fromRel: string, spec: string, files: ReadonlySet<string>): string | null {
+  const relative = normalizePosix(posixDirname(fromRel) + '/' + spec);
+  if (relative !== null && files.has(relative)) return relative;
+  const plain = normalizePosix(spec);
+  if (plain === null || plain.length === 0) return null;
+  if (files.has(plain)) return plain;
+  for (const root of ['include/', 'src/']) {
+    if (files.has(root + plain)) return root + plain;
+  }
+  return null;
+}
+
 export interface GraphSource {
   relPath: string;
   lang: LangId | null;
@@ -97,13 +214,30 @@ export function buildImportGraph(sources: readonly GraphSource[], allFiles: Read
   const edges = new Map<string, string[]>();
   const importers = new Map<string, string[]>();
   const inDegree = new Map<string, number>();
+  // Precomputed once: the go resolver matches directory suffixes, not per-file paths.
+  const goDirs = goPackageDirs(allFiles);
+
+  const resolveFor = (lang: NonNullable<GraphSource['lang']>, fromRel: string, spec: string): string | null => {
+    switch (lang) {
+      case 'ts':
+        return resolveTs(fromRel, spec, allFiles);
+      case 'py':
+        return resolvePy(fromRel, spec, allFiles);
+      case 'rust':
+        return resolveRust(fromRel, spec, allFiles);
+      case 'go':
+        return resolveGo(spec, goDirs);
+      case 'c-cpp':
+        return resolveC(fromRel, spec, allFiles);
+    }
+  };
 
   for (const src of sources) {
     if (src.lang === null) continue;
     const targets: string[] = [];
     const seen = new Set<string>();
     for (const spec of src.imports) {
-      const resolved = src.lang === 'ts' ? resolveTs(src.relPath, spec, allFiles) : resolvePy(src.relPath, spec, allFiles);
+      const resolved = resolveFor(src.lang, src.relPath, spec);
       if (resolved !== null && resolved !== src.relPath && !seen.has(resolved)) {
         seen.add(resolved);
         targets.push(resolved);

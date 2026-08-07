@@ -13,7 +13,10 @@ import type { GitFacts } from '../git/types.js';
  */
 
 /** Directories never listed, even when git would include them (defense in depth vs odd repos). */
-export const BUILTIN_EXCLUDE_DIRS = new Set(['node_modules', '.git', '.agent-cli', 'dist', 'coverage']);
+// Session 18 adds `target` (cargo output) and `__pycache__`; `vendor` stays VISIBLE — vendored
+// dependencies are real source and the map's recall backstop must not hide that they exist
+// (ranking already penalizes the segment).
+export const BUILTIN_EXCLUDE_DIRS = new Set(['node_modules', '.git', '.agent-cli', 'dist', 'coverage', 'target', '__pycache__']);
 
 export function hasExcludedSegment(rel: string): boolean {
   return rel.split('/').some((seg) => BUILTIN_EXCLUDE_DIRS.has(seg));

@@ -32,8 +32,10 @@ export interface RetrievalHit extends RankedFile {
   symbols: string[];
 }
 
-const ENTRY_BASENAMES = new Set(['index', 'main', 'cli', 'app', 'server', '__init__']);
-const MANIFEST_BASENAMES = new Set(['package.json', 'pyproject.toml', 'setup.py', 'tsconfig.json', 'readme.md']);
+// Session 18: `lib`/`mod` boost lib.rs and mod.rs (matched on the STEM, so lib.ts profits too —
+// deliberate: a `lib` stem is entry-shaped in any ecosystem).
+const ENTRY_BASENAMES = new Set(['index', 'main', 'cli', 'app', 'server', '__init__', 'lib', 'mod']);
+const MANIFEST_BASENAMES = new Set(['package.json', 'pyproject.toml', 'setup.py', 'tsconfig.json', 'readme.md', 'cargo.toml', 'go.mod', 'cmakelists.txt']);
 const PENALTY_SEGMENTS = new Set(['test', 'tests', '__tests__', 'spec', 'fixtures', 'fixture', 'vendor', 'third_party', 'testdata']);
 
 function baseName(relPath: string): string {
@@ -49,7 +51,9 @@ function isTestPath(relPath: string): boolean {
   const lower = relPath.toLowerCase();
   if (lower.split('/').some((seg) => PENALTY_SEGMENTS.has(seg))) return true;
   const base = baseName(lower);
-  return base.includes('.test.') || base.includes('.spec.') || base.startsWith('test_');
+  // `_test.go` is Go's test convention (Session 18) — a sibling of production code, so no
+  // directory segment ever catches it.
+  return base.includes('.test.') || base.includes('.spec.') || base.startsWith('test_') || base.endsWith('_test.go');
 }
 
 function structuralFor(relPath: string, handle: { inventory: Inventory; index: RetrievalIndex; graph: ImportGraph }, maxPr: number, dirty: ReadonlySet<string>): { score: number; signals: string[] } {
