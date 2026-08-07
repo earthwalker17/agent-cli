@@ -120,7 +120,7 @@ describe('retrieve — output', () => {
   it('omits secret-named hits (config secretPatterns respected) and never excerpts them', async () => {
     const handle = makeHandle({ 'notes/private-stuff.ts': 'export const apiThing = 1;\n', 'src/api.ts': 'export const apiMain = 2;\n' });
     const tool = createRetrieveTool(handle);
-    const rules = { protectedPaths: [], secretPatterns: ['private-'], envExcludePatterns: [] };
+    const rules = { protectedPaths: [], secretPatterns: ['private-'], envExcludePatterns: [], researchBlockedDomains: [] };
     const r = await tool.execute({ query: 'api' }, { ...ctx, rules });
     expect(r.output).not.toContain('private-stuff');
     expect(r.output).toContain('secret-named file(s) omitted');

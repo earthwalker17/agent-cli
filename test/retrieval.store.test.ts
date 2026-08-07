@@ -181,7 +181,7 @@ describe('loadOrBuildIndex', () => {
       root: ws,
       inventory: inv,
       head: null,
-      rules: { protectedPaths: [], secretPatterns: ['ok.'], envExcludePatterns: [] },
+      rules: { protectedPaths: [], secretPatterns: ['ok.'], envExcludePatterns: [], researchBlockedDomains: [] },
     });
     expect(r2.index.entries['ok.ts']).toBeUndefined();
   });

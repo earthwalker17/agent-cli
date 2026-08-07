@@ -32,6 +32,14 @@ const narrowing = {
   secretPatterns: z.array(z.string().min(1).max(100)).max(64).optional(),
   /** LITERAL name substrings dropped from child-process environments (narrowing; the core floor stays). */
   envExcludePatterns: z.array(z.string().min(1).max(100)).max(64).optional(),
+  /**
+   * Domains web research may never reach (Session 19). Narrowing, like everything else here —
+   * and note what is deliberately ABSENT: there is no allowed-domains counterpart. A permit list
+   * would be a widening knob, and the whole point of this schema is that it structurally cannot
+   * express one. Available in BOTH layers: a repository has a legitimate interest in saying
+   * "never send anything about this project to that host".
+   */
+  researchBlockedDomains: z.array(z.string().min(1).max(253)).max(256).optional(),
 };
 
 const UserConfigSchema = z
@@ -104,6 +112,9 @@ export function loadConfig(stateRoot: string, workspaceRoot: string): ResolvedCo
     ),
     envExcludePatterns: [...(user?.data.envExcludePatterns ?? []), ...(ws?.data.envExcludePatterns ?? [])].map((s) =>
       s.toLowerCase(),
+    ),
+    researchBlockedDomains: [...(user?.data.researchBlockedDomains ?? []), ...(ws?.data.researchBlockedDomains ?? [])].map((s) =>
+      s.trim().toLowerCase(),
     ),
   };
 

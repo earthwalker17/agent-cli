@@ -149,16 +149,11 @@ export function hostOf(url: string): string {
 }
 
 /**
- * Whether `host` falls under `pattern` for denylist purposes. Suffix matching respects label
- * boundaries, so `evil.com` blocks `evil.com` and `www.evil.com` but never `notevil.com`.
- * Case-insensitive; a leading dot in the pattern is tolerated.
+ * Denylist matching. Re-exported from `shared/domain.ts` rather than reimplemented: the policy
+ * engine enforces the same denylist and must not import a workflow pack, so the predicate lives
+ * one layer down where both can reach it. Two copies of this would eventually disagree.
  */
-export function domainMatches(host: string, pattern: string): boolean {
-  const h = host.toLowerCase().replace(/\.$/, '');
-  const p = pattern.toLowerCase().replace(/^\./, '').replace(/\.$/, '');
-  if (p === '') return false;
-  return h === p || h.endsWith(`.${p}`);
-}
+export { domainMatches } from '../shared/domain.js';
 
 /**
  * Build a display-safe refusal record. The URL is sanitized because it failed validation.

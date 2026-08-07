@@ -44,6 +44,13 @@ export interface PolicyRules {
   secretPatterns: string[];
   /** Extra lowercase name substrings dropped from child-process environments (cannot drop the core floor). */
   envExcludePatterns: string[];
+  /**
+   * Domains web research may never reach (Session 19). Narrowing only, in both directions that
+   * matter: there is deliberately no permit-list counterpart, and a model-supplied include list
+   * can never override an entry here. Matching respects label boundaries, so `evil.com` covers
+   * `www.evil.com` but never `notevil.com`.
+   */
+  researchBlockedDomains: string[];
 }
 
 /**
@@ -338,6 +345,78 @@ export type ArtifactEvidence =
       warnings: string[];
     };
 
+/** One recorded research finding: a claim, the sources behind it, and how well they agree. */
+export interface ResearchNote {
+  /** Assigned at CAPTURE (`${childSessionId}#${ordinal}`) — the child id does not exist earlier. */
+  noteId: string;
+  /** What was learned, as one falsifiable statement. */
+  claim: string;
+  /** The URLs the claim rests on. At least one; a claim with no source is not a finding. */
+  sources: string[];
+  /**
+   * Whether independent sources agree. `single-source` is not a failure — it is a disclosure, and
+   * a reader deciding how much weight to put on a claim needs it more than a confidence word.
+   */
+  corroboration: 'corroborated' | 'single-source' | 'sources-disagree';
+  confidence: 'high' | 'medium' | 'low';
+  /** Why this matters to the delegated task — the filter that keeps notes from becoming a dump. */
+  relevance: string;
+  /** ISO date the sources were retrieved. Research is perishable and must say when it was picked. */
+  retrievedAt: string;
+}
+
+/**
+ * Structured facts about bounded external reads (Session 19), reported through
+ * `ToolContext.reportResearch`. Same callId-binding contract as every other channel: a tool can
+ * only produce evidence for its own call, because the runtime — not the tool — stamps the id.
+ *
+ * `usage` exists for one reason worth stating: a researcher's searches happen in a CHILD session
+ * with its own log, so the parent's event stream would otherwise show a research budget that
+ * silently refilled on every resume. The delegate captures one usage record per task into the
+ * PARENT log so the budget can be rebuilt from events.
+ */
+export type ResearchEvidence =
+  | {
+      kind: 'searched';
+      provider: string;
+      /** The query verbatim — the text that actually left the machine. */
+      query: string;
+      resultCount: number;
+      /** Hosts of the admitted results, de-duplicated: the origins that reached a context. */
+      hosts: string[];
+      /** Sources the harness refused after the provider returned them, with reasons. */
+      refused: { url: string; reason: string }[];
+      credits: number;
+      contentChars: number;
+      durationMs: number;
+      requestId?: string;
+    }
+  | {
+      kind: 'extracted';
+      provider: string;
+      urls: string[];
+      pageCount: number;
+      /** URLs the PROVIDER could not retrieve — distinct from a harness refusal. */
+      failed: { url: string; reason: string }[];
+      credits: number;
+      contentChars: number;
+      durationMs: number;
+      requestId?: string;
+    }
+  | {
+      kind: 'findings';
+      childSessionId: string;
+      notes: ResearchNote[];
+    }
+  | {
+      kind: 'usage';
+      childSessionId: string;
+      searches: number;
+      extracts: number;
+      credits: number;
+      contentChars: number;
+    };
+
 /**
  * Typed failure classes (Session 12) — the vocabulary the recovery catalogue, the repair ledger,
  * the DAG gate, and the report all key on. Classification happens BEFORE any repair is planned;
@@ -451,13 +530,21 @@ export type ReviewEvidence = {
  * this in `runtime/roles.ts`. `decide()` consults THIS table and fails closed on any role that
  * is not in it; 'mutating-worktree' roles additionally require worktree isolation to exist.
  */
-export type SubagentRoleName = 'explorer' | 'planner' | 'reviewer' | 'executor';
-export type SubagentRoleAccess = 'read-only' | 'mutating-worktree';
+export type SubagentRoleName = 'explorer' | 'planner' | 'reviewer' | 'executor' | 'researcher';
+/**
+ * What a role may REACH. 'read-only' and 'mutating-worktree' are the workspace axis;
+ * 'read-only-external' (Session 19) adds the network axis to a role that is still read-only in
+ * the workspace. It is a third value rather than a boolean flag because the engine's ordering is
+ * a total order over strictness — mutating beats external beats read-only — and a flag would let
+ * a future role be both without anyone deciding which ask wins.
+ */
+export type SubagentRoleAccess = 'read-only' | 'read-only-external' | 'mutating-worktree';
 export const SUBAGENT_ROLES: Record<SubagentRoleName, { access: SubagentRoleAccess }> = {
   explorer: { access: 'read-only' },
   planner: { access: 'read-only' },
   reviewer: { access: 'read-only' },
   executor: { access: 'mutating-worktree' },
+  researcher: { access: 'read-only-external' },
 };
 /** Access class for a role name, or undefined when the role is unknown (⇒ deny, fail closed). */
 export function subagentRoleAccess(role: string): SubagentRoleAccess | undefined {
@@ -643,6 +730,20 @@ export interface ToolContext {
   reportBrowser?: (e: BrowserFlowEvidence) => void;
   /** Evidence channel for document-artifact facts (Session 17); persisted under this call's id. */
   reportArtifact?: (e: ArtifactEvidence) => void;
+  reportResearch?: (e: ResearchEvidence) => void;
+  /**
+   * Present only for SUBAGENT child sessions (Session 19): the runtime's own record of who spawned
+   * this session and as what role. Set by `startSession` from `StartOptions.lineage`, the same
+   * value that lands on `session.started` — so it is runtime state, not tool state and not model
+   * input, and a child cannot claim a role it was not started as.
+   *
+   * The policy engine reads it to answer one question: is this call happening inside a subagent
+   * whose SPAWN the engine already gated? That is what lets a researcher child search without an
+   * approver attached — read-only roles auto-deny, so an ask inside one is a refusal, not a
+   * prompt. The honest phrasing of the resulting rule is "the spawn was allowed", never "the
+   * human approved": under --dangerously-allow-all no human approved anything.
+   */
+  lineage?: { parentSessionId: string; role: string };
   /**
    * The execution sandbox for this call. `enforced` tells the policy engine whether a genuine OS
    * boundary is active (a precondition for auto-running a command); a shell tool applies `wrap` to
@@ -770,6 +871,66 @@ export interface ArtifactFact {
   renderedWithEmbeddedImages?: boolean;
 }
 
+/**
+ * The policy-visible shape of one bounded external-read call (Session 19). See `Tool.research`
+ * for why this needs its own branch rather than riding any existing one.
+ *
+ * Everything here is HARNESS-COMPOSED, exactly like `ResolvedCheckFact.command`: the tool
+ * classifies the model's raw input into targets and bounds, and the engine then decides over that
+ * declaration. The model never authors a field of this object.
+ */
+export interface ResearchFact {
+  kind: 'search' | 'extract';
+  /** The single host this call contacts. Named in the decision reason and the approval prompt. */
+  providerHost: string;
+  /**
+   * 'search' only: the query VERBATIM. This is the text that leaves the machine, so the approval
+   * prompt must show it — a human consenting to "web_search" without seeing the query is
+   * consenting to nothing (`describeCall`'s existing lesson, session.ts).
+   */
+  query?: string;
+  /**
+   * 'search' only: domains the call narrows to or excludes. Checked against the operator's
+   * research denylist, which no model-chosen include list may override.
+   */
+  domains?: readonly string[];
+  /** 'extract' only: one entry per requested URL, already classified by the tool. */
+  targets?: readonly ResearchTarget[];
+  /** The hard per-call bounds this call will obey; rendered verbatim into the approval detail. */
+  bounds: ResearchBounds;
+  /**
+   * Why the SESSION research budget cannot admit this call, when it cannot. Pure over the shared
+   * in-memory counter (the `browser.readyPreviews` pattern — memory flags, never I/O). The engine
+   * denies rather than letting a tool decide to overspend.
+   */
+  budgetExhausted?: string;
+  /** Remaining session allowance, so an approval prompt states what `[s]` is actually bounded by. */
+  budgetRemaining?: string;
+}
+
+export interface ResearchTarget {
+  /** The URL as the model supplied it, already sanitized for display. */
+  url: string;
+  /** The hostname, present only when the URL resolved to a usable public host. */
+  host?: string;
+  /**
+   * Why this URL is not a citable source. Any refusal denies the WHOLE call: silently dropping
+   * one URL from a batch would let a model learn nothing from naming an internal host, and a
+   * partial success is harder to read than an explicit failure naming the offender.
+   */
+  refusedReason?: string;
+}
+
+export interface ResearchBounds {
+  /** 'search' only: how many sources may come back. */
+  maxResults?: number;
+  /** Ceiling on retrieved characters admitted into any context by this call. */
+  maxContentChars: number;
+  timeoutMs: number;
+  /** Estimated provider credits, ceiling-rounded — a budget must never under-charge itself. */
+  credits: number;
+}
+
 export interface Tool<I = unknown> {
   name: string;
   /** Sent to the model. */
@@ -873,6 +1034,28 @@ export interface Tool<I = unknown> {
    * is a PATH claim, execute compares the file's sha against the recorded artifact.
    */
   artifact?(input: I): ArtifactFact;
+  /**
+   * Declares a BOUNDED EXTERNAL READ (Session 19) — the only capability in this harness that
+   * sends anything to a third party at the model's request.
+   *
+   * It needs its own fail-closed branch for the S6-trap reason every fact above it documents: a
+   * command-less, mutation-less tool auto-allows as `observe` with the recorded reason
+   * "read-only workspace access", which for a call that ships a model-authored query to a remote
+   * service is not merely imprecise — it is false in the one direction that matters. Reading is
+   * not the consequence here; SENDING is. Query text can carry whatever the conversation
+   * contained, and the network is the one boundary the sandbox explicitly does not confine.
+   *
+   * The consent model is the budget. A human approving research approves a bounded mission, not
+   * an open line: `bounds` states the per-call ceilings and `budgetRemaining` states the session
+   * ceilings, and both are rendered into the prompt. `budgetExhausted` is a DENY, not advice —
+   * spending is the engine's decision, never the tool's.
+   *
+   * MUST be pure: targets and bounds come from input, budget fields from an in-memory counter
+   * (never the filesystem, never a probe). Never combinable with any other fact; a throw is a
+   * deny. The tool re-enforces every bound at execute, because a decision is a claim about what
+   * WILL happen and only execute knows what did.
+   */
+  research?(input: I): ResearchFact;
   /**
    * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
    * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the

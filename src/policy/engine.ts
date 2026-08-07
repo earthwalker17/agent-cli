@@ -1,8 +1,9 @@
 import path from 'node:path';
 import { SETUP_ACTIONS, subagentRoleAccess } from '../types.js';
-import type { ActionClass, ArtifactFact, MutationPlan, PolicyDecision, ResolvedCheckFact, Tool, ToolContext } from '../types.js';
+import type { ActionClass, ArtifactFact, MutationPlan, PolicyDecision, ResearchFact, ResolvedCheckFact, Tool, ToolContext } from '../types.js';
 import { validatePath } from './paths.js';
 import { PathError } from '../shared/errors.js';
+import { domainMatches as hostUnder } from '../shared/domain.js';
 import { caseFold } from '../shared/pathutil.js';
 import { sha256 } from '../shared/hash.js';
 import { analyzeCommand } from './command-review.js';
@@ -28,6 +29,43 @@ import { analyzeCommand } from './command-review.js';
  * closed). An approved command still runs with full user privilege and is neither snapshotted
  * nor undoable — approval is consent, never containment.
  */
+
+/**
+ * Every optional policy FACT a tool may declare. Exactly one may be present: each fact gets its
+ * own fail-closed branch, and a tool declaring two would be gated by whichever branch happens to
+ * run first — a decision record that describes one consequence while another one executes.
+ *
+ * Derived from ONE table on purpose (Session 19). Until now each of the six branches carried a
+ * hand-written list of the other five, which is fail-OPEN by construction: a seventh fact is
+ * absent from all six until someone remembers to add it, and nothing fails if they do not. With
+ * the table, adding a member to `FactKind` breaks the `FACT_LABELS` record at compile time.
+ */
+const FACT_KINDS = ['command', 'delegates', 'planDoc', 'check', 'browser', 'evidenceRead', 'artifact', 'research'] as const;
+type FactKind = (typeof FACT_KINDS)[number];
+
+const FACT_LABELS: Record<FactKind, string> = {
+  command: 'a shell command',
+  delegates: 'delegation',
+  planDoc: 'a plan-document write',
+  check: 'typed checks',
+  browser: 'a browser flow',
+  evidenceRead: 'an evidence read',
+  artifact: 'a document-artifact operation',
+  research: 'a bounded external read',
+};
+
+/** The facts this tool declares OTHER than `self`. Non-empty means a conflicting contract. */
+function otherFacts<I>(tool: Tool<I>, self: FactKind): FactKind[] {
+  return FACT_KINDS.filter((k) => k !== self && tool[k] !== undefined);
+}
+
+/** The deny reason for a tool that declared more than one fact. Names both sides, always. */
+function conflictReason(self: FactKind, others: readonly FactKind[]): string {
+  return (
+    `a tool may declare ${FACT_LABELS[self]} or ${others.map((k) => FACT_LABELS[k]).join(' or ')} — never a combination ` +
+    `(each is gated by its own rule, and a call cannot be two consequences at once)`
+  );
+}
 
 // Classes that may be carried by a session grant. Never `destructive` (no-undo) or `reversible`.
 const GRANTABLE: readonly ActionClass[] = ['sensitive', 'external'];
@@ -193,13 +231,9 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'task.invalid-contract', `delegates() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
-      return decision(
-        'sensitive',
-        'deny',
-        'task.conflicting-contract',
-        'a tool may declare delegation, a shell command, a plan-document write, typed checks, a browser flow, an evidence read, or a document-artifact operation — never a combination',
-      );
+    const conflicts = otherFacts(tool, 'delegates');
+    if (conflicts.length > 0) {
+      return decision('sensitive', 'deny', 'task.conflicting-contract', conflictReason('delegates', conflicts));
     }
     if (delegation.roles.length === 0) {
       return decision('sensitive', 'deny', 'task.empty-group', 'a delegation must name at least one role');
@@ -227,6 +261,30 @@ export function decide<I>(
         `spawns MUTATING subagent(s) in isolated git worktree(s); their approvals forward to you, their changes are captured for review and enter the workspace only through apply_task_changes`,
       );
     }
+    // A researcher is read-only in the WORKSPACE and external on the network — two different
+    // authorities, and only the first is covered by the read-only allow below. Spawning one must
+    // therefore ask, because this ask IS the consent for every search the child will run: the
+    // child has no approver of its own (read-only roles auto-deny), so if the spawn does not
+    // carry the authority, nothing does. Placed AFTER the mutating check on purpose — a group
+    // holding both roles is governed by the stricter one, and a stored `delegate_task::external`
+    // grant must never satisfy a mutating spawn (pinned by test).
+    const external = delegation.roles.find((r) => subagentRoleAccess(r) === 'read-only-external');
+    if (external !== undefined) {
+      return applyGrant(
+        decision(
+          'external',
+          'ask',
+          'task.research-role',
+          'spawns a READ-ONLY RESEARCH subagent: it can reach the web through the bounded research provider and can ' +
+            'read this workspace, but it holds no tool that writes, runs, or delegates anything. Its searches spend the ' +
+            'SAME session research budget shown at the first research approval, and every query and source is recorded. ' +
+            'What it returns is source-backed context, never verification',
+          { noUndo: true },
+        ),
+        tool,
+        grants,
+      );
+    }
     return decision(
       'observe',
       'allow',
@@ -247,13 +305,9 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'plan.invalid-contract', `planDoc() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
-      return decision(
-        'sensitive',
-        'deny',
-        'plan.conflicting-contract',
-        'a tool may declare a plan-document write, a shell command, typed checks, a browser flow, an evidence read, or a document-artifact operation — never a combination',
-      );
+    const conflicts = otherFacts(tool, 'planDoc');
+    if (conflicts.length > 0) {
+      return decision('sensitive', 'deny', 'plan.conflicting-contract', conflictReason('planDoc', conflicts));
     }
     if (planDoc.action !== 'update') {
       return decision('sensitive', 'deny', 'plan.unknown-action', `unknown plan action '${String(planDoc.action)}'`);
@@ -285,13 +339,9 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'check.invalid-contract', `check() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
-      return decision(
-        'sensitive',
-        'deny',
-        'check.conflicting-contract',
-        'a tool may declare typed checks, a shell command, delegation, a plan-document write, a browser flow, an evidence read, or a document-artifact operation — never a combination',
-      );
+    const conflicts = otherFacts(tool, 'check');
+    if (conflicts.length > 0) {
+      return decision('sensitive', 'deny', 'check.conflicting-contract', conflictReason('check', conflicts));
     }
     if (fact.resolved.length === 0) {
       // Nothing resolved ⇒ nothing to run ⇒ nothing to consent to — but the RECORD must not
@@ -426,13 +476,9 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'browser.invalid-contract', `browser() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.evidenceRead !== undefined || tool.artifact !== undefined) {
-      return decision(
-        'sensitive',
-        'deny',
-        'browser.conflicting-contract',
-        'a tool may declare a browser flow, typed checks, a shell command, delegation, a plan-document write, an evidence read, or a document-artifact operation — never a combination',
-      );
+    const conflicts = otherFacts(tool, 'browser');
+    if (conflicts.length > 0) {
+      return decision('sensitive', 'deny', 'browser.conflicting-contract', conflictReason('browser', conflicts));
     }
     if (!fact.previewBound) {
       const ready = fact.readyPreviews ?? [];
@@ -479,13 +525,9 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'evidence.invalid-contract', `evidenceRead() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.artifact !== undefined) {
-      return decision(
-        'sensitive',
-        'deny',
-        'evidence.conflicting-contract',
-        'a tool may declare an evidence read, typed checks, a shell command, delegation, a plan-document write, a browser flow, or a document-artifact operation — never a combination',
-      );
+    const conflicts = otherFacts(tool, 'evidenceRead');
+    if (conflicts.length > 0) {
+      return decision('sensitive', 'deny', 'evidence.conflicting-contract', conflictReason('evidenceRead', conflicts));
     }
     // An evidence READER must not write: a declared mutation plan (or an undeclarable one)
     // through this branch would bypass path validation and snapshots entirely.
@@ -538,13 +580,9 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'artifact.invalid-contract', `artifact() threw: ${(e as Error).message}`);
     }
-    if (tool.command !== undefined || tool.delegates !== undefined || tool.planDoc !== undefined || tool.check !== undefined || tool.browser !== undefined || tool.evidenceRead !== undefined) {
-      return decision(
-        'sensitive',
-        'deny',
-        'artifact.conflicting-contract',
-        'a tool may declare a document-artifact operation, typed checks, a shell command, delegation, a plan-document write, a browser flow, or an evidence read — never a combination',
-      );
+    const conflicts = otherFacts(tool, 'artifact');
+    if (conflicts.length > 0) {
+      return decision('sensitive', 'deny', 'artifact.conflicting-contract', conflictReason('artifact', conflicts));
     }
     let plan: MutationPlan | null;
     try {
@@ -664,6 +702,142 @@ export function decide<I>(
           ', in the headless system browser (network access blocked, script evaluation disabled in the PDF engine); the ' +
           'rendered pixels are shown to the model and stored as session evidence; a session-scope answer covers further ' +
           'documents this session',
+        { noUndo: true },
+      ),
+      tool,
+      grants,
+    );
+  }
+
+  // 0g. Bounded external read (Session 19) → explicit fail-closed branch, before the command
+  //     branch and every fall-through.
+  //
+  //     Why it cannot ride an existing branch: a research call is command-less and mutation-less,
+  //     so it would auto-allow as `observe` with the reason "read-only workspace access". That
+  //     sentence is not merely imprecise for a call that ships model-authored text to a third
+  //     party — it is false about the only consequence that matters. Reading is not the risk;
+  //     SENDING is, and the network is the one boundary the OS sandbox explicitly does not
+  //     confine (see sandboxRuleLines).
+  //
+  //     Consent model — the BUDGET is the consent. The first call asks, `external` and grantable,
+  //     with the query verbatim and both the per-call and per-session ceilings in the prompt; a
+  //     session grant then means "the bounded research capability is authorized this session",
+  //     bounded by a real shared counter rather than by good intentions. Inside a researcher
+  //     subagent there is no approver at all (read-only roles auto-deny), so the authority comes
+  //     from the SPAWN the engine already gated — stated as "the spawn was allowed", never "the
+  //     human approved", because under --dangerously-allow-all no human approved anything.
+  if (tool.research !== undefined) {
+    let fact: ResearchFact;
+    try {
+      fact = tool.research(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'research.invalid-contract', `research() threw: ${(e as Error).message}`);
+    }
+    const conflicts = otherFacts(tool, 'research');
+    if (conflicts.length > 0) {
+      return decision('sensitive', 'deny', 'research.conflicting-contract', conflictReason('research', conflicts));
+    }
+    // A research tool writes nothing. Findings reach the log through the evidence channel, whose
+    // callId the runtime binds — never through a mutation plan this branch did not validate.
+    let plan: MutationPlan | null;
+    try {
+      plan = tool.mutates(input, ctx);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'research.invalid-contract', `mutates() threw: ${(e as Error).message}`);
+    }
+    if (plan === null || plan.paths.length > 0) {
+      return decision('sensitive', 'deny', 'research.mutating-contract', 'a research tool must declare an empty mutation plan');
+    }
+
+    const blocked = ctx.rules?.researchBlockedDomains ?? [];
+    const blockedBy = (host: string): string | undefined => blocked.find((d) => hostUnder(host, d));
+
+    if (fact.kind === 'search') {
+      const query = (fact.query ?? '').trim();
+      if (query === '') {
+        return decision('sensitive', 'deny', 'research.empty-request', 'a search must carry a non-empty query');
+      }
+      for (const d of fact.domains ?? []) {
+        const hit = blockedBy(d);
+        if (hit !== undefined) {
+          return decision(
+            'sensitive',
+            'deny',
+            'research.blocked-domain',
+            `'${d}' is under '${hit}', which this workspace's configuration forbids research from reaching; a model-chosen domain list never overrides it`,
+          );
+        }
+      }
+    } else {
+      const targets = fact.targets ?? [];
+      if (targets.length === 0) {
+        return decision('sensitive', 'deny', 'research.empty-request', 'an extract must name at least one URL');
+      }
+      // One bad URL denies the whole call. A partial success would teach a model nothing from
+      // naming an internal host, and "3 of 5 were fetched" is harder to act on than a refusal
+      // that names the offender.
+      const bad = targets.find((t) => t.refusedReason !== undefined);
+      if (bad !== undefined) {
+        return decision(
+          'sensitive',
+          'deny',
+          'research.unusable-target',
+          `'${bad.url}' is not a citable public source (${bad.refusedReason ?? 'refused'}); the whole call is refused — re-issue it without that URL`,
+        );
+      }
+      for (const t of targets) {
+        const hit = t.host !== undefined ? blockedBy(t.host) : undefined;
+        if (hit !== undefined) {
+          return decision(
+            'sensitive',
+            'deny',
+            'research.blocked-domain',
+            `'${t.url}' is under '${hit}', which this workspace's configuration forbids research from reaching`,
+          );
+        }
+      }
+    }
+
+    if (fact.budgetExhausted !== undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'research.budget-exhausted',
+        `the session research budget is spent (${fact.budgetExhausted}); further external reads are refused for this session`,
+      );
+    }
+
+    const shape =
+      fact.kind === 'search'
+        ? `sends the query verbatim to ${fact.providerHost} and returns at most ${String(fact.bounds.maxResults ?? 0)} source snippet(s)`
+        : `asks ${fact.providerHost} to fetch ${String((fact.targets ?? []).length)} page(s) and returns their text`;
+    const cost =
+      `bounds: ≤${String(fact.bounds.maxContentChars)} retrieved chars, ${String(fact.bounds.timeoutMs)} ms, ` +
+      `~${String(fact.bounds.credits)} provider credit(s)`;
+
+    // Inside a researcher child the spawn already carried this authority through the engine, and
+    // there is no approver to ask (read-only roles auto-deny — an ask here is a refusal, not a
+    // prompt). Every bound above still applies, and every call is still recorded.
+    if (ctx.lineage?.role === 'researcher') {
+      return decision(
+        'external',
+        'allow',
+        'research.delegated-role',
+        `${shape}; runs inside a research subagent whose spawn this engine allowed, under the same session budget as the parent (${cost})`,
+        { noUndo: true },
+      );
+    }
+
+    return applyGrant(
+      decision(
+        'external',
+        'ask',
+        'research.approval-required',
+        `${shape}. The text above LEAVES THIS MACHINE. Retrieved content is untrusted data, is never treated as ` +
+          `instructions, and never verifies anything. ${cost}` +
+          (fact.budgetRemaining !== undefined
+            ? `; a session-scope answer covers further research this session within the remaining budget (${fact.budgetRemaining})`
+            : ''),
         { noUndo: true },
       ),
       tool,

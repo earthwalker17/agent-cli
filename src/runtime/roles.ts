@@ -3,6 +3,7 @@ import {
   buildExecutorSystemPrompt,
   buildExplorerSystemPrompt,
   buildPlannerSystemPrompt,
+  buildResearcherSystemPrompt,
   buildReviewerSystemPrompt,
 } from '../workspace/system-prompt.js';
 import type { WorkspaceMap } from '../workspace/map.js';
@@ -26,6 +27,14 @@ export interface RolePromptArgs {
   agentMd?: { text: string; truncated: boolean } | undefined;
   /** Session 10: whether this child's registry actually includes the retrieve tool. */
   retrieve?: boolean | undefined;
+  /**
+   * Session 19: whether this child's registry actually includes the research tools. Same reason
+   * `retrieve` is per-instance — `childTools` drops an instance the role did not name or that the
+   * assembly could not build (no credential configured), and the prompt must describe the
+   * registry the child really got, not the one the contract hoped for.
+   */
+  webSearch?: boolean | undefined;
+  webExtract?: boolean | undefined;
 }
 
 export interface RoleContract {
@@ -55,6 +64,17 @@ const READ_ONLY_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 're
  * findings are what the review gate reads; prose stays narration.
  */
 const REVIEWER_TOOLS = [...READ_ONLY_TOOLS, 'report_finding'] as const;
+/**
+ * 'web_search' / 'web_extract' / 'record_source' (Session 19) follow the same named-instance
+ * discipline as 'retrieve' and 'report_finding': ONLY the researcher contract names them, and the
+ * runner admits each from the research factory iff named AND structurally free of every fact but
+ * `research`. `record_source` is the researcher's only findings channel — recorded notes are what
+ * the parent reads as evidence; prose stays narration.
+ *
+ * The workspace read tools are kept deliberately: research that ignores what the project actually
+ * pins produces generic answers. The point is to compare the two.
+ */
+const RESEARCHER_TOOLS = [...READ_ONLY_TOOLS, 'web_search', 'web_extract', 'record_source'] as const;
 const EXECUTOR_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 'write_file', 'edit_file'] as const;
 const READ_ONLY_BUDGET: TaskBudget = { maxSteps: 15, timeoutMs: 300_000, maxOutputTokens: 30_000 };
 /**
@@ -65,6 +85,14 @@ const READ_ONLY_BUDGET: TaskBudget = { maxSteps: 15, timeoutMs: 300_000, maxOutp
  * 'budget-steps', and a round whose every lens died cannot qualify no matter what it recorded.
  */
 const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 480_000, maxOutputTokens: 30_000 };
+/**
+ * Session 19: research is interleaved like review (search → read → corroborate → record → search
+ * again), so it needs more than the 15-step read-only budget. The wall clock is generous relative
+ * to the step count because a research step includes provider latency the child cannot control,
+ * while the step count stays modest on purpose: a bounded question should not become a crawl, and
+ * the SESSION research budget is the harder ceiling anyway.
+ */
+const RESEARCHER_BUDGET: TaskBudget = { maxSteps: 20, timeoutMs: 420_000, maxOutputTokens: 30_000 };
 
 /**
  * Executor budget is larger: mutating work takes more steps, and time spent WAITING on a
@@ -98,6 +126,22 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
     budget: REVIEWER_BUDGET,
     approvals: 'auto-deny',
     buildPrompt: (a) => buildReviewerSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve),
+  },
+  /**
+   * Session 19. Read-only in the workspace, external on the network — the only role that can
+   * reach outside this machine, and the reason `read-only-external` exists as its own access
+   * class. Its budget sits between the explorer's and the reviewer's: research is interleaved
+   * work (search, read, corroborate, record, search again) like a review is, but a bounded
+   * question should not become an open-ended crawl, and provider latency spends wall clock the
+   * child cannot control — hence the generous timeout against a modest step count.
+   */
+  researcher: {
+    name: 'researcher',
+    access: 'read-only-external',
+    toolNames: RESEARCHER_TOOLS,
+    budget: RESEARCHER_BUDGET,
+    approvals: 'auto-deny',
+    buildPrompt: (a) => buildResearcherSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve, a.webExtract),
   },
   executor: {
     name: 'executor',
