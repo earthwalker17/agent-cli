@@ -7,6 +7,75 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.5.0] — 2026-08-08
+
+**Source-backed web research.** Until now the harness had no network capability at all: it could
+write code against an API that had moved, from recall, and be sure of itself. It can now search the
+public web as an explicit, budgeted, read-only capability — and, more usefully, send a dedicated
+**researcher subagent** that reads pages in its own context and hands back short claims with their
+sources, so the raw material never enters the main conversation.
+
+### Added
+
+- **`web_search`** — bounded search returning ranked source snippets with URLs. Available to the
+  main agent for a single narrow lookup.
+- **A `researcher` subagent role** (`delegate_task role: "researcher"`, or the `@research` sigil) —
+  read-only in the workspace, external on the network, holding **no tool that writes, runs, or
+  delegates**. It also gets `web_extract` (full page text) and `record_source`, neither of which
+  the main agent ever holds.
+- **`record_source`**, the researcher's only structured findings channel: one falsifiable claim,
+  the URLs behind it, and a corroboration verdict. It **refuses** `corroborated` backed by a single
+  distinct source, and stamps the retrieval date from the harness clock rather than the model.
+- **`@search`** (one bounded lookup) and **`@research`** (delegate a researcher) input sigils, and
+  **`/research`** — a privacy surface first: every query this session sent, the sources that
+  answered, the recorded findings, and what is left of the budget.
+- A `researchBlockedDomains` narrowing knob in both config layers. Note what is deliberately
+  absent: no allowed-domains counterpart — a permit list is widening, and the schema structurally
+  cannot express one.
+- Provider: **Tavily** (`TAVILY_API_KEY`, env-only). No credential means the tools are not
+  registered and the system prompt says nothing about them.
+
+### Security and safety
+
+- Network is a **seventh policy fact** with its own fail-closed branch, before the command branch
+  and every fall-through. A research call is command-less and mutation-less, so without it the
+  decision record would have read "read-only workspace access" for a call whose actual consequence
+  is sending model-authored text off the machine.
+- **The budget is the consent.** One session allowance (24 searches / 12 extracts / 80 provider
+  credits / 800k retrieved characters), shared by the main agent and every researcher, rebuilt from
+  events on resume so a restart cannot refill it. The approval prompt shows the query verbatim, the
+  per-call bounds, and what remains; `[s]` is worded as bounded by that budget, not by the session.
+- Retrieved content is neutralized at ingestion and rendered inside an explicit UNTRUSTED fence.
+  Documented honestly as a **mitigation, not a boundary** — the real containment is that a
+  researcher holds no tool that can act.
+- URLs are identifiers: non-http(s) schemes, embedded credentials, loopback/private/link-local
+  hosts, bare IP literals and over-long inputs are **refused**, not escaped. IDN hosts are flagged
+  rather than refused.
+- **Research is never verification.** It never marks a file CHECKED and never satisfies a plan gate.
+  Acceptance carries a caveat naming that the web was consulted, and a second naming findings that
+  rest on a single source or on sources that disagreed.
+- The egress claim is scoped precisely: *the research tools'* egress is one host. Not the harness's
+  — `npm view` is on the auto-run allowlist and the sandbox does not confine network.
+
+### Fixed
+
+- `childTools`' admissibility predicate was a hand-written deny-list, fail-open for every policy
+  fact invented after it was written — which is why `artifact` was missing from it. It is now an
+  exhaustive table that breaks the typecheck when a fact is added.
+- The six `conflicting-contract` guards each hand-listed the other five; they now derive from one
+  table.
+- The provider tool-naming rule had gone four names stale since 1.2.0 and was enforcing nothing
+  about `project_setup`, `read_document`, `render_document` or `inspect_pages`.
+
+### Known limits
+
+- `RESEARCH.md` (a durable curated research surface) is **not** in this release; ephemeral research
+  is bounded session evidence. It is planned alongside the Session 21 memory work.
+- A researcher subagent cannot see its own budget pressure — supervision notes reach the parent.
+  The per-task bounds compensate.
+- Live-proven on **Kimi K3** against the real Tavily API, one task. Other providers run the same
+  bounded loop but this capability has not been live-smoked on each.
+
 ## [1.4.0] — 2026-08-07
 
 **Polyglot repository intelligence and verification.** Before this release, an ecosystem the

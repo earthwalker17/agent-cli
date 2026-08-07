@@ -14,10 +14,11 @@ open-source project, not a staffed product, so please calibrate expectations acc
 
 | Version | Supported |
 | --- | --- |
-| 1.4.x | ✅ (current: 1.4.0) |
-| 1.3.x | ⚠️ security fixes only |
-| 1.2.x | ⚠️ security fixes only |
-| 1.1.x | ⚠️ security fixes only |
+| 1.5.x | ✅ (current: 1.5.0) |
+| 1.4.x | ⚠️ security fixes only |
+| 1.3.x | ❌ |
+| 1.2.x | ❌ |
+| 1.1.x | ❌ |
 | 1.0.x | ⚠️ security fixes only |
 | < 1.0 | ❌ (pre-release development versions) |
 

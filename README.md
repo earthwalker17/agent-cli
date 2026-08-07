@@ -47,6 +47,12 @@ What that means concretely:
   browser-printed PDF output, **parse-back validation of every artifact**, and page rasterization
   so a vision model judges the real pages — revision means editing the spec and re-rendering, and
   an artifact is a product that never counts as verification.
+- **Source-backed web research.** An explicit, budgeted, read-only path to the public web: one
+  bounded lookup for a narrow fact, or a **researcher subagent** that reads pages in its own
+  context and returns short claims with their sources, so raw pages never enter your conversation.
+  One session allowance shared by every researcher and rebuilt from the event log on resume, the
+  query shown verbatim before it is sent, retrieved content fenced as untrusted data — and research
+  that **never counts as verification**.
 - **Five model providers behind one runtime.** Anthropic, OpenAI, DeepSeek, Kimi (Moonshot) and
   GLM (Z.AI/Zhipu) through two genuinely different protocols, with a shipped **capability
   catalog** so differences degrade honestly instead of hiding behind a false
@@ -54,23 +60,26 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.3.0.** 1469 hermetic tests across 107 files (real-OS sandbox, real-repository git,
-> real browser flows, real PDF print + rasterization, adversarial-review suites) plus opt-in live
-> smokes. Proven live end-to-end across twelve recorded runs — newest: **the documents workflow in
-> a 21-minute Kimi K3 session** (one request → source notes read → a document spec authored →
-> DOCX+PDF rendered and parse-back validated → the model SEEING its own pages, judging the first
-> render too cramped, isolating the fix in a throwaway probe spec, and revising the spec → a
-> follow-up revision turn → `/accept` COMPLETE, validated post hoc 28/28 from persisted evidence
-> alone). Before it: **the full multi-project workflow in one 84-minute Kimi K3 session** (one natural-language request → plan → revision → sha-bound approval → `npm ci` in
-> both packages → migrate → seed → per-project typed checks incl. lint → parallel worktree
-> executors → integration → two dev servers at once → three passing browser flows → a three-lens
-> adversarial review that caught the seeded XSS → mid-session kill → resume → `/accept` COMPLETE,
-> validated post hoc 38/38 from persisted evidence alone). Before it: the full v1.0 demo, and
-> **all five providers exercised live through the real bounded tool loop** — 10/10 gated adapter
-> smokes plus two multi-provider sessions with each model writing its own file. No credential
-> appears anywhere in the evidence. This is an open, build-in-public engineering effort — see
-> `PROJECT.md` for the thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is
-> done, deferred, and next.
+> **Status: v1.5.0.** 1828 hermetic tests across 119 files (real-OS sandbox, real-repository git,
+> real browser flows, real PDF print + rasterization, hermetic HTTP wire pins, adversarial-review
+> suites) plus opt-in live smokes. Proven live end-to-end across fourteen recorded runs — newest:
+> **web research, as a controlled experiment**. The same task ran twice on Kimi K3 against the same
+> fixture, differing only in whether the research credential was present. The control implemented a
+> client from recall, typechecked green, and said *"moderately confident — not certain… a quick
+> check of docs.tavily.com would settle everything below"*. The proof's researcher subagent ran 14
+> searches and 3 page reads in its own context and recorded **7 corroborated findings with real
+> source URLs** — including the exact legacy trap the control had named as its top risk — and
+> honestly recorded what it could **not** establish. Read the narrow claim rather than the loud one:
+> research converted a plausible answer into a supported one, it did not rescue a wrong one
+> (`agent-cli-s19-live/DEMO.md`). Before it: **polyglot verification proven three ways** including
+> a before-capture of the defect it fixes; **the documents workflow in a 21-minute session** (the
+> model seeing its own too-cramped pages and revising the spec); **the full multi-project workflow
+> in one 84-minute session** (plan → sha-bound approval → installs → parallel worktree executors →
+> two dev servers → three browser flows → a review that caught a seeded XSS → kill → resume →
+> `/accept`, validated post hoc 38/38 from persisted evidence alone); and **all five providers
+> exercised live through the real bounded tool loop**. No credential appears anywhere in the
+> evidence. This is an open, build-in-public engineering effort — see `PROJECT.md` for the thesis,
+> `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is done, deferred, and next.
 
 ## Install
 
@@ -132,12 +141,15 @@ agent session 20260715-101730-5d56
   `/tasks` (the task graph + delegated subagents), `/cancel <ref>` (stop one task),
   `/checks` (what this project can verify and the latest evidence per kind),
   `/preview [stop <id>]` (managed dev servers), `/review` (the review gate's state),
+  `/research` (every web query this session sent, the sources that answered, and the budget left),
   `/provider [name [model]]` and `/model [id]` (list or switch provider/model mid-session —
   recorded, credential-free), `/accept [confirm]` (the completion boundary), `/report`, `/map`,
   `/quit`.
 - **`@plan <request>`** forces plan mode: the model investigates read-only, writes a
   persistent plan document, and waits — executor tasks stay blocked until `/plan approve`.
   **`@direct <request>`** forces the direct path for a request that needs no ceremony.
+- **`@search <question>`** forces one bounded web lookup; **`@research <question>`** delegates a
+  read-only research subagent that reads pages in its own context and returns sourced claims.
 - A running `run_command` IS interruptible: Ctrl+C tree-kills it (best effort, verified) and the
   kill is recorded as evidence — a killed command never reads as a passing check.
 - stdout carries only model text and requested artifacts; all status chrome goes to stderr, so
@@ -248,8 +260,9 @@ not what a process *can technically* do. Untrusted + non-interactive runs refuse
   `.agent-cli/`.
 
 Narrowing knobs: `protectedPaths` (extra write-deny roots), `secretPatterns` (literal lowercase
-basename substrings treated as secret-like), and `envExcludePatterns` (extra name substrings
-dropped from command-child environments). Config can only *restrict* the agent — there is no
+basename substrings treated as secret-like), `envExcludePatterns` (extra name substrings dropped
+from command-child environments), and `researchBlockedDomains` (domains web research may never
+reach — with no allowed-domains counterpart, because a permit list would be widening). Config can only *restrict* the agent — there is no
 allowlist field, no auto-approval field, and no way to relax the command gate or widen the sandbox.
 Unknown keys or invalid JSON are hard errors. CLI flags > user config > defaults; narrowing
 merges as a union across layers.
@@ -269,6 +282,7 @@ per-session tools the main agent (and only the main agent) receives:
 | `run_check` | Typed verification — the model names kinds, the harness resolves commands |
 | `project_setup` | Dependency install / migrate / seed — the model names an intent, the harness resolves the command from the lockfile or the project's own script |
 | `preview` | A managed dev-server process with recorded readiness, logs, and teardown |
+| `web_search` | Bounded web search returning source snippets with URLs — the ONE research tool the main agent holds |
 | `browser_flow` | Typed browser steps against a running preview; screenshots + traces |
 | `view_image` | Re-read an image this session recorded (browser screenshot or inspected page) |
 | `read_document` | DOCX / PPTX / PDF structure, text and metadata, with an honest coverage verdict |
@@ -373,6 +387,56 @@ DOCX bytes are. Editing pre-existing DOCX files, PPTX generation, footnotes, TOC
 changes, cell merges, and RTL/complex-script fidelity are **out of scope** — not partially
 supported.
 
+## Source-backed web research
+
+An agent working from recall writes code against APIs that have moved, and is confident about it.
+Agent CLI can go and check — as an explicit, budgeted, read-only capability.
+
+Two shapes, matched to size:
+
+- **`@search <question>`** — one bounded lookup. Returns ranked source snippets with URLs.
+- **`@research <question>`** — delegates a **researcher subagent**: read-only in your workspace,
+  external on the network, and holding *no tool that writes, runs, or delegates*. It searches,
+  reads the pages that matter **in its own context**, corroborates, and hands back short claims
+  with their sources. The raw pages never enter your conversation.
+
+The agent also reaches for either on its own when a request clearly needs current information.
+
+```
+⚠ approval required  [web research — queries LEAVE THIS MACHINE; read-only, nothing here is written]  web_search
+  web_search: "zod v4 json schema helper" → api.tavily.com
+    query (sent verbatim): zod v4 json schema helper
+    max results: 5
+    provider: api.tavily.com (the only research destination; a configured proxy still carries the connection)
+    bounds: ≤12000 retrieved chars · 20000 ms · ~1 credit(s)
+    session budget remaining: 23 search(es), 12 extract(s), 79 credit(s)
+  [y] allow once   [s] allow further research this session, within the session budget   [n] deny
+```
+
+**What bounds it.** One session allowance — 24 searches, 12 extracts, 80 provider credits, 800k
+retrieved characters — shared by the main agent and every researcher, and **rebuilt from the event
+log on resume** so restarting cannot refill it. The prompt shows the query verbatim before anything
+is sent, and `[s]` is bounded by that budget rather than by the session.
+
+**What it will not do.** Non-http(s) schemes, URLs with embedded credentials, loopback/private/
+link-local hosts and bare IP addresses are refused outright. `researchBlockedDomains` in either
+config layer is absolute — a model-chosen domain list can never override it. And **research never
+verifies anything**: it does not mark a file CHECKED and cannot satisfy a plan gate. A session
+accepted as complete after consulting the web says so, and says which findings rested on a single
+source or on sources that disagreed.
+
+**Retrieved content is untrusted.** It is neutralized on the way in and rendered inside an explicit
+UNTRUSTED fence telling the model it is data, never instructions. That is a *mitigation, not a
+boundary* — a persuasive page can still influence a model. What it cannot do is act: a researcher
+has nothing to act with.
+
+`/research` shows every query this session sent, which hosts answered, the findings with their
+sources and retrieval dates, and what is left of the budget.
+
+Setup: `export TAVILY_API_KEY=tvly-…` ([get a key](https://app.tavily.com)). Env-only, like every
+other credential here. Without it the research tools are simply not registered and the model is
+never told about them.
+
 ## Plan mode, agent teams, and project memory
 
 - **Plan mode** (`@plan …`, `/plan`): plans are persistent markdown documents (one per
@@ -449,6 +513,25 @@ Read this before trusting the harness with anything sensitive.
   fails, the mode is `none` (no enforcement) and **auto-run is disabled — every command asks**.
   Agent CLI never auto-runs a command with nothing enforcing the boundary, and never claims
   cross-platform parity it doesn't have.
+- **Web research SENDS text off this machine, and that is the consequence to weigh.** Nothing
+  executes and nothing here changes; a query and (for a page read) a URL go out to one
+  destination, and untrusted text comes back. The prompt shows the query verbatim before it is
+  sent, names the destination, and states the per-call and session bounds. `[s]` is bounded by
+  the session research budget rather than by the session. A configured proxy still carries the
+  connection — the claim is about the destination, not the wire — and page retrieval happens on
+  the provider's infrastructure, so the *research tools'* egress is one host, which is **not**
+  the same as the harness's (`npm view` is on the auto-run allowlist, and the sandbox does not
+  gate the network at all).
+- **Retrieved web content is untrusted, and the fence is a mitigation, not a boundary.** Every
+  retrieved string is neutralized at ingestion (control, bidi and zero-width characters escaped;
+  harness-fence mimicry broken) and rendered inside an explicit UNTRUSTED region that tells the
+  model it is data, never instructions. A sufficiently persuasive page can still influence a
+  model — no prompt can promise otherwise. What it **cannot** do is act: a researcher subagent
+  holds no tool that writes, runs, or delegates, so the worst case is a bad claim, which is why
+  claims carry their sources and why research can never mark anything verified.
+- **Research never counts as verification.** No research event marks a file CHECKED or satisfies
+  a plan gate. A session accepted as complete after consulting the web says so in its caveats,
+  and names any finding that rested on a single source or on sources that disagreed.
 - **An install executes third-party code, and a migration cannot be undone.** `project_setup`
   never runs without an explicit approval showing the exact command and directory, and installs
   deliberately DO run package lifecycle scripts (`--ignore-scripts` would break esbuild,

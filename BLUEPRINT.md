@@ -100,17 +100,31 @@ classified and fixed; mid-session `rustup target add` noticed by the drift seam;
 green gates). Suite 1480 → 1539. Details: `ROADMAP.md` Session 18, `ARCHITECTURE.md` (toolchain
 facts, typed verification, retrieval), `agent-cli-s18-live/DEMO.md`, CHANGELOG 1.4.0.
 
-### Session 19 — Source-Backed Web Research
+### Session 19 — Source-Backed Web Research — **DONE (v1.5.0)**
 
-Add a bounded research path that can be triggered explicitly with `@research` and naturally from a
-user request. Use a dedicated read-only research role and a search/extraction provider such as Tavily
-to gather current external information, select high-value sources, and return concise findings with
-provenance to the main agent.
+Delivered: a **seventh policy fact** with its own fail-closed branch (a research call is
+command-less and mutation-less, so it would otherwise auto-allow as `observe` with the reason
+"read-only workspace access" — false in the one direction that matters, because reading is not the
+consequence, **sending** is); a `researcher` subagent role with a third access class
+`read-only-external`, spawned through the existing `delegate_task` with no new orchestration;
+`web_search` for the parent and `web_extract` + `record_source` for the researcher only, so "the
+main agent never receives raw webpages" is a registry property; and **the budget as the consent** —
+one session allowance shared by parent and every child, rebuilt from events on resume, shown
+verbatim in the approval prompt.
 
-Network access must remain an explicit capability with domain, result, content, cost, and time bounds.
-Research output is evidence or context, never authority. Introduce `RESEARCH.md` only as a bounded,
-curated project memory surface for information with continuing value; ephemeral search results stay
-in session evidence.
+**Live-proven** as two runs of one fixture differing only in whether the credential was present:
+the control implemented from recall and said *"a quick check of docs.tavily.com would settle
+everything"*; the proof's researcher recorded 7 corroborated findings with real sources, including
+the exact legacy trap the control had flagged. Honest reading: research converted a plausible
+answer into a supported one, not a wrong one into a right one. Review: 4 lenses, 20 findings, 12
+fixed — including a trailing-dot bypass of every internal-host refusal and a parallel-researcher
+spend double-count. Suite 1547 → 1828. Details: `ROADMAP.md` Session 19,
+`agent-cli-s19-live/DEMO.md`, CHANGELOG 1.5.0.
+
+**Deferred, deliberately: `RESEARCH.md`.** It was the plan's declared cut line. Ephemeral research
+works as bounded session evidence, which is what this session required; the durable curated surface
+needs staleness rules, size budgets and provenance semantics that belong with Session 21's memory
+work rather than bolted onto a capability release.
 
 ### Session 20 — Remote Git and GitHub Delivery
 
@@ -129,7 +143,10 @@ Strengthen memory without turning startup into prompt dumping.
 
 Add explicit size and token budgets, staleness rules, provenance, and deterministic or reviewable
 compaction for harness-managed project memory. Introduce `LESSONS.md` for reusable failure patterns
-and practical project knowledge. Keep startup context small and retrieve older detail only when it is
+and practical project knowledge, and `RESEARCH.md` — deferred from S19 precisely because a durable
+research surface needs the staleness and provenance semantics this session builds: a research note
+is perishable in a way a lesson is not, and it must carry its sources and its retrieval date or it
+becomes exactly the stale confidence S19 exists to prevent. Keep startup context small and retrieve older detail only when it is
 relevant.
 
 Add an optional `/init` or first-run onboarding flow for a transparent global profile in the normal
@@ -187,7 +204,11 @@ Before calling the next phase mature, Agent CLI should have demonstrated:
 - ~~polyglot retrieval and checks over several different build ecosystems~~ **(MET in S18:
   Rust/Cargo + Go modules full-path live-proven, C/C++ indexed with honest refusals, missing
   toolchains and cross-target embedded crates answering explicitly — three validated runs)**;
-- source-backed research with bounded network authority and durable provenance;
+- ~~source-backed research with bounded network authority and durable provenance~~ **(MET in
+  S19 for the bounded-authority and provenance halves: a seventh fail-closed policy fact, one
+  shared session budget rebuilt from events, findings carrying sources + corroboration +
+  retrieval date, live-proven against the real provider. The DURABLE half — a curated RESEARCH.md
+  — is deliberately deferred to S21 with the rest of the memory work)**;
 - explicit, previewed, user-approved remote Git/GitHub delivery;
 - bounded project/global memory that can be inspected, edited, compacted, and removed;
 - terminal presentation that scales to these states without changing runtime truth.

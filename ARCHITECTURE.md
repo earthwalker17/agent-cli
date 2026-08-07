@@ -985,6 +985,73 @@ review → apply, every link evidenced.
   are reported per-file (`task.applied`), one undoable unit. The registry is rebuilt from
   `task.changes` events on resume, so a crash between capture and apply strands nothing.
 
+## The research pack (`research/`, `tools/web-*.ts`, `tools/record-source.ts`) — Session 19
+
+The one capability that sends anything off this machine. Same pack shape as `artifacts/`: a pure
+module with no kernel imports (`tools`/`runtime`/`policy`/`repl`), its own failure vocabulary
+(`ResearchError`), and thin tool wrappers above it.
+
+**Egress.** `research/tavily.ts` is the only code here that opens a connection, and it opens exactly
+one: `api.tavily.com`. Page retrieval happens on the provider's infrastructure, so the pack owns no
+redirect policy, no response size limiter and no SSRF guard — it never fetches a model-named URL
+itself. The claim is scoped: *the research tools'* egress is one host, **not** the harness's
+(`npm view` is on the auto-run allowlist; the sandbox does not confine network). A configured proxy
+still carries the connection, and the approval prompt says so.
+
+**The policy fact** (`Tool.research()`, engine branch 0g). Needed for a sharper version of the S6
+trap than the six facts before it: a research call is command-less and mutation-less, so it would
+auto-allow as `observe` with the reason "read-only workspace access" — false in the one direction
+that matters. Reading is not the consequence; **sending** is. Deny rules: invalid/conflicting
+contract, non-empty mutation plan, empty request, an unusable target (any single bad URL denies the
+whole call), a config-denylisted domain, and an exhausted bound.
+
+**Consent is the budget.** First call asks (`external`, grantable) with the query verbatim, the
+per-call bounds and the remaining allowance in the reason. One `ResearchBudget` object — 24
+searches / 12 extracts / 80 credits / 800k chars — is shared by reference between the parent's
+instance and every researcher child's, and rebuilt from parent events on resume
+(`researchSpendFromEvents`) so a restart cannot refill it. The credit ceiling is checked against the
+*estimate* before the wire, so a call that would overshoot is refused whole rather than half-spent,
+and charged from the provider's real reported figure (clamped) afterwards. Every bound is
+re-enforced at execute: `decide()` is a claim about what will happen, and a sibling can drain the
+remainder while a human reads the prompt.
+
+**The `researcher` role** (`read-only-external`) runs on the ordinary `delegate_task` path — no new
+orchestration, no second loop. Spawning one asks as `external`, placed **after** the mutating check
+so a mixed group is still governed by `task.mutating-role`. Inside the child there is no approver
+(read-only roles auto-deny), so admission comes from `ctx.lineage.role`, which `startSession` stamps
+from the same value that lands on `session.started` — runtime state, not tool state, not model
+input. The rule says *"whose spawn this engine allowed"*, never *"the human approved"*.
+
+**Registry split.** The parent holds `web_search` only. `web_extract` (full page text) and
+`record_source` are researcher-only, which is what makes "the main agent never receives raw
+webpages" a property of construction. `childTools`' admissibility is an exhaustive
+`satisfies Record<FactKind, boolean>` table, so the next policy fact breaks the typecheck rather
+than silently passing into a child registry.
+
+**Per-task vs per-session state.** `researchToolsFor(acc)` runs once per task and creates the
+task's own page counter and spend counter there; the budget stays shared. The spend must be
+per-task because the group fans out under one `Promise.all` — a diff of the shared budget would
+give every sibling the whole group's usage. `research.usage` carries that per-task figure into the
+**parent** log, because the child's own `research.*` events live in a log the parent's fold never
+reads.
+
+**Untrusted content, three mechanisms, honestly ranked.** (1) `sanitizeBlock` at ingestion — like
+`sanitizeLine` but preserving newlines, because a page is a block; (2) `neutralizeHarnessDelimiters`,
+shared with the memory docs; (3) the UNTRUSTED fence plus the prompt contract, which is a
+**mitigation, not a boundary** — a persuasive page can still influence a model. What it cannot do is
+act: a researcher holds no tool that writes, runs, or delegates. URLs are identifiers: a value
+sanitization would alter is refused, not escaped; loopback/private/link-local/single-label hosts and
+bare IP literals are refused (leak prevention and honest early failure, *not* an SSRF guard); IDN
+hosts are flagged.
+
+**Findings, not summaries.** `record_source` takes one falsifiable claim, its source URLs and a
+corroboration verdict, and refuses `corroborated` backed by a single distinct source. `retrievedAt`
+comes from the harness clock. Notes reach the parent as one `research.findings` capture at task end.
+
+**Never verification.** Research events are absent from `WORK_EVENT_TYPES`, never mark a file
+CHECKED and never satisfy a plan gate. Acceptance carries two caveats instead: that the web was
+consulted at all, and that some findings rest on a single source or on sources that disagreed.
+
 ## Planning lifecycle (`plan/`, `tools/update-plan.ts`, `/plan`, `@plan`/`@direct`)
 
 One CANONICAL structured plan per session at `<projectDir>/plans/<sessionId>.plan.json` —

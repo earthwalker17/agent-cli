@@ -6,6 +6,165 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 19 (2026-08-07/08) — Source-backed web research
+
+### Objective
+
+Give the harness its first deliberate connection to the external web, as a bounded read-only
+capability: search deliberately, prefer primary sources, corroborate anything load-bearing, and
+hand the main agent short **source-backed claims** rather than raw pages — with network authority
+that is explicit, budgeted, and honest about what it is.
+
+The failure this exists to prevent is not "the agent cannot search". It is **stale confidence**:
+writing code against an API that moved, from recall, sure of itself.
+
+### What shipped
+
+**A seventh policy fact and its branch.** `Tool.research()` + engine branch 0g, before the command
+branch and every fall-through. The S6 trap it closes is sharper than the previous six: a research
+call is command-less and mutation-less, so it would auto-allow as `observe` with the recorded
+reason *"read-only workspace access"*. For a call that ships model-authored text to a third party
+that sentence is not imprecise — it is false in the only direction that matters. Reading is not the
+consequence; **sending** is, and the network is the one boundary the OS sandbox explicitly does not
+confine.
+
+**The budget is the consent.** The first call asks (`external`, grantable) with the query verbatim,
+the per-call bounds, and the remaining session allowance in the reason, so `[s]` means "the bounded
+research capability is authorized this session" against a real shared counter. An exhausted budget
+is a DENY the engine owns; a held grant does not rescue it, nor a blocked domain, nor an unusable
+target, nor a mutating spawn.
+
+**A `researcher` subagent role** (`read-only-external`, a third access class — the engine's ordering
+is a total order over strictness, and a boolean flag would let a future role be both without anyone
+deciding which ask wins). Spawned through the existing `delegate_task`: one runtime, one loop, no
+new orchestration. It holds `web_search`, `web_extract`, `record_source` and the workspace read
+tools, and **nothing that writes, runs, or delegates**.
+
+**The parent gets `web_search` only.** Full page text and the findings channel are researcher-only,
+which makes "the main agent never receives raw webpages" a property of the registry rather than a
+hope about behaviour.
+
+**`record_source` is where research stops being a pile of search results.** One falsifiable claim,
+the URLs behind it, and a corroboration verdict — and it **refuses** `corroborated` backed by a
+single distinct source, which is the exact way one page becomes consensus. `retrievedAt` is stamped
+by the harness clock: research is perishable, and a date the model authors is a date it can be
+wrong about.
+
+**Untrusted content, three mechanisms.** Character neutralization at ingestion (`sanitizeBlock` —
+like `sanitizeLine` but preserving newlines, because a page is a block), fence neutralization
+shared with the memory docs, and the fence itself with the prompt contract. The third is documented
+as a **mitigation, not a boundary**: a sufficiently persuasive page can still influence a model.
+What it cannot do is act, because a researcher holds no tool that acts.
+
+**Research is never verification.** Not in `WORK_EVENT_TYPES`, never marks a file CHECKED, never
+satisfies a plan gate — the S16 setup / S17 artifact asymmetry, reused. But acceptance carries a
+**caveat**: a session accepted as COMPLETE whose conclusions rest on external sources says so, and
+a second caveat names findings resting on a single source or on sources that disagreed.
+
+### Structural fixes made along the way
+
+Three fail-open patterns were found and closed while working here, each the same shape — a
+hand-maintained list that silently stops covering things:
+
+- The six `conflicting-contract` guards each carried a hand-written list of the other five. A
+  seventh fact is absent from all six until someone remembers. They now derive from one
+  `FACT_KINDS` table with a `Record<FactKind, string>` label map, so the **eighth** fact breaks the
+  typecheck.
+- `childTools`' admissibility predicate was a deny-list of the facts that existed when it was
+  written — which is why `artifact` was missing from it. Now `satisfies Record<FactKind, boolean>`.
+- The provider naming rule read a tool list that had gone **four names stale** since S16. A rule
+  that cannot see a tool enforces nothing about it, and nothing failed. Both it and the child
+  registry checks now read `SESSION_TOOL_NAMES` / `CHILD_ONLY_TOOL_NAMES`, pinned three ways
+  against a real assembly.
+
+### Verification
+
+Suite **1547 → 1828** (12 new files, 292 research tests; 119 files, 0 failures). `npm run typecheck` clean.
+
+**Live E2E — two runs, one variable.** Same fixture, same provider (Kimi K3), differing only in
+whether `TAVILY_API_KEY` was in the child env. The task: implement a client for the Tavily Search
+API, whose current auth header is a known stale-prior trap. Full record: `agent-cli-s19-live/DEMO.md`.
+
+- The **control** implemented from recall, typechecked PASS, and said: *"Moderately confident — not
+  certain. No live verification… a quick check of `docs.tavily.com` would settle everything below.
+  Auth mechanism drift: earlier versions passed the key in the JSON body as `api_key`."*
+- The **proof** delegated a researcher, which ran 14 searches and 3 extracts in its own context and
+  recorded **7 corroborated findings with real source URLs** — including the `api_key`-in-body
+  legacy trap the control had flagged as its top risk, and an honest *"could NOT establish an
+  authoritative date/changelog for the switch"*. The main agent implemented from those findings,
+  typechecked PASS, and the produced code names both pitfalls it avoids.
+- Budget accounting held across both logs: `/research` showed 15 searches = 1 parent + 14 child,
+  and pointed at the child's log rather than pretending to have read it.
+
+**Honest reading of that result:** the control's wire format was already *correct*. Research did not
+rescue a wrong answer; it converted a plausible one into a supported one, added `exclude_domains`,
+and named what remained unknown. That is a narrower claim than "research fixed it", and it is the
+true one.
+
+**Adversarial review — 4 lenses, 20 findings, 12 fixed**, every one verified by hand. Two lenses
+independently found the same accounting bug, which is the shape of a real one. The three that
+mattered most:
+
+- A single **trailing dot** defeated every name-based internal-host refusal (`http://localhost./`
+  passed). `URL` preserves it on non-IPv4 hosts, so `'localhost.'` beat the loopback check, all
+  four private-suffix checks, and the single-label check at once. `shared/domain.ts` had always
+  stripped it — the denylist and the validator disagreed about what an internal name is.
+- **Parallel researchers each recorded the whole group's spend.** The delegate diffed the shared
+  budget around each task, but the group fans out under one `Promise.all`, so every sibling
+  snapshotted the same "before" (live 2, rebuilt 4). Spend now comes from a per-task counter, and
+  the regression test asserts the live object EQUALS a fresh fold of the parent log.
+- The **extract page URL** escaped ingestion sanitization on the no-match fallback — the one
+  provider string that reached the untrusted fence and the durable log verbatim.
+
+Plus: the client's timeouts had drifted from the pack constants so the prompt declared a bound it
+did not enforce; a per-task cap was reported as the session budget being spent; *"the only host
+contacted"* is false under a proxy; a partial extract rendered "N of N"; `/research` hid the privacy
+record precisely when a user auditing a past run would need it; and excluding a denylisted domain
+was denied with a reason asserting the model had tried to reach it.
+
+**Three defects the live run found that no hermetic test did** — the spawn ask rendering with
+generic wording, a duplicated budget line, and a researcher timing out at 420 s with 8 searches and
+10 extracts spent and **zero findings recorded**. The last one is the interesting one: the
+budget-pressure supervision note reaches the **parent**, not the child, so a researcher cannot pace
+itself. Fixed with a per-task page cap, an extract timeout no longer exceeding the provider's own,
+a larger wall clock, and a prompt that says a timeout takes unrecorded findings with it.
+
+### Decisions
+
+- **Consent comes from lineage, not a constructor flag.** The first design had the delegate hand
+  the child an instance carrying `delegatedConsent: true` — a `() => true` constant, the tool
+  telling policy it is authorized. The engine now reads `ctx.lineage.role`, which `startSession`
+  stamps from the same value that lands on `session.started`. The rule says *"whose spawn this
+  engine allowed"*, never *"the human approved"*: under `--dangerously-allow-all` no human approved
+  anything, and a reason string must not claim otherwise.
+- **The egress claim is scoped.** "The research tools' egress is one host" — never "the harness's
+  egress". `npm view` sits on the auto-run allowlist and the sandbox does not confine network.
+- **No `researcher` in `PlanTaskRole`.** `planner` is already absent; adding it would inherit the
+  queued-forever acceptance dead-end that reviewers needed a dedicated clause to escape.
+- **No credential ⇒ no tools registered**, and the prompt paragraph is conditional on the same flag
+  (the `retrieveTool` precedent). A tool the model can see but never use costs a step and a retry
+  loop every time it looks useful.
+
+### Left open
+
+- **`RESEARCH.md` was deferred** — it was the plan's declared cut line. Ephemeral research works as
+  bounded session evidence, which is what BLUEPRINT S19 required; the durable curated surface
+  belongs with Session 21's memory budgets, staleness rules and `LESSONS.md`.
+- **A child cannot see its own budget pressure.** Supervision notes go to the parent. The bounds
+  compensate; a real fix would surface pressure into the child's own context.
+- **The live proof is one provider, one task, one API.** It shows the path works and the findings
+  were sourced; it is not a measurement of research quality.
+- `ResolvedCheckFact.effects.network` remains a declared-but-dead field, read by nothing.
+- Tavily `/crawl`, `/map` and the async `/research` endpoint are unimplemented; there is no
+  direct-fetch tool, deliberately.
+
+### Recommended next step
+
+Session 20 per BLUEPRINT: remote Git and GitHub delivery — the other half of the external
+authority split, where read and **write** must stay visibly different things.
+
+---
+
 ## Session 18 (2026-08-07) — Polyglot repository intelligence and verification
 
 ### Objective
