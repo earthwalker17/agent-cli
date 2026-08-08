@@ -51,6 +51,14 @@ export interface PolicyRules {
    * `www.evil.com` but never `notevil.com`.
    */
   researchBlockedDomains: string[];
+  /**
+   * Hosts remote Git/GitHub delivery may never reach (Session 20). Narrowing only, on the same
+   * terms as `researchBlockedDomains` and for the same reason: there is no permit-list
+   * counterpart, because a permit list is a widening knob and this schema must be structurally
+   * incapable of expressing one. An entry here refuses BOTH reads and mutations — an operator who
+   * forbids a host forbids looking at it too.
+   */
+  remoteBlockedHosts: string[];
 }
 
 /**
@@ -418,6 +426,62 @@ export type ResearchEvidence =
     };
 
 /**
+ * Structured facts about remote Git/GitHub delivery, reported through `ToolContext.reportRemote`.
+ * Same callId-binding contract as every other channel.
+ *
+ * The two kinds are the session's whole thesis in the evidence model: looking at a remote and
+ * changing one are different events, so that "what did this session actually publish" is answerable
+ * by a filter rather than by reading prose. Neither ever carries a credential — the harness does
+ * not possess one, and every string here is built from output that passed `scrubSecrets`.
+ */
+export type RemoteEvidence =
+  | {
+      kind: 'inspected';
+      /** `auth` | `repository` | `refs` | `pulls` | `issues` | `runs` | `run`. */
+      operation: string;
+      host: string;
+      /** `owner/repo`, or the remote name when the destination has no forge path. */
+      target: string;
+      /** The gh account in force, once an `auth` read has established one. Never the token. */
+      account?: string;
+      ok: boolean;
+      /** Items returned (refs, pulls, issues, runs) — 0 for a single-object read. */
+      itemCount?: number;
+      /** Observation id, when this read produced one a mutation can bind to. */
+      observationId?: string;
+      /** Honest one-line failure text when `ok` is false. */
+      detail?: string;
+      durationMs: number;
+    }
+  | {
+      kind: 'mutated';
+      /** `push.branch` | `push.tag` | `release.create`. */
+      operation: string;
+      host: string;
+      target: string;
+      /** The exact remote ref/release this call changed. */
+      exactTarget: string;
+      account?: string;
+      /** The oid the remote held before, as observed. Null when the ref did not exist. */
+      beforeOid?: string | null;
+      /** The oid pushed / the release tag. */
+      afterOid?: string | null;
+      /** The resulting object's URL, when the remote reported one. */
+      url?: string;
+      /** True when the effect was overwriting (force push, tag move). */
+      overwrote: boolean;
+      ok: boolean;
+      /**
+       * The harness RE-READ the remote afterwards and it matches. `ok && !verified` is a real and
+       * important state: the command succeeded and the outcome could not be confirmed, which is
+       * reported as unverified rather than rounded up to done.
+       */
+      verified: boolean;
+      detail?: string;
+      durationMs: number;
+    };
+
+/**
  * Typed failure classes (Session 12) — the vocabulary the recovery catalogue, the repair ledger,
  * the DAG gate, and the report all key on. Classification happens BEFORE any repair is planned;
  * `unknown` is a first-class member and a stopping condition, never a shrug that lets a loop
@@ -731,6 +795,8 @@ export interface ToolContext {
   /** Evidence channel for document-artifact facts (Session 17); persisted under this call's id. */
   reportArtifact?: (e: ArtifactEvidence) => void;
   reportResearch?: (e: ResearchEvidence) => void;
+  /** Evidence channel for remote Git/GitHub facts (Session 20); persisted under this call's id. */
+  reportRemote?: (e: RemoteEvidence) => void;
   /**
    * Present only for SUBAGENT child sessions (Session 19): the runtime's own record of who spawned
    * this session and as what role. Set by `startSession` from `StartOptions.lineage`, the same
@@ -931,6 +997,122 @@ export interface ResearchBounds {
   credits: number;
 }
 
+/**
+ * Why a remote call cannot be admitted. The tool computes it; the ENGINE turns it into a deny with
+ * the matching rule id. Kept as a closed union so a new refusal cannot be introduced without a
+ * matching rule — an unnamed refusal is indistinguishable from a bug.
+ */
+export type RemoteBlockKind =
+  /** `gh` is missing, or the workspace has no remote at all. */
+  | 'unavailable'
+  /** `gh` has no usable credential for the host this call needs. */
+  | 'unauthenticated'
+  /** The destination host is not a GitHub host `gh` reported, so a gh-backed operation cannot apply. */
+  | 'not-github'
+  /** Remote, branch, account or repository identity could not be resolved to exactly one thing. */
+  | 'ambiguous'
+  /** The session's remote read/write allowance is spent. */
+  | 'budget'
+  /** A mutation named a target no observation covers. */
+  | 'unobserved'
+  /** The covering observation is older than the freshness bound. */
+  | 'stale-observation'
+  /** A harness-checked precondition does not hold (ref absent, relation unpushable, archived repo). */
+  | 'precondition';
+
+/**
+ * How long a look at a remote stays admissible as the basis for a mutation (Session 20).
+ *
+ * Kernel-owned rather than pack-owned on purpose: the engine enforces it directly, and the engine
+ * must not depend on a workflow pack (the `shared/domain.ts` argument). It is not a security
+ * boundary — the remote can move a millisecond after we look — it bounds how stale the number a
+ * human READ in the prompt is allowed to be. The real guarantees are downstream: execute re-reads
+ * the ref before sending, and a force push carries the observed oid as a server-enforced lease.
+ */
+export const REMOTE_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
+
+/**
+ * The destination a remote call names — resolved by the harness from the configured remote, never
+ * a default the tool guessed. Rendered verbatim into the approval prompt and the event, because
+ * "which repository did this publish to" is the question evidence has to be able to answer.
+ */
+export interface RemoteTargetFact {
+  /** The git remote's configured name, e.g. 'origin'. */
+  remoteName: string;
+  host: string;
+  /** `owner/repo` when the destination is a recognisable forge path; null otherwise. */
+  slug: string | null;
+  /** One fully-qualified line for a human: `github.com/owner/repo via remote 'origin'`. */
+  display: string;
+}
+
+/**
+ * The policy-visible shape of one remote READ (Session 20).
+ *
+ * Separate from `RemoteWriteFact` on purpose, and enforced as separate `FactKind`s: read and write
+ * are not two modes of one capability, they are two capabilities, and the engine's existing
+ * conflicting-contract rule then makes a tool that declares both an automatic deny. A read tool is
+ * structurally incapable of publishing; a write tool is structurally incapable of being classified
+ * as "just looking".
+ *
+ * MUST be pure: target and argv come from input plus the session's in-memory remote context; the
+ * budget fields come from an in-memory counter (never the filesystem, never a probe).
+ */
+export interface RemoteReadFact {
+  /** `auth` | `repository` | `refs` | `pulls` | `issues` | `runs` | `run`. */
+  operation: string;
+  target: RemoteTargetFact;
+  /** The exact command that will run, harness-composed. What the prompt shows is what executes. */
+  argvPreview: string;
+  bounds: { maxItems?: number; timeoutMs: number };
+  /** Why this call cannot be admitted, with the kind the engine maps to a rule id. */
+  blocked?: string;
+  blockedKind?: RemoteBlockKind;
+  /** Remaining session allowance, so `[s]` states what it is actually bounded by. */
+  budgetRemaining?: string;
+}
+
+/**
+ * The policy-visible shape of one remote MUTATION (Session 20).
+ *
+ * Three things make this different from every other fact in this file, and all three are the
+ * point of the session:
+ *
+ *  1. **It is bound to an observation.** `observation` carries the id, age and oids of the live
+ *     look at the remote that the `effect` was computed from. Absent or stale ⇒ the engine DENIES
+ *     (the `browser.no-preview` precedent). A publish may not be reasoned about from memory.
+ *  2. **It is never granted.** The engine does not pass this branch through `applyGrant`, the
+ *     prompt offers no `[s]`, and the runtime stores nothing on a session answer. Each publish
+ *     names a different target and a different effect, so a class-scoped grant could only ever
+ *     mean "publish whatever you like this session" — the exact inversion this capability exists
+ *     to prevent.
+ *  3. **It states the local evidence without depending on it.** `localEvidence` puts the local
+ *     verification state in front of the human. It is deliberately NOT a precondition: making a
+ *     green gate a requirement would make a green gate an authorization, and local completion must
+ *     never imply permission to publish.
+ */
+export interface RemoteWriteFact {
+  /** `push.branch` | `push.tag` | `release.create`. */
+  operation: string;
+  target: RemoteTargetFact;
+  /** The exact thing being changed on the remote: `refs/heads/x`, `refs/tags/v1`, `release v1`. */
+  exactTarget: string;
+  /** True when the effect overwrites or discards remote state (a force push, a tag move). */
+  overwrites: boolean;
+  /** Machine-derived effect lines, computed from the bound observation. Rendered verbatim. */
+  effect: readonly string[];
+  /** The exact command that will run, harness-composed. */
+  argvPreview: string;
+  observation?: { id: string; ageMs: number; remoteOid: string | null; localOid: string };
+  /** One line of local verification state, folded in memory from the session's own events. */
+  localEvidence?: string;
+  blocked?: string;
+  blockedKind?: RemoteBlockKind;
+  /** Remaining session write allowance — a runaway bound, never a consent ceiling. */
+  budgetRemaining?: string;
+  timeoutMs: number;
+}
+
 export interface Tool<I = unknown> {
   name: string;
   /** Sent to the model. */
@@ -1057,6 +1239,36 @@ export interface Tool<I = unknown> {
    */
   research?(input: I): ResearchFact;
   /**
+   * Declares a REMOTE READ (Session 20) — a call that contacts a git remote or the GitHub API
+   * under the user's existing credential.
+   *
+   * Its own branch for the S6-trap reason every fact above it documents, plus one specific to this
+   * capability: a remote read authenticates. It tells a third party which account is looking at
+   * which repository, and it spends that account's rate limit. `observe`/"read-only workspace
+   * access" is false about all of it.
+   *
+   * Consent is the S19 shape: the first read asks, `external` and grantable, and `[s]` means "the
+   * bounded remote-read capability is authorized this session", bounded by a real counter rather
+   * than by good intentions.
+   *
+   * MUST be pure, and never combinable with any other fact — `remoteWrite` least of all: the whole
+   * point of two facts is that the engine's conflicting-contract rule makes a tool that could do
+   * both a deny rather than a judgement call.
+   */
+  remoteRead?(input: I): RemoteReadFact;
+  /**
+   * Declares a REMOTE MUTATION (Session 20) — publishing a ref or a release to a third party.
+   *
+   * See `RemoteWriteFact` for the three properties that make this branch different from every
+   * other: it is bound to a live observation, it is never session-granted, and it shows the local
+   * verification state without ever treating it as authority.
+   *
+   * MUST be pure: the effect is derived from the bound observation held in memory, never from a
+   * probe. The tool re-verifies against the live remote at execute — a decision is a claim about
+   * what WILL happen, and between the claim and the act a human was reading a prompt.
+   */
+  remoteWrite?(input: I): RemoteWriteFact;
+  /**
    * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
    * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the
    * prompt renderer's sanitization and line cap; NEVER consulted by policy (the decision is
@@ -1118,8 +1330,13 @@ export interface ApprovalRequest {
    * this machine; text goes OUT, to one named host, and what comes back is untrusted. The prompt
    * must show what is being sent, name the host, and state that a session answer is bounded by
    * the session research budget rather than open-ended.
+   * 'remote-read' / 'remote-write' = remote Git/GitHub delivery (Session 20), and they are TWO
+   * kinds rather than one with a mode for the same reason the policy facts are two: the prompts
+   * must not be able to look alike. A read offers `[s]` bounded by the session read allowance; a
+   * write offers NO `[s]` at all, shows the exact destination and the machine-derived effect, and
+   * says plainly that nothing here can undo it.
    */
-  kind?: 'command' | 'check' | 'preview' | 'setup' | 'research';
+  kind?: 'command' | 'check' | 'preview' | 'setup' | 'research' | 'remote-read' | 'remote-write';
   /** kind 'check'/'preview'/'setup': how many distinct commands a session-scope answer would consent to re-run. */
   checkCount?: number;
   /** One-line summary (command string or "edit src/x.ts"). */
@@ -1701,6 +1918,68 @@ export type EventBody =
       extracts: number;
       credits: number;
       contentChars: number;
+    }
+  /**
+   * Remote Git/GitHub delivery (Session 20). Additive, so `EVENT_SCHEMA_VERSION` stays 1.
+   *
+   * `remote.context` is the LOCAL inventory, recorded once at assembly: which remotes exist, where
+   * they point, whether gh is installed. No network, no credential, no approval — recorded anyway,
+   * because "the session knew there was a remote called origin pointing at X" is the premise every
+   * later decision rests on, and a premise that is not written down is not evidence.
+   */
+  | {
+      type: 'remote.context';
+      /** Present and parsed, or null when gh is absent. Never a path outside the version. */
+      ghVersion: string | null;
+      /** Installed gh predates the `gh auth status` token-leak fix (GHSA-cg6r-mpgc-h9mm). */
+      ghAuthStatusLeakRisk: boolean;
+      /** Remotes with credential-redacted URLs. The raw URL is never recorded. */
+      remotes: { name: string; url: string; host: string | null; slug: string | null; isGitHub: boolean; hadCredentials: boolean }[];
+      defaultRemote: string | null;
+      ambiguity?: string;
+      /** `GH_HOST` / `GH_CONFIG_DIR` in force — an override must be auditable, never invisible. */
+      ghHostOverride?: string;
+      ghConfigDirOverride?: string;
+      /** A GH_TOKEN/GITHUB_TOKEN exists in the parent shell and is deliberately NOT forwarded. */
+      tokenEnvNotForwarded: boolean;
+      detail: string;
+    }
+  /** One authorized remote READ. The account is the identity in force, never the credential. */
+  | {
+      type: 'remote.inspected';
+      callId: string;
+      operation: string;
+      host: string;
+      target: string;
+      account?: string;
+      ok: boolean;
+      itemCount?: number;
+      observationId?: string;
+      detail?: string;
+      durationMs: number;
+    }
+  /**
+   * One remote MUTATION. Separate from `remote.inspected` deliberately: a reader answering "what
+   * did this session change on a third party" must be able to do it by event type, not by parsing
+   * an operation string out of a shared arm. `verified` is the post-hoc re-read, so a successful
+   * command whose outcome could not be confirmed is durably distinguishable from a confirmed one.
+   */
+  | {
+      type: 'remote.mutated';
+      callId: string;
+      operation: string;
+      host: string;
+      target: string;
+      exactTarget: string;
+      account?: string;
+      beforeOid?: string | null;
+      afterOid?: string | null;
+      url?: string;
+      overwrote: boolean;
+      ok: boolean;
+      verified: boolean;
+      detail?: string;
+      durationMs: number;
     }
   | {
       type: 'undo.applied';

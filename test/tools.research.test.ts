@@ -71,7 +71,7 @@ describe('web_search', () => {
     // S19 review: the fact merged include+exclude, so a call that told the provider to AVOID a
     // blocked domain was denied with a reason asserting it had tried to reach it.
     const t = createWebSearchTool({ client: fakeClient(), budget: createResearchBudget() }) as unknown as Tool<unknown>;
-    const c = ctx({ rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: ['evil.example'] } });
+    const c = ctx({ rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: ['evil.example'], remoteBlockedHosts: [] } });
     expect(decide(t, { query: 'abc', exclude_domains: ['evil.example'] }, c, new Grants())).toMatchObject({ decision: 'ask' });
     // ...while trying to TARGET it is still denied.
     expect(decide(t, { query: 'abc', include_domains: ['evil.example'] }, c, new Grants())).toMatchObject({

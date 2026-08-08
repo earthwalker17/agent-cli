@@ -1,6 +1,18 @@
 import path from 'node:path';
-import { SETUP_ACTIONS, subagentRoleAccess } from '../types.js';
-import type { ActionClass, ArtifactFact, MutationPlan, PolicyDecision, ResearchFact, ResolvedCheckFact, Tool, ToolContext } from '../types.js';
+import { REMOTE_OBSERVATION_MAX_AGE_MS, SETUP_ACTIONS, subagentRoleAccess } from '../types.js';
+import type {
+  ActionClass,
+  ArtifactFact,
+  MutationPlan,
+  PolicyDecision,
+  RemoteBlockKind,
+  RemoteReadFact,
+  RemoteWriteFact,
+  ResearchFact,
+  ResolvedCheckFact,
+  Tool,
+  ToolContext,
+} from '../types.js';
 import { validatePath } from './paths.js';
 import { PathError } from '../shared/errors.js';
 import { domainMatches as hostUnder } from '../shared/domain.js';
@@ -40,7 +52,22 @@ import { analyzeCommand } from './command-review.js';
  * absent from all six until someone remembers to add it, and nothing fails if they do not. With
  * the table, adding a member to `FactKind` breaks the `FACT_LABELS` record at compile time.
  */
-export const FACT_KINDS = ['command', 'delegates', 'planDoc', 'check', 'browser', 'evidenceRead', 'artifact', 'research'] as const;
+export const FACT_KINDS = [
+  'command',
+  'delegates',
+  'planDoc',
+  'check',
+  'browser',
+  'evidenceRead',
+  'artifact',
+  'research',
+  // Session 20. TWO members rather than one with a mode, deliberately: remote reads and remote
+  // mutations are different authorities, and expressing that as two facts makes the existing
+  // conflicting-contract rule enforce it for free — a tool that could do both denies, instead of
+  // being gated by whichever half of an `if` happened to run first.
+  'remoteRead',
+  'remoteWrite',
+] as const;
 export type FactKind = (typeof FACT_KINDS)[number];
 
 const FACT_LABELS: Record<FactKind, string> = {
@@ -52,6 +79,8 @@ const FACT_LABELS: Record<FactKind, string> = {
   evidenceRead: 'an evidence read',
   artifact: 'a document-artifact operation',
   research: 'a bounded external read',
+  remoteRead: 'a remote-state read',
+  remoteWrite: 'a remote mutation',
 };
 
 /** The facts this tool declares OTHER than `self`. Non-empty means a conflicting contract. */
@@ -203,6 +232,91 @@ export function classifyCommand(command: string, workspaceRoot: string): Command
 function denyFromError(e: unknown): PolicyDecision {
   if (e instanceof PathError) return decision('sensitive', 'deny', e.rule, e.message);
   return decision('sensitive', 'deny', 'path.invalid', (e as Error).message);
+}
+
+/** One rule id per refusal kind. A refusal without its own id is indistinguishable from a bug. */
+function remoteRule(kind: RemoteBlockKind | undefined): string {
+  switch (kind) {
+    case 'unavailable':
+      return 'remote.unavailable';
+    case 'unauthenticated':
+      return 'remote.unauthenticated';
+    case 'not-github':
+      return 'remote.not-github';
+    case 'ambiguous':
+      return 'remote.ambiguous-target';
+    case 'budget':
+      return 'remote.budget-exhausted';
+    case 'unobserved':
+      return 'remote.unobserved';
+    case 'stale-observation':
+      return 'remote.stale-observation';
+    case 'precondition':
+      return 'remote.precondition';
+    default:
+      // A tool that reports a blocker without naming its kind gets the least specific rule rather
+      // than the benefit of the doubt.
+      return 'remote.refused';
+  }
+}
+
+/**
+ * The checks both remote branches share, in the order that fails closed.
+ *
+ * Returns a deny, or undefined when the call may continue to its branch's own logic. Shared so the
+ * two branches cannot drift on the parts that must be identical — a read and a write must agree
+ * about what an operator's host denylist means, and about the fact that no subagent reaches the
+ * network on the user's credential.
+ */
+function remoteGuards<I>(
+  tool: Tool<I>,
+  input: I,
+  ctx: ToolContext,
+  self: 'remoteRead' | 'remoteWrite',
+  host: string,
+): PolicyDecision | undefined {
+  const label = self === 'remoteRead' ? 'read' : 'write';
+  const conflicts = otherFacts(tool, self);
+  if (conflicts.length > 0) {
+    return decision('sensitive', 'deny', `remote.${label}-conflicting-contract`, conflictReason(self, conflicts));
+  }
+  // A remote tool changes NOTHING in the workspace. Its consequence is entirely on the other side
+  // of the network, so a non-empty local mutation plan means the contract is not what it claims —
+  // and an undeclarable one (`null`) means the same thing more loudly.
+  let plan: MutationPlan | null;
+  try {
+    plan = tool.mutates(input, ctx);
+  } catch (e) {
+    return decision('sensitive', 'deny', `remote.${label}-invalid-contract`, `mutates() threw: ${(e as Error).message}`);
+  }
+  if (plan === null || plan.paths.length > 0) {
+    return decision('sensitive', 'deny', `remote.${label}-mutating-contract`, 'a remote tool must declare an empty workspace mutation plan');
+  }
+  if (host.trim() === '') {
+    return decision('sensitive', 'deny', 'remote.unresolved-target', 'a remote operation must name the host it contacts');
+  }
+  const blockedHit = (ctx.rules?.remoteBlockedHosts ?? []).find((d) => hostUnder(host, d));
+  if (blockedHit !== undefined) {
+    return decision(
+      'sensitive',
+      'deny',
+      'remote.blocked-host',
+      `'${host}' is under '${blockedHit}', which this workspace's configuration forbids remote delivery from reaching`,
+    );
+  }
+  // No subagent touches the remote. The registry already withholds these tools from every child
+  // role (`CHILD_ADMISSIBLE_FACTS`); this is the second lock, because a capability that publishes
+  // under the user's credential should be unreachable by construction from a context whose asks
+  // are auto-denied and whose instructions can come from a web page.
+  if (ctx.lineage !== undefined) {
+    return decision(
+      'sensitive',
+      'deny',
+      'remote.delegated-role',
+      `a ${ctx.lineage.role} subagent may not reach the remote; remote delivery belongs to the main session, where a human answers for it`,
+    );
+  }
+  return undefined;
 }
 
 /** Decide the policy verdict for one tool call. */
@@ -846,6 +960,124 @@ export function decide<I>(
       ),
       tool,
       grants,
+    );
+  }
+
+  // 0h. Remote READ (Session 20) → explicit fail-closed branch, before the command branch and
+  //     every fall-through.
+  //
+  //     Why it cannot ride an existing branch: like a research call it is command-less and
+  //     mutation-less, so it would auto-allow as `observe` with the reason "read-only workspace
+  //     access". Two things about that are false. The call leaves the machine, and — unlike a
+  //     search — it AUTHENTICATES: it tells GitHub which account is looking at which repository,
+  //     under a credential this harness never sees and therefore cannot bound by any other means.
+  //
+  //     Consent model — the S19 shape, deliberately reused rather than reinvented. The first read
+  //     asks, `external` and grantable, and `[s]` means "the bounded remote-read capability is
+  //     authorized this session", bounded by a real counter. Writes are a DIFFERENT fact with a
+  //     different branch below, so no read grant can ever satisfy one.
+  if (tool.remoteRead !== undefined) {
+    let fact: RemoteReadFact;
+    try {
+      fact = tool.remoteRead(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'remote.read-invalid-contract', `remoteRead() threw: ${(e as Error).message}`);
+    }
+    const guard = remoteGuards(tool, input, ctx, 'remoteRead', fact.target.host);
+    if (guard !== undefined) return guard;
+    if (fact.blocked !== undefined) {
+      return decision('sensitive', 'deny', remoteRule(fact.blockedKind), fact.blocked);
+    }
+    return applyGrant(
+      decision(
+        'external',
+        'ask',
+        'remote.read-approval-required',
+        `reads ${fact.operation} from ${fact.target.display} using the credential gh/git already holds — Agent CLI never reads the token. ` +
+          `The request identifies that account to ${fact.target.host} and spends its rate limit. Nothing on this machine is written` +
+          (fact.budgetRemaining !== undefined
+            ? `; a session-scope answer covers further remote READS this session within the remaining allowance (${fact.budgetRemaining}) and NEVER a mutation`
+            : ''),
+        { noUndo: true },
+      ),
+      tool,
+      grants,
+    );
+  }
+
+  // 0i. Remote MUTATION (Session 20) → explicit fail-closed branch. The one capability in this
+  //     harness that changes state on a third party.
+  //
+  //     Three properties, each of which is the reason this is not merely "the read branch with a
+  //     different verb":
+  //
+  //     (a) OBSERVATION-BOUND. A mutation must carry the live look at the remote its effect was
+  //         computed from; absent or stale is a DENY, not an ask (the `browser.no-preview`
+  //         precedent). "Publish the branch" reasoned from memory is how an agent overwrites work
+  //         it never saw. The freshness bound is enforced HERE, from a kernel-owned constant, so
+  //         a pack cannot widen its own leash.
+  //
+  //     (b) NEVER GRANTED. This branch does not call `applyGrant`, the prompt offers no `[s]`, and
+  //         the runtime stores nothing on a session answer. Every publish names a different target
+  //         and a different effect, so a class-scoped grant could only mean "publish whatever you
+  //         like this session" — precisely the authority that local completion must never imply.
+  //
+  //     (c) CLASS TELLS THE TRUTH. Publishing is `external`. Overwriting remote history — a force
+  //         push, a tag move — is `destructive`, which is also non-grantable by construction, so
+  //         the strongest case is protected twice.
+  if (tool.remoteWrite !== undefined) {
+    let fact: RemoteWriteFact;
+    try {
+      fact = tool.remoteWrite(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'remote.write-invalid-contract', `remoteWrite() threw: ${(e as Error).message}`);
+    }
+    const guard = remoteGuards(tool, input, ctx, 'remoteWrite', fact.target.host);
+    if (guard !== undefined) return guard;
+    if (fact.blocked !== undefined) {
+      return decision('sensitive', 'deny', remoteRule(fact.blockedKind), fact.blocked);
+    }
+    if (fact.exactTarget.trim() === '') {
+      return decision('sensitive', 'deny', 'remote.unresolved-target', 'a remote mutation must name the exact ref or release it changes');
+    }
+    if (fact.effect.length === 0) {
+      // An effect the harness could not describe is an effect a human cannot consent to. Refusing
+      // is the only honest option: the alternative is a prompt that asks "may I do something".
+      return decision('sensitive', 'deny', 'remote.undescribed-effect', 'a remote mutation must state the effect it would have; this one described none');
+    }
+    const obs = fact.observation;
+    if (obs === undefined) {
+      return decision(
+        'sensitive',
+        'deny',
+        'remote.unobserved',
+        `no live observation covers ${fact.exactTarget}; inspect the remote ref first so the effect is computed from what the remote actually holds`,
+      );
+    }
+    if (obs.ageMs < 0 || obs.ageMs > REMOTE_OBSERVATION_MAX_AGE_MS) {
+      return decision(
+        'sensitive',
+        'deny',
+        'remote.stale-observation',
+        `the observation of ${fact.exactTarget} is ${String(Math.round(obs.ageMs / 1000))}s old (bound ${String(Math.round(REMOTE_OBSERVATION_MAX_AGE_MS / 1000))}s); re-inspect the remote before publishing`,
+      );
+    }
+
+    const where = `${fact.exactTarget} on ${fact.target.display}`;
+    const bound =
+      `Bound to the exact state the remote held when it was observed ${String(Math.round(obs.ageMs / 1000))}s ago ` +
+      `(${obs.remoteOid ?? 'ref absent'}); the harness re-reads the remote immediately before sending and abandons the ` +
+      `operation if it has moved.`;
+    const local = fact.localEvidence !== undefined ? ` Local verification state: ${fact.localEvidence} — stated for your judgement, NOT as authorization.` : '';
+    return decision(
+      fact.overwrites ? 'destructive' : 'external',
+      'ask',
+      fact.overwrites ? 'remote.write-overwrite-approval-required' : 'remote.write-approval-required',
+      (fact.overwrites
+        ? `OVERWRITES ${where}. Remote history that other people may already have is discarded. `
+        : `PUBLISHES to ${where}. This changes state on a third party under your credential, and nothing in this harness can undo it. `) +
+        `${bound}${local}`,
+      { noUndo: true },
     );
   }
 

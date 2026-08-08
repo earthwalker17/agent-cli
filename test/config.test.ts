@@ -35,7 +35,7 @@ function writeWorkspace(cfg: unknown): void {
 describe('config loading and merging', () => {
   it('no files → empty rules, no prefs, no sources', () => {
     const c = loadConfig(state, ws);
-    expect(c).toEqual({ rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [] }, sources: [] });
+    expect(c).toEqual({ rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [], remoteBlockedHosts: [] }, sources: [] });
   });
 
   it('merges narrowing knobs as a union and records source hashes', () => {
@@ -80,7 +80,7 @@ describe('config loading and merging', () => {
 });
 
 describe('narrowing effects on policy', () => {
-  const rules = (r: Partial<PolicyRules>): PolicyRules => ({ protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [], ...r });
+  const rules = (r: Partial<PolicyRules>): PolicyRules => ({ protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [], remoteBlockedHosts: [], ...r });
 
   it('an extra protectedPath denies writes beneath it', () => {
     const ctx: ToolContext = { workspaceRoot: ws, stateDir: state, rules: rules({ protectedPaths: ['generated'] }) };

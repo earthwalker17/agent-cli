@@ -40,6 +40,13 @@ const narrowing = {
    * "never send anything about this project to that host".
    */
   researchBlockedDomains: z.array(z.string().min(1).max(253)).max(256).optional(),
+  /**
+   * Hosts remote Git/GitHub delivery may never reach (Session 20). Same narrowing-only shape as
+   * `researchBlockedDomains`, and available in BOTH layers for the same reason: a repository has a
+   * legitimate interest in saying "nothing from this workspace is ever published to that host".
+   * An entry refuses reads as well as mutations — forbidding a host means not looking at it either.
+   */
+  remoteBlockedHosts: z.array(z.string().min(1).max(253)).max(256).optional(),
 };
 
 const UserConfigSchema = z
@@ -114,6 +121,9 @@ export function loadConfig(stateRoot: string, workspaceRoot: string): ResolvedCo
       s.toLowerCase(),
     ),
     researchBlockedDomains: [...(user?.data.researchBlockedDomains ?? []), ...(ws?.data.researchBlockedDomains ?? [])].map((s) =>
+      s.trim().toLowerCase(),
+    ),
+    remoteBlockedHosts: [...(user?.data.remoteBlockedHosts ?? []), ...(ws?.data.remoteBlockedHosts ?? [])].map((s) =>
       s.trim().toLowerCase(),
     ),
   };

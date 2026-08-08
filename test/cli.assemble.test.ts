@@ -41,7 +41,7 @@ function makeDeps(overrides: Partial<AssembleDeps> = {}): AssembleDeps {
   const layout = resolveLayout(ws, { env: { AGENT_CLI_STATE_DIR: stateRoot }, ensure: true });
   return {
     trust: { trusted: true, source: 'flag' },
-    config: { rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [] }, sources: [] },
+    config: { rules: { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [], remoteBlockedHosts: [] }, sources: [] },
     ctx: {
       ws,
       mode: 'non-interactive',

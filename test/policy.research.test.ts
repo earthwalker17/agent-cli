@@ -46,7 +46,7 @@ function researchTool(fact: ResearchFact, overrides: Partial<Tool<unknown>> = {}
 }
 
 function rules(r: Partial<PolicyRules> = {}): PolicyRules {
-  return { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [], ...r };
+  return { protectedPaths: [], secretPatterns: [], envExcludePatterns: [], researchBlockedDomains: [], remoteBlockedHosts: [], ...r };
 }
 
 function ctx(extra: Partial<ToolContext> = {}): ToolContext {
@@ -161,7 +161,7 @@ describe('decide: extract targets', () => {
 
 describe('decide: the configured domain denylist', () => {
   it('denies an extract target under a blocked domain, naming the rule that blocked it', () => {
-    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'] }) });
+    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'], remoteBlockedHosts: [] }) });
     const fact: ResearchFact = { ...EXTRACT, targets: [{ url: 'https://docs.evil.example/a', host: 'docs.evil.example' }] };
     const d = decide(researchTool(fact), {}, c, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'research.blocked-domain' });
@@ -169,13 +169,13 @@ describe('decide: the configured domain denylist', () => {
   });
 
   it('respects label boundaries — notevil.example is not under evil.example', () => {
-    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'] }) });
+    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'], remoteBlockedHosts: [] }) });
     const fact: ResearchFact = { ...EXTRACT, targets: [{ url: 'https://notevil.example/a', host: 'notevil.example' }] };
     expect(decide(researchTool(fact), {}, c, new Grants())).toMatchObject({ decision: 'ask' });
   });
 
   it('a model-chosen include list never overrides the operator denylist', () => {
-    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'] }) });
+    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'], remoteBlockedHosts: [] }) });
     const fact: ResearchFact = { ...SEARCH, domains: ['evil.example'] };
     const d = decide(researchTool(fact), {}, c, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'research.blocked-domain' });
@@ -185,7 +185,7 @@ describe('decide: the configured domain denylist', () => {
   it('a session grant cannot rescue a blocked domain', () => {
     const g = new Grants();
     g.add('web_search', 'external');
-    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'] }) });
+    const c = ctx({ rules: rules({ researchBlockedDomains: ['evil.example'], remoteBlockedHosts: [] }) });
     const fact: ResearchFact = { ...EXTRACT, targets: [{ url: 'https://evil.example/a', host: 'evil.example' }] };
     expect(decide(researchTool(fact), {}, c, g)).toMatchObject({ decision: 'deny', rule: 'research.blocked-domain' });
   });

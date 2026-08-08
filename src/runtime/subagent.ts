@@ -71,6 +71,12 @@ const CHILD_ADMISSIBLE_FACTS = {
   evidenceRead: false,
   artifact: false,
   research: true,
+  // Session 20. Both false, and not marginally: remote delivery acts on a third party under the
+  // user's own credential, and a child session has no approver attached (read-only roles auto-deny)
+  // while its instructions can legitimately include text a stranger wrote on a web page. The engine
+  // refuses a remote fact under any lineage as a second lock; this table is the first.
+  remoteRead: false,
+  remoteWrite: false,
 } satisfies Record<FactKind, boolean>;
 
 /** The three per-task research instances a researcher child receives. */
