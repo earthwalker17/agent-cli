@@ -53,6 +53,15 @@ export const DEFAULT_REMOTE_ITEMS = 10;
 export const MAX_PREVIEW_COMMITS = 20;
 /** Changed paths carried on an observation. Enough to judge a push; never a full diff. */
 export const MAX_PREVIEW_PATHS = 60;
+/**
+ * Remote-ref object ids used to exclude already-published history when a ref is NEW.
+ *
+ * Without them the preview reports the ENTIRE branch as new — which the live S20 run showed
+ * producing "207 commit(s)" and a `.github/workflows/` warning for a push that added one file.
+ * The cap keeps one argv bounded on a repository with thousands of refs; anything beyond it makes
+ * the estimate incomplete, which the observation records rather than hides.
+ */
+export const MAX_EXCLUSION_BASES = 200;
 /** Characters of third-party text (bodies, logs) admitted into a context from one read. */
 export const MAX_REMOTE_CONTENT_CHARS = 40_000;
 /** Release notes the model may author. Larger than a commit message, far below a document. */
@@ -97,6 +106,13 @@ export interface RemoteEndpoint {
   isGitHub: boolean;
   /** True when the configured URL embedded a credential. Surfaced so the user can remove it. */
   hadCredentials: boolean;
+  /**
+   * `remote.<name>.pushurl` differs from the fetch URL, so `ls-remote` and `push` would talk to
+   * DIFFERENT repositories (Session 20 review). Every operation on such a remote is refused: an
+   * observation of one URL cannot describe the other, and the prompt would name the wrong
+   * destination for the act being approved.
+   */
+  pushUrlDiffers?: boolean;
 }
 
 /** What is known about the `gh` binary WITHOUT contacting anything. */
@@ -180,6 +196,14 @@ export interface RemoteObservation {
   refName: string;
   /** What the remote holds, or null when the ref does not exist there. */
   remoteOid: string | null;
+  /**
+   * For an ANNOTATED tag, the commit the remote's tag object peels to (`refs/tags/x^{}` in
+   * `ls-remote` output). Null for a branch, or for a lightweight tag where the ref IS the commit.
+   *
+   * Carried because a release is cut "at" a commit, and showing a human the tag-object hash while
+   * saying "at" is a small lie they cannot check against their own `git log`.
+   */
+  remotePeeledOid?: string | null;
   /** The local commit this observation resolved. */
   localOid: string;
   /** The local ref/rev that produced `localOid` (`refs/heads/x`, `HEAD`, an oid). */
@@ -192,6 +216,12 @@ export interface RemoteObservation {
   commitsOmitted: number;
   changedPaths: string[];
   changedPathsOmitted: number;
+  /**
+   * The remote holds refs whose objects this repository does not have, so they could not be used
+   * to exclude already-published history. The counts and paths above are then an OVER-estimate,
+   * and the preview says so rather than presenting an inflated number as fact.
+   */
+  basesIncomplete: boolean;
   /**
    * The change set touches `.github/workflows/**`. GitHub rejects such a push when the credential
    * lacks the `workflow` scope, with an error most users have never seen — so it is detected here

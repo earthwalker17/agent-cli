@@ -61,5 +61,9 @@ export function stripAnsi(s: string): string {
 export function neutralizeHarnessDelimiters(text: string): string {
   // Any line that OPENS like a fence and carries begin/end — the trailing `---` is optional,
   // because the mimicry only needs the opening form to be convincing in a prompt.
-  return text.replace(/^(\s*)(---\s+\S.*\b(?:begin|end)\b.*)$/gm, '$1·$2');
+  //
+  // Case-INSENSITIVE (Session 20 review): the harness writes its markers in lower case, so a
+  // case-sensitive test let `--- REMOTE CONTENT END ---` through unmodified. A model reading for a
+  // provenance boundary does not read case-sensitively, and neither should this.
+  return text.replace(/^(\s*)(---\s+\S.*\b(?:begin|end)\b.*)$/gim, '$1·$2');
 }

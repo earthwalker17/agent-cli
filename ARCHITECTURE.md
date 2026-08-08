@@ -1052,6 +1052,87 @@ comes from the harness clock. Notes reach the parent as one `research.findings` 
 CHECKED and never satisfy a plan gate. Acceptance carries two caveats instead: that the web was
 consulted at all, and that some findings rest on a single source or on sources that disagreed.
 
+## The remote-delivery pack (`remote/`, `tools/remote-*.ts`) — Session 20
+
+The one capability that changes state on a machine the user does not own. Same pack shape as
+`artifacts/` and `research/`: a pure module with no kernel imports beyond the shared type
+vocabulary, its own failure vocabulary (`RemoteError`), and thin tool wrappers above it.
+
+**Two facts, not one capability with a mode.** `FACT_KINDS` gains **`remoteRead` AND
+`remoteWrite`**, each with its own fail-closed branch ahead of the command branch. That is the
+session's thesis made structural rather than documentary: the engine's existing
+conflicting-contract rule then makes a tool that could both read and publish an automatic deny, so
+"the read tool cannot publish" is a property a reviewer verifies by grepping for a second fact and
+finding none. Consent follows the split — a read asks `external` and is session-grantable within a
+real counter (the S19 budget-as-consent shape, worded `[s] allow further remote READS this session
+(never a push, tag or release)`); a write asks **every time**, is never passed through
+`applyGrant`, offers no `[s]` in `formatApprovalPrompt`, and stores nothing at the grant-storage
+site in `session.ts`. The same sentence is written in three places on purpose: a consent surface
+that disagrees with itself is how standing authority gets won by accident.
+
+**Observation binding.** A mutation must carry the live look at the remote its effect was computed
+from; absent, or older than the kernel-owned `REMOTE_OBSERVATION_MAX_AGE_MS`, is a **deny** (the
+`browser.no-preview` precedent). Only `remote_status view=refs` produces observations, so
+"understand the remote before you change it" is enforced by the engine rather than requested in a
+prompt. The bound lives in `src/types.ts`, not in the pack, so a workflow pack cannot widen its own
+leash. Observations and the gh identity are **in memory only** and do not survive a resume, while
+the read/write spend IS rebuilt from events — authority is not durable, spending is.
+
+**Looking never writes.** The only network verb is `git ls-remote`: no fetch, no remote-tracking
+refs, no FETCH_HEAD. The cost is honest — a commit the remote holds and this repository has never
+seen is genuinely outside our object database, so the relation is reported `unknown` and a force
+push over it is **refused even with `force`**, because the harness cannot say what would be
+discarded.
+
+**What the human approved is what executes.** The refspec source is the observed OID, not a branch
+name, so a local branch that moves while a human reads the prompt cannot change what is sent.
+Execute then re-reads the local rev AND the remote ref, runs `git push --dry-run --porcelain` and
+compares its flag column against what the observed relation permits, pushes, and re-reads the
+remote to set `verified`. A force push additionally carries
+`--force-with-lease=<ref>:<observed-oid>` so the **server** enforces the same binding.
+`--force-if-includes` is deliberately absent: it is a no-op without a lease and its real check
+reads a remote-tracking reflog this pack never writes.
+
+**gh is managed like git.** `remote/gh.ts` mirrors `git/client.ts`: absolute-path resolution
+(`gh.exe` only on Windows, no `.cmd` shims, relative PATH entries skipped), `GH_REPO` scrubbed
+because it retargets every command the way `GIT_DIR` does, `GH_DEBUG`/`DEBUG` scrubbed because gh's
+debug mode prints the Authorization header, `GH_PROMPT_DISABLED` + no stdin + bounded timeouts.
+`GH_HOST`/`GH_CONFIG_DIR` deliberately pass through — an enterprise host or a relocated config is
+legitimate — and are RECORDED in `remote.context` so an override is auditable. Remote-bearing git
+calls carry `-c credential.interactive=false`, and ssh remotes get `GIT_SSH_COMMAND="ssh -o
+BatchMode=yes"`; neither is a guarantee (a non-conforming helper exists), which is why every call
+is time-bounded.
+
+**The harness never holds a credential.** Authentication is entirely gh's own stored credential and
+git's credential helper. `buildChildEnv` drops every `*token*` name, so a `GH_TOKEN` in the user's
+shell is not forwarded and *cannot* be — recorded as a fact (`tokenEnvNotForwarded`) rather than
+worked around. `shared/secrets.ts` scrubs credential shapes from all gh/git output at the pack
+boundary and again at the event emit site: the installed gh 2.96.0 predates the
+GHSA-cg6r-mpgc-h9mm fix in which `gh auth status` printed part of the token, remote URLs embed
+credentials in the standard CI form, and git echoes those URLs inside auth failures.
+
+**Everything is harness-composed.** `remote/argv.ts` builds every argv from typed inputs in
+`--flag=value` form, so model text lands only in value positions and a value beginning with `-`
+cannot become a flag. There is no `gh api` passthrough and no generic escape. `gh release create`
+always carries `--verify-tag`: without it gh silently creates the named tag from the default branch
+— a publish nobody asked for, at a commit nobody named.
+
+**Stops rather than guesses.** No remote; several remotes with no upstream; a push URL that differs
+from the fetch URL; a detached or unresolvable local rev; a non-GitHub host for a gh-backed
+operation; gh absent or unauthenticated; a GitHub destination whose publishing account has not been
+established by an `auth` read; a relation a normal push cannot satisfy.
+
+**Never a gate, in either direction.** `remote.*` is absent from `WORK_EVENT_TYPES` (accept →
+commit → push is the ordinary order, so a publish must not stale the acceptance it delivers), and a
+publish is an acceptance **caveat**, never a blocker — including when it failed, and including when
+it succeeded but could not be verified. Symmetrically, the local verification state is *shown* in
+the publish prompt and is deliberately **not** a precondition: making a green gate a requirement
+would make a green gate an authorization, the exact inversion this capability exists to prevent.
+
+**The compound invariant.** The model cannot commit (`/commit` is still user-typed, `GitOps` above)
+and a push transmits committed refs only. Together: *the model cannot publish content a human did
+not commit.*
+
 ## Planning lifecycle (`plan/`, `tools/update-plan.ts`, `/plan`, `@plan`/`@direct`)
 
 One CANONICAL structured plan per session at `<projectDir>/plans/<sessionId>.plan.json` —

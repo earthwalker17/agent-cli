@@ -7,6 +7,91 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.6.0] — 2026-08-08
+
+**Deliberate remote delivery to GitHub.** The harness could take a project from a natural-language
+request to a verified, accepted, committed result — and then it stopped at the machine boundary. It
+can now carry that result to an explicitly identified GitHub destination: understand what the
+remote actually holds, publish a named branch or tag, cut a release against a tag that is already
+there, and watch the CI run it triggered. What makes it a *delivery* capability rather than a
+`git push` wrapper is that reading a remote and changing one are two different authorities, and the
+harness cannot be talked out of the difference.
+
+### Added
+
+- **`remote_status`** — the only way this harness looks at a remote: `auth` (which GitHub account
+  would act, and its scopes), `repository` (your permission, default branch, archived), `refs`
+  (read ONE remote ref and produce the observation a publish must cite), `pulls`, `issues`, `runs`,
+  `run`.
+- **`remote_push`** — publish one named branch or tag to one named remote, with an optional
+  `force` that is classified **destructive** and bound to the exact commit the remote held when it
+  was observed.
+- **`remote_release`** — a GitHub Release for a tag that is **already** on the remote.
+- **`/remote`** — an accountability surface: the configured remotes, which account would act, live
+  observations, every remote read, and every remote MUTATION with its verification verdict —
+  including the ones that failed.
+- A `## Remote delivery` report section, REPL chrome for reads and publishes, a conditional system
+  prompt paragraph, and acceptance **caveats** naming what was published, what could not be
+  verified, and what was attempted and failed.
+- A `remoteBlockedHosts` narrowing knob in both config layers. As with research, there is
+  deliberately no permit-list counterpart, and an entry refuses reads as well as mutations.
+
+### Security and safety
+
+- **Two policy facts, not one capability with a mode.** `remoteRead` and `remoteWrite` are separate
+  members of `FACT_KINDS` with separate fail-closed branches, so the engine's existing
+  conflicting-contract rule makes a tool that could both read and publish an automatic deny. A read
+  asks `external` and is session-grantable within a real counter; a **write asks every single
+  time**, is never passed through `applyGrant`, offers no `[s]`, and stores nothing on a session
+  answer — the same rule written at all three consent surfaces, because a consent surface that
+  disagrees with itself is how standing authority is won by accident.
+- **A publish must be bound to a fresh observation** of that exact remote and ref. Absent, or older
+  than the kernel-owned freshness bound, is a **deny** rather than an ask. The bound lives in the
+  kernel so a workflow pack cannot widen its own leash.
+- **What the human approved is what executes.** The refspec source is the observed OID rather than
+  a branch name; execute re-reads the local rev and the remote ref, runs `git push --dry-run
+  --porcelain` and compares its flag column against what the observed relation permits, and
+  re-reads the remote afterwards to record `verified` separately from `ok`. A force push carries
+  `--force-with-lease=<ref>:<observed-oid>`, so the server enforces the same binding.
+- **Looking never writes.** The only network verb is `git ls-remote` — no fetch, no
+  remote-tracking refs, no `FETCH_HEAD`. The honest cost: a commit the remote holds and this
+  repository has never seen is genuinely unknowable, so the relation reports `unknown` and a force
+  push over it is refused **even with `force`**.
+- **The harness never holds a credential**, and `GH_TOKEN`/`GITHUB_TOKEN` are deliberately not
+  forwarded to child processes (recorded as a fact, not worked around). All gh/git output passes a
+  credential scrubber at the pack boundary and again at the event emit site — gh below 2.97.0 could
+  print part of the token from `gh auth status` (GHSA-cg6r-mpgc-h9mm), and a session running a
+  vulnerable gh is told so.
+- **`GH_REPO` is scrubbed** from the child environment because it retargets every gh command the
+  way `GIT_DIR` does; `GH_DEBUG`/`DEBUG` are scrubbed because gh's debug mode prints the
+  Authorization header. `GH_HOST`/`GH_CONFIG_DIR` deliberately pass through and are **recorded** so
+  an override is auditable.
+- **No subagent reaches the remote** — both facts are inadmissible in a child registry, and the
+  engine refuses either under any lineage as a second lock.
+- **Local completion is never permission to publish**, and a green gate is never a precondition
+  either: the local verification state is shown in the publish prompt and enforces nothing. With
+  the model still unable to commit, the compound invariant is that it cannot publish content a
+  human did not commit.
+- A GUI credential prompt cannot be structurally prevented on Windows; `-c
+  credential.interactive=false` plus a bounded timeout is the backstop, and that limit is
+  documented rather than implied away.
+
+### Fixed
+
+- `scrubSecrets` ran its token pattern before its URL-userinfo pattern, so
+  `https://x-access-token:<token>@host` lost the secret but kept the username half. Userinfo now
+  runs first.
+- `parsePushPorcelain` sliced the flag character off before splitting on tabs, leaving the leading
+  tab in place; every line parsed as unrecognisable, which would have aborted every push at the
+  dry-run comparison.
+
+### Deliberately out of scope
+
+No `gh api` passthrough or generic escape; no pull-request or issue creation, no merges, no
+repository creation or deletion, no settings, secrets or workflow dispatch; no `git fetch`/`pull`
+(being behind is reported, not fixed); no multi-repo, fork or upstream-sync flows; no upstream
+tracking configuration as a side effect of a push.
+
 ## [1.5.0] — 2026-08-08
 
 **Source-backed web research.** Until now the harness had no network capability at all: it could

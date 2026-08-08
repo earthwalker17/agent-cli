@@ -62,7 +62,10 @@ const StatusInput = z
       .min(1)
       .max(255)
       .optional()
-      .describe("view=refs: the local rev that would be published, default HEAD. Use a branch name or 'HEAD'; never a working-tree path."),
+      .describe(
+        'view=refs: which local rev would be published. Defaults to the SAME-NAMED local ref — pass ' +
+          "'HEAD' explicitly to publish the current checkout under a different name.",
+      ),
     limit: z.number().int().min(1).max(MAX_REMOTE_ITEMS).optional().describe(`How many items to list (default ${String(DEFAULT_REMOTE_ITEMS)}).`),
     state: z.enum(['open', 'closed', 'all']).optional().describe('view=pulls/issues: which state to list. Default open.'),
     branch: z.string().min(1).max(255).optional().describe('view=runs: only runs for this branch.'),
@@ -129,6 +132,20 @@ export function createRemoteStatusTool(deps: RemoteStatusDeps): Tool<StatusInput
             target,
             `remote '${endpoint.name}' points at ${endpoint.displayUrl}, which is not a GitHub owner/repo destination`,
             'not-github',
+            remaining,
+          );
+        }
+        // `GH_HOST` retargets gh at a different host than the one this remote names, so a read
+        // would report a repository the prompt never mentioned and the operator denylist never
+        // matched (S20 review). It passes through the child env deliberately — an enterprise
+        // install needs it — so the conflict is refused here rather than silently resolved.
+        const ghHost = deps.state.context.gh.hostOverride;
+        if (ghHost !== undefined && ghHost.trim().toLowerCase() !== (endpoint.host ?? '').toLowerCase()) {
+          return blockedFact(
+            input.view,
+            target,
+            `GH_HOST is set to '${ghHost}' while remote '${endpoint.name}' points at ${endpoint.host ?? '(unknown host)'}; gh would contact a different host than this remote names`,
+            'ambiguous',
             remaining,
           );
         }
@@ -247,7 +264,10 @@ export function createRemoteStatusTool(deps: RemoteStatusDeps): Tool<StatusInput
         try {
           const obs = await observeRemoteRef(
             gitDeps,
-            { remoteName: endpoint.name, host, slug: endpoint.slug, refName: q.ref, localRev: input.local_rev ?? 'HEAD' },
+            // The local rev DEFAULTS to the same-named ref, not HEAD (S20 review): observing
+            // `ref=main` while checked out on `feature` otherwise compared origin/main against
+            // HEAD, and the push that followed would have published the wrong commit.
+            { remoteName: endpoint.name, host, slug: endpoint.slug, refName: q.ref, localRev: input.local_rev ?? q.ref },
             state.now(),
           );
           state.charge('read');

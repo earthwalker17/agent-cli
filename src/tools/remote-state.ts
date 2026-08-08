@@ -143,6 +143,23 @@ export function createRemoteState(opts: RemoteStateOptions): RemoteState {
       if (endpoints.length === 0) {
         return { error: 'no git remote is configured for this repository; there is nowhere to publish', kind: 'unavailable' };
       }
+      /**
+       * A remote whose push URL differs from its fetch URL is refused HOWEVER it was reached
+       * (Session 20 review). `ls-remote` uses the fetch URL and `push` uses the push URL, so the
+       * observation would describe one repository while the approval published to another — and
+       * the prompt, the host denylist and the recorded evidence would all name the wrong one.
+       */
+      const admit = (e: RemoteEndpoint): EndpointResolution | EndpointRefusal =>
+        e.pushUrlDiffers === true
+          ? {
+              error:
+                `remote '${e.name}' has a push URL different from its fetch URL, so reading it and publishing to it are ` +
+                'different repositories. This is refused rather than guessed: point them at the same place, or add a ' +
+                'separate remote for the publish destination',
+              kind: 'ambiguous',
+            }
+          : { endpoint: e };
+
       if (remoteName !== undefined && remoteName.trim() !== '') {
         const problem = remoteNameProblem(remoteName.trim());
         if (problem !== undefined) return { error: problem, kind: 'ambiguous' };
@@ -153,14 +170,14 @@ export function createRemoteState(opts: RemoteStateOptions): RemoteState {
             kind: 'ambiguous',
           };
         }
-        return { endpoint: hit };
+        return admit(hit);
       }
       if (defaultRemote === null) {
         return { error: ambiguity ?? 'the destination remote is ambiguous and must be named explicitly', kind: 'ambiguous' };
       }
       const hit = endpoints.find((e) => e.name === defaultRemote);
       if (hit === undefined) return { error: `the default remote '${defaultRemote}' is no longer configured`, kind: 'ambiguous' };
-      return { endpoint: hit };
+      return admit(hit);
     },
   };
   return state;

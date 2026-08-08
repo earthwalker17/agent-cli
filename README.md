@@ -53,6 +53,15 @@ What that means concretely:
   One session allowance shared by every researcher and rebuilt from the event log on resume, the
   query shown verbatim before it is sent, retrieved content fenced as untrusted data — and research
   that **never counts as verification**.
+- **Deliberate remote delivery to GitHub.** Reading a remote and changing one are **two different
+  authorities**, enforced as two separate policy facts: reads ask once and are session-grantable
+  within a fixed allowance, while a push, a tag or a release asks **every single time**, with the
+  exact destination and a machine-computed effect on screen and no session-wide "yes" available at
+  all. A publish must be bound to a fresh `ls-remote` observation of that exact ref — the harness
+  refuses to reason about a remote from memory — and the object that reaches the remote is the
+  object you read in the prompt, re-checked immediately before sending and verified against the
+  remote afterwards. Local completion is **never** permission to publish, and because the model
+  still cannot commit, it can only ever publish work a human committed.
 - **Five model providers behind one runtime.** Anthropic, OpenAI, DeepSeek, Kimi (Moonshot) and
   GLM (Z.AI/Zhipu) through two genuinely different protocols, with a shipped **capability
   catalog** so differences degrade honestly instead of hiding behind a false

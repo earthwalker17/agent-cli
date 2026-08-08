@@ -6,6 +6,7 @@ import { scrubSecrets } from '../shared/secrets.js';
 import { RemoteError, classifyRemoteFailure } from './errors.js';
 import { shortRef } from './refs.js';
 import {
+  MAX_EXCLUSION_BASES,
   MAX_PREVIEW_COMMITS,
   MAX_PREVIEW_PATHS,
   REMOTE_CALL_TIMEOUT_MS,
@@ -87,6 +88,29 @@ async function runLocalGit(deps: RemoteGitDeps, argv: readonly string[]): Promis
   });
 }
 
+/** One `<oid>\t<ref>` row of `git ls-remote` output. */
+export interface LsRemoteRow {
+  oid: string;
+  ref: string;
+  /** True for the `refs/tags/x^{}` row, which names the commit an annotated tag peels to. */
+  peeled: boolean;
+}
+
+/** Ref rows read from one listing before the parser stops. Far above any real repository's count. */
+const MAX_LS_REMOTE_ROWS = 2_000;
+
+export function parseLsRemoteRows(stdout: string): LsRemoteRow[] {
+  const rows: LsRemoteRow[] = [];
+  for (const line of stdout.split('\n')) {
+    if (rows.length >= MAX_LS_REMOTE_ROWS) break;
+    const m = /^([0-9a-f]{40,64})\s+(\S+)\s*$/.exec(line.trim());
+    if (m === null) continue;
+    const ref = m[2] ?? '';
+    rows.push({ oid: m[1] ?? '', ref: ref.replace(/\^\{\}$/, ''), peeled: ref.endsWith('^{}') });
+  }
+  return rows;
+}
+
 /**
  * Parse `git ls-remote` output for ONE ref.
  *
@@ -95,12 +119,7 @@ async function runLocalGit(deps: RemoteGitDeps, argv: readonly string[]): Promis
  * against, is the ref's own value.
  */
 export function parseLsRemote(stdout: string, refName: string): string | null {
-  for (const line of stdout.split('\n')) {
-    const m = /^([0-9a-f]{40,64})\s+(\S+)\s*$/.exec(line.trim());
-    if (m === null) continue;
-    if (m[2] === refName) return m[1] ?? null;
-  }
-  return null;
+  return parseLsRemoteRows(stdout).find((r) => r.ref === refName && !r.peeled)?.oid ?? null;
 }
 
 /** Whether the local object database actually contains this commit-ish. */
@@ -122,9 +141,36 @@ async function isAncestor(deps: RemoteGitDeps, a: string, b: string): Promise<bo
   return r.ok;
 }
 
+/**
+ * Which of these object ids this repository actually has, in ONE spawn.
+ *
+ * `--ignore-missing` is the load-bearing flag: rev-list otherwise fails the whole invocation on the
+ * first unknown id, and the ids here come from a REMOTE listing, so unknown ones are the expected
+ * case rather than an error. `--no-walk` keeps it a membership test instead of a traversal.
+ */
+async function presentLocally(deps: RemoteGitDeps, oids: readonly string[]): Promise<string[]> {
+  if (oids.length === 0) return [];
+  const r = await runLocalGit(deps, ['rev-list', '--no-walk', '--ignore-missing', ...oids.slice(0, MAX_EXCLUSION_BASES)]);
+  if (!r.ok) return [];
+  const have = new Set(
+    r.stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => /^[0-9a-f]{40,64}$/.test(l)),
+  );
+  return oids.filter((o) => have.has(o));
+}
+
 /** Commit subjects in a rev range, newest first, bounded. */
-async function commitsIn(deps: RemoteGitDeps, range: string): Promise<{ commits: PreviewCommit[]; omitted: number }> {
-  const r = await runLocalGit(deps, ['log', `--max-count=${String(MAX_PREVIEW_COMMITS + 1)}`, '--no-color', '--format=%H %s', range]);
+async function commitsIn(deps: RemoteGitDeps, range: string, exclude: readonly string[] = []): Promise<{ commits: PreviewCommit[]; omitted: number }> {
+  const r = await runLocalGit(deps, [
+    'log',
+    `--max-count=${String(MAX_PREVIEW_COMMITS + 1)}`,
+    '--no-color',
+    '--format=%H %s',
+    range,
+    ...(exclude.length > 0 ? ['--not', ...exclude] : []),
+  ]);
   if (!r.ok) return { commits: [], omitted: 0 };
   const lines = r.stdout.split('\n').map((l) => l.trimEnd()).filter((l) => l !== '');
   const commits: PreviewCommit[] = [];
@@ -144,20 +190,42 @@ async function countIn(deps: RemoteGitDeps, args: readonly string[]): Promise<nu
   return r.ok && Number.isFinite(n) ? n : 0;
 }
 
-/** Unique paths touched by a range (or by the tip's recent history when there is no base). */
-async function changedPaths(deps: RemoteGitDeps, base: string | null, tip: string): Promise<{ paths: string[]; omitted: number }> {
+/**
+ * Unique paths a push would carry.
+ *
+ * With a known base (the remote already holds this ref) it is a plain diff. Without one — a ref the
+ * remote does not have — the range is the tip MINUS everything the remote already holds under other
+ * refs, which is why `exclude` exists: the alternative, walking the tip's own history, reports the
+ * whole branch as new and produced a false "GitHub will reject this" warning in the live run.
+ *
+ * Returns the FULL set alongside the capped display list, because the workflow-scope test must run
+ * over everything: a warning that disappears on large pushes is worse than no warning.
+ */
+async function changedPaths(
+  deps: RemoteGitDeps,
+  base: string | null,
+  tip: string,
+  exclude: readonly string[] = [],
+): Promise<{ paths: string[]; omitted: number; all: string[] }> {
   const r =
     base !== null
       ? await runLocalGit(deps, ['diff', '--name-only', base, tip])
-      : await runLocalGit(deps, ['log', `--max-count=${String(MAX_PREVIEW_COMMITS)}`, '--pretty=format:', '--name-only', tip]);
-  if (!r.ok) return { paths: [], omitted: 0 };
+      : await runLocalGit(deps, [
+          'log',
+          `--max-count=${String(MAX_PREVIEW_COMMITS)}`,
+          '--pretty=format:',
+          '--name-only',
+          tip,
+          ...(exclude.length > 0 ? ['--not', ...exclude] : []),
+        ]);
+  if (!r.ok) return { paths: [], omitted: 0, all: [] };
   const seen = new Set<string>();
   for (const line of r.stdout.split('\n')) {
     const p = line.trim();
     if (p !== '') seen.add(p);
   }
   const all = [...seen];
-  return { paths: all.slice(0, MAX_PREVIEW_PATHS), omitted: Math.max(0, all.length - MAX_PREVIEW_PATHS) };
+  return { paths: all.slice(0, MAX_PREVIEW_PATHS), omitted: Math.max(0, all.length - MAX_PREVIEW_PATHS), all };
 }
 
 /** Uncommitted entries in the workspace right now, or null when git could not answer. */
@@ -231,10 +299,17 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
     );
   }
 
-  const ls = await runRemoteGit(deps, ['ls-remote', '--exit-code', req.remoteName, req.refName]);
-  // `--exit-code` reports 2 for "no matching refs"; that is an answer, not a failure.
-  const absent = ls.termination === 'exited' && ls.exitCode === 2;
-  if (!ls.ok && !absent) {
+  // ONE listing of EVERY ref the remote has, rather than a lookup of just this one.
+  //
+  // The extra rows are not incidental — they are the fix for a defect the live run exposed. A ref
+  // the remote does not have is `new`, and computing "what this push adds" from the tip's own
+  // history reports the entire branch: 207 commits and a `.github/workflows/` change that was
+  // published months ago, which the prompt then asserted GitHub would reject. It did not. The
+  // remote's OTHER refs are the exclusion bases that make the number true.
+  const ls = await runRemoteGit(deps, ['ls-remote', '--exit-code', req.remoteName]);
+  // `--exit-code` reports 2 for "no refs at all"; that is an answer (an empty remote), not a failure.
+  const empty = ls.termination === 'exited' && ls.exitCode === 2;
+  if (!ls.ok && !empty) {
     const { reason, cure } = classifyRemoteFailure(`${ls.stdout}\n${ls.stderr}`, ls.termination === 'timeout' ? 'timeout' : 'network');
     throw new RemoteError(
       `could not read '${req.refName}' from '${req.remoteName}': ${firstLine(ls.stderr) || firstLine(ls.stdout) || `exit ${String(ls.exitCode)}`}`,
@@ -242,7 +317,9 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
       { exitCode: ls.exitCode, ...(cure !== undefined ? { cure } : {}) },
     );
   }
-  const remoteOid = absent ? null : parseLsRemote(ls.stdout, req.refName);
+  const rows = empty ? [] : parseLsRemoteRows(ls.stdout);
+  const remoteOid = rows.find((r) => r.ref === req.refName && !r.peeled)?.oid ?? null;
+  const remotePeeledOid = rows.find((r) => r.ref === req.refName && r.peeled)?.oid ?? null;
 
   // Peel both sides to commits for ancestry. A branch ref IS its commit; an annotated tag is not.
   const localCommit = (await resolveRev(deps, `${localOid}^{commit}`)) ?? localOid;
@@ -251,10 +328,18 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
   let ahead = 0;
   let behind = 0;
   let base: string | null = null;
+  let exclude: string[] = [];
+  let basesIncomplete = false;
 
   if (remoteOid === null) {
     relation = 'new';
-    ahead = await countIn(deps, [localCommit]);
+    // Everything the remote already holds under ANY other ref, restricted to objects we actually
+    // have. What we do not have cannot be excluded, and that is recorded rather than hidden: the
+    // resulting counts are then an over-estimate, and the preview says so.
+    const candidates = [...new Set(rows.filter((r) => r.ref !== req.refName).map((r) => r.oid))];
+    exclude = await presentLocally(deps, candidates);
+    basesIncomplete = exclude.length < candidates.length;
+    ahead = await countIn(deps, [localCommit, ...(exclude.length > 0 ? ['--not', ...exclude] : [])]);
   } else if (remoteOid === localOid) {
     relation = 'up-to-date';
   } else if (!(await haveObject(deps, remoteOid))) {
@@ -273,8 +358,8 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
     else relation = 'diverged';
   }
 
-  const { commits, omitted } = await commitsIn(deps, base !== null ? `${base}..${localCommit}` : localCommit);
-  const paths = await changedPaths(deps, base, localCommit);
+  const { commits, omitted } = await commitsIn(deps, base !== null ? `${base}..${localCommit}` : localCommit, base !== null ? [] : exclude);
+  const paths = await changedPaths(deps, base, localCommit, exclude);
   const dirty = await dirtyCount(deps);
 
   return {
@@ -284,6 +369,7 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
     slug: req.slug,
     refName: req.refName,
     remoteOid,
+    ...(remotePeeledOid !== null ? { remotePeeledOid } : {}),
     localOid,
     localRef: req.localRev,
     relation,
@@ -293,7 +379,10 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
     commitsOmitted: omitted,
     changedPaths: paths.paths,
     changedPathsOmitted: paths.omitted,
-    touchesWorkflows: touchesWorkflowFiles(paths.paths),
+    basesIncomplete,
+    // Computed over the FULL path set, not the capped display list: a scope warning that
+    // disappears on exactly the large pushes that need it is worse than no warning at all.
+    touchesWorkflows: touchesWorkflowFiles(paths.all),
     dirtyCount: dirty,
     observedAtMs: nowMs,
   };

@@ -14,8 +14,9 @@ open-source project, not a staffed product, so please calibrate expectations acc
 
 | Version | Supported |
 | --- | --- |
-| 1.5.x | ✅ (current: 1.5.0) |
-| 1.4.x | ⚠️ security fixes only |
+| 1.6.x | ✅ (current: 1.6.0) |
+| 1.5.x | ⚠️ security fixes only |
+| 1.4.x | ❌ |
 | 1.3.x | ❌ |
 | 1.2.x | ❌ |
 | 1.1.x | ❌ |
@@ -42,7 +43,17 @@ disabled and every command asks (fail closed).
 - **Workspace trust is recorded consent, not isolation.** It changes what the agent is *allowed*
   to do, not what a process *can* do.
 - **Command output is not scrubbed for secrets.** If a command prints a credential, it lands in
-  the evidence log and the model's context.
+  the evidence log and the model's context. The narrow exception is remote delivery: gh/git output
+  passes through a credential scrubber at the pack boundary and again at the event emit site,
+  because `gh auth status` below gh 2.97.0 printed part of the token (GHSA-cg6r-mpgc-h9mm), remote
+  URLs embed credentials in the standard CI form, and git echoes those URLs inside auth failures.
+  That scrubber matches GitHub's documented token shapes and URL userinfo — it is not a general
+  secret detector.
+- **Remote delivery never holds a credential, and cannot verify one.** Publishing uses gh's own
+  stored credential and git's credential helper; the harness never reads a token, and deliberately
+  does not forward `GH_TOKEN`/`GITHUB_TOKEN` to child processes. What it *can* prove is what the
+  remote actually holds before and after: every mutation is re-checked against the remote and
+  recorded as verified or not.
 - **Path validation is TOCTOU-racy** in principle, as all path checks are.
 - **Screenshots capture whatever the app renders**, secrets included.
 - No macOS/Linux enforcement backend exists yet — those platforms run with approval only.

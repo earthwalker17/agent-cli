@@ -153,6 +153,11 @@ export function gitPushArgv(a: PushArgs): string[] {
   return [
     'push',
     '--porcelain',
+    // `push.followTags = true` is a common user setting, and it makes git append every annotated
+    // tag reachable from the pushed commit that the remote lacks — with flag `*`, the same flag a
+    // new branch carries, so a flag-only comparison waves it through. That would publish refs the
+    // human never saw (Session 20 review, reproduced against real git). One ref per call, always.
+    '--no-follow-tags',
     ...(a.dryRun ? ['--dry-run'] : []),
     ...(a.lease !== undefined ? [`--force-with-lease=${a.refName}:${a.lease.expect ?? ''}`] : []),
     a.remoteName,

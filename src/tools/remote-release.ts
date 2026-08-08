@@ -15,6 +15,7 @@ import {
   type RemoteEndpoint,
 } from '../remote/types.js';
 import { sha256, truncateForModel } from '../shared/hash.js';
+import { sanitizeLine } from '../shared/text.js';
 import type { RemoteBlockKind, RemoteTargetFact, RemoteWriteFact, SessionEvent, Tool, ToolResult } from '../types.js';
 import { localEvidenceLine, type RemoteState } from './remote-state.js';
 
@@ -40,7 +41,7 @@ const ReleaseInput = z
       .string()
       .min(1)
       .max(MAX_RELEASE_NOTES_CHARS)
-      .describe('Release notes in Markdown. Published publicly and shown verbatim in the approval prompt preview.'),
+      .describe('Release notes in Markdown. Published publicly; the first lines are previewed to the user before anything is sent.'),
     draft: z.boolean().optional().describe('Create it unpublished so a human can review it on GitHub before it goes out.'),
     prerelease: z.boolean().optional().describe('Mark it a prerelease.'),
     remote: z.string().min(1).max(100).optional().describe('Which configured git remote. Required when several are configured.'),
@@ -141,7 +142,8 @@ export function createRemoteReleaseTool(deps: RemoteReleaseDeps): Tool<ReleaseIn
       draft: input.draft === true,
       prerelease: input.prerelease === true,
     });
-    const notesHead = input.notes.split('\n').slice(0, 6);
+    const noteLines = input.notes.split('\n');
+    const notesHead = noteLines.slice(0, 6);
     return {
       operation: 'release.create',
       target,
@@ -149,9 +151,15 @@ export function createRemoteReleaseTool(deps: RemoteReleaseDeps): Tool<ReleaseIn
       // A release does not overwrite anything: gh refuses when one already exists for the tag.
       overwrites: false,
       effect: [
-        `creates a ${input.draft === true ? 'DRAFT ' : ''}${input.prerelease === true ? 'pre' : ''}release for tag ${tag} at ${shortOid(obs.remoteOid)} in ${endpoint.slug}`,
-        `title: ${input.title}`,
-        `notes (${String(input.notes.length)} chars, published publicly) — first lines: ${notesHead.join(' ⏎ ')}${input.notes.split('\n').length > 6 ? ' …' : ''}`,
+        `creates a ${input.draft === true ? 'DRAFT ' : ''}${input.prerelease === true ? 'pre' : ''}release for tag ${tag} in ${endpoint.slug}, at commit ${shortOid(obs.remotePeeledOid ?? obs.remoteOid)}` +
+          (obs.remotePeeledOid != null ? ` (annotated tag object ${shortOid(obs.remoteOid)})` : ''),
+        `title: ${sanitizeLine(input.title)}`,
+        // Every model-authored value is sanitized before it becomes a prompt line: `sanitizeLine`
+        // collapses newlines, and without it a title or a note could inject lines that look
+        // harness-authored and push the truthful ones past the renderer's line cap (S20 review).
+        `notes (${String(input.notes.length)} chars in ${String(noteLines.length)} line(s), published publicly) — first lines: ` +
+          `${notesHead.map((l) => sanitizeLine(l)).join(' ⏎ ')}` +
+          (noteLines.length > notesHead.length ? ` ⏎ …${String(noteLines.length - notesHead.length)} further line(s) NOT shown here` : ''),
         input.draft === true
           ? 'a draft is visible only to people who can write to the repository until it is published'
           : 'a published release is visible to everyone who can see the repository and notifies watchers',

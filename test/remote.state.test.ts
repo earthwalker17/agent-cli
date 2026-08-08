@@ -45,6 +45,7 @@ function observation(over: Partial<RemoteObservation> = {}): RemoteObservation {
     commitsOmitted: 0,
     changedPaths: [],
     changedPathsOmitted: 0,
+    basesIncomplete: false,
     touchesWorkflows: false,
     dirtyCount: 0,
     observedAtMs: 1_000,

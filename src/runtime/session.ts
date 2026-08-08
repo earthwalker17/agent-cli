@@ -1408,10 +1408,10 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
     }
     if (fact !== undefined) {
       return {
-        summary: `${tool.name}: ${fact.operation} ← ${fact.target.display}`,
+        summary: `${tool.name}: ${sanitizeLine(fact.operation)} ← ${sanitizeLine(fact.target.display)}`,
         detail: [
-          `destination: ${fact.target.display}`,
-          `command: ${fact.argvPreview}`,
+          `destination: ${sanitizeLine(fact.target.display)}`,
+          `command: ${sanitizeLine(fact.argvPreview)}`,
           `bounds: ${fact.bounds.maxItems !== undefined ? `≤${String(fact.bounds.maxItems)} item(s) · ` : ''}${String(fact.bounds.timeoutMs)} ms`,
           ...(fact.budgetRemaining !== undefined ? [`session remote allowance remaining: ${fact.budgetRemaining}`] : []),
         ].join('\n'),
@@ -1426,20 +1426,29 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
       fact = undefined;
     }
     if (fact !== undefined) {
+      // Order is load-bearing (S20 review). The renderer caps detail lines and drops the TAIL, and
+      // `effect` can be long, so the three lines a human cannot answer without — where, what, and
+      // the exact command — go FIRST. Every value is sanitized here as well as at its source: a
+      // model-authored title carrying a newline would otherwise inject lines that look
+      // harness-authored and push the truthful ones off the end.
+      const s = (v: string): string => sanitizeLine(v);
+      const MAX_EFFECT_LINES = 6;
+      const effects = fact.effect.slice(0, MAX_EFFECT_LINES).map((l) => `effect: ${s(l)}`);
+      if (fact.effect.length > MAX_EFFECT_LINES) effects.push(`effect: …${String(fact.effect.length - MAX_EFFECT_LINES)} further effect line(s)`);
       return {
-        summary: `${tool.name}: ${fact.operation} → ${fact.exactTarget} on ${fact.target.display}`,
+        summary: `${tool.name}: ${s(fact.operation)} → ${s(fact.exactTarget)} on ${s(fact.target.display)}`,
         detail: [
-          `destination: ${fact.target.display}`,
-          `exact target: ${fact.exactTarget}`,
-          ...fact.effect.map((l) => `effect: ${l}`),
+          `destination: ${s(fact.target.display)}`,
+          `exact target: ${s(fact.exactTarget)}`,
+          `command: ${s(fact.argvPreview)}`,
+          ...effects,
           ...(fact.observation !== undefined
             ? [
-                `observed ${String(Math.round(fact.observation.ageMs / 1000))}s ago (id ${fact.observation.id}): remote held ${fact.observation.remoteOid ?? '(absent)'}`,
+                `observed ${String(Math.round(fact.observation.ageMs / 1000))}s ago (id ${s(fact.observation.id)}): remote held ${s(fact.observation.remoteOid ?? '(absent)')}`,
               ]
             : []),
-          ...(fact.localEvidence !== undefined ? [`local verification: ${fact.localEvidence}`] : []),
-          `command: ${fact.argvPreview}`,
-          ...(fact.budgetRemaining !== undefined ? [`session remote allowance remaining: ${fact.budgetRemaining}`] : []),
+          ...(fact.localEvidence !== undefined ? [`local verification: ${s(fact.localEvidence)}`] : []),
+          ...(fact.budgetRemaining !== undefined ? [`session remote allowance remaining: ${s(fact.budgetRemaining)}`] : []),
         ].join('\n'),
       };
     }

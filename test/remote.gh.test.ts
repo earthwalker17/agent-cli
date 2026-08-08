@@ -218,6 +218,7 @@ describe('argv composition', () => {
     expect(gitPushArgv({ remoteName: 'origin', refName: 'refs/heads/x', sourceOid: oid, dryRun: false })).toEqual([
       'push',
       '--porcelain',
+      '--no-follow-tags',
       'origin',
       `${oid}:refs/heads/x`,
     ]);
@@ -229,6 +230,7 @@ describe('argv composition', () => {
     expect(gitPushArgv({ remoteName: 'origin', refName: 'refs/heads/x', sourceOid: oid, lease: { expect: remote }, dryRun: true })).toEqual([
       'push',
       '--porcelain',
+      '--no-follow-tags',
       '--dry-run',
       `--force-with-lease=refs/heads/x:${remote}`,
       'origin',

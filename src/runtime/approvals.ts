@@ -22,6 +22,9 @@ export const dangerousApprover: Approver = async () => ({
  * from UNTRUSTED model output (the proposed command string); they are sanitized so embedded
  * ANSI/bidi/control characters cannot visually rewrite the very prompt that gates execution.
  */
+/** Detail lines rendered before truncation. Kept small so a prompt stays readable at a glance. */
+const DETAIL_LINE_CAP = 12;
+
 export function formatApprovalPrompt(req: ApprovalRequest): string {
   // For a shell command the class is only a best-effort LABEL (string matching over untrusted
   // model output, bypassable by design) — the header must say so, not present it as a verdict
@@ -73,7 +76,14 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   }
   lines.push(`  ${sanitizeLine(req.summary)}`);
   if (req.detail && req.detail !== req.summary) {
-    for (const l of req.detail.split('\n').slice(0, 12)) lines.push(`    ${sanitizeLine(l)}`);
+    const all = req.detail.split('\n');
+    for (const l of all.slice(0, DETAIL_LINE_CAP)) lines.push(`    ${sanitizeLine(l)}`);
+    // The cap drops the TAIL, and the tail is where the composed command and the allowance live.
+    // Silently eliding them let a detail line count — which a tool can inflate from model-authored
+    // text — evict the lines a human most needs (S20 review). Truncation is now visible.
+    if (all.length > DETAIL_LINE_CAP) {
+      lines.push(`    ⚠ ${String(all.length - DETAIL_LINE_CAP)} further detail line(s) NOT shown — see the reason below and /report for the full record`);
+    }
   }
   // The reason embeds untrusted model text for command asks (analyzeCommand quotes the
   // executable and offending arguments), so it needs the same escaping as every other line —

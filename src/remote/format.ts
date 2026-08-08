@@ -131,8 +131,11 @@ export function renderRepository(r: RepositorySummary): string {
 export function renderObservation(o: RemoteObservation): string {
   const head = [
     `Observed ${describeTarget(o)}`,
-    `remote holds: ${shortOid(o.remoteOid)} · local ${o.localRef} is ${shortOid(o.localOid)}`,
+    `remote holds: ${shortOid(o.remoteOid)}${o.remotePeeledOid != null ? ` (annotated tag → commit ${shortOid(o.remotePeeledOid)})` : ''} · local ${o.localRef} is ${shortOid(o.localOid)}`,
     describeRelation(o),
+    ...(o.basesIncomplete
+      ? ['NOTE: the remote holds refs whose objects this repository lacks, so the counts and paths below are an OVER-estimate']
+      : []),
     o.dirtyCount !== null && o.dirtyCount > 0
       ? `${String(o.dirtyCount)} uncommitted workspace entr(ies) — a push publishes COMMITS, so those are NOT included`
       : 'workspace is clean',
@@ -184,11 +187,17 @@ export function renderRuns(items: readonly RunSummary[]): string {
 }
 
 export function renderRun(r: RunSummary): string {
+  // Every third-party field goes INSIDE the fence, exactly as `renderRuns` does with the same
+  // fields (S20 review): a workflow name and a branch name come from the repository, which for a
+  // fork's pull request is a stranger's. Only the harness-authored frame stays outside.
   return [
-    h(`Run ${String(r.databaseId)} — ${r.status}${r.conclusion !== '' ? ` (${r.conclusion})` : ''}`),
-    h(`workflow ${r.workflowName} · ${r.headBranch} @ ${r.headSha.slice(0, 12)} · triggered by ${r.event} · ${r.createdAt}`),
-    ...fence([r.displayTitle]),
-    h(r.url),
+    h(`Run ${String(r.databaseId)} — status and conclusion below are GitHub's, the rest is repository-authored text`),
+    ...fence([
+      `${r.workflowName} · ${r.status}${r.conclusion !== '' ? ` (${r.conclusion})` : ''}`,
+      `${r.headBranch} @ ${r.headSha.slice(0, 12)} · triggered by ${r.event} · ${r.createdAt}`,
+      r.displayTitle,
+      r.url,
+    ]),
   ].join('\n');
 }
 

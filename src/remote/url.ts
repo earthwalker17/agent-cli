@@ -198,9 +198,13 @@ export function parseRemoteVerbose(stdout: string): { endpoints: RemoteEndpoint[
   const endpoints: RemoteEndpoint[] = [];
   const pushUrlDiffers: string[] = [];
   for (const [name, url] of fetchUrls) {
-    endpoints.push(endpointOf(name, url));
     const push = pushUrls.get(name);
-    if (push !== undefined && push !== url) pushUrlDiffers.push(name);
+    const differs = push !== undefined && push !== url;
+    // The flag rides on the ENDPOINT, not merely on this return value (Session 20 review). It used
+    // to inform only the default-remote choice, so naming the remote explicitly walked straight
+    // past it — and the refusal's own suggested cure was to name it explicitly.
+    endpoints.push({ ...endpointOf(name, url), ...(differs ? { pushUrlDiffers: true } : {}) });
+    if (differs) pushUrlDiffers.push(name);
   }
   return { endpoints, pushUrlDiffers };
 }

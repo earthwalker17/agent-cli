@@ -13,9 +13,10 @@ import {
   type RemoteGitDeps,
 } from '../remote/observe.js';
 import { qualifyBranch, qualifyTag, shortOid, shortRef } from '../remote/refs.js';
-import { endpointHost, targetFactOf } from '../remote/url.js';
-import { REMOTE_PUSH_TIMEOUT_MS, type RemoteEndpoint, type RemoteObservation } from '../remote/types.js';
+import { endpointHost, parseRemoteUrl, targetFactOf } from '../remote/url.js';
+import { REMOTE_PUSH_TIMEOUT_MS, type PushFlag, type PushPorcelain, type RemoteEndpoint, type RemoteObservation } from '../remote/types.js';
 import { truncateForModel } from '../shared/hash.js';
+import { sanitizeLine } from '../shared/text.js';
 import type { RemoteBlockKind, RemoteTargetFact, RemoteWriteFact, SessionEvent, Tool, ToolResult } from '../types.js';
 import { localEvidenceLine, type RemoteState } from './remote-state.js';
 
@@ -49,7 +50,7 @@ const PushInput = z
       .min(1)
       .max(255)
       .optional()
-      .describe('Which local rev to publish. Defaults to the same-named local ref. Must match the rev the observation was taken against.'),
+      .describe('Which local rev to publish. Defaults to whatever the observation resolved. Must match it, or nothing is sent.'),
     force: z
       .boolean()
       .optional()
@@ -87,20 +88,34 @@ function blocked(op: string, target: RemoteTargetFact, exact: string, error: str
 /** Effect lines derived from the observation. Everything here is machine-computed, never prose. */
 function effectLines(o: RemoteObservation, force: boolean, state: RemoteState, endpoint: RemoteEndpoint): string[] {
   const lines = [describeRelation(o)];
+  if (o.basesIncomplete) {
+    lines.push(
+      'the remote holds refs whose objects this repository does not have, so the counts and paths above are an ' +
+        'OVER-estimate of what would actually be transferred',
+    );
+  }
   if (o.commits.length > 0) {
-    const head = o.commits.slice(0, 3).map((c) => `${c.oid.slice(0, 12)} ${c.subject}`);
+    const head = o.commits.slice(0, 3).map((c) => `${c.oid.slice(0, 12)} ${sanitizeLine(c.subject)}`);
     lines.push(`commits: ${head.join(' | ')}${o.commits.length > 3 || o.commitsOmitted > 0 ? ` | …+${String(o.commits.length - head.length + o.commitsOmitted)} more` : ''}`);
   }
   if (force && (o.relation === 'diverged' || o.relation === 'behind')) {
     lines.push(`DISCARDS ${String(o.behind)} commit(s) that exist only on the remote — anyone who already pulled them keeps them, and history diverges`);
   }
   if (o.touchesWorkflows) {
+    // Stated as a POSSIBILITY, never a certainty — the live S20 run asserted "GitHub will REJECT
+    // this push" over an https remote and GitHub accepted it. The reason is that `git push` over
+    // https authenticates with the CREDENTIAL HELPER's token, which is not the gh CLI's token and
+    // routinely carries different scopes. The harness can see one of those and not the other, so
+    // it names what it can see and says which credential it is talking about.
     const host = endpointHost(endpoint);
     const identity = host !== null ? state.identityFor(host) : undefined;
+    const scoped = identity !== undefined && !identity.scopes.includes('workflow');
     lines.push(
-      identity !== undefined && !identity.scopes.includes('workflow')
-        ? `TOUCHES .github/workflows/ and the gh account '${identity.account}' has no 'workflow' scope — GitHub will REJECT this push (cure: gh auth refresh -h ${identity.host} -s workflow)`
-        : 'touches .github/workflows/ — GitHub rejects this unless the credential carries the `workflow` scope',
+      scoped
+        ? `TOUCHES .github/workflows/, and the gh account '${identity.account}' has no 'workflow' scope. GitHub rejects such a push ` +
+            `when the credential lacks that scope — but git may authenticate with your credential HELPER's token rather than gh's, ` +
+            `so this is a risk, not a certainty (cure if it is rejected: gh auth refresh -h ${identity.host} -s workflow)`
+        : 'touches .github/workflows/ — GitHub rejects such a push when the credential presented lacks the `workflow` scope',
     );
   }
   if (o.dirtyCount !== null && o.dirtyCount > 0) {
@@ -108,6 +123,47 @@ function effectLines(o: RemoteObservation, force: boolean, state: RemoteState, e
   }
   lines.push(`also updates the local remote-tracking ref refs/remotes/${o.remoteName}/${shortRef(o.refName)}`);
   return lines;
+}
+
+/**
+ * Re-resolve, from git's OWN config right now, the URL a push to this remote would use.
+ *
+ * The approved destination comes from an inventory taken at session assembly, and
+ * `git remote set-url` is one command away (Session 20 review). Comparing the live value against
+ * the approved one is what makes "the destination in the prompt" and "the destination git will
+ * contact" the same claim rather than two claims that usually agree.
+ */
+async function livePushUrl(deps: RemoteGitDeps, remoteName: string): Promise<{ url: string } | { error: string }> {
+  const push = await runRemoteGit(deps, ['config', '--get', `remote.${remoteName}.pushurl`]);
+  const fetch = await runRemoteGit(deps, ['config', '--get', `remote.${remoteName}.url`]);
+  const pushUrl = push.stdout.trim();
+  const fetchUrl = fetch.stdout.trim();
+  if (fetchUrl === '' && pushUrl === '') return { error: `remote '${remoteName}' is no longer configured` };
+  if (pushUrl !== '' && pushUrl !== fetchUrl) {
+    return { error: `remote '${remoteName}' now has a push URL different from its fetch URL; reading it and publishing to it are different repositories` };
+  }
+  return { url: pushUrl !== '' ? pushUrl : fetchUrl };
+}
+
+/**
+ * Why a porcelain preview does not match the single ref update that was approved, or undefined
+ * when it matches exactly. One ref, one source, one destination, and a run git said it finished.
+ */
+function describeMismatch(preview: PushPorcelain, allowed: readonly PushFlag[], refName: string, sourceOid: string): string | undefined {
+  if (preview.lines.length === 0) return 'it reports no ref update at all';
+  if (preview.lines.length > 1) {
+    return `it would update ${String(preview.lines.length)} refs (${preview.lines.map((l) => l.to).join(', ')}), not the one that was approved`;
+  }
+  const line = preview.lines[0]!;
+  if (line.to !== refName) return `it would update '${line.to}', not '${refName}'`;
+  // git echoes the source as given; an oid source may be abbreviated in the report, so compare by
+  // prefix in the direction that cannot produce a false match.
+  if (!sourceOid.startsWith(line.from) && !line.from.startsWith(sourceOid)) {
+    return `it would publish '${line.from}', not the observed commit ${shortOid(sourceOid)}`;
+  }
+  if (!allowed.includes(line.flag)) return `it would '${line.flag}'`;
+  if (!preview.done) return "git's porcelain output was cut short (no terminating 'Done')";
+  return undefined;
 }
 
 export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
@@ -261,7 +317,17 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       };
 
+      /**
+       * Record the mutation AND charge the allowance in one place.
+       *
+       * They are inseparable (Session 20 review): the live counter is charged in memory while the
+       * durable one is rebuilt by counting `remote.mutated` events, so charging only on success
+       * made the two disagree — a session could attempt eleven publishes live and then resume with
+       * a spend of ten. An attempt that reached the remote consumed a slot whether or not it
+       * landed, which is also the honest accounting.
+       */
       const report = (ok: boolean, verified: boolean, extra: { afterOid?: string | null; detail?: string }): void => {
+        state.charge('write');
         ctx.reportRemote?.({
           kind: 'mutated',
           operation: op,
@@ -280,6 +346,21 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
       };
 
       try {
+        // 0. The destination in the approved prompt came from an inventory taken at assembly, and
+        //    `git remote set-url` is one command away. Re-resolve what git would ACTUALLY contact.
+        const live = await livePushUrl(gitDeps, endpoint.name);
+        if ('error' in live) return done(false, '', `nothing was sent: ${live.error}. Re-inspect the remote and ask again.`);
+        const approved = parseRemoteUrl(endpoint.displayUrl);
+        const now = parseRemoteUrl(live.url);
+        if (now.displayUrl !== approved.displayUrl) {
+          return done(
+            false,
+            '',
+            `nothing was sent: remote '${endpoint.name}' now points at ${now.displayUrl}, not ${approved.displayUrl} as shown when this was approved. ` +
+              'Re-inspect the remote and ask again.',
+          );
+        }
+
         // 1. The local side must still be exactly what was observed. The refspec sends the observed
         //    OID either way, so a moved branch would silently publish something the human did not
         //    read — refusing is the only honest response.
@@ -322,16 +403,20 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
         report(false, false, { detail: `dry-run ${reason}: ${firstLine(dry.stderr) || firstLine(dry.stdout)}` });
         return done(false, '', `nothing was sent — the dry run failed: ${remoteFailureMessage(new RemoteError(firstLine(dry.stderr) || firstLine(dry.stdout) || `exit ${String(dry.exitCode)}`, reason, { exitCode: dry.exitCode, ...(cure !== undefined ? { cure } : {}) }))}`);
       }
+      // The comparison is STRUCTURAL, not just the flag column (Session 20 review). A flag-only
+      // check waved through extra refs git decided to include on its own — `push.followTags` adds
+      // annotated tags with the same `*` flag a new branch carries. What is approved is exactly one
+      // ref update, from a known oid, to a known ref, on a run git said it finished.
       const preview = parsePushPorcelain(dry.stdout);
       const allowed = expectedPushFlags(obs.relation, force);
-      const surprise = preview.lines.find((l) => !allowed.includes(l.flag));
-      if (surprise !== undefined || preview.lines.length === 0) {
-        report(false, false, { detail: `dry-run disagreed with the approved effect: ${surprise?.flag ?? 'no ref lines'}` });
+      const mismatch = describeMismatch(preview, allowed, refName, obs.localOid);
+      if (mismatch !== undefined) {
+        report(false, false, { detail: `dry-run disagreed with the approved effect: ${mismatch}` });
         return done(
           false,
           '',
-          `nothing was sent: the dry run says this push would '${surprise?.flag ?? 'do nothing'}', which is not what was approved ` +
-            `(the observed relation '${obs.relation}' permits ${allowed.join(', ') || 'nothing'}). Re-read the ref and ask again.`,
+          `nothing was sent: the dry run does not match what was approved (${mismatch}; the observed relation ` +
+            `'${obs.relation}' permits ${allowed.join(', ') || 'nothing'}). Re-read the ref and ask again.`,
         );
       }
 
@@ -342,8 +427,37 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
         const text = `${push.stdout}\n${push.stderr}`;
         const { reason, cure } = classifyRemoteFailure(text, push.termination === 'timeout' ? 'timeout' : 'rejected');
         const detail = porcelain.lines.find((l) => l.flag === 'rejected')?.reason ?? firstLine(push.stderr) ?? '';
-        report(false, false, { detail: `${reason}: ${detail}` });
-        return done(false, '', remoteFailureMessage(new RemoteError(detail || `git push exited ${String(push.exitCode)}`, reason, { exitCode: push.exitCode, ...(cure !== undefined ? { cure } : {}) })));
+        // A failed push is not the same as an unchanged remote (Session 20 review). A pack can be
+        // transferred and the ref updated before the connection drops, the timeout fires, or the
+        // turn is cancelled — so ASK the remote what it holds rather than asserting that nothing
+        // reached it. The answer goes into the durable record either way.
+        let afterFailure: string | null | undefined;
+        try {
+          afterFailure = await lsRemoteOid(gitDeps, endpoint.name, refName);
+        } catch {
+          afterFailure = undefined;
+        }
+        const landed = afterFailure !== undefined && afterFailure === obs.localOid;
+        report(false, landed, {
+          ...(afterFailure !== undefined ? { afterOid: afterFailure } : {}),
+          detail: `${reason}: ${detail}${
+            afterFailure === undefined
+              ? '; the remote could not be re-read afterwards, so whether anything landed is UNKNOWN'
+              : landed
+                ? '; but the remote NOW HOLDS the pushed commit — the ref was updated before the failure'
+                : `; the remote still holds ${shortOid(afterFailure)}`
+          }`,
+        });
+        return done(
+          false,
+          '',
+          `${remoteFailureMessage(new RemoteError(detail || `git push exited ${String(push.exitCode)}`, reason, { exitCode: push.exitCode, ...(cure !== undefined ? { cure } : {}) }))}` +
+            (afterFailure === undefined
+              ? ' The remote could not be re-read, so whether anything landed is UNKNOWN — check it yourself before retrying.'
+              : landed
+                ? ` HOWEVER the remote now holds ${shortOid(afterFailure)}: the ref WAS updated before the failure. Do not retry blindly.`
+                : ` The remote still holds ${shortOid(afterFailure)}; nothing landed.`),
+        );
       }
 
       // 5. Verify from the remote's own answer, not from git's exit code.
@@ -355,7 +469,6 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
       } catch {
         verified = false;
       }
-      state.charge('write');
       report(true, verified, { afterOid: after, ...(verified ? {} : { detail: `post-push read returned ${shortOid(after)}, expected ${shortOid(obs.localOid)}` }) });
 
       const t = truncateForModel(
