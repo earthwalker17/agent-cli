@@ -307,6 +307,31 @@ export function createRenderer(opts: {
           );
           break;
         }
+        // Session 20. The read line is ordinary progress; the MUTATION line is not. It is the only
+        // chrome in this harness that reports a change to a machine the user does not own, so it
+        // states the exact target, whether the harness confirmed it against the remote afterwards,
+        // and — loudly — whether it overwrote anything.
+        case 'remote.inspected': {
+          chromeLine(
+            `  ${e.ok ? style.green(g.ok) : style.yellow(g.warn)} remote ${sanitizeLine(e.operation)} ${sanitizeLine(e.host)}/${sanitizeLine(e.target)}` +
+              `${e.account !== undefined ? ` as ${sanitizeLine(e.account)}` : ''}` +
+              `${e.itemCount !== undefined ? ` ${g.arrow} ${String(e.itemCount)} item(s)` : ''}` +
+              `${e.detail !== undefined ? ` — ${sanitizeLine(e.detail)}` : ''} · ${String(e.durationMs)}ms`,
+          );
+          break;
+        }
+        case 'remote.mutated': {
+          const verdict = !e.ok ? style.yellow('FAILED') : e.verified ? style.green('verified') : style.yellow('NOT VERIFIED');
+          chromeLine(
+            `  ${e.ok && e.verified ? style.green(g.ok) : style.yellow(g.warn)} PUBLISHED ${sanitizeLine(e.operation)} ` +
+              `${sanitizeLine(e.exactTarget)} ${g.arrow} ${sanitizeLine(e.host)}/${sanitizeLine(e.target)}` +
+              `${e.account !== undefined ? ` as ${sanitizeLine(e.account)}` : ''} — ${verdict}` +
+              `${e.overwrote ? ` ${style.yellow('[OVERWROTE remote state]')}` : ''}`,
+          );
+          if (e.url !== undefined) chromeLine(style.dim(`      ${sanitizeLine(e.url)}`));
+          if (e.detail !== undefined) chromeLine(style.dim(`      ${sanitizeLine(e.detail)}`));
+          break;
+        }
         case 'preview.started': {
           // No live output channel: a preview logs to a FILE (see preview/process.ts), so the
           // chrome shows lifecycle boundaries and /preview shows the tail.

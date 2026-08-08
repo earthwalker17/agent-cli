@@ -26,6 +26,13 @@ import { createRecordSourceTool, type NoteAccumulator } from '../tools/record-so
 import { researchBudgetFromEvents, type ResearchBudget } from '../tools/research-budget.js';
 import { createTavilyClient, noKeyMessage, tavilyKeyAvailability } from '../research/tavily.js';
 import { EXTRACTS_PER_RESEARCH_TASK, type ResearchClient } from '../research/types.js';
+import { detectRemoteContext } from '../remote/context.js';
+import { createGhRunner } from '../remote/gh.js';
+import type { GhRunner, RemoteContext } from '../remote/types.js';
+import { createRemoteState, remoteSpendFromEvents, type RemoteState } from '../tools/remote-state.js';
+import { createRemoteStatusTool } from '../tools/remote-status.js';
+import { createRemotePushTool } from '../tools/remote-push.js';
+import { createRemoteReleaseTool } from '../tools/remote-release.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
 import { effectiveIdentity } from '../report/report.js';
 import { cacheSuccessfulProbe, likelyBrowserAvailable, probeBrowser } from '../browser/probe.js';
@@ -79,6 +86,12 @@ export const SESSION_TOOL_NAMES = [
   'web_search',
   'render_document',
   'inspect_pages',
+  // Session 20. Registered only when the workspace actually has a git remote — the `retrieve` and
+  // `web_search` precedent: a model told about a tool its registry does not contain will reach for
+  // it, be told it does not exist, and reach again.
+  'remote_status',
+  'remote_push',
+  'remote_release',
   'delegate_task',
   'update_plan',
   'apply_task_changes',
@@ -171,6 +184,17 @@ export interface Assembled {
    * shape for a capability whose credential is absent.
    */
   researchUnavailable?: string;
+  /**
+   * The live remote-delivery state (Session 20): the local remote inventory, the events-rebuilt
+   * read/write spend, the in-memory observations, and the gh identity once one is established.
+   * `/remote` reads it. Present even when there is no remote — it then reports exactly that.
+   */
+  remoteState: RemoteState;
+  /**
+   * Why remote delivery is unavailable this session, or undefined when it is available. Present
+   * means the three tools were NOT registered and the system prompt says nothing about them.
+   */
+  remoteUnavailable?: string;
   /** The managed-preview tool instance (Session 13) — /preview reads its live handles. */
   previewTool: PreviewTool;
   /** The live preview-start counter (Session 13, events-rebuilt). */
@@ -313,7 +337,35 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         })
       : null;
   const researchUnavailable = researchClient === null ? noKeyMessage() : undefined;
-  const system = buildSystemPrompt(ctx.ws, map, sandboxFacts, gitFacts, promptMemory(memory), detectedWorkspace, researchClient !== null);
+
+  // Remote delivery (Session 20). The inventory is LOCAL and network-free: git config plus
+  // `gh --version`. Knowing a remote is configured is local knowledge; every question whose answer
+  // lives on the remote needs authority, so nothing here contacts anything and nothing here
+  // establishes who the user is.
+  //
+  // Built before the prompt for the S19 reason: the prompt's remote paragraph is conditional on
+  // the same flag, so the model is never told about a capability its registry does not contain.
+  const remoteContext: RemoteContext = await detectRemoteContext({
+    gitPath: gitFacts.gitPath,
+    repoRoot: gitFacts.repoRoot,
+  });
+  const ghRunner: GhRunner | null = remoteContext.gh.ghPath !== null ? createGhRunner(remoteContext.gh.ghPath) : null;
+  const remoteUnavailable =
+    remoteContext.endpoints.length === 0
+      ? gitFacts.isRepo
+        ? 'no git remote is configured for this repository, so there is nowhere to publish (`git remote add …` first)'
+        : 'the workspace is not inside a git repository, so there is no remote to deliver to'
+      : undefined;
+  const system = buildSystemPrompt(
+    ctx.ws,
+    map,
+    sandboxFacts,
+    gitFacts,
+    promptMemory(memory),
+    detectedWorkspace,
+    researchClient !== null,
+    remoteUnavailable === undefined ? { defaultRemote: remoteContext.defaultRemote, ghAvailable: ghRunner !== null } : undefined,
+  );
 
   const common = {
     workspaceRoot: ctx.ws,
@@ -347,6 +399,28 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   session.log.append({ type: 'config.loaded', sources: deps.config.sources });
   recordSandboxStatus(session, sandboxFacts);
   recordGitContext(session, gitFacts);
+  // The local remote inventory, recorded whether or not it is usable. "This session knew there was
+  // a remote called origin pointing at X, and that gh was version Y" is the premise every later
+  // remote decision rests on, and a premise that is not written down is not evidence.
+  session.log.append({
+    type: 'remote.context',
+    ghVersion: remoteContext.gh.version,
+    ghAuthStatusLeakRisk: remoteContext.gh.authStatusLeakRisk,
+    remotes: remoteContext.endpoints.map((e) => ({
+      name: e.name,
+      url: e.displayUrl,
+      host: e.host,
+      slug: e.slug,
+      isGitHub: e.isGitHub,
+      hadCredentials: e.hadCredentials,
+    })),
+    defaultRemote: remoteContext.defaultRemote,
+    ...(remoteContext.ambiguity !== null ? { ambiguity: remoteContext.ambiguity } : {}),
+    ...(remoteContext.gh.hostOverride !== undefined ? { ghHostOverride: remoteContext.gh.hostOverride } : {}),
+    ...(remoteContext.gh.configDirOverride !== undefined ? { ghConfigDirOverride: remoteContext.gh.configDirOverride } : {}),
+    tokenEnvNotForwarded: remoteContext.gh.tokenEnvPresentButNotForwarded,
+    detail: remoteContext.detail,
+  });
 
   // Resume honesty (Session 15): resuming under a DIFFERENT provider/model used to switch
   // silently — the report kept asserting the original identity for work the new model did.
@@ -577,6 +651,19 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   // refill it, and handed by reference to the parent's tool AND to every researcher child's.
   const researchBudget: ResearchBudget = researchBudgetFromEvents(session.log.events);
 
+  // ONE remote-state object for the whole session. Spend is rebuilt from events (a resume cannot
+  // refill the allowance); observations and the gh identity are NOT — they live in memory only, so
+  // a resumed session must look at the remote again before it may change it. That asymmetry is the
+  // point, and it matches how grants are never restored.
+  const remoteState: RemoteState = createRemoteState({
+    context: remoteContext,
+    initialSpend: remoteSpendFromEvents(session.log.events),
+  });
+  const remoteGitDeps =
+    gitFacts.gitPath !== null && gitFacts.repoRoot !== null
+      ? { gitPath: gitFacts.gitPath, repoRoot: gitFacts.repoRoot, workspaceRoot: ctx.ws }
+      : null;
+
   // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the
   // handle died with the process's owner); the sweep above already dealt with the process, so
   // tell the model what happened rather than let a stale "ready" claim stand.
@@ -640,6 +727,25 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     // are researcher-only, which is what makes "the main agent never receives raw webpages" a
     // property of the registry rather than a hope about behaviour.
     ...(researchClient !== null ? [createWebSearchTool({ client: researchClient, budget: researchBudget })] : []),
+    // Session 20: three instances, and only when a remote actually exists. They are parent-only —
+    // no role registry names them, and `CHILD_ADMISSIBLE_FACTS` refuses both remote facts — so
+    // "no subagent reaches the remote" is a property of the registry, not a hope about behaviour.
+    ...(remoteUnavailable === undefined
+      ? [
+          createRemoteStatusTool({ state: remoteState, gh: ghRunner, git: remoteGitDeps }) as Tool,
+          createRemotePushTool({ state: remoteState, git: remoteGitDeps, events: () => session.log.events }) as Tool,
+          createRemoteReleaseTool({
+            state: remoteState,
+            gh: ghRunner,
+            git: remoteGitDeps,
+            // The notes file is staged in the PROJECT STATE dir, never the workspace: it is a
+            // transient argument to gh, not a workspace artifact, and the workspace is where a
+            // path validator would rightly refuse an undeclared write.
+            notesDir: layout.projectDir,
+            events: () => session.log.events,
+          }) as Tool,
+        ]
+      : []),
     createRenderDocumentTool({ probe: cachedProbe, caps: renderCapsFromEvents(session.log.events) }),
     createInspectPagesTool({
       probe: cachedProbe,
@@ -771,6 +877,8 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     delegateCaps,
     researchBudget,
     ...(researchUnavailable !== undefined ? { researchUnavailable } : {}),
+    remoteState,
+    ...(remoteUnavailable !== undefined ? { remoteUnavailable } : {}),
     checkTool,
     checkCaps,
     setupTool,

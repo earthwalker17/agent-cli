@@ -110,7 +110,7 @@ async function haveObject(deps: RemoteGitDeps, oid: string): Promise<boolean> {
 }
 
 /** Resolve a local rev to its raw oid, or null when it does not exist. */
-async function resolveRev(deps: RemoteGitDeps, rev: string): Promise<string | null> {
+export async function resolveRev(deps: RemoteGitDeps, rev: string): Promise<string | null> {
   const r = await runLocalGit(deps, ['rev-parse', '--verify', '--quiet', rev]);
   const oid = r.stdout.trim();
   return r.ok && /^[0-9a-f]{40,64}$/.test(oid) ? oid : null;
@@ -180,6 +180,28 @@ async function dirtyCount(deps: RemoteGitDeps): Promise<number | null> {
 /** Does this change set touch a GitHub Actions workflow definition? */
 export function touchesWorkflowFiles(paths: readonly string[]): boolean {
   return paths.some((p) => /(^|\/)\.github\/workflows\/[^/]+\.(ya?ml)$/i.test(p.replace(/\\/g, '/')));
+}
+
+/**
+ * Read ONE remote ref's current oid, or null when it does not exist there.
+ *
+ * Separate from `observeRemoteRef` because it is used at a different moment for a different
+ * purpose: the observation is what a human reads, and this is what the harness re-checks
+ * immediately before and immediately after a mutation. Throws `RemoteError` when the remote could
+ * not be reached — a mutation must never proceed on "we could not tell".
+ */
+export async function lsRemoteOid(deps: RemoteGitDeps, remoteName: string, refName: string): Promise<string | null> {
+  const ls = await runRemoteGit(deps, ['ls-remote', '--exit-code', remoteName, refName]);
+  const absent = ls.termination === 'exited' && ls.exitCode === 2;
+  if (!ls.ok && !absent) {
+    const { reason, cure } = classifyRemoteFailure(`${ls.stdout}\n${ls.stderr}`, ls.termination === 'timeout' ? 'timeout' : 'network');
+    throw new RemoteError(
+      `could not read '${refName}' from '${remoteName}': ${firstLine(ls.stderr) || firstLine(ls.stdout) || `exit ${String(ls.exitCode)}`}`,
+      reason,
+      { exitCode: ls.exitCode, ...(cure !== undefined ? { cure } : {}) },
+    );
+  }
+  return absent ? null : parseLsRemote(ls.stdout, refName);
 }
 
 export interface ObserveRequest {

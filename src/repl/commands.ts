@@ -17,6 +17,8 @@ import { CHECKS_PER_SESSION, describeWorkspace, type CheckCaps, type RunCheckToo
 import { SETUPS_PER_SESSION, type SetupCaps } from '../tools/project-setup.js';
 import type { PreviewTool } from '../tools/preview.js';
 import type { ResearchBudget } from '../tools/research-budget.js';
+import type { RemoteState } from '../tools/remote-state.js';
+import { describeRelation } from '../remote/observe.js';
 import type { SessionEvent } from '../types.js';
 import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
 import { likelyBrowserAvailable } from '../browser/probe.js';
@@ -66,6 +68,10 @@ export interface CommandContext {
   researchBudget?: ResearchBudget;
   /** Session 19: why research is unavailable this session (absent = available). */
   researchUnavailable?: string;
+  /** Session 20: the live remote-delivery state; /remote renders identity, allowance, observations. */
+  remoteState?: RemoteState;
+  /** Session 20: why remote delivery is unavailable this session (absent = available). */
+  remoteUnavailable?: string;
   /** Session 15: the provider registry (env-only key discovery, bounded validation, construction)
    *  — the /provider and /model switching seam. Absent = switching unavailable in this context. */
   registry?: ProviderRegistry;
@@ -110,6 +116,9 @@ export const HELP = [
   '                  "stop <id>" stops one — a preview otherwise runs until session end or its TTL',
   '  /research       web research this session: every query sent, the sources that answered,',
   '                  the recorded findings, and what is left of the session budget',
+  '  /remote         remote delivery this session: the configured remotes, which GitHub account',
+  '                  would act, live observations, every remote read, and every remote MUTATION',
+  '                  (what changed, whether it verified, and whether it overwrote anything)',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -768,6 +777,92 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         'Research is CONTEXT, never verification: no finding here marks a file checked or satisfies a plan gate.',
         'Retrieved content is untrusted third-party text; claims above are the model\'s reading of it, not the harness\'s.',
       );
+      ctx.renderer.flush();
+      ctx.modelOut.write(`${out.filter((l) => l !== '').join('\n')}\n`);
+      return 'continue';
+    }
+
+    case 'remote': {
+      // Session 20. Like /research this is an audit surface first and a status line second: its
+      // job is to let a user see exactly what this session looked at on a third party and — far
+      // more importantly — exactly what it CHANGED there, derived entirely from the event log.
+      const events = ctx.session.log.events;
+      const context = events.filter((e) => e.type === 'remote.context').at(-1) as Extract<SessionEvent, { type: 'remote.context' }> | undefined;
+      const reads = events.filter((e) => e.type === 'remote.inspected') as Extract<SessionEvent, { type: 'remote.inspected' }>[];
+      const writes = events.filter((e) => e.type === 'remote.mutated') as Extract<SessionEvent, { type: 'remote.mutated' }>[];
+
+      const out: string[] = ['# Remote delivery (this session)'];
+      if (ctx.remoteUnavailable !== undefined) out.push('', `unavailable: ${sanitizeLine(ctx.remoteUnavailable)}`);
+      if (context !== undefined) {
+        out.push('', `local context: ${sanitizeLine(context.detail)}`);
+        for (const r of context.remotes) {
+          out.push(
+            `- ${sanitizeLine(r.name)} → ${sanitizeLine(r.url)}` +
+              `${r.slug !== null ? ` (${sanitizeLine(r.slug)})` : ''}${r.isGitHub ? '' : ' [not a GitHub host]'}` +
+              `${r.hadCredentials ? ' [WARNING: URL embeds a credential — remove it]' : ''}`,
+          );
+        }
+        if (context.ambiguity !== undefined) out.push(`- no default remote: ${sanitizeLine(context.ambiguity)}`);
+        if (context.ghAuthStatusLeakRisk) {
+          out.push(
+            `- gh ${sanitizeLine(context.ghVersion ?? 'unknown')} predates the GHSA-cg6r-mpgc-h9mm fix: 'gh auth status' can print part of your token. ` +
+              'Agent CLI reads the structured form and scrubs its output; other tools on this machine do not.',
+          );
+        }
+        if (context.tokenEnvNotForwarded) {
+          out.push('- GH_TOKEN/GITHUB_TOKEN is set in your shell and is deliberately NOT forwarded to child processes; gh uses its own stored credential.');
+        }
+        if (context.ghHostOverride !== undefined) out.push(`- GH_HOST override in force: ${sanitizeLine(context.ghHostOverride)}`);
+        if (context.ghConfigDirOverride !== undefined) out.push('- GH_CONFIG_DIR override in force (a different gh account store).');
+      }
+
+      const identity = ctx.remoteState?.identities() ?? [];
+      out.push('', '## Identity');
+      if (identity.length === 0) out.push('(not established — no authorized `auth` read has happened this session)');
+      for (const i of identity) {
+        out.push(
+          `- ${sanitizeLine(i.host)}: ${sanitizeLine(i.account)} · scopes ${i.scopes.length > 0 ? i.scopes.map((s) => sanitizeLine(s)).join(', ') : '(none reported)'} · credential in ${sanitizeLine(i.source)}`,
+        );
+      }
+      if (ctx.remoteState !== undefined) {
+        out.push(
+          '',
+          `allowance: ${ctx.remoteState.remaining('read')} remaining, ${ctx.remoteState.remaining('write')} remaining` +
+            ` (spent ${String(ctx.remoteState.spend.reads)} read(s), ${String(ctx.remoteState.spend.writes)} mutation(s))`,
+        );
+        const obs = ctx.remoteState.observations();
+        out.push('', `## Live observations (${String(obs.length)}; in-memory only — a resume must look again)`);
+        if (obs.length === 0) out.push('(none)');
+        for (const o of obs) {
+          out.push(`- ${sanitizeLine(o.remoteName)}:${sanitizeLine(o.refName)} — ${sanitizeLine(describeRelation(o))} [id ${sanitizeLine(o.id)}]`);
+        }
+      }
+
+      out.push('', `## Reads (${String(reads.length)})`);
+      if (reads.length === 0) out.push('(none)');
+      for (const r of reads) {
+        out.push(
+          `- ${sanitizeLine(r.operation)} ${sanitizeLine(r.host)}/${sanitizeLine(r.target)}${r.account !== undefined ? ` as ${sanitizeLine(r.account)}` : ''}` +
+            ` — ${r.ok ? 'ok' : 'FAILED'}${r.itemCount !== undefined ? `, ${String(r.itemCount)} item(s)` : ''} (${String(r.durationMs)}ms)` +
+            `${r.detail !== undefined ? ` — ${sanitizeLine(r.detail)}` : ''}`,
+        );
+      }
+
+      // The section that matters. Mutations are listed even when they failed: "we tried to publish
+      // and it was rejected" is exactly the kind of thing a status surface must not quietly drop.
+      out.push('', `## Mutations (${String(writes.length)})`);
+      if (writes.length === 0) out.push('(none — nothing on any remote was changed by this session)');
+      for (const w of writes) {
+        out.push(
+          `- ${sanitizeLine(w.operation)} → ${sanitizeLine(w.exactTarget)} on ${sanitizeLine(w.host)}/${sanitizeLine(w.target)}` +
+            `${w.account !== undefined ? ` as ${sanitizeLine(w.account)}` : ''}` +
+            ` — ${w.ok ? (w.verified ? 'ok, VERIFIED against the remote' : 'ok but NOT VERIFIED') : 'FAILED'}` +
+            `${w.overwrote ? ' [OVERWROTE remote state]' : ''}`,
+          `    ${sanitizeLine(w.beforeOid ?? '(ref absent)')} → ${sanitizeLine(w.afterOid ?? '(unknown)')}${w.url !== undefined ? ` · ${sanitizeLine(w.url)}` : ''}` +
+            `${w.detail !== undefined ? ` · ${sanitizeLine(w.detail)}` : ''}`,
+        );
+      }
+      out.push('', 'Publishing never happens without an individual approval, and a green local check is never one.');
       ctx.renderer.flush();
       ctx.modelOut.write(`${out.filter((l) => l !== '').join('\n')}\n`);
       return 'continue';

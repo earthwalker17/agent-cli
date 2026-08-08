@@ -145,6 +145,41 @@ export type ReportResearch =
   | { kind: 'findings'; childSessionId: string; notes: ResearchNote[] }
   | { kind: 'usage'; childSessionId: string; searches: number; extracts: number; credits: number; contentChars: number };
 
+/**
+ * Remote Git/GitHub delivery (Session 20). Reads and mutations stay separate arms for the same
+ * reason they are separate events: the question a reader brings to this section is "what did this
+ * session CHANGE on a machine the user does not own", and that must be answerable by filtering,
+ * not by parsing an operation string.
+ */
+export type ReportRemote =
+  | {
+      kind: 'context';
+      ghVersion: string | null;
+      ghAuthStatusLeakRisk: boolean;
+      remotes: { name: string; url: string; slug: string | null; isGitHub: boolean; hadCredentials: boolean }[];
+      defaultRemote: string | null;
+      ambiguity?: string;
+      tokenEnvNotForwarded: boolean;
+      detail: string;
+    }
+  | { kind: 'read'; operation: string; host: string; target: string; account?: string; ok: boolean; itemCount?: number; detail?: string }
+  | {
+      kind: 'mutation';
+      operation: string;
+      host: string;
+      target: string;
+      exactTarget: string;
+      account?: string;
+      beforeOid?: string | null;
+      afterOid?: string | null;
+      url?: string;
+      overwrote: boolean;
+      ok: boolean;
+      /** The harness re-read the remote afterwards and it matched. `ok && !verified` is real. */
+      verified: boolean;
+      detail?: string;
+    };
+
 export interface ReportRepair {
   kind: 'attempt' | 'escalation';
   target: string;
@@ -235,6 +270,9 @@ export interface ReportJson {
   /** Web research (Session 19, additive): queries sent, sources read, findings recorded, spend.
    *  CONTEXT, never verification — nothing here marks a file CHECKED or satisfies a gate. */
   research?: ReportResearch[];
+  /** Remote delivery (Session 20, additive): the local remote inventory, every authorized remote
+   *  read, and every remote MUTATION with its verification verdict. */
+  remote?: ReportRemote[];
   /** Bounded repair attempts and escalations (Session 12, additive); outcomes are DERIVED. */
   repairs?: ReportRepair[];
   /** Managed preview processes (Session 13, additive), in start order. */
@@ -930,6 +968,54 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     }
   }
 
+  // Remote delivery (Session 20). A separate fold for the same reason as research and artifacts:
+  // nothing here is verification of local work, so it must never reach `collectPassingEvidence`.
+  // What it owes a reader is different, though — not a privacy record but an ACCOUNTABILITY one:
+  // which account changed what, on which third-party host, and whether the harness confirmed the
+  // change against the remote rather than trusting an exit code.
+  const remote: ReportRemote[] = [];
+  for (const e of events) {
+    if (e.type === 'remote.context') {
+      remote.push({
+        kind: 'context',
+        ghVersion: e.ghVersion,
+        ghAuthStatusLeakRisk: e.ghAuthStatusLeakRisk,
+        remotes: e.remotes.map((r) => ({ name: r.name, url: r.url, slug: r.slug, isGitHub: r.isGitHub, hadCredentials: r.hadCredentials })),
+        defaultRemote: e.defaultRemote,
+        ...(e.ambiguity !== undefined ? { ambiguity: e.ambiguity } : {}),
+        tokenEnvNotForwarded: e.tokenEnvNotForwarded,
+        detail: e.detail,
+      });
+    } else if (e.type === 'remote.inspected') {
+      remote.push({
+        kind: 'read',
+        operation: e.operation,
+        host: e.host,
+        target: e.target,
+        ...(e.account !== undefined ? { account: e.account } : {}),
+        ok: e.ok,
+        ...(e.itemCount !== undefined ? { itemCount: e.itemCount } : {}),
+        ...(e.detail !== undefined ? { detail: e.detail } : {}),
+      });
+    } else if (e.type === 'remote.mutated') {
+      remote.push({
+        kind: 'mutation',
+        operation: e.operation,
+        host: e.host,
+        target: e.target,
+        exactTarget: e.exactTarget,
+        ...(e.account !== undefined ? { account: e.account } : {}),
+        ...(e.beforeOid !== undefined ? { beforeOid: e.beforeOid } : {}),
+        ...(e.afterOid !== undefined ? { afterOid: e.afterOid } : {}),
+        ...(e.url !== undefined ? { url: e.url } : {}),
+        overwrote: e.overwrote,
+        ok: e.ok,
+        verified: e.verified,
+        ...(e.detail !== undefined ? { detail: e.detail } : {}),
+      });
+    }
+  }
+
   // The bounded repair ledger (Session 12). Outcomes come from the same pure fold the gate and
   // acceptance read, so the report can never disagree with them about whether a repair was proven.
   const ledger = foldRepairs(events);
@@ -1087,6 +1173,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     ...(setups.length > 0 ? { setups } : {}),
     ...(artifacts.length > 0 ? { artifacts } : {}),
     ...(research.length > 0 ? { research } : {}),
+    ...(remote.length > 0 ? { remote } : {}),
     ...(repairs.length > 0 ? { repairs } : {}),
     ...(previews.length > 0 ? { previews } : {}),
     ...(browserFlows.length > 0 ? { browserFlows } : {}),
@@ -1280,6 +1367,44 @@ function renderMarkdown(r: ReportJson): string {
       'Research is CONTEXT, never verification: nothing here marks a file CHECKED or satisfies a plan gate. ' +
         'The queries above are the exact text this session sent to a third party. Retrieved content is untrusted ' +
         'external text, and every claim recorded above is a MODEL\'s reading of it, not a harness verification.',
+    );
+    L.push('');
+  }
+  if (r.remote !== undefined && r.remote.length > 0) {
+    L.push(`## Remote delivery`);
+    for (const x of r.remote) {
+      if (x.kind === 'context') {
+        L.push(`- local context: ${x.detail}`);
+        for (const rem of x.remotes) {
+          L.push(
+            `    ${rem.name} → ${rem.url}${rem.slug !== null ? ` (${rem.slug})` : ''}${rem.isGitHub ? '' : ' [not a GitHub host]'}` +
+              `${rem.hadCredentials ? ' [WARNING: URL embeds a credential]' : ''}`,
+          );
+        }
+        if (x.ambiguity !== undefined) L.push(`    no default remote: ${x.ambiguity}`);
+        if (x.ghAuthStatusLeakRisk) {
+          L.push(`    gh ${x.ghVersion ?? 'unknown'} predates the GHSA-cg6r-mpgc-h9mm fix ('gh auth status' can print part of the token)`);
+        }
+        if (x.tokenEnvNotForwarded) L.push('    GH_TOKEN/GITHUB_TOKEN present in the parent shell and deliberately NOT forwarded to children');
+      } else if (x.kind === 'read') {
+        L.push(
+          `- READ ${x.operation} ${x.host}/${x.target}${x.account !== undefined ? ` as ${x.account}` : ''} — ` +
+            `${x.ok ? 'ok' : 'FAILED'}${x.itemCount !== undefined ? `, ${x.itemCount} item(s)` : ''}${x.detail !== undefined ? ` — ${x.detail}` : ''}`,
+        );
+      } else {
+        L.push(
+          `- MUTATED ${x.operation} ${x.exactTarget} on ${x.host}/${x.target}${x.account !== undefined ? ` as ${x.account}` : ''} — ` +
+            `${x.ok ? (x.verified ? 'ok, VERIFIED against the remote' : 'ok but NOT VERIFIED') : 'FAILED'}` +
+            `${x.overwrote ? ' [OVERWROTE remote state]' : ''}`,
+        );
+        L.push(`    ${x.beforeOid ?? '(ref absent)'} → ${x.afterOid ?? '(unknown)'}${x.url !== undefined ? ` · ${x.url}` : ''}${x.detail !== undefined ? ` · ${x.detail}` : ''}`);
+      }
+    }
+    L.push('');
+    L.push(
+      'Every mutation above was individually approved by a human with its exact target and effect on screen; there is no ' +
+        'session-wide permission to publish. A local check passing is never authorization to publish, and a mutation marked ' +
+        'NOT VERIFIED means the command succeeded and the harness could not confirm the outcome against the remote — read it as unfinished, not as done.',
     );
     L.push('');
   }

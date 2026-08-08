@@ -14,6 +14,9 @@ import type {
   PreviewEvidence,
   Provider,
   ProviderRequest,
+  RemoteEvidence,
+  RemoteReadFact,
+  RemoteWriteFact,
   RepairEvidence,
   ResearchEvidence,
   ResearchFact,
@@ -34,6 +37,7 @@ import { decide, Grants, escalateOnSnapshotFailure } from '../policy/engine.js';
 import { TOOLS, toToolSchema } from '../tools/index.js';
 import { sha256, redactSecret } from '../shared/hash.js';
 import { sanitizeLine } from '../shared/text.js';
+import { scrubSecrets } from '../shared/secrets.js';
 import { isInside } from '../shared/pathutil.js';
 import { systemClock, type Clock } from '../shared/clock.js';
 import { systemIdGen, type IdGen } from '../shared/ids.js';
@@ -754,7 +758,14 @@ async function executeCall(
     // `(project_setup, external)` that nothing ever reads. The prompt already hid `[s]` for these
     // kinds; the STORAGE site had not been told, so a typed `s` still recorded a session grant
     // the user was never offered and never received. Consent that does nothing is worse than none.
-    if (outcome.scope === 'session' && tool.command === undefined && tool.check === undefined) {
+    // `tool.remoteWrite === undefined` too (Session 20), and this one is the strongest case in the
+    // list. A publish is classified `external` (grantable) when it is not overwriting, and the
+    // remote-write branch deliberately never consults a grant — so without this exclusion a typed
+    // `s` would store `(remote_push, external)` that nothing reads. Worse than a dead grant: the
+    // user would believe they had authorized "publishing this session", which is exactly the
+    // standing authority this capability is built to withhold. The prompt offers no [s] for a
+    // remote write; the storage site is told the same thing, in the same place as its siblings.
+    if (outcome.scope === 'session' && tool.command === undefined && tool.check === undefined && tool.remoteWrite === undefined) {
       session.grants.add(tool.name, decision.classification);
     }
     // Typed-check replay consent (Session 12): a session-scope approval on a check stores the
@@ -1101,6 +1112,58 @@ function recordResearchEvidence(session: Session, callId: string, e: ResearchEvi
   });
 }
 
+/**
+ * Persist a tool-reported remote Git/GitHub fact under the runtime-bound callId (Session 20).
+ *
+ * Two rules apply here that apply nowhere else in this file:
+ *
+ *  - Every string is scrubbed of credential shapes as well as sanitized. The pack scrubs at its own
+ *    boundary already; this is the second pass, at the emit site, because the event log is
+ *    append-only and a credential written into it cannot be taken back out.
+ *  - `verified` is recorded as a distinct field from `ok`. A command that succeeded and could not
+ *    be confirmed is a real state, and it must stay distinguishable from a confirmed one forever —
+ *    prose in a summary would round it up to "published".
+ */
+function recordRemoteEvidence(session: Session, callId: string, e: RemoteEvidence): void {
+  const s = (v: string, n = 260): string => {
+    const t = sanitizeLine(scrubSecrets(v));
+    return t.length > n ? `${t.slice(0, n)}…` : t;
+  };
+  if (e.kind === 'inspected') {
+    session.log.append({
+      type: 'remote.inspected',
+      callId,
+      operation: s(e.operation, 40),
+      host: s(e.host, 253),
+      target: s(e.target),
+      ...(e.account !== undefined ? { account: s(e.account, 80) } : {}),
+      ok: e.ok,
+      ...(e.itemCount !== undefined ? { itemCount: e.itemCount } : {}),
+      ...(e.observationId !== undefined ? { observationId: s(e.observationId, 40) } : {}),
+      ...(e.detail !== undefined ? { detail: s(e.detail, 400) } : {}),
+      durationMs: e.durationMs,
+    });
+    return;
+  }
+  session.log.append({
+    type: 'remote.mutated',
+    callId,
+    operation: s(e.operation, 40),
+    host: s(e.host, 253),
+    target: s(e.target),
+    exactTarget: s(e.exactTarget),
+    ...(e.account !== undefined ? { account: s(e.account, 80) } : {}),
+    ...(e.beforeOid !== undefined ? { beforeOid: e.beforeOid === null ? null : s(e.beforeOid, 64) } : {}),
+    ...(e.afterOid !== undefined ? { afterOid: e.afterOid === null ? null : s(e.afterOid, 64) } : {}),
+    ...(e.url !== undefined ? { url: s(e.url, 400) } : {}),
+    overwrote: e.overwrote,
+    ok: e.ok,
+    verified: e.verified,
+    ...(e.detail !== undefined ? { detail: s(e.detail, 400) } : {}),
+    durationMs: e.durationMs,
+  });
+}
+
 /** Persist a tool-reported preview lifecycle fact under the runtime-bound callId (Session 13). */
 function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvidence): void {
   if (e.kind === 'started') {
@@ -1218,7 +1281,15 @@ function buildApprovalRequest<I>(tool: Tool<I>, input: I, decision: PolicyDecisi
           // to replace. Both doors, one kind.
           tool.research !== undefined || decision.rule.startsWith('task.research-role')
           ? { kind: 'research' as const }
-          : {}),
+          : // Session 20: two more kinds, and they are two rather than one with a mode for the
+            // same reason the policy facts are two — the prompts must not be able to look alike.
+            // A read offers `[s]` bounded by the session read allowance; a write offers no `[s]`
+            // at all and leads with the destination it is about to change.
+            tool.remoteRead !== undefined
+            ? { kind: 'remote-read' as const }
+            : tool.remoteWrite !== undefined
+              ? { kind: 'remote-write' as const }
+              : {}),
     summary,
     detail: fullDetail,
     reason: decision.reason,
@@ -1320,6 +1391,56 @@ function describeCall<I>(tool: Tool<I>, input: I): { summary: string; detail: st
       return {
         summary: `${tool.name}: ${String(urls.length)} page(s) via ${fact.providerHost}`,
         detail: [...urls.map((u) => `fetch: ${u}`), ...common].join('\n'),
+      };
+    }
+  }
+  // Remote delivery (Session 20). Same argument as checks and research, at the highest stakes in
+  // the harness: the prompt must show the exact DESTINATION and the machine-derived EFFECT,
+  // because "allow remote_push?" is a question nobody can answer. Everything rendered here is
+  // harness-composed — the argv, the effect lines, the observation age — so what the human reads
+  // is what the tool will run, not a description of it.
+  if (tool.remoteRead !== undefined) {
+    let fact: RemoteReadFact | undefined;
+    try {
+      fact = tool.remoteRead(input);
+    } catch {
+      fact = undefined;
+    }
+    if (fact !== undefined) {
+      return {
+        summary: `${tool.name}: ${fact.operation} ← ${fact.target.display}`,
+        detail: [
+          `destination: ${fact.target.display}`,
+          `command: ${fact.argvPreview}`,
+          `bounds: ${fact.bounds.maxItems !== undefined ? `≤${String(fact.bounds.maxItems)} item(s) · ` : ''}${String(fact.bounds.timeoutMs)} ms`,
+          ...(fact.budgetRemaining !== undefined ? [`session remote allowance remaining: ${fact.budgetRemaining}`] : []),
+        ].join('\n'),
+      };
+    }
+  }
+  if (tool.remoteWrite !== undefined) {
+    let fact: RemoteWriteFact | undefined;
+    try {
+      fact = tool.remoteWrite(input);
+    } catch {
+      fact = undefined;
+    }
+    if (fact !== undefined) {
+      return {
+        summary: `${tool.name}: ${fact.operation} → ${fact.exactTarget} on ${fact.target.display}`,
+        detail: [
+          `destination: ${fact.target.display}`,
+          `exact target: ${fact.exactTarget}`,
+          ...fact.effect.map((l) => `effect: ${l}`),
+          ...(fact.observation !== undefined
+            ? [
+                `observed ${String(Math.round(fact.observation.ageMs / 1000))}s ago (id ${fact.observation.id}): remote held ${fact.observation.remoteOid ?? '(absent)'}`,
+              ]
+            : []),
+          ...(fact.localEvidence !== undefined ? [`local verification: ${fact.localEvidence}`] : []),
+          `command: ${fact.argvPreview}`,
+          ...(fact.budgetRemaining !== undefined ? [`session remote allowance remaining: ${fact.budgetRemaining}`] : []),
+        ].join('\n'),
       };
     }
   }
@@ -1434,6 +1555,7 @@ async function runExecution<I>(
     reportBrowser: (e) => recordBrowserEvidence(session, callId, e),
     reportArtifact: (e) => recordArtifactEvidence(session, callId, e),
     reportResearch: (e) => recordResearchEvidence(session, callId, e),
+    reportRemote: (e) => recordRemoteEvidence(session, callId, e),
     // Session 19: the child's own lineage, so the policy engine can tell a researcher subagent's
     // call from a parent's. Runtime state stamped at startSession — never tool state, never model
     // input, absent entirely for a parent session.

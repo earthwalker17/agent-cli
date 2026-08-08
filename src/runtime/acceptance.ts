@@ -75,6 +75,12 @@ const WORK_EVENT_TYPES = new Set([
   // the same spawned-and-writes class again. Deliberately `setup.started` only, matching
   // `check.started` — counting the completion too would double one unit of work.
   'setup.started',
+  // `remote.inspected` / `remote.mutated` are deliberately NOT here (Session 20). Publishing is
+  // the act that FOLLOWS an acceptance — accept, commit, push is the ordinary order — so counting
+  // a push as work-since-accept would stale every acceptance the moment the work it approved was
+  // delivered. It is the `harness.checkpoint` argument exactly: an event that is downstream of the
+  // accept must not invalidate it. Nothing local changed, and the publish is recorded as its own
+  // durable evidence and as an acceptance CAVEAT, which is where a reader should meet it.
 ]);
 
 /**
@@ -379,6 +385,42 @@ export function computeAcceptance(
         `research findings needing a second look: ${String(single)} rest on a SINGLE source` +
           `${conflicting > 0 ? ` and ${String(conflicting)} record SOURCES THAT DISAGREE` : ''} — ` +
           'verify any of these that load-bearing work depends on',
+      );
+    }
+  }
+
+  // Remote delivery (Session 20). Caveats only, in BOTH directions — and the second direction is
+  // the one that matters.
+  //
+  // A publish never blocks completion: local completion and remote delivery are separate
+  // questions, and making a push a precondition for accepting would be the same category error as
+  // making a green gate a permission to push. But an acceptance that stays silent about having
+  // changed a third party's state is an incomplete record of what this session did, and a mutation
+  // the harness could NOT confirm against the remote is exactly the thing a reader must not have
+  // to dig for.
+  {
+    const mutations = events.filter((e): e is Extract<SessionEvent, { type: 'remote.mutated' }> => e.type === 'remote.mutated');
+    const succeeded = mutations.filter((m) => m.ok);
+    const unverified = succeeded.filter((m) => !m.verified);
+    const failed = mutations.filter((m) => !m.ok);
+    const overwrote = succeeded.filter((m) => m.overwrote);
+    if (succeeded.length > 0) {
+      caveats.push(
+        `this session PUBLISHED to a remote (${succeeded.map((m) => `${m.operation} ${m.exactTarget} → ${m.host}/${m.target}`).join('; ')})` +
+          `${overwrote.length > 0 ? ` — ${String(overwrote.length)} of them OVERWROTE remote state` : ''} — ` +
+          'remote state is outside this harness and nothing here can undo it (`/remote` shows every read and mutation)',
+      );
+    }
+    if (unverified.length > 0) {
+      caveats.push(
+        `${String(unverified.length)} remote mutation(s) reported success but could NOT be verified against the remote afterwards ` +
+          `(${unverified.map((m) => m.exactTarget).join(', ')}) — treat them as unconfirmed, not as delivered`,
+      );
+    }
+    if (failed.length > 0) {
+      caveats.push(
+        `${String(failed.length)} remote mutation(s) were ATTEMPTED and failed (${failed.map((m) => `${m.exactTarget}: ${m.detail ?? 'no detail'}`).join('; ')}) — ` +
+          'the work may be complete locally while nothing reached the remote',
       );
     }
   }

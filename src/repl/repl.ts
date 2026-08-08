@@ -181,6 +181,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     previewTool: assembled.previewTool,
     researchBudget: assembled.researchBudget,
     ...(assembled.researchUnavailable !== undefined ? { researchUnavailable: assembled.researchUnavailable } : {}),
+    remoteState: assembled.remoteState,
+    ...(assembled.remoteUnavailable !== undefined ? { remoteUnavailable: assembled.remoteUnavailable } : {}),
     registry,
     ...(assembled.pruneHarnessRefs !== undefined ? { pruneHarnessRefs: assembled.pruneHarnessRefs } : {}),
   };

@@ -46,7 +46,19 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
                 // Worded to cover both doors: a direct search, and spawning the subagent that will
                 // run many of them.
                 '[web research — queries LEAVE THIS MACHINE; read-only, nothing here is written]'
-              : `[${req.classification}]`;
+              : req.kind === 'remote-read'
+                ? // Session 20, the fifth consequence. Like research it leaves the machine, and
+                  // unlike research it AUTHENTICATES — it tells a third party which account is
+                  // looking. The header says so, because "[external]" does not.
+                  '[remote READ — contacts the remote under your existing credential; nothing here is written]'
+                : req.kind === 'remote-write'
+                  ? // The sixth, and the only one in this harness that changes state on a machine
+                    // the user does not own. The header leads with the verb and with what cannot be
+                    // taken back; the detail lines below carry the exact destination and effect.
+                    // `destructive` appears in the header only when the effect really is one, so
+                    // the word keeps meaning something.
+                    `[remote WRITE — changes state on the remote; NOT undoable from here${req.classification === 'destructive' ? '; OVERWRITES remote state' : ''}]`
+                  : `[${req.classification}]`;
   const lines = [
     '',
     `  ⚠ approval required  ${cls}  ${req.tool}`,
@@ -83,8 +95,19 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
   // grantable — so without this exclusion a session grant keyed (project_setup, external) would be
   // stored and then never read, standing authority won by a label. The [s] below is offered off
   // the KEYS instead, which is what makes a migration (no keys) show no [s] at all.
+  // 'remote-write' joins the exclusion, and for the strongest reason on the list (Session 20). A
+  // non-overwriting publish is classified `external`, which IS grantable — so without this the
+  // prompt would offer `[s]` for "allow for the rest of this session" on an operation whose whole
+  // design is that it asks every single time. The engine never consults a grant in that branch and
+  // the runtime never stores one; this is the third place the same sentence is written, because a
+  // consent surface that disagrees with itself is how standing authority gets won by accident.
   const grantable =
-    isGrantable(req.classification) && req.kind !== 'command' && req.kind !== 'check' && req.kind !== 'preview' && req.kind !== 'setup';
+    isGrantable(req.classification) &&
+    req.kind !== 'command' &&
+    req.kind !== 'check' &&
+    req.kind !== 'preview' &&
+    req.kind !== 'setup' &&
+    req.kind !== 'remote-write';
   const forwarded = req.taskContext !== undefined;
   const sPart =
     req.kind === 'setup'
@@ -106,7 +129,13 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
             // line to the internet; the truth is that the session research budget is the ceiling,
             // and the reason line above states what remains of it.
             '   [s] allow further research this session, within the session budget'
-          : grantable
+          : req.kind === 'remote-read'
+            ? // A remote-read [s] IS a real class-scoped grant, bounded by the session read
+              // allowance the reason line above states. The wording names what it does NOT cover,
+              // because "allow remote access this session" is exactly the sentence a user would
+              // later believe had covered the push.
+              '   [s] allow further remote READS this session (never a push, tag or release)'
+            : grantable
             ? forwarded
               ? '   [s] allow for the rest of THIS TASK'
               : '   [s] allow for the rest of this session'
