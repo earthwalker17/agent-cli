@@ -21,6 +21,7 @@ import {
 import { firstLine, observeRemoteRef, type RemoteGitDeps } from '../remote/observe.js';
 import { parseAuthStatus, parseIssues, parsePulls, parseRepository, parseRun, parseRuns } from '../remote/parse.js';
 import { qualifyBranch, qualifyTag } from '../remote/refs.js';
+import { endpointHost, targetFactOf } from '../remote/url.js';
 import {
   DEFAULT_REMOTE_ITEMS,
   MAX_REMOTE_ITEMS,
@@ -82,15 +83,6 @@ export interface RemoteStatusDeps {
 /** Views that need `gh` and a GitHub `owner/repo` destination. `refs` needs neither. */
 const GH_VIEWS: readonly RemoteReadOp[] = ['auth', 'repository', 'pulls', 'issues', 'runs', 'run'];
 
-function targetOf(e: RemoteEndpoint): RemoteTargetFact {
-  return {
-    remoteName: e.name,
-    host: e.host ?? '',
-    slug: e.slug,
-    display: `${e.host ?? '(unknown host)'}${e.slug !== null ? `/${e.slug}` : ''} via remote '${e.name}'`,
-  };
-}
-
 /** A refusal shaped as a fact, so the engine — not the tool — turns it into a deny. */
 function blockedFact(op: string, target: RemoteTargetFact, error: string, kind: RemoteBlockKind, remaining: string): RemoteReadFact {
   return {
@@ -121,9 +113,9 @@ export function createRemoteStatusTool(deps: RemoteStatusDeps): Tool<StatusInput
     const resolution = state.resolveEndpoint(input.remote);
     if ('error' in resolution) return blockedFact(input.view, unresolved, resolution.error, resolution.kind, remaining);
     const endpoint = resolution.endpoint;
-    const target = targetOf(endpoint);
-    if (endpoint.host === null) {
-      return blockedFact(input.view, target, `remote '${endpoint.name}' has no host this harness can identify (${endpoint.displayUrl})`, 'ambiguous', remaining);
+    const target = targetFactOf(endpoint);
+    if (endpointHost(endpoint) === null) {
+      return blockedFact(input.view, target, `remote '${endpoint.name}' points at ${endpoint.displayUrl}, which this harness cannot identify as a destination`, 'ambiguous', remaining);
     }
 
     if (GH_VIEWS.includes(input.view)) {
@@ -222,7 +214,7 @@ export function createRemoteStatusTool(deps: RemoteStatusDeps): Tool<StatusInput
       const resolution = state.resolveEndpoint(input.remote);
       if ('error' in resolution) return done(false, '', resolution.error);
       const endpoint = resolution.endpoint;
-      const host = endpoint.host ?? '';
+      const host = endpointHost(endpoint) ?? '';
       const slug = endpoint.slug ?? '';
       const account = state.identityFor(host)?.account;
       const target = endpoint.slug ?? endpoint.name;

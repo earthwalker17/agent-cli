@@ -13,6 +13,19 @@ import {
   SEARCH_TIMEOUT_MS,
 } from '../src/research/types.js';
 import { MAX_NOTES_PER_RESEARCHER } from '../src/tools/record-source.js';
+import {
+  GH_AUTH_STATUS_FIXED_VERSION,
+  MAX_PREVIEW_COMMITS,
+  MAX_PREVIEW_PATHS,
+  MAX_RELEASE_NOTES_CHARS,
+  MAX_REMOTE_CONTENT_CHARS,
+  MAX_REMOTE_ITEMS,
+  REMOTE_CALL_TIMEOUT_MS,
+  REMOTE_PUSH_TIMEOUT_MS,
+  REMOTE_READS_PER_SESSION,
+  REMOTE_WRITES_PER_SESSION,
+} from '../src/remote/types.js';
+import { REMOTE_OBSERVATION_MAX_AGE_MS } from '../src/types.js';
 import { SESSION_CHILD_OUTPUT_TOKEN_CAP, TASKS_PER_SESSION } from '../src/runtime/subagent.js';
 import { MAX_TASK_CHANGE_FILES, MAX_TASK_CHANGE_FILE_BYTES } from '../src/runtime/task-changes.js';
 import { CHECKS_PER_SESSION } from '../src/tools/run-check.js';
@@ -91,6 +104,32 @@ describe('scale bounds (Session 16 raised these)', () => {
     expect(EXTRACTS_PER_RESEARCH_TASK).toBeLessThan(EXTRACTS_PER_SESSION);
     // Nor should one task's reading alone be able to exhaust its own wall clock.
     expect(EXTRACTS_PER_RESEARCH_TASK * EXTRACT_TIMEOUT_MS).toBeLessThan(ROLE_CONTRACTS.researcher.budget.timeoutMs / 2);
+  });
+
+  it('remote delivery (Session 20)', () => {
+    // The bounds a remote approval prompt shows and the engine enforces. Reads are
+    // session-grantable, so REMOTE_READS_PER_SESSION is what an [s] is actually bounded by;
+    // writes ask every time, so their ceiling is a runaway bound rather than a consent one.
+    expect(REMOTE_READS_PER_SESSION).toBe(40);
+    expect(REMOTE_WRITES_PER_SESSION).toBe(10);
+    expect(MAX_REMOTE_ITEMS).toBe(30);
+    expect(MAX_PREVIEW_COMMITS).toBe(20);
+    expect(MAX_PREVIEW_PATHS).toBe(60);
+    expect(MAX_REMOTE_CONTENT_CHARS).toBe(40_000);
+    expect(MAX_RELEASE_NOTES_CHARS).toBe(60_000);
+    expect(REMOTE_CALL_TIMEOUT_MS).toBe(30_000);
+    expect(REMOTE_PUSH_TIMEOUT_MS).toBe(120_000);
+    // The freshness bound is KERNEL-owned so the engine can enforce it without depending on a
+    // workflow pack; the pack must not be able to widen its own leash.
+    expect(REMOTE_OBSERVATION_MAX_AGE_MS).toBe(300_000);
+    // A publish must be allowed more wall clock than a read: it uploads objects, and a
+    // credential helper that decides to show a GUI prompt is the failure the timeout backstops.
+    expect(REMOTE_PUSH_TIMEOUT_MS).toBeGreaterThan(REMOTE_CALL_TIMEOUT_MS);
+    // Mutations must stay far rarer than reads: a session that publishes as often as it looks
+    // has stopped being a delivery flow.
+    expect(REMOTE_WRITES_PER_SESSION).toBeLessThan(REMOTE_READS_PER_SESSION);
+    // The gh release that fixed the auth-status token leak (GHSA-cg6r-mpgc-h9mm).
+    expect(GH_AUTH_STATUS_FIXED_VERSION).toBe('2.97.0');
   });
 
   it('delegated work', () => {

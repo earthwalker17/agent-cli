@@ -51,9 +51,14 @@ const AUTH_HEADER = String.raw`\b(authorization\s*:\s*)(bearer|basic|token)\s+\S
  * the same input. Every use compiles a fresh one.
  */
 const PATTERNS: readonly { src: string; flags: string; with: string }[] = [
+  // Userinfo FIRST, and the order is load-bearing. Scrubbing the token pattern first turns
+  // `https://x-access-token:ghs_…@host` into `https://x-access-token:[REDACTED gh-token]@host` —
+  // the secret is gone, but the placeholder now contains a space, so the userinfo pattern no
+  // longer matches and the username half survives. Running userinfo first removes the whole
+  // credential in one replacement and leaves nothing for the token pattern to half-finish.
+  { src: URL_USERINFO, flags: 'g', with: '$1[REDACTED credentials]@' },
   { src: GH_FINE_GRAINED, flags: 'g', with: '[REDACTED github-pat]' },
   { src: GH_TOKEN, flags: 'g', with: '[REDACTED gh-token]' },
-  { src: URL_USERINFO, flags: 'g', with: '$1[REDACTED credentials]@' },
   { src: AUTH_HEADER, flags: 'gi', with: '$1$2 [REDACTED]' },
 ];
 

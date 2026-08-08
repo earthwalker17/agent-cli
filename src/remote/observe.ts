@@ -330,11 +330,14 @@ export function parsePushPorcelain(stdout: string): PushPorcelain {
       continue;
     }
     if (line === '' || line.startsWith('To ')) continue;
-    const flag = FLAGS[line[0] ?? ''];
-    if (flag === undefined) continue;
-    const parts = line.slice(1).split('\t');
-    const refs = parts[0] ?? '';
-    const summaryRaw = parts.slice(1).join('\t');
+    // Split on the tabs FIRST. Slicing the flag off and then splitting leaves the leading tab in
+    // place, so the refspec lands in element 1 while element 0 is empty — which parsed every line
+    // as unrecognisable and made the dry-run comparison see zero refs on every push.
+    const parts = line.split('\t');
+    const flag = FLAGS[parts[0] ?? ''];
+    if (flag === undefined || parts.length < 2) continue;
+    const refs = parts[1] ?? '';
+    const summaryRaw = parts.slice(2).join('\t');
     const colon = refs.indexOf(':');
     if (colon === -1) continue;
     const reasonMatch = /^(.*?)\s*\(([^)]*)\)\s*$/.exec(summaryRaw);

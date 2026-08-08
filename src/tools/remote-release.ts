@@ -7,6 +7,7 @@ import { renderReleaseOutcome } from '../remote/format.js';
 import { firstLine, lsRemoteOid, type RemoteGitDeps } from '../remote/observe.js';
 import { parseRelease, releaseUrlFromCreate } from '../remote/parse.js';
 import { qualifyTag, shortOid, shortRef } from '../remote/refs.js';
+import { targetFactOf } from '../remote/url.js';
 import {
   MAX_RELEASE_NOTES_CHARS,
   REMOTE_CALL_TIMEOUT_MS,
@@ -57,15 +58,6 @@ export interface RemoteReleaseDeps {
   events: () => readonly SessionEvent[];
 }
 
-function targetOf(e: RemoteEndpoint): RemoteTargetFact {
-  return {
-    remoteName: e.name,
-    host: e.host ?? '',
-    slug: e.slug,
-    display: `${e.host ?? '(unknown host)'}${e.slug !== null ? `/${e.slug}` : ''} via remote '${e.name}'`,
-  };
-}
-
 function blocked(target: RemoteTargetFact, exact: string, error: string, kind: RemoteBlockKind, remaining: string): RemoteWriteFact {
   return {
     operation: 'release.create',
@@ -100,7 +92,7 @@ export function createRemoteReleaseTool(deps: RemoteReleaseDeps): Tool<ReleaseIn
     const resolution = state.resolveEndpoint(input.remote);
     if ('error' in resolution) return blocked(unresolved, input.tag, resolution.error, resolution.kind, remaining);
     const endpoint = resolution.endpoint;
-    const target = targetOf(endpoint);
+    const target = targetFactOf(endpoint);
     if (!endpoint.isGitHub || endpoint.slug === null || endpoint.host === null) {
       return blocked(target, input.tag, `remote '${endpoint.name}' points at ${endpoint.displayUrl}, which is not a GitHub owner/repo destination`, 'not-github', remaining);
     }

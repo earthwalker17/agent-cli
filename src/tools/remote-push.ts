@@ -13,6 +13,7 @@ import {
   type RemoteGitDeps,
 } from '../remote/observe.js';
 import { qualifyBranch, qualifyTag, shortOid, shortRef } from '../remote/refs.js';
+import { endpointHost, targetFactOf } from '../remote/url.js';
 import { REMOTE_PUSH_TIMEOUT_MS, type RemoteEndpoint, type RemoteObservation } from '../remote/types.js';
 import { truncateForModel } from '../shared/hash.js';
 import type { RemoteBlockKind, RemoteTargetFact, RemoteWriteFact, SessionEvent, Tool, ToolResult } from '../types.js';
@@ -68,15 +69,6 @@ export interface RemotePushDeps {
   events: () => readonly SessionEvent[];
 }
 
-function targetOf(e: RemoteEndpoint): RemoteTargetFact {
-  return {
-    remoteName: e.name,
-    host: e.host ?? '',
-    slug: e.slug,
-    display: `${e.host ?? '(unknown host)'}${e.slug !== null ? `/${e.slug}` : ''} via remote '${e.name}'`,
-  };
-}
-
 function blocked(op: string, target: RemoteTargetFact, exact: string, error: string, kind: RemoteBlockKind, remaining: string): RemoteWriteFact {
   return {
     operation: op,
@@ -103,7 +95,8 @@ function effectLines(o: RemoteObservation, force: boolean, state: RemoteState, e
     lines.push(`DISCARDS ${String(o.behind)} commit(s) that exist only on the remote — anyone who already pulled them keeps them, and history diverges`);
   }
   if (o.touchesWorkflows) {
-    const identity = endpoint.host !== null ? state.identityFor(endpoint.host) : undefined;
+    const host = endpointHost(endpoint);
+    const identity = host !== null ? state.identityFor(host) : undefined;
     lines.push(
       identity !== undefined && !identity.scopes.includes('workflow')
         ? `TOUCHES .github/workflows/ and the gh account '${identity.account}' has no 'workflow' scope — GitHub will REJECT this push (cure: gh auth refresh -h ${identity.host} -s workflow)`
@@ -132,9 +125,12 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
     const resolution = state.resolveEndpoint(input.remote);
     if ('error' in resolution) return blocked(op, unresolved, '(unresolved)', resolution.error, resolution.kind, remaining);
     const endpoint = resolution.endpoint;
-    const target = targetOf(endpoint);
-    if (endpoint.host === null) {
-      return blocked(op, target, '(unresolved)', `remote '${endpoint.name}' has no host this harness can identify`, 'ambiguous', remaining);
+    const target = targetFactOf(endpoint);
+    const host = endpointHost(endpoint);
+    if (host === null) {
+      // The one destination that cannot proceed: a remote URL that parsed as nothing recognisable.
+      // A filesystem remote is fine (it gets the local-filesystem sentinel); an unnameable one is not.
+      return blocked(op, target, '(unresolved)', `remote '${endpoint.name}' points at ${endpoint.displayUrl}, which this harness cannot identify as a destination`, 'ambiguous', remaining);
     }
 
     const q = input.ref_kind === 'tag' ? qualifyTag(input.ref) : qualifyBranch(input.ref);
@@ -145,12 +141,12 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
     // hold several, gh picks the active one, and "who published this" is the first question anyone
     // asks afterwards. Non-GitHub remotes are exempt because gh has no answer for them — and the
     // effect lines say so rather than implying an identity was checked.
-    if (endpoint.isGitHub && state.identityFor(endpoint.host) === undefined) {
+    if (endpoint.isGitHub && state.identityFor(host) === undefined) {
       return blocked(
         op,
         target,
         refName,
-        `no gh identity is established for ${endpoint.host}; read remote_status view=auth first so the account that would publish is on the record`,
+        `no gh identity is established for ${host}; read remote_status view=auth first so the account that would publish is on the record`,
         'unauthenticated',
         remaining,
       );
@@ -248,7 +244,7 @@ export function createRemotePushTool(deps: RemotePushDeps): Tool<PushInputT> {
       const resolution = state.resolveEndpoint(input.remote);
       if ('error' in resolution) return done(false, '', resolution.error);
       const endpoint = resolution.endpoint;
-      const host = endpoint.host ?? '';
+      const host = endpointHost(endpoint) ?? '';
       const q = input.ref_kind === 'tag' ? qualifyTag(input.ref) : qualifyBranch(input.ref);
       if ('error' in q) return done(false, '', q.error);
       const refName = q.ref;

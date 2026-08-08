@@ -1,3 +1,4 @@
+import type { RemoteTargetFact } from '../types.js';
 import type { RemoteEndpoint, RemoteScheme } from './types.js';
 
 /**
@@ -140,6 +141,40 @@ export function endpointOf(name: string, rawUrl: string): RemoteEndpoint {
     scheme: p.scheme,
     isGitHub: p.isGitHubHost,
     hadCredentials: p.hadCredentials,
+  };
+}
+
+/**
+ * The host string a policy fact reports for an endpoint.
+ *
+ * A network remote has a real hostname. A filesystem remote (`/srv/git/x.git`, `C:\repos\x.git`,
+ * `file://…`) has none — and it is still a real remote: pushing to one changes a repository outside
+ * this workspace, possibly someone else's on a shared volume, so the consequence class is
+ * unchanged. It gets the stable sentinel `local-filesystem`, which is honest in an event, readable
+ * in a prompt, and matchable by an operator's `remoteBlockedHosts`.
+ *
+ * A remote whose URL parsed as nothing recognisable returns null, and every caller refuses it: the
+ * one case where we genuinely cannot name the destination is the one case that must not proceed.
+ */
+export const LOCAL_FILESYSTEM_HOST = 'local-filesystem';
+
+export function endpointHost(e: RemoteEndpoint): string | null {
+  if (e.host !== null) return e.host;
+  return e.scheme === 'file' ? LOCAL_FILESYSTEM_HOST : null;
+}
+
+/**
+ * The policy-visible destination for one endpoint. Shared by all three remote tools so a read, a
+ * push and a release can never describe the same remote differently.
+ */
+export function targetFactOf(e: RemoteEndpoint): RemoteTargetFact {
+  const host = endpointHost(e);
+  const where = e.slug !== null && host !== null ? `${host}/${e.slug}` : e.displayUrl;
+  return {
+    remoteName: e.name,
+    host: host ?? '',
+    slug: e.slug,
+    display: `${where} via remote '${e.name}'`,
   };
 }
 
