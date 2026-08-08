@@ -93,8 +93,9 @@ boundary.
 credential-shaped strings anywhere in the log.** Eleven approvals resolved: two `allow/session`
 (both remote READS), eight `allow/once`, and **one `deny/once`**. Published to the real repository
 and verified there at the time: `refs/heads/s20-proof-b`, the annotated tag `refs/tags/s20-tag-b`,
-and a draft Release for it. The three proof branches were deleted by hand once v1.6.0 shipped — the
-transcript and the event log are the evidence; the branches were only what the evidence was about.
+and a draft Release for it. Every one of those was deleted by hand once v1.6.0 shipped, so none of
+it is inspectable on the repository today — the transcript and the event log are the evidence; the
+refs were only what the evidence was about.
 
 The order that matters. `/remote` before any authority reports the local inventory and nothing
 else — no identity, full allowance, no observations. The first read asks and offers `[s] allow
