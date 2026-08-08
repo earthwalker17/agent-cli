@@ -49,6 +49,11 @@ disabled and every command asks (fail closed).
   URLs embed credentials in the standard CI form, and git echoes those URLs inside auth failures.
   That scrubber matches GitHub's documented token shapes and URL userinfo — it is not a general
   secret detector.
+- **`--dangerously-allow-all` covers remote mutations too.** The policy engine returns `ask` for
+  every publish and never consults a session grant, but that flag replaces the human at the prompt,
+  so a publish is auto-allowed and recorded with `source: "dangerous-mode"`. "Asks every time" is a
+  statement about the policy decision, not about that flag. Do not use it in a workspace with a
+  remote you care about.
 - **Remote delivery never holds a credential, and cannot verify one.** Publishing uses gh's own
   stored credential and git's credential helper; the harness never reads a token, and deliberately
   does not forward `GH_TOKEN`/`GITHUB_TOKEN` to child processes. What it *can* prove is what the

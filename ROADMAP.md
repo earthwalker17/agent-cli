@@ -6,6 +6,180 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 20 (2026-08-08) — Remote Git and GitHub delivery
+
+### Objective
+
+Carry a verified, accepted, committed local result across the machine boundary to an explicitly
+identified GitHub destination — and do it without ever letting "the work is done" become "the work
+may be published".
+
+The failure this exists to prevent is not "the agent cannot push". It is **authority creep**: a
+capability that reads a remote and one that changes a remote, arriving as one thing, so that
+consent to look becomes consent to publish, and a green check becomes a licence.
+
+### What shipped
+
+**Two policy facts, not one capability with a mode.** `FACT_KINDS` gains `remoteRead` AND
+`remoteWrite`, each with its own fail-closed branch before the command branch. The split is
+structural rather than documentary: the engine's existing conflicting-contract rule now makes a
+tool that could both read and publish an **automatic deny**, so "the read tool cannot publish" is
+verified by grepping this object for a second fact and finding none. Consent follows the split —
+a read asks `external` and is session-grantable within a real counter (`[s] allow further remote
+READS this session (never a push, tag or release)`); a write asks every time, is never passed
+through `applyGrant`, offers no `[s]`, and stores nothing at the grant-storage site. That last
+sentence is written in three places on purpose: a consent surface that disagrees with itself is
+how standing authority gets won by accident.
+
+**Observation binding.** A mutation must carry the live look at the remote its effect was computed
+from. Absent, or older than `REMOTE_OBSERVATION_MAX_AGE_MS`, is a **deny** — the
+`browser.no-preview` precedent — and the bound is kernel-owned so a workflow pack cannot widen its
+own leash. Only `remote_status view=refs` produces observations, so "understand the remote before
+you change it" is enforced by the engine rather than requested in a prompt. Observations and the
+gh identity are in memory only and do not survive a resume; the read/write SPEND is rebuilt from
+events. Authority is not durable; spending is.
+
+**Looking never writes.** The only network verb is `git ls-remote` — no fetch, no remote-tracking
+refs, no `FETCH_HEAD` — so an agent being curious can never change the state of the user's
+repository. The honest cost is stated rather than hidden: a commit the remote holds and this
+repository has never seen is genuinely outside our object database, so the relation reports
+`unknown` and a force push over it is refused **even with `force`**, because the harness cannot say
+what would be discarded.
+
+**What the human approved is what executes.** The refspec source is the observed OID, not a branch
+name. Execute re-resolves the push URL from git's own config, re-reads the local rev and the remote
+ref, runs `git push --dry-run --porcelain` and compares it **structurally** (exactly one ref line,
+to the approved ref, from the approved oid, on a run git said it finished), pushes with
+`--no-follow-tags`, and re-reads the remote to record `verified` as a field distinct from `ok`. A
+force push carries `--force-with-lease=<ref>:<observed-oid>`, so the server enforces the same
+binding; `--force-if-includes` is deliberately absent because it is a no-op without a lease and its
+real check reads a reflog this pack never writes.
+
+**Three tools, and a deliberately small catalogue.** `remote_status` (auth / repository / refs /
+pulls / issues / runs / run), `remote_push` (branch or tag, optional destructive force),
+`remote_release` (a Release for a tag that is ALREADY on the remote, always `--verify-tag` —
+without it gh creates the tag from the default branch as a side effect, a publish nobody asked for
+at a commit nobody named). No `gh api` passthrough, no generic escape: every argv is
+harness-composed in `--flag=value` form, so model text lands only in value positions.
+
+**The harness never holds a credential.** Authentication is gh's own store and git's credential
+helper. `buildChildEnv` drops every `*token*` name, so a `GH_TOKEN` in the user's shell is not
+forwarded and cannot be — recorded as a fact rather than worked around. `GH_REPO` is scrubbed (it
+retargets every gh command the way `GIT_DIR` does) and `GH_DEBUG`/`DEBUG` with it (gh's debug mode
+prints the Authorization header); `GH_HOST`/`GH_CONFIG_DIR` pass through because an enterprise
+install needs them, are recorded so an override is auditable, and now refuse a gh read whose host
+they contradict. `shared/secrets.ts` scrubs credential shapes from all gh/git output at the pack
+boundary and again at the event emit site — the installed gh 2.96.0 predates the
+GHSA-cg6r-mpgc-h9mm fix in which `gh auth status` printed part of the token.
+
+**Surfaces.** `/remote` (an accountability record: remotes, identity, live observations, every
+read, every mutation with its verification verdict — including failures), a `## Remote delivery`
+report section, REPL chrome, a conditional system-prompt paragraph, and acceptance **caveats** in
+both directions. `remote.*` is deliberately absent from `WORK_EVENT_TYPES` — accept → commit →
+push is the ordinary order, so a publish must not stale the acceptance it delivers.
+
+**The compound invariant.** The model cannot commit (`/commit` is still user-typed) and a push
+transmits committed refs only. Together: *the model cannot publish content a human did not commit.*
+
+### The live proof (`agent-cli-s20-live/`, Kimi K3, against the real `earthwalker17/agent-cli`)
+
+Dogfooding, at the user's explicit choice. The fixture is a real clone; the branches are real; the
+destination has real CI and a real credential whose scopes are what they are. The scripted human is
+deliberately **not** "always yes": reads take the session grant once, and the **first publish is
+DENIED**, because a run in which every prompt is answered `y` proves the automation and not the
+boundary.
+
+**225 events, 12 remote reads, 3 mutations — all verified against the remote, zero
+credential-shaped strings anywhere in the log.** Eleven approvals resolved: two `allow/session`
+(both remote READS), eight `allow/once`, and **one `deny/once`**. Published and still on the
+repository: `refs/heads/s20-proof-b`, the annotated tag `refs/tags/s20-tag-b`, and a draft Release
+for it.
+
+The order that matters. `/remote` before any authority reports the local inventory and nothing
+else — no identity, full allowance, no observations. The first read asks and offers `[s] allow
+further remote READS this session (never a push, tag or release)`. The first **publish is denied**,
+and `/remote` immediately afterwards still says *"Mutations (0) — nothing on any remote was changed
+by this session"*: the refusal is not a message, it is the absence of a mutation in the durable
+record. Re-asked, the same publish executes and is verified by re-reading the ref. Asked for a
+release, the model reads the remote, finds the tag absent and reports the two-step shape before
+being told — `--verify-tag` surfacing as behaviour — so the tag is published under its own
+approval and the release under a third. Four publishes, four separate approvals, no `[s]` anywhere.
+
+**The resume leg is the other half.** Resumed, the session reports `spent 10 read(s), 3
+mutation(s)` and **`Live observations (0)`**; the read grant is gone too. Told to publish again
+"right now", it is denied twice by policy, in order: `remote.unauthenticated` (no gh identity is
+established — identity is in-memory only), then, after re-reading `auth`, `remote.precondition`
+(the ref already holds that commit). Spending is durable so a restart cannot refill an allowance;
+authority is not, so a restart cannot inherit one.
+
+**What the live run found that 2000 hermetic tests could not** — two honesty defects, both fixed
+with regression tests:
+
+- **A new branch reported the whole branch.** Publishing ONE commit to a fresh branch announced
+  *"207 commit(s)"* and a `.github/workflows/` change published months earlier, because a ref the
+  remote lacks was previewed by walking the tip's own history. The observation now takes one full
+  `ls-remote` and uses every other remote ref whose objects we hold as exclusion bases; the same
+  push now reads *"CREATE … (1 commit(s) in the branch)"*, one file.
+- **The workflow-scope warning was asserted as a certainty, and was wrong.** The first run said
+  *"GitHub will REJECT this push"* over an https remote and GitHub accepted it: `git push` over
+  https authenticates with the CREDENTIAL HELPER's token, not gh's, and they routinely carry
+  different scopes — the harness can see one and not the other. It is now a stated risk that names
+  which credential it means. In the second run the model reached the same conclusion from evidence
+  (*"it must have been pushed under a differently-scoped credential or via the web UI"*), declined
+  the workflow-touching push and asked how to proceed — so that path was previewed here and
+  executed in the earlier run, which is where the overclaim was disproved.
+
+A third, smaller one is visible in the run-b log and was fixed after it: `basesIncomplete` fired on
+every repository with annotated tags, because `ls-remote` reports the tag OBJECT id and a
+membership test over commits never finds it. A signal that always fires tells a reader nothing.
+
+Full transcript, evidence and honest limits: `agent-cli-s20-live/DEMO.md`.
+
+### Decisions (and why)
+
+- **Two facts rather than one with a mode.** Read and write are different authorities, and the
+  cheapest way to make that true rather than merely stated was to let the existing
+  conflicting-contract rule enforce it. It cost nothing and it closes the whole class.
+- **A write is never granted, and the class still tells the truth.** Publishing is `external`;
+  overwriting remote history is `destructive` (non-grantable by construction, so the strongest
+  case is protected twice). Reaching for `destructive` on an ordinary publish would have been the
+  cheap way to make it non-grantable, and would have spent the word.
+- **Local verification is SHOWN, never required.** Making a green gate a precondition would make a
+  green gate an authorization — the exact inversion this capability exists to prevent. So the
+  prompt states the gate state and enforces nothing.
+- **`ls-remote`, never `fetch`.** Looking at a remote must not mutate the user's repository as a
+  side effect of the agent being curious. The cost is a genuinely `unknown` relation, which is
+  reported as unknown.
+- **A publish is an acceptance caveat, never a blocker** — and so is a publish that failed, and a
+  publish that succeeded unverifiably. Local completion and remote delivery are separate questions
+  in both directions.
+
+### Open issues / boundaries
+
+- **A GUI credential prompt cannot be structurally prevented on Windows.** `-c
+  credential.interactive=false` plus a bounded timeout is the backstop, and a non-conforming helper
+  ignores both.
+- **`--dangerously-allow-all` covers remote mutations.** The engine always returns `ask` and never
+  consults a grant, but that flag replaces the human at the prompt; the publish is auto-allowed and
+  recorded as `source: "dangerous-mode"`. Documented in SECURITY.md and printed by `/remote`.
+- **The workflow-scope preview is a risk, not a verdict** — see the live findings above.
+- **Out of scope by decision:** `gh api` passthrough, PR/issue creation, merges, repository
+  creation or deletion, settings/secrets/workflow dispatch, `git fetch`/`pull` (being behind is
+  reported, not fixed), multi-repo and fork/upstream-sync flows, and upstream-tracking
+  configuration as a side effect of a push.
+- The gh JSON parsers are tolerant by design; a gh that renames a field degrades to an empty value
+  rather than crashing a publish flow, which means a silent shape change reads as missing data.
+- Only `github.com` was exercised live. Enterprise hosts are handled by the same code paths and are
+  **not** live-proven.
+
+### Recommended next step
+
+Session 21 per BLUEPRINT: bounded memory and initialization — size and token budgets, staleness
+rules, provenance, `LESSONS.md`, and the `RESEARCH.md` deferred from S19 precisely because a
+durable research surface needs the staleness and provenance semantics that session builds.
+
+---
+
 ## Session 19 (2026-08-07/08) — Source-backed web research
 
 ### Objective
@@ -165,301 +339,52 @@ authority split, where read and **write** must stay visibly different things.
 
 ---
 
-## Session 18 (2026-08-07) — Polyglot repository intelligence and verification
-
-### Objective
-
-Extend repository intelligence and typed verification beyond the Node/TS + Python bias —
-Rust/Cargo and Go modules as the complete path (units → indexing → symbols/imports → recipes →
-signals → classification), C/C++ (CMake) as detection + indexing with honest refusals, and
-embedded as a Rust cross-target honesty story — with support meaning **language + build system +
-layout + AVAILABLE TOOLCHAIN**, never file-extension recognition. Three audits first (checks/
-detection, retrieval, recovery/reporting); the finding that shaped everything: an unrecognized
-ecosystem resolved every check to `no-recipe`, and `no-recipe` WAIVES declared gates — a Rust
-repo session reached `/accept` COMPLETE having verified nothing, claiming "no supported project
-manifest was detected (Node/TS and Python are supported)" about a workspace holding a
-Cargo.toml. The S16 silent-inertness bug, one axis over.
-
-### The three-run proof structure (`agent-cli-s18-live/`, all validated post hoc)
-
-- **BEFORE (v1.3.0, 17/17):** the defect on the record — approved build+test gates on a real
-  Rust crate, both waived as `no-recipe`, `/accept` COMPLETE with zero checks ever run.
-- **Proof A (S18 build, toolchains still absent, 17/17):** the machine's pre-install state used
-  as a one-shot fixture. 6 units named across four ecosystems (cargo `[workspace] members`,
-  go.work-less go module, CMake, embedded), 8 polyglot files symbol-indexed, and six explicit
-  `toolchain-unavailable` states naming exact cures (install via rustup / go.dev) with ZERO
-  spawns; the gates waive LOUDLY — "TOOLCHAIN IS NOT INSTALLED on this machine" — never the old
-  claim. 2.6 min, 62 events.
-- **Proof B (after `winget` Go 1.26.5 + rustup gnu-host stable 1.97.1, 27/27):** the full path.
-  `go test` FAILS with the `--- FAIL: TestScale` finding → the CODE fixed, test untouched →
-  path-scoped `go test ./calc/...` targeted proof (`scopePaths: gosvc/calc` on the event) →
-  `go vet` → `cargo build` FAILS firing `rust-error` with a file:line finding into main.rs →
-  fixed → PASS → gates re-proven → embedded: `cargo fmt --check` passes host-side, the cross
-  build refuses naming `rustup target add thumbv7em-none-eabihf`, the USER installs the target
-  mid-session (driver-executed between turns), the toolchain pseudo-stamp flips the TOCTOU
-  fingerprint, re-detection sees it, and the SAME kind cross-compiles and PASSES — while
-  `cargo test` still refuses: cross binaries cannot execute on this host, and the harness
-  manages no hardware. `/accept` COMPLETE on GREEN gates, no waivers. 9.3 min, 170 events, 15
-  real spawns + exactly 2 honest refusals, `[s]` replay consent exercised.
-
-### What landed (commits `5bcb2cf`…`286bcdc` + docs; suite 1480 → 1539)
-
-- **`checks/toolchain.ts`** — machine toolchain availability as a stat-only fact (PATH probe
-  PATHEXT-aware; rustup components/targets under toolchain dirs, never the `~/.cargo/bin` proxy
-  shims — verified against the real install, which ships exactly the false-positive shims the
-  design predicted). Freshness rides the TOCTOU seam as `~toolchain/` pseudo-stamps: absence is
-  never cached (S16.5 lesson), and the mid-session install re-detect in proof B is this seam
-  working on camera.
-- **Detection**: `ProjectKind` += rust/go/cmake with optional per-ecosystem facts (bounded
-  hand-extraction, no TOML dependency): cargo workspace root/members, edition, Cargo.lock,
-  rust-toolchain files, the `[build].target` cross triple; go module path/directive/go.sum/
-  vendor; CMake project name. Units: Cargo.toml/go.mod/CMakeLists.txt join `UNIT_MANIFESTS`;
-  cargo members + go.work `use` join the declared sources; target/ + vendor/ join the skip set;
-  every new manifest joins the stat-candidate fingerprint.
-- **Recipes**: `cargo.` and `go.` rows (build/test/check/clippy `-D warnings`/fmt; go
-  build/test/vet with typecheck-as-build and a path→package `test-targeted` mapping only Go can
-  honestly express). Holes are decisions with stated reasons (`ECOSYSTEM_KIND_NOTES`): no rust
-  test-targeted (name-based selection), no go format (`gofmt -l` exits 0 — the exit code is the
-  verdict). **`UnsupportedReason` += `toolchain-unavailable`**: waives gates (the
-  browser-unavailable precedent) but tracked apart through the folds so the acceptance caveat
-  names the missing toolchain and its recorded cure. The precondition WHY moved into the rows;
-  Node/Python answers byte-identical, test-pinned; the recipe-id table pinned as a consent
-  surface.
-- **Signals/classification**: `rust-error` + `go-error` appended (order pinned); `syntax-error`
-  widened for Go's lowercase spelling, `assertion-failed` for Rust ≥1.73's backticked form;
-  classify.ts changed ONE line (both ids → compile-type). rustc two-line and Go one-line finding
-  extractors carry file:line.
-- **Retrieval**: `LangId` += rust/go/c-cpp, `SymbolKind` += struct/trait/mod/macro (no index
-  version bump — warm-load convergence is the pinned behavior); pattern tables with pub/case
-  exported rules; import edges a polyglot repo entirely lacked (rust `use`/`mod` through the
-  crate root; go directory-suffix matching onto a deterministic representative; C `#include`);
-  Cargo.toml/go.mod/CMakeLists manifests, lib/mod entry stems, `_test.go` penalty; honesty
-  strings now say ts/js/py/rust/go/c-cpp everywhere.
-- **Surfaces**: setup refusals say "nothing to install — cargo/go fetch during the build" instead
-  of implying a missing feature; the prompt's project block renders per-ecosystem facts
-  (toolchain installed/NOT INSTALLED, the cross-target line) instead of npm vocabulary.
-
-### Decisions (and why)
-
-- **A missing toolchain is `toolchain-unavailable`, and it WAIVES — loudly.** Machine capability
-  is the browser-unavailable case one toolchain over; an absence the harness will never install
-  must not strand acceptance. The loudness is structural (folds track it apart), not prose.
-- **Rows own the precondition WHY.** The old central curable rule was Node's answer hard-coded
-  into generic control flow; only a row knows whether its blocker is curable, a machine gap, or
-  a host incapability.
-- **`cargo test` under a cross target refuses PERMANENTLY as `precondition`** — installed target
-  or not, cross binaries cannot execute here, and the harness manages no hardware or emulators.
-  That is the embedded line: host-verifiable vs target-dependent, drawn in the recipe table.
-- **Go's typecheck deliberately duplicates build** (its compiler IS its typechecker) — an honest
-  gate beats a `no-recipe` waiver. **gofmt has no format row** — an output-parsed verdict would
-  break THE EXIT CODE IS THE VERDICT.
-- **LangId and ProjectKind stay separate vocabularies** (per-file extraction vs per-unit build
-  system); a lone `.rs` scratch file indexes without any cargo unit existing.
-- **Go import edges by directory-suffix matching** — module paths are unknowable in a per-file
-  resolver without go.mod context; centrality is a signal, never a claim, and the error mode is
-  a missing edge, not a wrong claim.
-
-### Open issues / boundaries
-
-- Live claims cover the rustup **gnu** host and go.dev Go on this one Windows 11 machine; MSVC
-  Rust, cgo, cargo features/build tags, `rust-toolchain` version selection are recorded facts
-  the harness never manipulates. clippy/rustfmt/target probing unions across installed rustup
-  toolchains (stated approximation; rustup's active-toolchain selection is not re-implemented).
-- C/C++ is detection + indexing only; the gcc/clang missing-header output would false-fire
-  `command-not-found` if it ever entered check normalization (unreachable today — no C recipe
-  exists; documented in ARCHITECTURE).
-- Rust `impl` methods, C++ templates and generated Go code are invisible to the map (column-0
-  heuristics by design; live reads see them). `_test.go` penalty covers the basename convention
-  only.
-- No preview recipes for cargo/go servers (`cargo run`/`go run` have no representation) — the
-  preview surface stays package.json-only this session.
-- The go `test-targeted` all-paths-outside-the-unit case degrades to the argv-null `no-recipe`
-  answer rather than `bad-request` (matches long-standing argv-null semantics; noted, not fixed).
-- **Review: 4 lenses, 13 findings (10 unique — three lenses independently found the top gate
-  defect), all hand-verified, all 10 fixed** (suite 1539 → 1547, each fix pinned). The first
-  fleet was killed by the account session limit; a preliminary hand pass and the re-run round
-  are both on the record. The four that mattered most: an all-outside-unit `test-targeted`
-  scope resolved to gate-WAIVING `no-recipe` instead of `bad-request` (a caller mistake
-  discharging a user-approved gate — the exact class S12 tagged bad-request for); **cargo/go
-  replay consent bound no content identity although for these ecosystems the check IS the
-  install** — one `[s]` on `cargo build` survived an auto-allowed `.cargo/config.toml` write
-  redirecting the registry; the steering files (Cargo.toml/lock, `.cargo/config*`,
-  `rust-toolchain*`; go.mod+go.sum) now ride `bodySha`, so both the replay key and the drift
-  refusal change when any of them does — the hand pass had under-called this by comparing to
-  tsconfig instead of to the S16 install identity; **a stale waiver survived a LATER recorded
-  failure of the same kind** (toolchain-unavailable, user installs, re-run FAILS → accepted
-  "COMPLETE, TOOLCHAIN IS NOT INSTALLED" — false twice; both folds now apply a recency rule:
-  a waiver older than a real fail/error is refuted evidence); and non-rustup Rust installs read
-  as missing clippy/rustfmt (the PATH-shim distrust is now conditional on rustup actually
-  managing the install). Plus: mixed-reason and root-scoped caveat rendering split honestly,
-  control/oversize member entries counted-never-echoed, stable-first toolchain scan, POSIX
-  PATHEXT ignore, a rustlib walk cap, and `go build` effects that no longer under-declare.
-
-### Recommended next step
-
-Session 19 per BLUEPRINT: source-backed web research (`@research`, bounded network authority,
-provenance-bearing findings), now that polyglot retrieval and checks are live-proven.
-
----
-
-## Session 17 (2026-08-04/05) — The first non-coding workflow pack: documents and PDF
-
-### Objective
-
-Answer the question BLUEPRINT set for this session: do the contracts that made the coding
-workflow trustworthy generalize beyond source code — without a second agent loop, a plugin
-system, or a parallel framework? The deliverable is a documents/PDF workflow standing on the
-existing kernel, with the same evidence and honesty discipline, plus a live proof.
-
-The answer is yes, and the shape of the answer is the result: **three per-session tools, ONE new
-policy fact, TWO additive event types, and a module of pure format logic outside the kernel.**
-No new orchestration, no new loop, no widened `CheckKind`.
-
-### The loop, and why the spec is a workspace file
-
-`request → read sources → author a *.docspec.json → render → deterministic validation → SEE the
-pages → revise THE SPEC → re-render → deliver.` The spec being an ordinary workspace file (not
-harness state, not an in-memory object) is the load-bearing choice: revision inherits snapshots,
-`/undo`, the session diff and attribution for free, and "targeted revision" needs no
-incremental-artifact-patching machinery at all.
-
-### What landed (commits `4c5db6a`…`HEAD`)
-
-- **Substrate** (`artifacts/zip.ts`, `xml.ts`): in-memory-only OOXML zip access (nothing is ever
-  extracted to disk, so zip-slip is structurally impossible rather than defended against) with
-  entry-name validation and byte caps; deterministic zip writing (sorted entries, FIXED mtime —
-  fflate would stamp the live clock into 2-second-resolution DOS fields); size- AND depth-bounded
-  strict XML parsing plus the escapers all generation routes through.
-- **Read layer**: DOCX/PPTX/PDF/XLSX identified by MAGIC BYTES and the content-types part, never
-  the extension, each summary leading with a **coverage verdict** (`full`/`partial`/`structural`)
-  and reasons. PPTX slide ORDER comes from the declared `sldIdLst` through the relationship map.
-- **The DocSpec + deterministic DOCX renderer**: one strict schema returning the COMPLETE error
-  list with nothing written; hand-rolled OOXML with real named styles, one numbering instance per
-  list, field codes, fixed timestamps, no rsids — same spec + same images ⇒ same sha256.
-- **PDF production** through the shared cached browser probe from one self-contained page, and
-  **`inspect_pages`** rasterizing pages via unpdf's bundled pdf.js injected into a blank page of
-  that same browser (native-free by construction: the zero-dep library that reads PDFs in Node
-  renders them where a real DOM exists).
-- **Deterministic validators** that parse each artifact BACK, with two severities kept apart:
-  structural mismatches FAIL; layout heuristics are NOTES that can never block.
-- **The `artifact` policy fact** (branch 0f) and `artifact.rendered`/`artifact.inspected` events
-  on the S16 setup pattern — products, never verification, pinned by the same asymmetry test.
-
-### Review: 4 lenses, 29 findings, all hand-verified, 19 fixed
-
-Three lenses independently found the top defect. Every claim was reproduced against the built
-code before any fix (`scratchpad/verify-findings.mjs`), and each fix carries a regression pin
-(`test/artifacts.review-fixes.test.ts`, 18 tests). The four that mattered most:
-
-- **The engine never evaluates `readsPaths` on a tool with a non-empty mutation plan**, so
-  `render_document`'s claimed read coverage was structurally void: pointing it at `.env` read the
-  file and echoed a fragment through V8's JSON error. Both the spec path and every image path are
-  now validated at execute (containment + secret-name, raw AND resolved), and JSON syntax errors
-  report POSITION only.
-- **Zip caps gated the uncompressed-size field** while a STORED entry is materialized by its
-  COMPRESSED size — a forged central directory pulled 300 KB past a 1 KB cap, refused only after
-  the allocation. Both caps now gate `max(size, originalSize)`.
-- **Validation compared artifacts against the READER's display bounds**, manufacturing "does not
-  match its spec" failures on correct renders (25 tables, a heading containing `\r`) — which the
-  acceptance caveat then repeated as fact. This is the class this project treats most seriously:
-  a fabricated failure claim.
-- **A render+inspect pair laundered arbitrary workspace pixels to the model** with no approval:
-  a spec may embed any in-workspace image, the render auto-allows, and inspection inherited that
-  consent. `embeddedWorkspaceImages` on the render event now gates inherited consent.
-
-### Live proof (Kimi K3, `agent-cli-s17-live/`)
-
-Two piped-REPL takes in a fresh fixture workspace (`notes.md` + a generated CRC-valid logo PNG),
-both from one natural-language request, both `/accept` COMPLETE.
-
-**Take 2 is the complete run: 21 minutes, 312 events, 49 turns, 48 tool calls, 10 approvals,
-post-hoc validated 28/28 from persisted evidence alone.** The arc: read the notes → author
-`report.docspec.json` iterating against the schema's verbatim errors → render both formats
-(validation PASS) → SEE the pages and **disagree with them** (one page against a 2–3 page target)
-→ build a throwaway `probe.docspec.json` to experiment with page breaks in isolation, render and
-inspect it three times → apply the finding to the real spec → two balanced pages → take the
-follow-up revision turn (discover the accent key by probing, set `styles.accentColor: "#1F3864"`,
-add "Next Steps") → re-render + re-inspect → clean up the scratch files → `/accept` COMPLETE with
-no caveats. **Both admission paths of the new fact fired in one run**: `report.pdf` (spec embeds
-the logo) ASKED; `probe.pdf` (spec embeds nothing) auto-allowed under inherited consent — the
-rule is provenance-driven, not blanket. The delivered artifacts match their recorded shas and the
-spec on disk matches the `specSha256` the last render consumed.
-
-**Take 1 (archived, 26/26): the same self-correcting arc, and an honest failure.** Its SECOND user
-turn never ran — Kimi returned "engine currently overloaded", the harness recorded a typed
-provider failure, said so, and continued cleanly through `/status`, `/accept` and `/quit`. So take
-1 proves model-initiated revision from visual evidence; take 2 adds the user-driven one.
-
-**What the takes found that the suites could not**: the inspect ask claimed "a workspace document
-the harness did NOT produce" about a file the harness had just rendered (the true reason was the
-embedded logo — the record now says so, and take 2's log shows the corrected wording); pdf.js
-sprayed font-substitution warnings onto stderr, which is the REPL's CHROME stream (`verbosity: 0`);
-and the agent wrote *"page-number tokens weren't documented, so I probed the renderer"* — burning
-render calls rediscovering the spec shape, so `render_document`'s description now states the block
-kinds, run fields and header/footer tokens outright.
-
-### Verification evidence
-
-`npm run typecheck` + `npm run build` clean per commit; suite **1373 → 1480** (1469 passed + 11
-skipped) across 107 files, including two REAL-browser suites (PDF print + parse-back; page
-rasterization) that skip honestly on a machine without one. A dev-time check opened the rendered
-sample in real Word 16: 21 paragraphs, 1 table, 1 inline image, and the footer computed
-"Page 1 of 2" — the field grammar is genuinely Word-valid.
-
-### Decisions (and why)
-
-- **The spec is a workspace file, not harness state.** Everything the coding workflow already
-  built for files — snapshots, undo, diff, attribution, drift — applies to document revision for
-  free, and the alternative (patching artifacts in place) is a fidelity contract this session
-  deliberately did not sign.
-- **Artifacts are PRODUCTS, never verification.** A render never marks a file CHECKED and never
-  satisfies a plan gate; the S16 setup asymmetry is reused verbatim rather than widening
-  `CheckKind`, because a kind that resolves `unsupported` everywhere silently WAIVES gates.
-- **A heuristic must never become a gate.** Blank pages and stranded headings are notes; only
-  structural mismatches fail. The first false positive would otherwise turn a guess into a
-  blocker on the delivery path.
-- **Validation reads at validation scale.** Display bounds exist to protect the model's context;
-  applying them to harness-generated bytes made the validator lie about its own renderer.
-- **DOCX visual fidelity belongs to Word**, so this session claims structural + parse-back
-  verification for DOCX and does visual judgment on the PDF twin. Word COM conversion was cut
-  deliberately rather than shipped shallow.
-- **Inherited consent must not launder pixels.** Rasterizing shows the model bytes; a render that
-  embedded workspace images does not get to convert "you approved a render" into "you approved
-  showing me these images".
-
-### Open issues / boundaries
-
-- **Visual judgment is the MODEL's**: the harness proves the pixels were rendered and shown, and
-  the deterministic spec↔artifact verdict is what `validation: pass` refers to. That an aesthetic
-  verdict is *right* is not something the evidence can establish, and neither doc claims it.
-- Take 2's delivered page 2 carries a lot of white space and its "Decisions Requested" / "Next
-  Checkpoints" / "Next Steps" sections overlap — content quality the harness has no opinion
-  about. Recorded in `DEMO.md` rather than glossed.
-- **PPTX is read-only** this session; generation belongs to a slides pack. **Editing pre-existing
-  DOCX** is out of scope (round-trip fidelity is a different contract). Footnotes, TOC fields,
-  tracked changes, comments, multi-section layouts, cell merges, and RTL/complex-script fidelity
-  are unsupported, not partially supported.
-- **Word COM conversion is deferred** (S17.5 candidate): its four sharp edges (temp-file
-  placement in the state dir, modal-dialog suppression, `-EncodedCommand` ask honesty, noUndo
-  wording) deserve their own design.
-- **`read_document` is parent-only**: reviewer/explorer children cannot open the artifacts they
-  review (they can read the spec JSON). Child-tool admission needs the static-construction seam.
-- No document CheckKind and no plan-gate integration: a document artifact cannot yet gate a plan
-  task. Deferred until there is real pressure for it.
-- PDF bytes are not deterministic (Chromium embeds dates/ids) and this is never claimed; DOCX
-  bytes are, and that is test-pinned.
-
-### Recommended next step
-
-Session 18 per BLUEPRINT: polyglot repository intelligence and verification (Rust, Go, C/C++,
-embedded), now that the kernel has been shown to carry a non-coding workflow without deforming.
-
----
-
 ## Earlier Milestones (compressed per the rolling-docs policy)
 
 Contract detail lives in `ARCHITECTURE.md`; entries keep the objective, lasting decisions, the
 evidence, and what stayed open.
+
+### Session 18 (2026-08-07) — Polyglot repository intelligence and verification
+
+Extended repository intelligence and typed verification beyond the Node/TS + Python bias, with
+support defined as **language + build system + layout + AVAILABLE TOOLCHAIN** rather than
+file-extension recognition (commits `5bcb2cf`…`286bcdc`; suite 1480 → 1547). The audit finding
+that shaped it: an unrecognized ecosystem resolved every check to `no-recipe`, and `no-recipe`
+WAIVES declared gates — so a Rust session reached `/accept` COMPLETE having verified nothing while
+claiming no supported manifest existed, over a workspace holding a `Cargo.toml`.
+
+**Lasting decisions.** Machine toolchain availability became a first-class **stat-only** fact
+(`checks/toolchain.ts`), with absence never cached and rustup components probed under toolchain
+dirs rather than the `~/.cargo/bin` proxy shims — which do ship exactly the false positives the
+design predicted. A missing toolchain is `toolchain-unavailable`: it waives (the
+browser-unavailable precedent — an absence the harness will never install must not strand
+acceptance) but is tracked apart through every fold, so the caveat names the toolchain and its
+cure. Recipe ROWS own the precondition "why", because only a row knows whether its blocker is
+curable, a machine gap, or a host incapability. `cargo test` under a cross target refuses
+PERMANENTLY — cross binaries cannot execute here and the harness manages no hardware — which is
+where the embedded line sits. Go's typecheck deliberately duplicates build (its compiler IS its
+typechecker: an honest gate beats a waiver), and gofmt gets no format row because an output-parsed
+verdict would break *the exit code is the verdict*. `LangId` and `ProjectKind` stay separate
+vocabularies, so a lone `.rs` file indexes with no cargo unit in existence.
+
+**Evidence — three validated live runs** (`agent-cli-s18-live/`): the v1.3.0 BEFORE-capture of the
+defect itself (17/17 — approved gates on a real Rust crate, both silently waived, `/accept`
+COMPLETE with zero checks run); proof A on the pre-install machine (17/17 — six explicit
+`toolchain-unavailable` states naming exact cures with ZERO spawns, gates waiving LOUDLY); and
+proof B after installing Go and rustup-gnu (27/27 — a seeded `go test` failure and a seeded rustc
+E0308 each found, classified, fixed and re-proven; a mid-session `rustup target add` noticed
+through the toolchain pseudo-stamp on the TOCTOU seam; `/accept` COMPLETE on GREEN gates with no
+waivers). Review: 4 lenses, 13 findings, 10 unique, all hand-verified and fixed — the sharpest
+being that cargo/go replay consent bound no content identity although for those ecosystems the
+check IS the install (steering files now ride `bodySha`), and that a stale waiver survived a LATER
+recorded failure of the same kind (both folds now apply a recency rule).
+
+**Still open.** Live claims cover the rustup **gnu** host and go.dev Go on one Windows 11 machine;
+MSVC Rust, cgo, cargo features/build tags and `rust-toolchain` version selection are recorded but
+never manipulated. C/C++ is detection + indexing only. Rust `impl` methods, C++ templates and
+generated Go code are invisible to the map (column-0 heuristics by design). No preview recipes for
+`cargo run`/`go run`.
+
 
 ### Session 16.5 (2026-08-01 … 08-03) — Proving S16 end to end
 

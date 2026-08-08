@@ -336,7 +336,17 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
     // Everything the remote already holds under ANY other ref, restricted to objects we actually
     // have. What we do not have cannot be excluded, and that is recorded rather than hidden: the
     // resulting counts are then an over-estimate, and the preview says so.
-    const candidates = [...new Set(rows.filter((r) => r.ref !== req.refName).map((r) => r.oid))];
+    //
+    // For an annotated tag prefer the PEELED row: `ls-remote` reports the tag OBJECT for
+    // `refs/tags/x` and the commit for `refs/tags/x^{}`, and a tag object is not a commit — a
+    // membership test over tag-object ids finds none of them present and reports every repository
+    // with annotated tags as "incomplete", which makes the signal useless.
+    const byRef = new Map<string, string>();
+    for (const r of rows) {
+      if (r.ref === req.refName) continue;
+      if (r.peeled || !byRef.has(r.ref)) byRef.set(r.ref, r.oid);
+    }
+    const candidates = [...new Set(byRef.values())];
     exclude = await presentLocally(deps, candidates);
     basesIncomplete = exclude.length < candidates.length;
     ahead = await countIn(deps, [localCommit, ...(exclude.length > 0 ? ['--not', ...exclude] : [])]);

@@ -69,18 +69,25 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.5.0.** 1828 hermetic tests across 119 files (real-OS sandbox, real-repository git,
-> real browser flows, real PDF print + rasterization, hermetic HTTP wire pins, adversarial-review
-> suites) plus opt-in live smokes. Proven live end-to-end across fourteen recorded runs — newest:
-> **web research, as a controlled experiment**. The same task ran twice on Kimi K3 against the same
-> fixture, differing only in whether the research credential was present. The control implemented a
-> client from recall, typechecked green, and said *"moderately confident — not certain… a quick
-> check of docs.tavily.com would settle everything below"*. The proof's researcher subagent ran 14
-> searches and 3 page reads in its own context and recorded **7 corroborated findings with real
-> source URLs** — including the exact legacy trap the control had named as its top risk — and
-> honestly recorded what it could **not** establish. Read the narrow claim rather than the loud one:
-> research converted a plausible answer into a supported one, it did not rescue a wrong one
-> (`agent-cli-s19-live/DEMO.md`). Before it: **polyglot verification proven three ways** including
+> **Status: v1.6.0.** 2038 hermetic tests across 130 files (real-OS sandbox, real-repository git,
+> **a local bare repo standing in as a real remote**, real browser flows, real PDF print +
+> rasterization, hermetic HTTP wire pins, adversarial-review suites) plus opt-in live smokes.
+> Proven live end-to-end across sixteen recorded runs — newest: **remote delivery to this
+> project's own GitHub repository**. One Kimi K3 session read the remote, published a branch, a tag
+> and a draft release — **three mutations, three separate approvals, each verified by re-reading
+> the remote** — and, before that, had its **first publish denied**, after which `/remote` still
+> read *"nothing on any remote was changed by this session"*. Resumed, the same session remembered
+> what it had spent and forgot what it was allowed: `Live observations (0)`, and two policy
+> denials in a row. Zero credential-shaped strings anywhere in the 225-event log. The live run also
+> found two honesty defects hermetic tests could not — a preview that reported an entire 207-commit
+> branch as new, and a workflow-scope rejection asserted as certain that GitHub then did not
+> perform — both fixed, both now regression-tested (`agent-cli-s20-live/DEMO.md`). Before it:
+> **web research as a controlled experiment** — the same task twice on Kimi K3, differing only in
+> whether the research credential was present; the control said *"moderately confident — not
+> certain… a quick check of docs.tavily.com would settle everything below"*, and the proof's
+> researcher recorded **7 corroborated findings with real source URLs** including the exact legacy
+> trap the control had flagged (`agent-cli-s19-live/DEMO.md`). Before that: **polyglot
+> verification proven three ways** including
 > a before-capture of the defect it fixes; **the documents workflow in a 21-minute session** (the
 > model seeing its own too-cramped pages and revising the spec); **the full multi-project workflow
 > in one 84-minute session** (plan → sha-bound approval → installs → parallel worktree executors →
@@ -151,6 +158,8 @@ agent session 20260715-101730-5d56
   `/checks` (what this project can verify and the latest evidence per kind),
   `/preview [stop <id>]` (managed dev servers), `/review` (the review gate's state),
   `/research` (every web query this session sent, the sources that answered, and the budget left),
+  `/remote` (the remotes, which GitHub account would act, live observations, every remote read and
+  every remote MUTATION with its verification verdict),
   `/provider [name [model]]` and `/model [id]` (list or switch provider/model mid-session —
   recorded, credential-free), `/accept [confirm]` (the completion boundary), `/report`, `/map`,
   `/quit`.
@@ -270,7 +279,7 @@ not what a process *can technically* do. Untrusted + non-interactive runs refuse
 
 Narrowing knobs: `protectedPaths` (extra write-deny roots), `secretPatterns` (literal lowercase
 basename substrings treated as secret-like), `envExcludePatterns` (extra name substrings dropped
-from command-child environments), and `researchBlockedDomains` (domains web research may never
+from command-child environments), and `remoteBlockedHosts` / `researchBlockedDomains` (hosts remote delivery and domains web research may never
 reach — with no allowed-domains counterpart, because a permit list would be widening). Config can only *restrict* the agent — there is no
 allowlist field, no auto-approval field, and no way to relax the command gate or widen the sandbox.
 Unknown keys or invalid JSON are hard errors. CLI flags > user config > defaults; narrowing
@@ -292,6 +301,9 @@ per-session tools the main agent (and only the main agent) receives:
 | `project_setup` | Dependency install / migrate / seed — the model names an intent, the harness resolves the command from the lockfile or the project's own script |
 | `preview` | A managed dev-server process with recorded readiness, logs, and teardown |
 | `web_search` | Bounded web search returning source snippets with URLs — the ONE research tool the main agent holds |
+| `remote_status` | Read a git remote / its GitHub repo: identity, permission, ONE ref (producing the observation a publish must cite), pulls, issues, CI runs |
+| `remote_push` | Publish one named branch or tag to one named remote — observation-bound, dry-run compared, verified afterwards |
+| `remote_release` | A GitHub Release for a tag ALREADY on the remote (never creates the tag) |
 | `browser_flow` | Typed browser steps against a running preview; screenshots + traces |
 | `view_image` | Re-read an image this session recorded (browser screenshot or inspected page) |
 | `read_document` | DOCX / PPTX / PDF structure, text and metadata, with an honest coverage verdict |
@@ -492,6 +504,66 @@ explicitly ask. Everything deliberate is yours:
 One consent note: git operations you invoke honor the **trusted repository's own config and
 hooks** (that is what makes commits real); the harness disables only the pieces that would run
 code from a repo *implicitly* (fsmonitor) and never lets the model reach these flows.
+
+## Remote delivery to GitHub
+
+The model *can* reach the remote — under two separate authorities that no amount of arguing
+merges into one. They are two policy facts, so a tool that could both read a remote and change one
+is refused by construction rather than by convention.
+
+**Reading** (`remote_status`) asks once and is session-grantable within a fixed allowance:
+
+```
+⚠ approval required  [remote READ — contacts the remote under your existing credential; nothing here is written]  remote_status
+  command: git ls-remote --exit-code origin refs/heads/session-20
+  reason: reads refs from github.com/you/repo via remote 'origin' using the credential gh/git already
+          holds — Agent CLI never reads the token. …
+  [y] allow once   [s] allow further remote READS this session (never a push, tag or release)   [n] deny
+```
+
+**Publishing** (`remote_push`, `remote_release`) asks **every single time**, and there is no `[s]`
+to press:
+
+```
+⚠ approval required  [remote WRITE — changes state on the remote; NOT undoable from here]  remote_push
+    exact target: refs/heads/session-20
+    command: git push --porcelain --no-follow-tags origin 9f3c1ab…:refs/heads/session-20
+    effect: CREATE origin:refs/heads/session-20 at 9f3c1ab (4 commit(s) in the branch)
+    effect: commits: 9f3c1ab feat(remote): … | 7a1e0c2 test(remote): …
+    observed 12s ago (id 16164a9ec49e): remote held (absent)
+    local verification: checks since the last change: build pass, test pass · 3 commit(s) this session
+  reason: PUBLISHES to … nothing in this harness can undo it. … Local verification state: … — stated
+          for your judgement, NOT as authorization.
+  [y] allow once   [n] deny   [q] deny & stop
+```
+
+What makes that prompt trustworthy:
+
+- **A publish must cite a fresh observation** of that exact remote and ref, produced by
+  `remote_status view=refs`. Absent or stale is a refusal, not a question — the harness will not
+  reason about a remote from memory.
+- **Looking never writes.** The only network verb is `git ls-remote`: no fetch, no
+  remote-tracking refs, no `FETCH_HEAD`. The cost is stated honestly — a commit the remote holds
+  and you have never fetched makes the relation `unknown`, and a force push over it is refused
+  *even with `force`*, because nothing here can tell you what would be discarded.
+- **What you approve is what executes.** The refspec source is the observed commit, not a branch
+  name; before sending, the harness re-resolves the push URL and re-reads both sides, runs
+  `git push --dry-run --porcelain` and checks it structurally (exactly one ref, the approved one,
+  from the approved commit); afterwards it re-reads the remote and records `verified` separately
+  from `ok`. A force push carries `--force-with-lease=<ref>:<observed-oid>` so the server enforces
+  the same binding.
+- **Agent CLI never holds your credential.** Authentication is gh's own store and git's credential
+  helper; `GH_TOKEN`/`GITHUB_TOKEN` are deliberately not forwarded to child processes (and that is
+  reported, not silently worked around). All gh/git output is scrubbed of credential shapes before
+  it reaches the model, the terminal or the log.
+- **Local completion is never permission to publish**, and a green gate is never a precondition
+  either — it is shown in the prompt and enforces nothing. Since the model still cannot commit, it
+  can only ever publish work you committed.
+
+`/remote` is the record: the configured remotes, which account would act, live observations, every
+read, and every mutation with its verification verdict — including the ones that failed. Out of
+scope by decision: `gh api` passthrough, PR/issue creation, merges, repository creation or
+deletion, settings, secrets, workflow dispatch, and `git fetch`/`pull`.
 
 ## Security model & honest limitations
 

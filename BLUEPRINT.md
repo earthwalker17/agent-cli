@@ -126,16 +126,25 @@ works as bounded session evidence, which is what this session required; the dura
 needs staleness rules, size budgets and provenance semantics that belong with Session 21's memory
 work rather than bolted onto a capability release.
 
-### Session 20 — Remote Git and GitHub Delivery
+### Session 20 — Remote Git and GitHub Delivery — **DONE (v1.6.0)**
 
-Extend the existing local Git boundary to deliberate remote delivery. Support user-requested
-`git push` and selected GitHub CLI operations for an explicitly identified repository, account,
-remote, branch, and change set.
+Delivered, and the read/write split is structural rather than documentary: **two** policy facts
+(`remoteRead`, `remoteWrite`) with separate fail-closed branches, so the engine's existing
+conflicting-contract rule makes a tool that could both read and publish an automatic deny. Reads
+ask once and are session-grantable within a real counter; a publish asks EVERY time, is never
+passed through `applyGrant`, offers no `[s]` and stores nothing — the same rule written at all
+three consent surfaces. A mutation must cite a fresh `ls-remote` observation of that exact ref
+(absent or stale is a DENY, on a kernel-owned bound a pack cannot widen); the refspec source is the
+observed OID; execute re-resolves the push URL, re-reads both sides, compares a `--dry-run
+--porcelain` structurally, and verifies against the remote afterwards. Three tools — `remote_status`
+(auth/repository/refs/pulls/issues/runs/run), `remote_push`, `remote_release` — plus `/remote`, a
+report section, and acceptance caveats in both directions. The harness never holds a credential.
 
-Remote reads and remote mutations must remain distinct. Every mutation should show its exact target
-and effect before confirmation, use existing user authentication without exposing credentials, emit
-attributable evidence, and stop on ambiguity. Agent CLI must never create, push, force, publish, or
-modify GitHub state merely because local work completed.
+**Deliberately out of scope:** `gh api` passthrough or any generic escape, PR/issue creation,
+merges, repository creation or deletion, settings/secrets/workflow dispatch, `git fetch`/`pull`,
+and upstream-tracking configuration as a side effect of a push. Details and honest limits:
+`ROADMAP.md` Session 20, `ARCHITECTURE.md` "The remote-delivery pack", `agent-cli-s20-live/DEMO.md`,
+CHANGELOG 1.6.0.
 
 ### Session 21 — Bounded Memory and Initialization
 
@@ -209,7 +218,10 @@ Before calling the next phase mature, Agent CLI should have demonstrated:
   shared session budget rebuilt from events, findings carrying sources + corroboration +
   retrieval date, live-proven against the real provider. The DURABLE half — a curated RESEARCH.md
   — is deliberately deferred to S21 with the rest of the memory work)**;
-- explicit, previewed, user-approved remote Git/GitHub delivery;
+- ~~explicit, previewed, user-approved remote Git/GitHub delivery~~ **(MET in S20: two policy
+  facts so read and write cannot be confused, an observation-bound publish that refuses to reason
+  about a remote from memory, and a live proof against a real GitHub repository in which the
+  scripted human DENIED the first push and the record showed nothing had left the machine)**;
 - bounded project/global memory that can be inspected, edited, compacted, and removed;
 - terminal presentation that scales to these states without changing runtime truth.
 

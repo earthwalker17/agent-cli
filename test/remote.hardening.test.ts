@@ -109,6 +109,22 @@ describe.skipIf(!hasGit)('a NEW ref reports what the remote LACKS, not the whole
     expect(o.commits.map((c) => c.subject)).toEqual(['the only new commit']);
     expect(o.changedPaths).toEqual(['new.txt']);
     expect(o.basesIncomplete).toBe(false);
+  });
+
+  it('does not report a repository with ANNOTATED TAGS as incomplete', async () => {
+    // `ls-remote` reports the tag OBJECT for `refs/tags/x` and the commit for `refs/tags/x^{}`.
+    // A membership test over tag-object ids finds none of them, so every repository with an
+    // annotated tag looked "incomplete" — a signal that fires always tells a reader nothing.
+    await setup();
+    await commit('base');
+    await git(repo, ...IDENT, 'tag', '-a', 'v1', '-m', 'annotated');
+    await runRemoteGit(gitDeps(), ['push', 'origin', 'refs/heads/main:refs/heads/main']);
+    await runRemoteGit(gitDeps(), ['push', 'origin', 'refs/tags/v1:refs/tags/v1']);
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await commit('mine', { 'mine.txt': 'm' });
+    const o = await observeRemoteRef(gitDeps(), REQ, 1_000);
+    expect(o.basesIncomplete).toBe(false);
+    expect(o.ahead).toBe(1);
     // …and therefore the workflow-scope warning does NOT fire for history published months ago.
     expect(o.touchesWorkflows).toBe(false);
   });

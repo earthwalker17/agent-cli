@@ -862,7 +862,12 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             `${w.detail !== undefined ? ` · ${sanitizeLine(w.detail)}` : ''}`,
         );
       }
-      out.push('', 'Publishing never happens without an individual approval, and a green local check is never one.');
+      out.push(
+        '',
+        'Every mutation above is an individual `ask` that no session grant can satisfy, and a green local check is never one.',
+        'The one exception is the flag that removes the human: under --dangerously-allow-all an ask is auto-allowed and',
+        'recorded with source "dangerous-mode".',
+      );
       ctx.renderer.flush();
       ctx.modelOut.write(`${out.filter((l) => l !== '').join('\n')}\n`);
       return 'continue';

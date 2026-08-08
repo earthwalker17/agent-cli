@@ -243,6 +243,7 @@ describe('/remote is an accountability surface', () => {
     expect(out).toContain('FAILED');
     expect(out).toContain('protected branch');
     expect(out).toContain('a green local check is never one');
+    expect(out).toContain('dangerous-mode');
   });
 
   it('reports an unavailable capability as a line, never as a wall over the record', async () => {
