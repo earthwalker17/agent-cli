@@ -81,6 +81,8 @@ export interface GitInvocation {
   /** Extra child-env overrides (GIT_INDEX_FILE for checkpoints, explicit identity, …). */
   env?: Record<string, string>;
   signal?: AbortSignal;
+  /** Byte cap override for output-heavy invocations (a full ls-remote listing). */
+  maxCaptureBytes?: number;
 }
 
 /** Build the hardened child environment for a git invocation. Exported for tests. */
@@ -112,6 +114,7 @@ export async function runGit(inv: GitInvocation): Promise<GitResult> {
     env: buildGitEnv(inv.env),
     timeoutMs: inv.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
     ...(inv.signal ? { signal: inv.signal } : {}),
+    ...(inv.maxCaptureBytes !== undefined ? { maxCaptureBytes: inv.maxCaptureBytes } : {}),
   });
   return {
     ok: outcome.termination === 'exited' && outcome.exitCode === 0,
@@ -120,5 +123,6 @@ export async function runGit(inv: GitInvocation): Promise<GitResult> {
     stdout: outcome.stdout,
     stderr: outcome.stderr,
     durationMs: outcome.durationMs,
+    ...(outcome.captureTruncated ? { captureTruncated: true } : {}),
   };
 }

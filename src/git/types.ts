@@ -15,6 +15,12 @@ export interface GitResult {
   stdout: string;
   stderr: string;
   durationMs: number;
+  /**
+   * True when the exec substrate's byte cap dropped output (head+tail kept, MIDDLE gone). A
+   * consumer parsing line-oriented output at scale must treat this as "the stream has a silent
+   * gap", never as a clean prefix (S20.5 — the ls-remote listing hit this before its own cap).
+   */
+  captureTruncated?: boolean;
 }
 
 /** One entry of `git status --porcelain=v2 -z` output. Paths are repo-relative POSIX. */

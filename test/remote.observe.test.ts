@@ -9,6 +9,7 @@ import {
   lsRemoteOid,
   observeRemoteRef,
   parseLsRemote,
+  parseLsRemoteRows,
   parsePushPorcelain,
   runRemoteGit,
   touchesWorkflowFiles,
@@ -219,6 +220,30 @@ describe.skipIf(!hasGit)('observeRemoteRef against a real bare repository', () =
     await commit('base');
     expect(await lsRemoteOid(deps(), 'origin', 'refs/heads/never')).toBeNull();
   });
+
+  it('a refs/pull/ namespace on the remote neither hides the target nor degrades the bases (S20.5)', async () => {
+    // GitHub exposes two refs per PR under refs/pull/, which sorts BEFORE refs/tags/ — an
+    // unscoped listing let them starve the row bound and a real tag read as absent. The listing
+    // is now scoped to heads+tags(+target), so PR refs are structurally outside it.
+    await setup();
+    const first = await commit('base');
+    await runRemoteGit(deps(), ['push', 'origin', 'refs/heads/main:refs/heads/main']);
+    for (let i = 1; i <= 25; i++) {
+      expect((await git(bare, 'update-ref', `refs/pull/${String(i)}/head`, first)).ok).toBe(true);
+    }
+    expect((await git(repo, ...IDENT, 'tag', '-a', 'v9', '-m', 'after the pull refs')).ok).toBe(true);
+    expect((await runRemoteGit(deps(), ['push', 'origin', 'refs/tags/v9:refs/tags/v9'])).ok).toBe(true);
+    // The tag (which sorts after refs/pull) is still found…
+    const o = await observeRemoteRef(deps(), { ...REQ, refName: 'refs/tags/v9', localRev: 'refs/tags/v9' }, 1_000);
+    expect(o.relation).toBe('up-to-date');
+    // …and a NEW branch's exclusion bases stay complete: the pull refs never enter the candidate
+    // set at all, so 25 extra refs over an object we hold cannot mark the bases incomplete.
+    await commit('feature work');
+    const n = await observeRemoteRef(deps(), { ...REQ, refName: 'refs/heads/feat', localRev: 'refs/heads/main' }, 1_000);
+    expect(n.relation).toBe('new');
+    expect(n.basesIncomplete).toBe(false);
+    expect(n.ahead).toBe(1); // only the commit main does not already hold
+  });
 });
 
 describe('parseLsRemote', () => {
@@ -229,6 +254,16 @@ describe('parseLsRemote', () => {
 
   it('returns null when the ref is not present', () => {
     expect(parseLsRemote('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/other', 'refs/heads/main')).toBeNull();
+  });
+
+  it('REPORTS hitting the row bound instead of silently stopping (S20.5)', () => {
+    const row = (i: number): string => `${'c'.repeat(40)}\trefs/heads/b-${String(i)}`;
+    const under = Array.from({ length: 20_000 }, (_, i) => row(i)).join('\n');
+    expect(parseLsRemoteRows(under)).toMatchObject({ truncated: false });
+    const over = `${under}\n${row(20_000)}`;
+    const parsed = parseLsRemoteRows(over);
+    expect(parsed.rows).toHaveLength(20_000);
+    expect(parsed.truncated).toBe(true);
   });
 });
 

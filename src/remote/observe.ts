@@ -65,7 +65,12 @@ const REMOTE_GIT_CONFIG: readonly string[] = [
  * git echoes the remote URL back inside authentication failures — so the two places this output is
  * most useful are exactly the two where a credential-bearing remote URL travels with it.
  */
-export async function runRemoteGit(deps: RemoteGitDeps, argv: readonly string[], timeoutMs = REMOTE_CALL_TIMEOUT_MS): Promise<GitResult> {
+export async function runRemoteGit(
+  deps: RemoteGitDeps,
+  argv: readonly string[],
+  timeoutMs = REMOTE_CALL_TIMEOUT_MS,
+  opts?: { maxCaptureBytes?: number },
+): Promise<GitResult> {
   const result = await runGit({
     gitPath: deps.gitPath,
     argv: [...REMOTE_GIT_CONFIG, ...argv],
@@ -73,6 +78,7 @@ export async function runRemoteGit(deps: RemoteGitDeps, argv: readonly string[],
     timeoutMs,
     ...(deps.ssh === true ? { env: { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' } } : {}),
     ...(deps.signal ? { signal: deps.signal } : {}),
+    ...(opts?.maxCaptureBytes !== undefined ? { maxCaptureBytes: opts.maxCaptureBytes } : {}),
   });
   return { ...result, stdout: scrubSecrets(result.stdout), stderr: scrubSecrets(result.stderr) };
 }
@@ -96,19 +102,30 @@ export interface LsRemoteRow {
   peeled: boolean;
 }
 
-/** Ref rows read from one listing before the parser stops. Far above any real repository's count. */
-const MAX_LS_REMOTE_ROWS = 2_000;
+/**
+ * Ref rows read from one listing before the parser stops. A bound, not an assumption: hitting it
+ * is REPORTED (`truncated`) and folded into `basesIncomplete`, never silent. 2,000 proved too
+ * small in the wild — GitHub exposes two refs per pull request under `refs/pull/`, which sorts
+ * BEFORE `refs/tags/`, so on a repository with ~1,000 PRs the old cap starved the tags out of an
+ * unscoped listing and a real tag read as absent (S20.5 review). The listing is now also SCOPED
+ * to heads+tags, so this bound is headroom, not a working limit.
+ */
+const MAX_LS_REMOTE_ROWS = 20_000;
 
-export function parseLsRemoteRows(stdout: string): LsRemoteRow[] {
+export function parseLsRemoteRows(stdout: string): { rows: LsRemoteRow[]; truncated: boolean } {
   const rows: LsRemoteRow[] = [];
+  let truncated = false;
   for (const line of stdout.split('\n')) {
-    if (rows.length >= MAX_LS_REMOTE_ROWS) break;
+    if (rows.length >= MAX_LS_REMOTE_ROWS) {
+      if (/^[0-9a-f]{40,64}\s+\S+/.test(line.trim())) truncated = true;
+      continue;
+    }
     const m = /^([0-9a-f]{40,64})\s+(\S+)\s*$/.exec(line.trim());
     if (m === null) continue;
     const ref = m[2] ?? '';
     rows.push({ oid: m[1] ?? '', ref: ref.replace(/\^\{\}$/, ''), peeled: ref.endsWith('^{}') });
   }
-  return rows;
+  return { rows, truncated };
 }
 
 /**
@@ -119,7 +136,7 @@ export function parseLsRemoteRows(stdout: string): LsRemoteRow[] {
  * against, is the ref's own value.
  */
 export function parseLsRemote(stdout: string, refName: string): string | null {
-  return parseLsRemoteRows(stdout).find((r) => r.ref === refName && !r.peeled)?.oid ?? null;
+  return parseLsRemoteRows(stdout).rows.find((r) => r.ref === refName && !r.peeled)?.oid ?? null;
 }
 
 /** Whether the local object database actually contains this commit-ish. */
@@ -299,15 +316,26 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
     );
   }
 
-  // ONE listing of EVERY ref the remote has, rather than a lookup of just this one.
+  // ONE listing of every HEAD and TAG the remote has, rather than a lookup of just this one.
   //
   // The extra rows are not incidental — they are the fix for a defect the live run exposed. A ref
   // the remote does not have is `new`, and computing "what this push adds" from the tip's own
   // history reports the entire branch: 207 commits and a `.github/workflows/` change that was
   // published months ago, which the prompt then asserted GitHub would reject. It did not. The
   // remote's OTHER refs are the exclusion bases that make the number true.
-  const ls = await runRemoteGit(deps, ['ls-remote', '--exit-code', req.remoteName]);
-  // `--exit-code` reports 2 for "no refs at all"; that is an answer (an empty remote), not a failure.
+  //
+  // SCOPED to refs/heads/* + refs/tags/* (plus the target itself, which may be neither): GitHub
+  // also exposes two refs per pull request under refs/pull/, which sorts BEFORE refs/tags — on a
+  // repository with enough PRs an unscoped listing starved the parser's row bound and a real tag
+  // read as absent (S20.5 review). PR heads are useless as exclusion bases anyway: their objects
+  // are almost never in this repository's database.
+  // 4 MiB capture: at ~60 bytes/row the default 1 MiB cap silently dropped the MIDDLE of a
+  // ~15k-ref listing (head+tail capture) — a gap no parser can detect from the text alone.
+  const ls = await runRemoteGit(deps, ['ls-remote', '--exit-code', req.remoteName, 'refs/heads/*', 'refs/tags/*', req.refName], REMOTE_CALL_TIMEOUT_MS, {
+    maxCaptureBytes: 4 * 1024 * 1024,
+  });
+  // `--exit-code` reports 2 for "no matching refs" — an empty remote (or one with no heads or
+  // tags at all). That is an answer, not a failure.
   const empty = ls.termination === 'exited' && ls.exitCode === 2;
   if (!ls.ok && !empty) {
     const { reason, cure } = classifyRemoteFailure(`${ls.stdout}\n${ls.stderr}`, ls.termination === 'timeout' ? 'timeout' : 'network');
@@ -317,9 +345,18 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
       { exitCode: ls.exitCode, ...(cure !== undefined ? { cure } : {}) },
     );
   }
-  const rows = empty ? [] : parseLsRemoteRows(ls.stdout);
-  const remoteOid = rows.find((r) => r.ref === req.refName && !r.peeled)?.oid ?? null;
+  const parsed = empty ? { rows: [], truncated: false } : parseLsRemoteRows(ls.stdout);
+  const rows = parsed.rows;
+  // Capture truncation (the exec substrate's byte cap) leaves a silent GAP in the middle of the
+  // stream; treat it exactly like the parser's own bound: incomplete bases, absence unproven.
+  const listingIncomplete = parsed.truncated || ls.captureTruncated === true;
+  let remoteOid = rows.find((r) => r.ref === req.refName && !r.peeled)?.oid ?? null;
   const remotePeeledOid = rows.find((r) => r.ref === req.refName && r.peeled)?.oid ?? null;
+  // A truncated listing must not turn "we stopped reading" into "the ref is not there": confirm
+  // absence with the bounded single-ref lookup before reporting relation 'new'.
+  if (listingIncomplete && remoteOid === null) {
+    remoteOid = await lsRemoteOid(deps, req.remoteName, req.refName);
+  }
 
   // Peel both sides to commits for ancestry. A branch ref IS its commit; an annotated tag is not.
   const localCommit = (await resolveRev(deps, `${localOid}^{commit}`)) ?? localOid;
@@ -348,7 +385,8 @@ export async function observeRemoteRef(deps: RemoteGitDeps, req: ObserveRequest,
     }
     const candidates = [...new Set(byRef.values())];
     exclude = await presentLocally(deps, candidates);
-    basesIncomplete = exclude.length < candidates.length;
+    // A truncated listing means bases we never even saw — incomplete for a second reason.
+    basesIncomplete = exclude.length < candidates.length || listingIncomplete;
     ahead = await countIn(deps, [localCommit, ...(exclude.length > 0 ? ['--not', ...exclude] : [])]);
   } else if (remoteOid === localOid) {
     relation = 'up-to-date';

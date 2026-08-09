@@ -212,7 +212,16 @@ export function createRemoteReleaseTool(deps: RemoteReleaseDeps): Tool<ReleaseIn
         return done(false, '', `the observation of ${tagRef} on '${endpoint.name}' expired or showed no tag; re-read it before publishing`);
       }
 
+      /**
+       * Record the mutation AND charge the allowance in one place — the remote-push invariant
+       * (S20 review), which this tool had only half of: charging on success alone let a failing
+       * `gh release create` loop spend nothing live while every failure's `remote.mutated` event
+       * counted on resume, so the live and events-rebuilt spends disagreed in both directions
+       * (S20.5 review). An attempt that reached the remote consumed a slot whether or not it
+       * landed.
+       */
       const report = (ok: boolean, verified: boolean, extra: { url?: string; detail?: string }): void => {
+        state.charge('write');
         ctx.reportRemote?.({
           kind: 'mutated',
           operation: 'release.create',
@@ -295,7 +304,6 @@ export function createRemoteReleaseTool(deps: RemoteReleaseDeps): Tool<ReleaseIn
         } catch {
           release = null;
         }
-        state.charge('write');
         report(true, release !== null, {
           ...(release?.url !== undefined ? { url: release.url } : url !== null ? { url } : {}),
           ...(release === null ? { detail: 'the release could not be read back' } : {}),

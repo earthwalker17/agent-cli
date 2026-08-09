@@ -202,6 +202,18 @@ describe('remote_release — execute', () => {
     expect(evidence[0]).toMatchObject({ ok: false, verified: false });
   });
 
+  it('a FAILED create still charges the write allowance — record and charge are inseparable (S20.5)', async () => {
+    // The remote-push invariant this tool had only half of: the durable spend is rebuilt by
+    // counting remote.mutated events, so a failure that records one but does not charge makes the
+    // live and events-rebuilt spends disagree — a failing-create loop spent nothing live, then a
+    // resume rebuilt a spend that included every failure.
+    const s = state();
+    const gh = runner({ 'release create': { ok: false, exitCode: 1, termination: 'exited', stdout: '', stderr: 'release already exists', durationMs: 1 } });
+    await tool(s, gh).execute({ tag: 'v1.6.0', title: 'T', notes: NOTES }, ctx());
+    expect(s.spend.writes).toBe(1);
+    expect(evidence.filter((e) => e.kind === 'mutated')).toHaveLength(1);
+  });
+
   it('refuses at execute when the observation expired while the prompt was open', async () => {
     let now = 1_000;
     const s = createRemoteState({ context: context(), nowMs: () => now });
