@@ -28,7 +28,11 @@ describe('validatePath boundary', () => {
   });
 
   it('flags a ".." traversal as outside the workspace', () => {
-    expect(validatePath(ws, '..\\..\\etc').inWorkspace).toBe(false);
+    // Separator-portable: path.join spells `..\..\etc` on win32 (byte-identical to the old
+    // fixture) and `../../etc` on POSIX — traversal detection itself is cross-platform.
+    expect(validatePath(ws, path.join('..', '..', 'etc')).inWorkspace).toBe(false);
+    // The forward-slash spelling is traversal on EVERY platform (win32 resolves both separators).
+    expect(validatePath(ws, '../../etc').inWorkspace).toBe(false);
   });
 
   it('does NOT treat a sibling with a shared prefix as inside (the classic escape)', () => {

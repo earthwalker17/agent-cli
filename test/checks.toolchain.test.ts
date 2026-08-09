@@ -28,23 +28,35 @@ function write(rel: string, content = 'x'): string {
   return p;
 }
 
+/**
+ * Platform-shaped executable suffix: the probe stats `cargo.exe` (PATHEXT) on win32 and the bare
+ * `cargo` on POSIX, so fixtures carry the suffix the platform under test actually resolves. The
+ * rustup directory LAYOUT (`toolchains/<tc>/bin`, `lib/rustlib/<triple>/lib`) is identical on
+ * every platform — only the binary names differ.
+ */
+const EXE = process.platform === 'win32' ? '.exe' : '';
+
 /** A fake env whose rustup home is INSIDE the temp dir, so machine state never leaks in. */
 function env(over: Record<string, string> = {}): NodeJS.ProcessEnv {
+  // PATHEXT is deliberately present even though POSIX ignores it: pathExts() must not honor a
+  // leaked PATHEXT off-Windows (the S18 review finding), and these tests exercise that for free.
   return { PATH: path.join(tmp, 'bin'), PATHEXT: '.exe', RUSTUP_HOME: path.join(tmp, '.rustup'), ...over };
 }
 
 describe('probeToolchains — PATH probe', () => {
-  it('resolves a binary through a fake PATH dir, PATHEXT-aware, stat-only', () => {
-    write('bin/cargo.exe');
+  it('resolves a binary through a fake PATH dir, suffix-aware, stat-only', () => {
+    // win32: PATHEXT '.com;.exe' resolves cargo.exe. POSIX: the same PATHEXT is IGNORED and the
+    // bare name resolves — honoring a leaked PATHEXT there would lose every real binary.
+    write(`bin/cargo${EXE}`);
     const facts = probeToolchains(env({ PATHEXT: '.com;.exe' }));
     expect(facts.cargo).not.toBeNull();
-    expect(facts.cargo!.path.toLowerCase().endsWith('cargo.exe')).toBe(true);
+    expect(facts.cargo!.path.toLowerCase().endsWith(`cargo${EXE}`)).toBe(true);
     expect(facts.rustc).toBeNull();
     expect(facts.go).toBeNull();
   });
 
   it('tolerates quoted entries, empty segments, and nonexistent dirs without throwing', () => {
-    write('real/go.exe');
+    write(`real/go${EXE}`);
     const hostile = ['', `"${path.join(tmp, 'real')}"`, path.join(tmp, 'no-such-dir'), '   '].join(path.delimiter);
     const facts = probeToolchains(env({ PATH: hostile }));
     expect(facts.go).not.toBeNull();
@@ -58,7 +70,7 @@ describe('probeToolchains — PATH probe', () => {
   });
 
   it('a directory named like the binary is not a hit', () => {
-    mkdir('bin/cargo.exe'); // a DIRECTORY
+    mkdir(`bin/cargo${EXE}`); // a DIRECTORY
     expect(probeToolchains(env()).cargo).toBeNull();
   });
 
@@ -73,8 +85,8 @@ describe('probeToolchains — PATH probe', () => {
 describe('probeToolchains — rustup components and targets', () => {
   it('ignores the cargo-bin proxy shims: components are probed under toolchain dirs only', () => {
     // rustup installs a cargo-clippy shim in .cargo/bin whether or not the component exists.
-    write('bin/cargo.exe');
-    write('bin/cargo-clippy.exe'); // the shim, ON PATH
+    write(`bin/cargo${EXE}`);
+    write(`bin/cargo-clippy${EXE}`); // the shim, ON PATH
     mkdir('.rustup/toolchains/stable-x86_64-pc-windows-gnu/bin'); // no real component
     const facts = probeToolchains(env());
     expect(facts.cargo).not.toBeNull();
@@ -84,8 +96,8 @@ describe('probeToolchains — rustup components and targets', () => {
 
   it('finds real components and installed targets, charset-filtered and lib-dir-verified', () => {
     const tc = '.rustup/toolchains/stable-x86_64-pc-windows-gnu';
-    write(`${tc}/bin/cargo-clippy.exe`);
-    write(`${tc}/bin/rustfmt.exe`);
+    write(`${tc}/bin/cargo-clippy${EXE}`);
+    write(`${tc}/bin/rustfmt${EXE}`);
     mkdir(`${tc}/lib/rustlib/thumbv7em-none-eabihf/lib`);
     mkdir(`${tc}/lib/rustlib/x86_64-pc-windows-gnu/lib`);
     write(`${tc}/lib/rustlib/manifest-rust-std`); // a FILE — not a target
@@ -107,9 +119,9 @@ describe('probeToolchains — rustup components and targets', () => {
     // No toolchains dir at all: a PATH hit for cargo-clippy/rustfmt is real evidence (apt,
     // scoop, standalone MSI installs have no proxy shims), and refusing to look there falsely
     // waived lint/format gates on such machines.
-    write('bin/cargo.exe');
-    write('bin/cargo-clippy.exe');
-    write('bin/rustfmt.exe');
+    write(`bin/cargo${EXE}`);
+    write(`bin/cargo-clippy${EXE}`);
+    write(`bin/rustfmt${EXE}`);
     const facts = probeToolchains(env());
     expect(facts.clippy).toBe(true);
     expect(facts.rustfmt).toBe(true);
@@ -123,8 +135,8 @@ describe('probeToolchains — rustup components and targets', () => {
   it('eight nightlies cannot evict the stable toolchain from the bounded scan (S18 review)', () => {
     for (let i = 0; i < 9; i++) mkdir(`.rustup/toolchains/nightly-2024-01-0${String(i)}/bin`);
     const tc = '.rustup/toolchains/stable-x86_64-pc-windows-gnu';
-    write(`${tc}/bin/cargo-clippy.exe`);
-    write(`${tc}/bin/rustfmt.exe`);
+    write(`${tc}/bin/cargo-clippy${EXE}`);
+    write(`${tc}/bin/rustfmt${EXE}`);
     const facts = probeToolchains(env());
     expect(facts.clippy).toBe(true);
     expect(facts.rustfmt).toBe(true);
@@ -134,7 +146,7 @@ describe('probeToolchains — rustup components and targets', () => {
 describe('toolchain pseudo-stamps', () => {
   it('stamps present tools under the reserved prefix; absence is not stamped', () => {
     expect(toolchainStamps(env())).toEqual([]);
-    write('bin/go.exe');
+    write(`bin/go${EXE}`);
     const stamps = toolchainStamps(env());
     expect(stamps.length).toBe(1);
     expect(stamps[0]!.relPath).toBe(`${TOOLCHAIN_STAMP_PREFIX}go`);
@@ -143,13 +155,13 @@ describe('toolchain pseudo-stamps', () => {
 
   it('a tool APPEARING flips stampsEqual — the mid-session install drift signal', () => {
     const before = toolchainStamps(env());
-    write('bin/cargo.exe');
+    write(`bin/cargo${EXE}`);
     const after = toolchainStamps(env());
     expect(stampsEqual(before, after)).toBe(false);
   });
 
   it('a rustup target APPEARING flips stampsEqual — the `rustup target add` mid-session arc', () => {
-    write('bin/cargo.exe');
+    write(`bin/cargo${EXE}`);
     const tc = '.rustup/toolchains/stable-x86_64-pc-windows-gnu';
     mkdir(`${tc}/lib/rustlib`);
     const before = toolchainStamps(env());

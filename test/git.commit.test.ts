@@ -172,8 +172,11 @@ describe.skipIf(!hasGit)('performCommit', () => {
 
   it('reports a hook failure honestly and leaves the staged state in place', async () => {
     await initRepo(repo);
-    const hooks = path.join(repo, '.git', 'hooks');
-    fs.writeFileSync(path.join(hooks, 'pre-commit'), '#!/bin/sh\necho "rejected by hook" >&2\nexit 1\n');
+    const hook = path.join(repo, '.git', 'hooks', 'pre-commit');
+    fs.writeFileSync(hook, '#!/bin/sh\necho "rejected by hook" >&2\nexit 1\n');
+    // POSIX git IGNORES a non-executable hook; git-for-windows runs sh hooks regardless, and
+    // chmod there is a harmless near-no-op — so one portable fixture serves both platforms.
+    fs.chmodSync(hook, 0o755);
     const events = [TASK(), mutate(path.join(repo, 'a.txt'), 'x\n', null)];
     const p = await prepareCommit(cctx(), events, 'session');
     const r = await performCommit(cctx(), p, 'subject', { trailer: true, sessionId: 's' });

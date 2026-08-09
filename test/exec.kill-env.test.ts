@@ -50,11 +50,21 @@ describe('buildChildEnv', () => {
     expect(env['CUSTOM_CREDENTIALS']).toBeUndefined();
   });
 
-  it('dedupes names case-insensitively, lexicographically-first wins (Node child-env rule)', () => {
+  it('dedupe is platform-honest: win32 folds case (lexicographically-first wins, Node child-env rule); POSIX keeps both', () => {
     const env = buildChildEnv({ Path: 'lower', PATH: 'upper' });
     const keys = Object.keys(env).filter((k) => k.toLowerCase() === 'path');
-    expect(keys).toEqual(['PATH']);
-    expect(env['PATH']).toBe('upper');
+    if (process.platform === 'win32') {
+      // Windows env names are case-insensitive; Node passes the child only the lexicographically-
+      // first case-insensitive match, and buildChildEnv applies that rule itself.
+      expect(keys).toEqual(['PATH']);
+      expect(env['PATH']).toBe('upper');
+    } else {
+      // POSIX env names are case-sensitive: `Path` and `PATH` are genuinely distinct variables.
+      // Folding would silently drop one, so both must survive, unfolded.
+      expect(keys.sort()).toEqual(['PATH', 'Path']);
+      expect(env['PATH']).toBe('upper');
+      expect(env['Path']).toBe('lower');
+    }
   });
 
   it('skips undefined values and injects the AGENT_CLI marker', () => {

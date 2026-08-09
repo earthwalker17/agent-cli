@@ -25,7 +25,7 @@ describe('read_document policy classification', () => {
       classification: 'observe',
       rule: 'observe.in-workspace',
     });
-    expect(decide(readDocumentTool, { path: '..\\outside.docx' }, ctx, new Grants())).toMatchObject({
+    expect(decide(readDocumentTool, { path: path.join('..', 'outside.docx') }, ctx, new Grants())).toMatchObject({
       decision: 'ask',
       rule: 'path.outside-workspace-read',
     });

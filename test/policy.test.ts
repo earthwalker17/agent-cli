@@ -47,7 +47,8 @@ describe('decide: reads', () => {
     expect(d).toMatchObject({ classification: 'observe', decision: 'allow' });
   });
   it('out-of-workspace read is sensitive/ask', () => {
-    const d = decide(reader, { path: '..\\..\\secret' }, ctx, new Grants());
+    // path.join keeps the fixture separator-portable (byte-identical to the old '..\\..\\secret' on win32).
+    const d = decide(reader, { path: path.join('..', '..', 'secret') }, ctx, new Grants());
     expect(d).toMatchObject({ classification: 'sensitive', decision: 'ask', rule: 'path.outside-workspace-read' });
   });
   it('secret-named read is sensitive/ask and flags redaction', () => {
@@ -89,14 +90,15 @@ describe('decide: writes', () => {
     expect(d).toMatchObject({ classification: 'reversible', decision: 'allow', requiresSnapshot: true });
   });
   it('out-of-workspace write is denied', () => {
-    const d = decide(writer, { path: '..\\evil.txt' }, ctx, new Grants());
+    const d = decide(writer, { path: path.join('..', 'evil.txt') }, ctx, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'path.outside-workspace' });
   });
   it('write to .git is denied as protected', () => {
-    const d = decide(writer, { path: '.git\\hooks\\pre-commit' }, ctx, new Grants());
+    const d = decide(writer, { path: path.join('.git', 'hooks', 'pre-commit') }, ctx, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'path.protected' });
   });
-  it('a hard-invalid path (UNC) is denied with the path rule', () => {
+  // UNC is a win32 path class; on POSIX the string resolves to an ordinary (weird) in-workspace filename.
+  it.runIf(process.platform === 'win32')('a hard-invalid path (UNC) is denied with the path rule', () => {
     const d = decide(writer, { path: '\\\\srv\\share\\x' }, ctx, new Grants());
     expect(d).toMatchObject({ decision: 'deny', rule: 'path.unc' });
   });

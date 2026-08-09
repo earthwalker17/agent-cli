@@ -57,7 +57,7 @@ describe('retrieve — policy shape', () => {
     const tool = createRetrieveTool(makeHandle({ 'a.ts': 'export const a = 1;' }));
     const allow = decide(tool, { query: 'anything' }, ctx, new Grants());
     expect(allow).toMatchObject({ classification: 'observe', decision: 'allow' });
-    const outside = decide(tool, { query: 'x', scope_paths: ['..\\..\\etc'] }, ctx, new Grants());
+    const outside = decide(tool, { query: 'x', scope_paths: [path.join('..', '..', 'etc')] }, ctx, new Grants());
     expect(outside.decision).toBe('ask');
     expect(outside.classification).toBe('sensitive');
   });

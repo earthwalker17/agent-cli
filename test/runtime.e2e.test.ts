@@ -283,7 +283,7 @@ describe('runTurn stop reasons', () => {
 
   it('denies an out-of-workspace write with a terminal tool.completed', async () => {
     const session = makeSession(
-      [{ calls: [{ name: 'write_file', input: { path: '..\\evil.txt', content: 'x' } }] }, { say: 'done' }],
+      [{ calls: [{ name: 'write_file', input: { path: path.join('..', 'evil.txt'), content: 'x' } }] }, { say: 'done' }],
       autoDenyApprover,
     );
     await runTurn(session, 'write outside');

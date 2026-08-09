@@ -30,6 +30,8 @@ describe('findGhOnPath', () => {
     fs.mkdirSync(dir, { recursive: true });
     const p = path.join(dir, name);
     fs.writeFileSync(p, '');
+    // findGhOnPath demands the executable bit on POSIX (X_OK); chmod is a harmless no-op on win32.
+    fs.chmodSync(p, 0o755);
     return p;
   };
 
