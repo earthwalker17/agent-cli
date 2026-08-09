@@ -293,11 +293,35 @@ describe('browser_flow evidence', () => {
     expect(r.error).toContain('ttl-timeout');
     expect(h.checks[0]).toMatchObject({ kind: 'ended', status: 'error', signals: ['preview-stopped-lifecycle'] });
     expect(r.output).toContain('lifecycle bound, not an app failure');
-    // An unbound flow (no preview_id) cannot name which preview ended — the crash reading stays.
+    // S20.5: an UNBOUND flow can name the reason too when nothing is left alive — it was
+    // admitted because exactly one preview was ready, so the most recently ended one speaks.
     const h2 = harness({ preview: { readyPreview: () => null, active: () => [], endedReason: () => 'ttl-timeout' } });
     const r2 = await createBrowserFlowTool(h2.deps).execute(FLOW_INPUT, h2.ctx);
-    expect(h2.checks[0]).toMatchObject({ kind: 'ended', signals: ['preview-died'] });
+    expect(h2.checks[0]).toMatchObject({ kind: 'ended', signals: ['preview-stopped-lifecycle'] });
     expect(r2.ok).toBe(false);
+    // But while ANOTHER preview is still alive, an ended sibling's reason must not be borrowed.
+    const h3 = harness({ preview: { readyPreview: () => null, active: () => [fakePreview()], endedReason: () => 'ttl-timeout' } });
+    const r3 = await createBrowserFlowTool(h3.deps).execute(FLOW_INPUT, h3.ctx);
+    expect(h3.checks[0]).toMatchObject({ kind: 'ended', signals: ['preview-died'] });
+    expect(r3.ok).toBe(false);
+  });
+
+  it('S20.5: a lifecycle stop landing MID-flow is reclassified from preview-died', async () => {
+    // The TTL and log-cap reapers are asynchronous, so they can fire inside the 90s flow wall;
+    // the flow then reported 'preview-died' → runtime-process, and the repair budget hunted a
+    // crash that never happened. The S16.5b fix covered only the pre-run window.
+    const h = harness({
+      preview: { readyPreview: () => fakePreview(), active: () => [fakePreview()], endedReason: () => 'log-overflow' },
+      run: (_spec, d2) => {
+        d2.onBrowserLaunched?.();
+        return Promise.resolve(
+          passResult({ status: 'error', signals: ['preview-died'], summary: "flow 'smoke': the preview server died mid-flow" }),
+        );
+      },
+    });
+    const r = await createBrowserFlowTool(h.deps).execute(FLOW_INPUT, h.ctx);
+    expect(h.checks.find((c) => c.kind === 'ended')).toMatchObject({ signals: ['preview-stopped-lifecycle'] });
+    expect(r.output).toContain('stopped by the harness (log-overflow)');
   });
 
   it('artifactBytesFromEvents rebuilds the budget from browser.flow events', () => {

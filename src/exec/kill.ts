@@ -32,12 +32,40 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Await a spawned helper's exit code (null on spawn failure), never throwing. */
-function runHelper(file: string, args: string[]): Promise<number | null> {
+/**
+ * How long a kill helper (taskkill) may take before we stop waiting on it. run.ts's settle path
+ * awaits the in-flight killTree so kill evidence is not lost — which is only safe because THIS
+ * bound exists: an unbounded exit wait let a wedged taskkill hang the ExecOutcome promise
+ * forever, with abort a no-op once killedFor was set (S20.5 review; preview/process.ts had
+ * already applied the same bound to the same call with the same justification).
+ */
+const HELPER_BOUND_MS = 10_000;
+
+/**
+ * Await a spawned helper's exit code, never throwing and never unbounded: null on spawn failure
+ * OR on a helper that outlives the bound (best-effort killed). Exported for tests.
+ */
+export function runHelper(file: string, args: string[], boundMs = HELPER_BOUND_MS): Promise<number | null> {
   return new Promise((resolve) => {
+    let done = false;
+    const finish = (code: number | null): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(code);
+    };
+    const timer = setTimeout(() => {
+      try {
+        p.kill();
+      } catch {
+        /* already gone */
+      }
+      finish(null);
+    }, boundMs);
+    timer.unref?.();
     const p = spawn(file, args, { stdio: 'ignore', windowsHide: true });
-    p.on('error', () => resolve(null));
-    p.on('exit', (code) => resolve(code));
+    p.on('error', () => finish(null));
+    p.on('exit', (code) => finish(code));
   });
 }
 

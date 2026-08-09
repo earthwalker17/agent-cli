@@ -129,8 +129,11 @@ export interface PreviewTool extends Tool<PreviewInputT> {
   /** This session's previews (live handles; callers re-probe isAlive() at render time). */
   active(): readonly ActivePreview[];
   /** Why a since-ended preview of this session stopped — lets the browser layer tell "the
-   *  harness reaped it (TTL/log-cap/stop)" apart from "the server crashed" (S16.5b review). */
-  endedReason(previewId: string): PreviewEndReason | undefined;
+   *  harness reaped it (TTL/log-cap/stop)" apart from "the server crashed" (S16.5b review).
+   *  With NO id (S20.5): the MOST RECENTLY ended preview's reason — an UNBOUND flow was
+   *  admitted because exactly one preview was ready, and when that one stops in the approval
+   *  window there is no id to ask with. */
+  endedReason(previewId?: string): PreviewEndReason | undefined;
   /** The one the browser layer binds to: a ready, still-alive preview by id (or the only one). */
   readyPreview(previewId?: string): ActivePreview | null;
   stopById(previewId: string, reason: 'stopped' | 'session-end'): Promise<{ ok: boolean; detail: string }>;
@@ -466,7 +469,7 @@ export function createPreviewTool(deps: PreviewToolDeps): PreviewTool {
     workspaceSnapshot: () => shared.current(),
     refresh: () => shared.refresh(),
     active: () => [...active.values()],
-    endedReason: (previewId) => endedReasons.get(previewId),
+    endedReason: (previewId) => (previewId !== undefined ? endedReasons.get(previewId) : [...endedReasons.values()].at(-1)),
     readyPreview: (previewId) => {
       const alive = aliveActive().filter((a) => a.readyObserved);
       if (previewId !== undefined) return alive.find((a) => a.previewId === previewId) ?? null;

@@ -176,6 +176,24 @@ describe('sweepOrphanedPreviews', () => {
     expect(res.unaccountedLogs).toEqual([path.join(dir, 'sess-pv-lost.log')]);
   });
 
+  it('S20.5: >50 accumulated old logs cannot blind the crash window — the fresh loss is still reported', async () => {
+    // The old scan sliced the first 50 directory entries BEFORE the recency filter, and log
+    // names start with the time-sortable session id — so a project that had accumulated >50
+    // preview logs (nothing prunes them) examined only the OLDEST 50, all aged, and a fresh
+    // spawn→register crash was never reported again.
+    const dir = path.join(projectDir, 'previews');
+    fs.mkdirSync(dir, { recursive: true });
+    const old = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    for (let i = 0; i < 60; i++) {
+      const p = path.join(dir, `20250101-000${String(i).padStart(3, '0')}-old.log`);
+      fs.writeFileSync(p, 'ancient\n');
+      fs.utimesSync(p, old, old);
+    }
+    fs.writeFileSync(path.join(dir, '20991231-235959-fresh.log'), 'server starting…\n');
+    const res = await sweepOrphanedPreviews(projectDir, { queryIdentity: () => Promise.resolve(null) });
+    expect(res.unaccountedLogs).toEqual([path.join(dir, '20991231-235959-fresh.log')]);
+  });
+
   it('unregister is scoped to the owning session: an id collision cannot delete a sibling entry', async () => {
     const file = previewsFile(projectDir);
     await registerPreview(file, entry({ previewId: 'pv-same', ownerSessionId: 'session-A' }));

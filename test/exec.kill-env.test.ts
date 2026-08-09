@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { buildChildEnv, DEFAULT_ENV_EXCLUDE_SUBSTRINGS } from '../src/exec/env.js';
-import { killTree, isAlive } from '../src/exec/kill.js';
+import { killTree, isAlive, runHelper } from '../src/exec/kill.js';
 
 describe('buildChildEnv', () => {
   it('drops variables whose names look secret-like, case-insensitively', () => {
@@ -87,6 +87,17 @@ describe('killTree / isAlive', () => {
     expect(r.verified).toBe(true);
     expect(isAlive(pid)).toBe(false);
     expect(r.detail).toMatch(/probe: dead/);
+  });
+
+  it('S20.5: a wedged kill helper cannot hang the caller — the exit wait is bounded', async () => {
+    // runHelper awaited the helper's exit with NO bound, and run.ts's settle path awaits the
+    // in-flight killTree — so a wedged taskkill hung the ExecOutcome promise forever, with
+    // abort a no-op once killedFor was set. The helper wait now carries a bound (the same one
+    // preview/process.ts already applied to the same call).
+    const t0 = Date.now();
+    const code = await runHelper(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], 400);
+    expect(code).toBeNull(); // outlived the bound → best-effort killed, resolved null
+    expect(Date.now() - t0).toBeLessThan(5_000);
   });
 
   it('treats killing an already-exited pid as success (taskkill 128 contract)', async () => {

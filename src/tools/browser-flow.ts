@@ -170,8 +170,16 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         deps.caps.checksRun++;
         // A harness LIFECYCLE stop (TTL, log cap, an explicit stop) is not a crash: recording
         // it as 'preview-died' classified a healthy app as runtime-process and sent repair
-        // guidance hunting a process failure that never happened (S16.5b review).
-        const ended = flow.preview_id !== undefined ? deps.preview.endedReason(flow.preview_id) : undefined;
+        // guidance hunting a process failure that never happened (S16.5b review). An UNBOUND
+        // flow (admitted because exactly one preview was ready) asks for the most recently
+        // ended preview's reason — but only when nothing is left alive, so a second preview
+        // becoming ready in the window cannot be misread as the first one's death (S20.5).
+        const ended =
+          flow.preview_id !== undefined
+            ? deps.preview.endedReason(flow.preview_id)
+            : deps.preview.active().some((a) => a.handle.isAlive())
+              ? undefined
+              : deps.preview.endedReason();
         const lifecycle = ended === 'ttl-timeout' || ended === 'log-overflow' || ended === 'stopped' || ended === 'session-end';
         if (lifecycle) {
           completed({
@@ -271,7 +279,21 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
         ...result.consoleErrors.slice(0, 3).map((c) => ({ message: `console.error: ${c}`.slice(0, 200) })),
       ].slice(0, 8);
 
-      completed({ status: result.status, summary: result.summary, durationMs: result.durationMs, signals: result.signals, findings });
+      // A lifecycle stop can land MID-flow too — the TTL and log-cap reapers are asynchronous —
+      // and the flow then reports 'preview-died', which classifies runtime-process and sends
+      // the repair budget hunting a crash that never happened. The S16.5b fix covered only the
+      // pre-run window; re-consult the ended reason after the run (S20.5). Best-effort: if the
+      // exit listener has not recorded a reason yet, the died reading stands.
+      let signals = result.signals;
+      let summary = result.summary;
+      if (signals.includes('preview-died')) {
+        const endedNow = deps.preview.endedReason(preview.previewId);
+        if (endedNow === 'ttl-timeout' || endedNow === 'log-overflow' || endedNow === 'stopped' || endedNow === 'session-end') {
+          signals = signals.map((s) => (s === 'preview-died' ? 'preview-stopped-lifecycle' : s));
+          summary = `${summary} — the preview was stopped by the harness (${endedNow}), not a crash`;
+        }
+      }
+      completed({ status: result.status, summary, durationMs: result.durationMs, signals, findings });
       ctx.reportBrowser?.({
         flowName: flow.name,
         previewId: preview.previewId,
@@ -291,7 +313,7 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
       // in a full-stack session can legitimately be the API — so "the UI assertion failed" and
       // "the flow was pointed at the backend" must be distinguishable from the result alone.
       const lines: string[] = [
-        result.summary,
+        summary,
         `  drove preview ${preview.previewId} [project ${preview.projectId}] at ${preview.url}` +
           (flow.preview_id === undefined ? ' (no preview_id was given; this was the only ready preview)' : ''),
       ];

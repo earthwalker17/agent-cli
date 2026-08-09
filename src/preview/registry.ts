@@ -201,8 +201,14 @@ export async function sweepOrphanedPreviews(projectDir: string, opts: PreviewSwe
   try {
     const dir = previewLogsDir(projectDir);
     const known = new Set(entries.map((e) => path.basename(e.logFile)));
-    const logs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.log')).slice(0, 50) : [];
+    // NEWEST first (log names start with the time-sortable session id), recency-filtered before
+    // any cap: the old oldest-50 slice ran before the 48h filter, so once a project accumulated
+    // >50 preview logs (nothing prunes them) the scan examined only aged files and a FRESH
+    // spawn→register crash was never reported again (S20.5 review). Stat at most 200; report at
+    // most 50 — both caps are on work, not on the window.
+    const logs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.log')).sort().reverse().slice(0, 200) : [];
     for (const f of logs) {
+      if (result.unaccountedLogs.length >= 50) break;
       if (known.has(f)) continue;
       const full = path.join(dir, f);
       // Recency-bounded: a lost spawn matters near in time; aged logs are ordinary evidence.

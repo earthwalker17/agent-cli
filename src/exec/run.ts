@@ -163,7 +163,9 @@ export function runManaged(spec: ExecSpec): Promise<ExecOutcome> {
         });
       };
       // The child's own exit can beat the killTree promise; the kill evidence must not be lost.
-      // killTree is bounded (taskkill + capped probes), so this cannot reintroduce a hang.
+      // killTree is genuinely bounded — the taskkill wait itself carries HELPER_BOUND_MS since
+      // S20.5 (it previously awaited the helper's exit with no bound, which made this sentence a
+      // hope), plus the capped liveness probes — so this cannot reintroduce a hang.
       if (pendingKill) void pendingKill.then(finish);
       else finish();
     };
