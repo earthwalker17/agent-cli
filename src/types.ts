@@ -3,9 +3,31 @@
  * place the kernel's interfaces are defined so modules depend on shapes, not on each other.
  */
 import type { ZodType } from 'zod';
-// Type-only import (erased at runtime): lets ExecSandbox.wrap be concretely typed without a
-// runtime cycle with the exec substrate (which type-only-imports CommandTermination from here).
-import type { ExecSpec } from './exec/run.js';
+
+/**
+ * The managed-subprocess input contract (S20.5: moved here from exec/run.ts, which re-exports
+ * it). It was the load-bearing half of a types↔exec cycle: `ExecSandbox.wrap` below consumes it
+ * while exec/run consumes CommandTermination from here — and a shape two modules' CONTRACTS
+ * depend on belongs in the contracts file, not in one implementation.
+ */
+export interface ExecSpec {
+  file: string;
+  args: string[];
+  cwd: string;
+  /** Pre-built child environment (see exec/env.ts) — never raw process.env. */
+  env: Record<string, string>;
+  /** 0 disables the timeout. */
+  timeoutMs: number;
+  signal?: AbortSignal | undefined;
+  /** Fires once with the child pid (the `command.started` evidence hook). */
+  onSpawn?: (pid: number) => void;
+  /** Live output chunks for rendering only; capture fidelity is the outcome's job. */
+  onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void;
+  /** Byte cap for captured output (default 4 MiB): 1/3 stdout, 2/3 stderr, plus a combined cap. */
+  maxCaptureBytes?: number;
+  /** How long to wait for 'close' (stdio drain) after 'exit' before destroying streams (default 1500). */
+  drainTimeoutMs?: number;
+}
 
 // ── Action taxonomy ────────────────────────────────────────────────────────────────────────
 // Consequence classes from the constitution's safety policy. This is the "approval" axis; the

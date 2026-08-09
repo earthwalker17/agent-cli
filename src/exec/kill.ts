@@ -18,15 +18,10 @@ export interface KillResult {
   detail: string;
 }
 
-/** Liveness probe. EPERM means "exists but not ours" → alive. PID reuse makes this heuristic. */
-export function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
+// isAlive moved to shared/proc.ts (S20.5 — registry-lock's import of it was the one edge
+// keeping shared/ from being a leaf); re-exported so kill-side consumers keep one import site.
+export { isAlive } from '../shared/proc.js';
+import { isAlive } from '../shared/proc.js';
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));

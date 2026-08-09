@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { parseFrontmatter, writeDocAtomic } from '../memory/store.js';
+import { parseFrontmatter, writeDocAtomic } from '../shared/docio.js';
 import { sha256 } from '../shared/hash.js';
 import type { SessionEvent } from '../types.js';
 import type { SnapshotStore } from '../store/snapshots.js';

@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import type { CommandTermination } from '../types.js';
+import type { CommandTermination, ExecSpec } from '../types.js';
 import { killTree } from './kill.js';
+
+// ExecSpec moved to types.ts (S20.5 — it was the load-bearing half of a types↔exec cycle);
+// re-exported so exec-side consumers keep one import site per concept.
+export type { ExecSpec } from '../types.js';
 
 /**
  * runManaged — the managed-subprocess substrate. Policy-free and log-free: it takes a fully
@@ -24,25 +28,6 @@ import { killTree } from './kill.js';
  */
 
 const isWin = process.platform === 'win32';
-
-export interface ExecSpec {
-  file: string;
-  args: string[];
-  cwd: string;
-  /** Pre-built child environment (see exec/env.ts) — never raw process.env. */
-  env: Record<string, string>;
-  /** 0 disables the timeout. */
-  timeoutMs: number;
-  signal?: AbortSignal | undefined;
-  /** Fires once with the child pid (the `command.started` evidence hook). */
-  onSpawn?: (pid: number) => void;
-  /** Live output chunks for rendering only; capture fidelity is the outcome's job. */
-  onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void;
-  /** Byte cap for captured output (default 4 MiB): 1/3 stdout, 2/3 stderr, plus a combined cap. */
-  maxCaptureBytes?: number;
-  /** How long to wait for 'close' (stdio drain) after 'exit' before destroying streams (default 1500). */
-  drainTimeoutMs?: number;
-}
 
 export interface ExecOutcome {
   termination: CommandTermination;

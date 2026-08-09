@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { writeDocAtomic } from '../memory/store.js';
+import { writeDocAtomic } from '../shared/docio.js';
 import type { SnapshotStore } from '../store/snapshots.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { topoOrder, type PlanGraph } from './schema.js';

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ignore from 'ignore';
 import { sha256 } from '../shared/hash.js';
-import { BUILTIN_EXCLUDE_DIRS, listGitFiles } from '../retrieval/inventory.js';
+import { BUILTIN_EXCLUDE_DIRS, listGitFiles } from '../git/ls.js';
 import type { GitFacts } from '../git/types.js';
 
 export interface WorkspaceMap {
