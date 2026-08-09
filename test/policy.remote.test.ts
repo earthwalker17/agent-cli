@@ -161,6 +161,30 @@ describe('remote reads', () => {
     expect(decide(readTool({ ...READ, blocked: 'because' }), {}, ctx(), new Grants())).toMatchObject({ decision: 'deny', rule: 'remote.refused' });
   });
 
+  it('a PRE-RESOLUTION blocker (no host yet) keeps its own rule id — never remote.unresolved-target (S20.5)', () => {
+    // Every real early refusal (budget spent, gh missing, no repository, ambiguous remote) is
+    // built on an unresolved target whose host is ''. Checking the host before the blocker
+    // recorded all of them as 'name the host it contacts' — a cure no input could satisfy.
+    const noHost = { ...TARGET, host: '', slug: null, display: '(unresolved)' };
+    const cases: [NonNullable<RemoteReadFact['blockedKind']>, string][] = [
+      ['budget', 'remote.budget-exhausted'],
+      ['unavailable', 'remote.unavailable'],
+      ['ambiguous', 'remote.ambiguous-target'],
+    ];
+    for (const [kind, rule] of cases) {
+      const read = decide(readTool({ ...READ, target: noHost, blocked: 'because', blockedKind: kind }), {}, ctx(), new Grants());
+      expect(read, `read kind ${String(kind)}`).toMatchObject({ decision: 'deny', rule });
+      const write = decide(writeTool({ ...WRITE, target: noHost, blocked: 'because', blockedKind: kind }), {}, ctx(), new Grants());
+      expect(write, `write kind ${String(kind)}`).toMatchObject({ decision: 'deny', rule });
+    }
+  });
+
+  it('lineage outranks a blocked fact: a child hears the permanent answer, not the transient one', () => {
+    const c = ctx({ lineage: { parentSessionId: 'p', role: 'researcher' } });
+    const d = decide(readTool({ ...READ, blocked: 'budget spent', blockedKind: 'budget' }), {}, c, new Grants());
+    expect(d).toMatchObject({ decision: 'deny', rule: 'remote.delegated-role' });
+  });
+
   it('DENIES a host the operator forbids — reads included', () => {
     const c = ctx({ rules: rules({ remoteBlockedHosts: ['github.com'] }) });
     expect(decide(readTool(), {}, c, new Grants())).toMatchObject({ decision: 'deny', rule: 'remote.blocked-host' });

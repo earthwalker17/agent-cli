@@ -102,6 +102,35 @@ describe('decide: writes', () => {
   });
 });
 
+describe('decide: a throwing fact is a deny, never an escape (S20.5 — the last two bare calls)', () => {
+  // Every declared-fact branch wraps its call in try/catch; command() and readsPaths() were the
+  // two bare ones left. A throw escaped decide() entirely and crashed the turn after
+  // tool.requested was appended with no paired completion.
+  it('command() throwing denies with its own rule', () => {
+    const boom: Tool<{ command: string }> = {
+      ...shell,
+      command: () => {
+        throw new Error('kaput');
+      },
+    };
+    const d = decide(boom, { command: 'echo hi' }, ctx, new Grants());
+    expect(d).toMatchObject({ decision: 'deny', rule: 'cmd.invalid-contract' });
+    expect(d.reason).toContain('kaput');
+  });
+
+  it('readsPaths() throwing denies with its own rule', () => {
+    const boom: Tool<{ path: string }> = {
+      ...reader,
+      readsPaths: () => {
+        throw new Error('kaput');
+      },
+    };
+    const d = decide(boom, { path: 'x' }, ctx, new Grants());
+    expect(d).toMatchObject({ decision: 'deny', rule: 'read.invalid-contract' });
+    expect(d.reason).toContain('kaput');
+  });
+});
+
 describe('decide: automatic command review', () => {
   // A ctx whose sandbox reports genuine enforcement — the precondition for auto-run. Built PER TEST
   // (ctx is populated in beforeEach; a describe-body constant would capture it undefined).

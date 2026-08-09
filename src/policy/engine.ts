@@ -274,6 +274,7 @@ function remoteGuards<I>(
   ctx: ToolContext,
   self: 'remoteRead' | 'remoteWrite',
   host: string,
+  blocked: { kind: RemoteBlockKind | undefined; reason: string } | undefined,
 ): PolicyDecision | undefined {
   const label = self === 'remoteRead' ? 'read' : 'write';
   const conflicts = otherFacts(tool, self);
@@ -292,6 +293,27 @@ function remoteGuards<I>(
   if (plan === null || plan.paths.length > 0) {
     return decision('sensitive', 'deny', `remote.${label}-mutating-contract`, 'a remote tool must declare an empty workspace mutation plan');
   }
+  // No subagent touches the remote. The registry already withholds these tools from every child
+  // role (`CHILD_ADMISSIBLE_FACTS`); this is the second lock, because a capability that publishes
+  // under the user's credential should be unreachable by construction from a context whose asks
+  // are auto-denied and whose instructions can come from a web page. WHO is asking outranks the
+  // tool's own reported state: a child hitting an exhausted budget must still hear the permanent
+  // answer, not the transient one.
+  if (ctx.lineage !== undefined) {
+    return decision(
+      'sensitive',
+      'deny',
+      'remote.delegated-role',
+      `a ${ctx.lineage.role} subagent may not reach the remote; remote delivery belongs to the main session, where a human answers for it`,
+    );
+  }
+  // The tool's own refusal comes BEFORE the host checks. A pre-resolution blocker (budget spent,
+  // gh missing, no repository, ambiguous remote) legitimately has NO host yet — checking the host
+  // first recorded every one of them as 'remote.unresolved-target' with the cure "name the host",
+  // which no input could satisfy (S20.5 review).
+  if (blocked !== undefined) {
+    return decision('sensitive', 'deny', remoteRule(blocked.kind), blocked.reason);
+  }
   if (host.trim() === '') {
     return decision('sensitive', 'deny', 'remote.unresolved-target', 'a remote operation must name the host it contacts');
   }
@@ -302,18 +324,6 @@ function remoteGuards<I>(
       'deny',
       'remote.blocked-host',
       `'${host}' is under '${blockedHit}', which this workspace's configuration forbids remote delivery from reaching`,
-    );
-  }
-  // No subagent touches the remote. The registry already withholds these tools from every child
-  // role (`CHILD_ADMISSIBLE_FACTS`); this is the second lock, because a capability that publishes
-  // under the user's credential should be unreachable by construction from a context whose asks
-  // are auto-denied and whose instructions can come from a web page.
-  if (ctx.lineage !== undefined) {
-    return decision(
-      'sensitive',
-      'deny',
-      'remote.delegated-role',
-      `a ${ctx.lineage.role} subagent may not reach the remote; remote delivery belongs to the main session, where a human answers for it`,
     );
   }
   return undefined;
@@ -983,11 +993,15 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'remote.read-invalid-contract', `remoteRead() threw: ${(e as Error).message}`);
     }
-    const guard = remoteGuards(tool, input, ctx, 'remoteRead', fact.target.host);
+    const guard = remoteGuards(
+      tool,
+      input,
+      ctx,
+      'remoteRead',
+      fact.target.host,
+      fact.blocked !== undefined ? { kind: fact.blockedKind, reason: fact.blocked } : undefined,
+    );
     if (guard !== undefined) return guard;
-    if (fact.blocked !== undefined) {
-      return decision('sensitive', 'deny', remoteRule(fact.blockedKind), fact.blocked);
-    }
     return applyGrant(
       decision(
         'external',
@@ -1032,11 +1046,15 @@ export function decide<I>(
     } catch (e) {
       return decision('sensitive', 'deny', 'remote.write-invalid-contract', `remoteWrite() threw: ${(e as Error).message}`);
     }
-    const guard = remoteGuards(tool, input, ctx, 'remoteWrite', fact.target.host);
+    const guard = remoteGuards(
+      tool,
+      input,
+      ctx,
+      'remoteWrite',
+      fact.target.host,
+      fact.blocked !== undefined ? { kind: fact.blockedKind, reason: fact.blocked } : undefined,
+    );
     if (guard !== undefined) return guard;
-    if (fact.blocked !== undefined) {
-      return decision('sensitive', 'deny', remoteRule(fact.blockedKind), fact.blocked);
-    }
     if (fact.exactTarget.trim() === '') {
       return decision('sensitive', 'deny', 'remote.unresolved-target', 'a remote mutation must name the exact ref or release it changes');
     }
@@ -1088,7 +1106,15 @@ export function decide<I>(
   //      only informs the human prompt (it is bypassable string matching, not a boundary).
   //    - everything else → ask. No enforced sandbox ⇒ auto-run is disabled and every command asks
   //      (fail closed) — Agent CLI never auto-runs a command with nothing enforcing the boundary.
-  const command = tool.command?.(input);
+  // The same throw-is-a-deny contract every fact branch above honors. These two were the only
+  // bare fact calls left in decide(): a throwing command()/readsPaths() escaped the gate and
+  // crashed the turn after `tool.requested` was appended with no paired completion (S20.5 review).
+  let command: string | undefined;
+  try {
+    command = tool.command?.(input);
+  } catch (e) {
+    return decision('sensitive', 'deny', 'cmd.invalid-contract', `command() threw: ${(e as Error).message}`);
+  }
   if (command !== undefined) {
     const { label, circuitBreaker } = classifyCommand(command, ctx.workspaceRoot);
     if (circuitBreaker) {
@@ -1148,7 +1174,12 @@ export function decide<I>(
   }
 
   // 3. Read paths → out-of-workspace or secret-named require approval; else observe.
-  const reads = tool.readsPaths?.(input) ?? [];
+  let reads: string[];
+  try {
+    reads = [...(tool.readsPaths?.(input) ?? [])];
+  } catch (e) {
+    return decision('sensitive', 'deny', 'read.invalid-contract', `readsPaths() threw: ${(e as Error).message}`);
+  }
   for (const p of reads) {
     let v;
     try {
