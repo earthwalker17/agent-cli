@@ -235,3 +235,29 @@ describe('provider/model identity (Session 15)', () => {
     expect(md).not.toContain('models used');
   });
 });
+
+describe('token totals: reasoning breakdown (Session 15 usage field)', () => {
+  it('folds reasoningTokens across assistant messages and renders the output breakdown', () => {
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'assistant.message', text: 'a', toolCalls: [], stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 100, reasoningTokens: 40 } }),
+      evt({ seq: 3, type: 'assistant.message', text: 'b', toolCalls: [], stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 50, reasoningTokens: 20 } }),
+      evt({ seq: 4, type: 'session.ended', reason: 'completed' }),
+    ];
+    const { json, md } = buildReport({ events });
+    expect(json.session.usage.reasoningTokens).toBe(60);
+    // Inside the out number (the Usage contract), never added to it.
+    expect(md).toContain('- tokens: 15 in / 150 out (incl. 60 reasoning)');
+  });
+
+  it('omits the reasoning fragment when no usage carried the field (older logs, non-reasoning providers)', () => {
+    const events: SessionEvent[] = [
+      started,
+      evt({ seq: 2, type: 'assistant.message', text: 'a', toolCalls: [], stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 100 } }),
+      evt({ seq: 3, type: 'session.ended', reason: 'completed' }),
+    ];
+    const { md } = buildReport({ events });
+    expect(md).toContain('- tokens: 10 in / 100 out');
+    expect(md).not.toContain('reasoning');
+  });
+});

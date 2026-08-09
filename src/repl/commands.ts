@@ -207,6 +207,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       let outTok = 0;
       let cacheRead = 0;
       let cacheWrite = 0;
+      let reasoningTok = 0;
       let turns = 0;
       for (const e of s.log.events) {
         if (e.type === 'assistant.message') {
@@ -214,15 +215,18 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           outTok += e.usage.outputTokens;
           cacheRead += e.usage.cacheReadInputTokens ?? 0;
           cacheWrite += e.usage.cacheCreationInputTokens ?? 0;
+          reasoningTok += e.usage.reasoningTokens ?? 0;
         } else if (e.type === 'user.message') turns++;
       }
+      // Reasoning tokens are inside outputTokens (the Usage contract); shown only when a provider reported them.
+      const reasoning = reasoningTok > 0 ? ` (incl. ${reasoningTok} reasoning)` : '';
       const cache = cacheRead + cacheWrite > 0 ? ` (cache: ${cacheRead} read / ${cacheWrite} written)` : '';
       ctx.renderer.chromeLine(
         [
           `session ${s.id} (${s.mode})`,
           `  workspace: ${sanitizeLine(s.workspaceRoot)}`,
           `  model: ${s.model} · provider: ${s.provider.name}`,
-          `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out${cache}`,
+          `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out${reasoning}${cache}`,
           `  ${completionLine(ctx)}`,
           ...((): string[] => {
             // The review gate at a glance (Session 14): the same fold /review and acceptance read.

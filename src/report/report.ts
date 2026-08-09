@@ -227,7 +227,7 @@ export interface ReportJson {
     modelsUsed?: { providerName: string; model: string }[];
     endedReason: string | null;
     resumes: number;
-    usage: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number };
+    usage: { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; reasoningTokens?: number };
     /** The active execution sandbox for the session (V0.4+ logs). */
     sandbox?: ReportSandbox;
     /** The probed git context at session start (V0.5+ logs). */
@@ -512,7 +512,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   const gitEvent = events.find((e) => e.type === 'git.context');
   const commandByCall = new Map<string, string>();
   const toolByCall = new Map<string, string>();
-  const usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0 };
   let resumes = 0;
 
   for (const e of events) {
@@ -527,6 +527,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       usage.outputTokens += e.usage.outputTokens;
       usage.cacheReadInputTokens += e.usage.cacheReadInputTokens ?? 0;
       usage.cacheCreationInputTokens += e.usage.cacheCreationInputTokens ?? 0;
+      usage.reasoningTokens += e.usage.reasoningTokens ?? 0;
     } else if (e.type === 'session.resumed') {
       resumes++;
     }
@@ -1213,7 +1214,11 @@ function renderMarkdown(r: ReportJson): string {
   {
     const u = r.session.usage;
     const cache = (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0) > 0 ? ` (cache: ${u.cacheReadInputTokens} read / ${u.cacheCreationInputTokens} written)` : '';
-    L.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out${cache}`);
+    // Reasoning tokens are INSIDE outputTokens (the Usage contract) — a breakdown, never an addend.
+    // Rendered only when > 0: older logs and non-reasoning providers have no field, and a zero row
+    // would read as "measured zero" rather than "not reported".
+    const reasoning = (u.reasoningTokens ?? 0) > 0 ? ` (incl. ${u.reasoningTokens} reasoning)` : '';
+    L.push(`- tokens: ${u.inputTokens} in / ${u.outputTokens} out${reasoning}${cache}`);
   }
   if (r.session.sandbox) {
     const s = r.session.sandbox;
