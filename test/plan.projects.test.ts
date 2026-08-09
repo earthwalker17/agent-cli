@@ -130,6 +130,20 @@ describe('a task gate scoped to a project', () => {
     const s = foldGraphState(g, [...ranTask(), check({})]); // no projectId at all
     expect(s.tasks.find((t) => t.id === 'a')!.verification.status).toBe('green');
   });
+
+  it("S20.5: a plan spelled 'API' matches checks recorded under the canonical 'api'", () => {
+    // selectUnit folds case (its comment documents the 'API' unclearable-gate trap), so a check
+    // requested for project 'API' RUNS in canonical 'api' and records projectId 'api'. The gate
+    // fold compared exactly — the plan's gate could then never satisfy and never waive.
+    reset();
+    const g = validatePlanGraph(
+      graph({
+        tasks: [{ id: 'a', title: 'A', intent: 'x', role: 'executor', verify: 'v', checks: ['test'], project: 'API', touches: ['api'] }],
+      } as never),
+    ).graph!;
+    const s = foldGraphState(g, [...ranTask(), check({ projectId: 'api' })]);
+    expect(s.tasks.find((t) => t.id === 'a')!.verification.status).toBe('green');
+  });
 });
 
 describe('graph-level gates scoped to projects', () => {
@@ -145,6 +159,17 @@ describe('graph-level gates scoped to projects', () => {
 
     events.push(check({ projectId: 'web' }));
     expect(completionGateState(g(), events).pending).toEqual([]);
+  });
+
+  it("S20.5: boundary-gate scopes fold case too — gates.projects ['API'] accepts runs in 'api'", () => {
+    reset();
+    const gg = validatePlanGraph(graph({ gates: { completion: ['test'], projects: ['API', 'web'] } } as never)).graph!;
+    const events = [
+      ev({ type: 'file.mutated', callId: 'm', path: 'C:/ws/x', kind: 'edit', beforeSha256: null, afterSha256: 'a', createdDirs: [] }),
+      check({ projectId: 'api' }),
+      check({ projectId: 'web' }),
+    ];
+    expect(completionGateState(gg, events).pending).toEqual([]);
   });
 
   it('an honestly unsupported project waives, a bad-request one never does', () => {

@@ -1,8 +1,19 @@
 import type { CheckKind, CheckStatus, SessionEvent, TaskChangeFile } from '../types.js';
 import type { UnsupportedReason } from '../checks/types.js';
 import { planTaskDefinitionSha, topoOrder, type PlanGraph, type PlanTaskRole } from './schema.js';
-import { relPrefixesOverlap } from '../shared/pathutil.js';
+import { caseFold, relPrefixesOverlap } from '../shared/pathutil.js';
 import { proveWith } from '../recovery/catalogue.js';
+
+/**
+ * Whether a plan-authored project name and an event's canonical unit id mean the same project.
+ *
+ * The two sides have DIFFERENT provenance: the plan spelling is model/user text, the event id is
+ * what discovery detected on disk — and `selectUnit` matches the two case-insensitively (its own
+ * comment documents the 'API'-vs-'api' unclearable gate). The fix landed in selection but never
+ * reached these folds, so a plan scoped 'API' ran its checks in canonical 'api' and the gate
+ * neither satisfied nor waived, permanently (S20.5 review — the exact trap, one layer up).
+ */
+const sameProject = (planName: string, eventId: string): boolean => planName === eventId || caseFold(planName) === caseFold(eventId);
 
 
 /**
@@ -190,7 +201,7 @@ export function foldGraphState(
         if (r.check !== kind || r.seq <= anchorSeq) return false;
         // Session 16: when the task names a project, only that project's runs count. A green
         // `test` in `web/` is not evidence about a task that owns `api/`.
-        if (project !== undefined && r.projectId !== project) return false;
+        if (project !== undefined && !sameProject(project, r.projectId)) return false;
         // For a TARGETED test the scope IS the check: a green run over somebody else's files
         // proves nothing about this task. When the task declares no touches there is nothing to
         // match against, so the permissive reading stands (and the plan validator warns about it).
@@ -446,7 +457,7 @@ function boundaryGate(
     const toolchainUnavailableIn: string[] = [];
     for (const scope of scopes) {
       const after = events.filter(
-        (e) => e.type === 'check.completed' && e.check === kind && e.seq > afterSeq && (scope === undefined || (e.projectId ?? '.') === scope),
+        (e) => e.type === 'check.completed' && e.check === kind && e.seq > afterSeq && (scope === undefined || sameProject(scope, e.projectId ?? '.')),
       );
       const label = scope ?? '.';
       if (after.some((e) => e.type === 'check.completed' && e.status === 'pass')) {

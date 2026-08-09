@@ -234,6 +234,21 @@ describe('review fix: budgets and admission', () => {
     expect(renderCapsFromEvents(events).renders).toBe(1);
   });
 
+  it('S20.5: charges an all-formats-HARD-FAILED render on rebuild too — the marker event closes the refund', () => {
+    // Charged live after validation, produced nothing, completed ok:false — invisible to the old
+    // rebuild, so a resume refunded exactly the failing-render loop the cap exists to bound. A
+    // validation REFUSAL (the designed revision loop) stays uncharged and unmarked.
+    const events = [
+      ev({ type: 'tool.requested', callId: 'c1', tool: 'render_document', input: {} }, 1),
+      ev({ type: 'artifact.render-failed', callId: 'c1', specPath: 'p.docspec.json', reasons: ['DOCX: FAILED — locked'], durationMs: 1 }, 2),
+      ev({ type: 'tool.completed', callId: 'c1', ok: false, outputPreview: 'DOCX: FAILED', durationMs: 1, truncated: false }, 3),
+      // A refusal (never charged live) leaves no marker and must not count on rebuild.
+      ev({ type: 'tool.requested', callId: 'c2', tool: 'render_document', input: {} }, 4),
+      ev({ type: 'tool.completed', callId: 'c2', ok: false, outputPreview: 'spec did not validate', durationMs: 1, truncated: false }, 5),
+    ];
+    expect(renderCapsFromEvents(events).renders).toBe(1);
+  });
+
   it('inspect does NOT inherit consent when the render embedded workspace images', () => {
     const ws = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'inspect-fix-')));
     try {
@@ -278,12 +293,17 @@ describe('review fix: budgets and admission', () => {
   });
 
   it('acceptance counts structural failures only, and drops the caveat once the artifact changes', () => {
+    // S20.5: retirement matches on the render's additive absPath (production file.mutated paths
+    // are ABSOLUTE; the original form of this test passed only because it used rel paths on both
+    // sides — a shape production never emits), and the retiring mutation must come from a
+    // DIFFERENT call than the render's own.
     const failing = ev(
       {
         type: 'artifact.rendered',
         callId: 'c1',
         format: 'docx',
         path: 'r.docx',
+        absPath: 'C:/ws/r.docx',
         sha256: 'c'.repeat(64),
         bytes: 1,
         specPath: 's',
@@ -298,7 +318,7 @@ describe('review fix: budgets and admission', () => {
 
     const undone = computeAcceptance(NO_PLAN, null, [
       failing,
-      ev({ type: 'file.mutated', callId: 'u1', path: 'r.docx', kind: 'delete', beforeSha256: 'c'.repeat(64), afterSha256: null, createdDirs: [] }, 2),
+      ev({ type: 'file.mutated', callId: 'u1', path: 'C:/ws/r.docx', kind: 'delete', beforeSha256: 'c'.repeat(64), afterSha256: null, createdDirs: [] }, 2),
     ]);
     expect(undone.caveats.join(' ')).not.toContain("artifact 'r.docx'");
   });

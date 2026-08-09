@@ -261,6 +261,22 @@ describe('delegateCapsFromEvents — resume keeps counting', () => {
     expect(caps.tasksStarted).toBe(4);
   });
 
+  it('S20.5: a never-started attempt (empty childSessionId) still counts — a setup-failure loop cannot refund', () => {
+    // Executor setup failures (worktree add, registry write) and a startSession throw were
+    // charged live at group admission but emitted no task.started — the rebuild came back
+    // smaller and a resume refunded both the task slots and, for reviewers, the ROUND.
+    seq = 0;
+    const events = [
+      started('t1', 'c1'),
+      endedAs('c1', 'completed'),
+      ev({ type: 'task.ended', callId: 'c9', childSessionId: '', role: 'executor', status: 'error', steps: 0, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+      ev({ type: 'task.ended', callId: 'r9', childSessionId: '', role: 'reviewer', status: 'error', steps: 0, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+    ];
+    const caps = delegateCapsFromEvents(events);
+    expect(caps.tasksStarted).toBe(3);
+    expect(caps.reviewRoundsStarted).toBe(1);
+  });
+
   it('S14.5: the THIRD reviewer group refuses whole, naming the real exits (triage / accept confirm)', async () => {
     const deps: SubagentDeps = {
       layout,

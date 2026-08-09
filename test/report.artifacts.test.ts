@@ -109,4 +109,49 @@ describe('acceptance: failing artifact validation is a loud caveat, never a bloc
     ];
     expect(computeAcceptance(NO_PLAN, null, recovered).caveats.join('\n')).not.toContain("artifact 'report.docx'");
   });
+
+  it("S20.5: retirement actually fires — and the render's OWN mutation never self-retires", () => {
+    // Before the fix this loop compared file.mutated ABSOLUTE paths against the render's
+    // workspace-relative path (never equal), the render call's own trailing file.mutated would
+    // have instantly retired every caveat had they matched, and the comment claimed undo emits
+    // file.mutated (it emits undo.applied). All three are pinned here via the additive absPath.
+    const abs = 'C:/ws/report.docx';
+    const FAIL = { status: 'fail' as const, findings: ['outline mismatch'], failureCount: 1, summary: 'FAILED' };
+
+    // 1) The render call's own mutation (same callId, later seq) keeps the caveat.
+    reset();
+    const own = [
+      ...base(),
+      evt(rendered({ validation: FAIL, absPath: abs })),
+      evt({ type: 'file.mutated', callId: 'a1', path: abs, kind: 'create', beforeSha256: null, afterSha256: 'b', createdDirs: [] }),
+    ];
+    expect(computeAcceptance(NO_PLAN, null, own).caveats.join('\n')).toContain("artifact 'report.docx'");
+
+    // 2) A LATER mutation by a different call (overwrite/delete) retires it.
+    reset();
+    const external = [
+      ...base(),
+      evt(rendered({ validation: FAIL, absPath: abs })),
+      evt({ type: 'file.mutated', callId: 'w9', path: abs, kind: 'modify', beforeSha256: 'b', afterSha256: 'c', createdDirs: [] }),
+    ];
+    expect(computeAcceptance(NO_PLAN, null, external).caveats.join('\n')).not.toContain("artifact 'report.docx'");
+
+    // 3) An undo restoring the path retires it (undo emits undo.applied, never file.mutated).
+    reset();
+    const undone = [
+      ...base(),
+      evt(rendered({ validation: FAIL, absPath: abs })),
+      evt({ type: 'undo.applied', target: 'last', restored: [{ path: abs, toSha256: null }], refused: [] }),
+    ];
+    expect(computeAcceptance(NO_PLAN, null, undone).caveats.join('\n')).not.toContain("artifact 'report.docx'");
+
+    // 4) Old logs without absPath keep the caveat — the safe direction.
+    reset();
+    const legacy = [
+      ...base(),
+      evt(rendered({ validation: FAIL })),
+      evt({ type: 'file.mutated', callId: 'w9', path: abs, kind: 'modify', beforeSha256: 'b', afterSha256: 'c', createdDirs: [] }),
+    ];
+    expect(computeAcceptance(NO_PLAN, null, legacy).caveats.join('\n')).toContain("artifact 'report.docx'");
+  });
 });

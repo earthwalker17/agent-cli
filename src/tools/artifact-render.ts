@@ -48,6 +48,10 @@ export function renderCapsFromEvents(events: readonly SessionEvent[]): { renders
   for (const e of events) {
     if (e.type === 'tool.requested' && e.tool === 'render_document') renderCallIds.add(e.callId);
     else if (e.type === 'artifact.rendered') charged.add(e.callId);
+    // A charged attempt that produced NO artifact (S20.5): without its marker the rebuild came
+    // back smaller than the live count and a resume refunded exactly the failing-render loop
+    // this cap exists to bound.
+    else if (e.type === 'artifact.render-failed') charged.add(e.callId);
     else if (e.type === 'tool.completed' && renderCallIds.has(e.callId) && e.ok) charged.add(e.callId);
   }
   return { renders: charged.size };
@@ -229,6 +233,7 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
       /** A requested format that produced no artifact for a NON-degradation reason. */
       const hardFailures: string[] = [];
       let pdfProduced = false;
+      let docxProduced = false;
 
       if (formats.includes('docx')) {
         const t0 = Date.now();
@@ -240,6 +245,7 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
             kind: 'rendered',
             format: 'docx',
             path: rel(out.docx),
+            absPath: out.docx,
             sha256: sha256(Buffer.from(bytes)),
             bytes: bytes.length,
             specPath: rel(specAbs),
@@ -256,6 +262,7 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
             },
             durationMs: Date.now() - t0,
           });
+          docxProduced = true;
           sections.push(
             `DOCX: ${rel(out.docx)} (${bytes.length} bytes, sha256 ${sha256(Buffer.from(bytes)).slice(0, 12)}…)\n` +
               `  validation: ${validation.status.toUpperCase()}` +
@@ -295,6 +302,7 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
               kind: 'rendered',
               format: 'pdf',
               path: rel(out.pdf),
+              absPath: out.pdf,
               sha256: sha256(printed.bytes),
               bytes: printed.bytes.length,
               pages: extras.pageCount,
@@ -331,6 +339,12 @@ export function createRenderDocumentTool(deps: RenderDocumentDeps): Tool<RenderI
         : `\n\nRevise by editing ${rel(specAbs)} and re-rendering.`;
       const body = `rendered from ${rel(specAbs)} (spec sha256 ${specSha256.slice(0, 12)}…)\n\n${sections.join('\n\n')}${guidance}`;
       if (hardFailures.length > 0) {
+        // A charged attempt that produced NOTHING must still be visible to the events rebuild,
+        // or a resume refunds it (S20.5). A partial outcome (one format landed) already has its
+        // artifact.rendered event and needs no marker.
+        if (!docxProduced && !pdfProduced) {
+          ctx.reportArtifact?.({ kind: 'render-failed', specPath: rel(specAbs), reasons: [...hardFailures], durationMs: Date.now() - started });
+        }
         return {
           ok: false,
           output: body,

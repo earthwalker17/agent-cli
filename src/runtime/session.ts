@@ -902,6 +902,7 @@ export function recordTaskEvidence(session: Session, callId: string, e: TaskEvid
         usage: e.usage,
         resultSha256: e.resultSha256,
         durationMs: e.durationMs,
+        ...(e.role !== undefined ? { role: e.role } : {}),
       });
       return;
     case 'changes':
@@ -1083,6 +1084,7 @@ function recordArtifactEvidence(session: Session, callId: string, e: ArtifactEvi
       callId,
       format: e.format,
       path: e.path,
+      ...(e.absPath !== undefined ? { absPath: e.absPath } : {}),
       sha256: e.sha256,
       bytes: e.bytes,
       ...(e.pages !== undefined ? { pages: e.pages } : {}),
@@ -1096,6 +1098,16 @@ function recordArtifactEvidence(session: Session, callId: string, e: ArtifactEvi
         summary: e.validation.summary.slice(0, 400),
       },
       ...(e.embeddedWorkspaceImages === true ? { embeddedWorkspaceImages: true as const } : {}),
+      durationMs: e.durationMs,
+    });
+    return;
+  }
+  if (e.kind === 'render-failed') {
+    session.log.append({
+      type: 'artifact.render-failed',
+      callId,
+      specPath: e.specPath,
+      reasons: e.reasons.slice(0, 12).map((r) => (r.length > 300 ? `${r.slice(0, 300)}…` : r)),
       durationMs: e.durationMs,
     });
     return;

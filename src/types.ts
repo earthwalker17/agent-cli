@@ -327,6 +327,12 @@ export type ArtifactEvidence =
       format: 'docx' | 'pdf';
       /** Workspace-relative artifact path. */
       path: string;
+      /**
+       * Absolute artifact path (S20.5, additive) — the same resolution the tool's `mutates()`
+       * declares, so acceptance can match this render against later `file.mutated`/`undo.applied`
+       * events (whose paths are absolute) when deciding a failing-validation caveat retired.
+       */
+      absPath?: string;
       sha256: string;
       bytes: number;
       pages?: number;
@@ -341,6 +347,19 @@ export type ArtifactEvidence =
        * about — so the render's own auto-allow must not launder them (S17 review).
        */
       embeddedWorkspaceImages?: true;
+      durationMs: number;
+    }
+  | {
+      /**
+       * A charged render attempt that produced NO artifact in any requested format (S20.5,
+       * additive). Exists for one reader: `renderCapsFromEvents` — without it, an
+       * all-formats-hard-failed call was charged live but invisible to the rebuild, refunding
+       * render budget across a resume. Validation REFUSALS (the designed spec-revision loop)
+       * are never charged and never emit this.
+       */
+      kind: 'render-failed';
+      specPath: string;
+      reasons: string[];
       durationMs: number;
     }
   | {
@@ -691,6 +710,13 @@ export type TaskEvidence =
       /** sha256 of the child's full (untruncated) final report text. */
       resultSha256: string;
       durationMs: number;
+      /**
+       * The task's role (S20.5, additive). Load-bearing for exactly one reader: a task whose
+       * child NEVER EXISTED (executor setup failure, a startSession throw) has an empty
+       * childSessionId and no task.started, so the caps fold reads the role from here to keep
+       * charged attempts — including reviewer ROUNDS — from refunding across a resume.
+       */
+      role?: string;
     }
   | {
       /** An executor task's captured changes vs its base (V0.7) — the diff OUTLIVES the worktree. */
@@ -1857,6 +1883,8 @@ export type EventBody =
       callId: string;
       format: 'docx' | 'pdf';
       path: string;
+      /** Absolute artifact path (S20.5, additive) — joins file.mutated/undo.applied paths. */
+      absPath?: string;
       sha256: string;
       bytes: number;
       pages?: number;
@@ -1865,6 +1893,14 @@ export type EventBody =
       validation: ArtifactValidation;
       /** The spec embedded workspace images; the inspect side must not inherit consent. */
       embeddedWorkspaceImages?: true;
+      durationMs: number;
+    }
+  /** A charged render attempt that produced NO artifact (S20.5, additive) — budget-fold evidence only. */
+  | {
+      type: 'artifact.render-failed';
+      callId: string;
+      specPath: string;
+      reasons: string[];
       durationMs: number;
     }
   /** One rasterization pass (Session 17, additive): page images stored as evidence blobs. */
@@ -2225,6 +2261,8 @@ export type EventBody =
       usage: Usage;
       resultSha256: string;
       durationMs: number;
+      /** The task's role (S20.5, additive) — set on never-started attempts (childSessionId '') so caps folds can count them. */
+      role?: string;
     }
   | {
       /**

@@ -5,6 +5,7 @@ import { createNoteAccumulator } from './record-source.js';
 import { createFindingAccumulator, createReportFindingTool } from './report-finding.js';
 import { MAX_REVIEW_ROUNDS } from '../review/ledger.js';
 import { sanitizeLine } from '../shared/text.js';
+import { sha256 } from '../shared/hash.js';
 import type { PlanState } from '../plan/canonical.js';
 import type { GraphState } from '../plan/graph-state.js';
 import type { CheckKind } from '../types.js';
@@ -160,6 +161,13 @@ export function delegateCapsFromEvents(events: readonly SessionEvent[]): Delegat
       if (e.role === 'reviewer') reviewerCalls.add(e.callId);
     } else if (e.type === 'task.ended') {
       caps.childOutputTokens += e.usage.outputTokens;
+      // A never-started attempt (childSessionId '' — executor setup failure, a startSession
+      // throw) was still CHARGED live; counting only task.started refunded it across a resume
+      // (S20.5). Its additive `role` keeps reviewer ROUNDS from refunding the same way.
+      if (e.childSessionId === '') {
+        caps.tasksStarted++;
+        if (e.role === 'reviewer') reviewerCalls.add(e.callId);
+      }
     }
   }
   caps.reviewRoundsStarted = reviewerCalls.size;
@@ -853,7 +861,27 @@ export function createDelegateTool(
           return runExecutorTask(taskDeps, spec, executor!, baseOid!, ctx);
         }),
       );
-      for (const o of outcomes) caps.childOutputTokens += o.result.usage.outputTokens;
+      for (let i = 0; i < outcomes.length; i++) {
+        const o = outcomes[i]!;
+        caps.childOutputTokens += o.result.usage.outputTokens;
+        // A task charged at group admission whose child NEVER EXISTED (executor setup failure,
+        // a startSession throw) emitted neither task.started nor task.ended, so the events-
+        // rebuilt caps came back SMALLER than the live ones and a resume refunded the attempt —
+        // exactly the non-spawning-loop refill the check fold's principle forbids (S20.5).
+        // Record the attempt; the role rides along so a reviewer ROUND cannot refund either.
+        if (o.result.childSessionId === '') {
+          ctx.reportTask?.({
+            kind: 'ended',
+            childSessionId: '',
+            status: o.result.status,
+            steps: 0,
+            usage: o.result.usage,
+            resultSha256: sha256(Buffer.from(o.result.finalText, 'utf8')),
+            durationMs: o.result.durationMs,
+            role: input.tasks[i]!.role,
+          });
+        }
+      }
 
       // Overlap detection across the group's captured write-sets (apply order defines the
       // winner; the warning makes the collision visible BEFORE anything integrates).

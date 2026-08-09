@@ -312,26 +312,40 @@ export function computeAcceptance(
   // session: blocker semantics need delete/undo resolution rules that do not exist yet, and an
   // abandoned draft artifact must not hold acceptance hostage. Never blocking ≠ never said.
   {
-    const latestByPath = new Map<string, { format: string; failures: number }>();
+    const latestByPath = new Map<string, { format: string; failures: number; callId: string; seq: number; absPath?: string }>();
     for (const e of events) {
       if (e.type !== 'artifact.rendered') continue;
       if (e.validation.status === 'fail') {
         // failureCount, never findings.length: the findings array mixes structural failures with
         // layout NOTES and is capped at the emit site, so its length both inflates and
         // under-reports the number this line is about.
-        latestByPath.set(e.path, { format: e.format, failures: e.validation.failureCount ?? e.validation.findings.length });
+        latestByPath.set(e.path, {
+          format: e.format,
+          failures: e.validation.failureCount ?? e.validation.findings.length,
+          callId: e.callId,
+          seq: e.seq,
+          ...(e.absPath !== undefined ? { absPath: e.absPath } : {}),
+        });
       } else {
         latestByPath.delete(e.path);
       }
     }
-    // An artifact that was undone or removed after its failing render is not a delivered file:
-    // a later mutation of that path (undo restores bytes through file.mutated too) retires the
-    // caveat rather than asserting something about bytes that are gone.
+    // An artifact that was overwritten, deleted, or UNDONE after its failing render is not a
+    // delivered file: the caveat retires rather than asserting something about bytes that are
+    // gone. Three S20.5 corrections make this actually fire: file.mutated paths are ABSOLUTE
+    // while the render's path is workspace-relative (matched via the additive absPath — old logs
+    // without it simply keep the caveat, the safe direction); the render call's OWN file.mutated
+    // lands after its artifact event and must not self-retire; and an undo emits `undo.applied`,
+    // never file.mutated (the old comment claimed otherwise).
     for (const e of events) {
-      if (e.type === 'file.mutated' && latestByPath.has(e.path)) {
-        const renderSeqs = events.filter((x) => x.type === 'artifact.rendered' && x.path === e.path).map((x) => x.seq);
-        const lastRenderSeq = renderSeqs.length > 0 ? Math.max(...renderSeqs) : -1;
-        if (e.seq > lastRenderSeq) latestByPath.delete(e.path);
+      if (e.type === 'file.mutated') {
+        for (const [p, v] of latestByPath) {
+          if (v.absPath !== undefined && e.path === v.absPath && e.seq > v.seq && e.callId !== v.callId) latestByPath.delete(p);
+        }
+      } else if (e.type === 'undo.applied') {
+        for (const [p, v] of latestByPath) {
+          if (v.absPath !== undefined && e.seq > v.seq && e.restored.some((r) => r.path === v.absPath)) latestByPath.delete(p);
+        }
       }
     }
     for (const [p, v] of latestByPath) {
