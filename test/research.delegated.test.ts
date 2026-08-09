@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { startSession, endSession, runTurn, type Session } from '../src/runtime/session.js';
 import type { SubagentDeps } from '../src/runtime/subagent.js';
+import { SEARCHES_PER_SESSION } from '../src/research/types.js';
 import { createDelegateTool } from '../src/tools/delegate.js';
 import { createWebSearchTool } from '../src/tools/web-search.js';
 import { createWebExtractTool } from '../src/tools/web-extract.js';
@@ -334,7 +335,7 @@ describe('the budget is genuinely shared', () => {
 
   it('a child cannot spend past an allowance the parent already drained', async () => {
     const budget = createResearchBudget();
-    budget.chargeUsage({ searches: 24, extracts: 0, credits: 0, contentChars: 0 });
+    budget.chargeUsage({ searches: SEARCHES_PER_SESSION, extracts: 0, credits: 0, contentChars: 0 });
     const parent = makeParent(
       spawn(),
       subagentDeps([[{ say: 's', calls: [{ name: 'web_search', input: { query: 'anything at all' } }] }, { say: 'done' }]], budget),
@@ -345,7 +346,7 @@ describe('the budget is genuinely shared', () => {
     // The child's own log would carry the denial; the parent's usage record shows zero spend.
     const u = parent.log.events.find((e) => e.type === 'research.usage') as Extract<SessionEvent, { type: 'research.usage' }>;
     expect(u).toMatchObject({ searches: 0, credits: 0 });
-    expect(budget.spent.searches).toBe(24);
+    expect(budget.spent.searches).toBe(SEARCHES_PER_SESSION);
   });
 });
 

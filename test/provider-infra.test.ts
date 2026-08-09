@@ -74,9 +74,15 @@ describe('provider catalog invariants', () => {
     expect(providersOfModel('no-such-model')).toEqual([]);
   });
 
-  it('contextBudgetFor reproduces the pre-S15 defaults on 100k-budget models', () => {
-    expect(contextBudgetFor('anthropic', 'claude-opus-5')).toEqual({ triggerChars: 400_000, targetChars: 200_000 });
-    expect(contextBudgetFor('glm', 'glm-4.6v').triggerChars).toBeLessThan(400_000);
+  it('contextBudgetFor derives ×4 chars / half-target from the per-model budget (S20.5 retune)', () => {
+    // The chars relation is the contract; the NUMBERS are per-model catalog data pinned (with
+    // their window-fit invariant and billing clamps) in test/limits.test.ts.
+    const opus = capsFor('anthropic', 'claude-opus-5');
+    expect(contextBudgetFor('anthropic', 'claude-opus-5')).toEqual({
+      triggerChars: opus.budgetTokens * 4,
+      targetChars: (opus.budgetTokens * 4) / 2,
+    });
+    expect(contextBudgetFor('glm', 'glm-4.6v').triggerChars).toBeLessThan(contextBudgetFor('anthropic', 'claude-opus-5').triggerChars);
   });
 
   it('every session tool name satisfies the strictest provider naming rules (kimi regex, glm charset)', () => {

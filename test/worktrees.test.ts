@@ -7,6 +7,7 @@ import {
   registerWorktree,
   registryFile,
   registryLockFile,
+  SWEEP_LIVE_MAX_AGE_MS,
   sweepOrphanedWorktrees,
   unregisterWorktree,
   worktreesRoot,
@@ -104,8 +105,8 @@ describe('sweep (injected remover — no git)', () => {
     const dGone = mk('gone-ok'); // dead owner, removal succeeds
     const dFail = mk('gone-fail'); // dead owner, removal fails → stays registered
     const dLive = mk('live'); // live owner → untouched
-    const dAged = mk('aged'); // live pid but 3h old → the age hatch sweeps it
-    const oldIso = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const dAged = mk('aged'); // live pid but an hour past the age hatch → swept
+    const oldIso = new Date(Date.now() - SWEEP_LIVE_MAX_AGE_MS - 60 * 60 * 1000).toISOString();
     await registerWorktree(reg, entry(dGone, { pid: 11 }));
     await registerWorktree(reg, entry(dFail, { pid: 22 }));
     await registerWorktree(reg, entry(dLive, { pid: 33 }));

@@ -132,8 +132,8 @@ describe('spillFullOutput at the tool.completed choke point', () => {
     endSession(session, 'completed');
   });
 
-  it('oversize fullOutput (> 2 MiB) is not spilled; the turn is unaffected', async () => {
-    const huge = 'B'.repeat(2 * 1024 * 1024 + 16);
+  it('oversize fullOutput (past the spill cap) is not spilled; the turn is unaffected', async () => {
+    const huge = 'B'.repeat(8 * 1024 * 1024 + 16);
     const tool = bigOutputTool('huge_out', huge);
     const session = makeSession([{ say: 'calling', calls: [{ name: 'huge_out', input: {} }] }, { say: 'done' }], [tool]);
     const result = await runTurn(session, 'go');

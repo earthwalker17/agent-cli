@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findGitOnPath, runGit } from '../src/git/client.js';
 import { createRemoteStatusTool } from '../src/tools/remote-status.js';
+import { REMOTE_READS_PER_SESSION } from '../src/remote/types.js';
 import { createRemoteState, type RemoteState } from '../src/tools/remote-state.js';
 import { endpointOf } from '../src/remote/url.js';
 import type { GhInvocation, GhResult, GhRunner, RemoteContext } from '../src/remote/types.js';
@@ -173,7 +174,7 @@ describe('remote_status — the fact it declares', () => {
 
   it('reports a spent read allowance as a blocker', () => {
     const s = state();
-    for (let i = 0; i < 40; i += 1) s.charge('read');
+    for (let i = 0; i < REMOTE_READS_PER_SESSION; i += 1) s.charge('read');
     const t = createRemoteStatusTool({ state: s, gh: runner({}), git: null });
     expect(t.remoteRead!({ view: 'repository' })).toMatchObject({ blockedKind: 'budget' });
   });

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { findGitOnPath, runGit } from '../src/git/client.js';
 import { worktreeSupport } from '../src/git/worktree.js';
 import { createApprovalForwarder } from '../src/runtime/approval-forwarder.js';
-import { loadRegistry, registerWorktree, registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
+import { loadRegistry, registerWorktree, registryFile, SWEEP_LIVE_MAX_AGE_MS, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
 import { createDelegateTool, type ExecutorDeps, type PlanGateInfo } from '../src/tools/delegate.js';
 import type { PlanState } from '../src/plan/canonical.js';
 import { owedHarnessRefsFromEvents, pruneHarnessCheckpointRefs } from '../src/cli/assemble.js';
@@ -695,7 +695,7 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     const agedDir = await mk('aged-1');
     const reg = registryFile(layout.projectDir);
     const nowIso = new Date().toISOString();
-    const oldIso = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(); // 3h > the 2h hatch
+    const oldIso = new Date(Date.now() - SWEEP_LIVE_MAX_AGE_MS - 60 * 60 * 1000).toISOString(); // an hour past the hatch
     await registerWorktree(reg, { dir: liveDir, repoRoot: repo, childSessionId: 'c1', createdAt: nowIso, ownerSessionId: 'sA', pid: 1111 });
     await registerWorktree(reg, { dir: deadDir, repoRoot: repo, childSessionId: 'c2', createdAt: nowIso, ownerSessionId: 'sB', pid: 2222 });
     await registerWorktree(reg, { dir: agedDir, repoRoot: repo, childSessionId: 'c3', createdAt: oldIso, ownerSessionId: 'sC', pid: 3333 });

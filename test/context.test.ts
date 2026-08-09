@@ -165,11 +165,11 @@ describe('buildRunContext (catalog-driven budgets)', () => {
     expect(() => makeProvider({ provider: 'mock' })).toThrow(/--script/);
   });
 
-  it('a real provider resolves budgets from its catalog entry (kimi-k2.6: 32k out, 240k trigger)', () => {
+  it('a real provider resolves budgets from its catalog entry (kimi-k2.6: 32k out, 400k trigger since the S20.5 retune)', () => {
     const registry = createProviderRegistry({ env: { MOONSHOT_API_KEY: 'k' } });
     const ctx = buildRunContext({ C: tmp, provider: 'kimi', model: 'kimi-k2.6' }, { registry });
     expect(ctx.provider.name).toBe('kimi');
     expect(ctx.maxTokens).toBe(32_768);
-    expect(ctx.contextBudget).toEqual({ triggerChars: 240_000, targetChars: 120_000 });
+    expect(ctx.contextBudget).toEqual({ triggerChars: 400_000, targetChars: 200_000 });
   });
 });
