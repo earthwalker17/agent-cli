@@ -38,7 +38,7 @@ export interface ExecSpec {
   onSpawn?: (pid: number) => void;
   /** Live output chunks for rendering only; capture fidelity is the outcome's job. */
   onOutput?: (chunk: string, stream: 'stdout' | 'stderr') => void;
-  /** Byte cap for captured output (default 512 KiB): 1/3 stdout, 2/3 stderr, plus a combined cap. */
+  /** Byte cap for captured output (default 4 MiB): 1/3 stdout, 2/3 stderr, plus a combined cap. */
   maxCaptureBytes?: number;
   /** How long to wait for 'close' (stdio drain) after 'exit' before destroying streams (default 1500). */
   drainTimeoutMs?: number;
@@ -62,8 +62,14 @@ export interface ExecOutcome {
   spawnError?: string;
 }
 
-/** Session 16: 512 KiB → 1 MiB. Install and build logs are the noisiest output the harness sees. */
-const DEFAULT_CAPTURE_BYTES = 1024 * 1024;
+/**
+ * S16: 512 KiB → 1 MiB; S20.5: → 4 MiB. Install and build logs are the noisiest output the
+ * harness sees, and capture truncation is UNRECOVERABLE (head+tail kept, the middle gone before
+ * any spill or model truncation runs) — the dropped middle of a failing build is exactly the
+ * evidence a later classification needs. The model-facing size stays independently bounded by
+ * truncateForModel; this cap widens EVIDENCE, not context.
+ */
+const DEFAULT_CAPTURE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_DRAIN_TIMEOUT_MS = 1500;
 const EXIT_AFTER_KILL_BOUND_MS = 5000;
 

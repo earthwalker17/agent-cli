@@ -135,6 +135,6 @@ export interface FlowRunResult {
 
 export const DEFAULT_STEP_TIMEOUT_MS = 5_000;
 /** Session 16: 60s → 90s. A flow against a cold dev server that proxies to a real API needs it. */
-export const FLOW_WALL_MS = 90_000;
+export const FLOW_WALL_MS = 120_000;
 export const MAX_RECORDED_ERRORS = 10;
 export const MAX_RECORDED_REQUESTS = 20;

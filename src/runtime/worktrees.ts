@@ -67,11 +67,16 @@ export function registryFile(projectDir: string): string {
 export { registryLockFile, REGISTRY_LOCK_STALE_MS };
 
 /**
- * Sweep age hatch: an entry older than this is swept even if its recorded pid is alive — the
- * executor wall clock is bounded in minutes, so no LIVE task's worktree can be hours old; only
- * a crashed session whose pid was recycled onto a long-lived process looks like this.
+ * Sweep age hatch: an entry older than this is swept even if its recorded pid is alive — only a
+ * crashed session whose pid was recycled onto a long-lived process should look like this.
+ *
+ * 2h → 8h (S20.5, coupled to the executor-clock change in the same session): the wall clock now
+ * EXCLUDES forwarded-approval wait, so a live executor whose human stepped away can legitimately
+ * be hours old — the old hatch would have swept a live task's worktree out from under it. The
+ * cost of the wider hatch is only that a genuinely recycled-pid orphan lingers a few hours
+ * longer before the sweep takes it; a DEAD pid is still swept immediately.
  */
-export const SWEEP_LIVE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+export const SWEEP_LIVE_MAX_AGE_MS = 8 * 60 * 60 * 1000;
 
 function isWorktreeEntry(e: unknown): e is WorktreeRegistryEntry {
   return (

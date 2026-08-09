@@ -55,7 +55,7 @@ const UserConfigSchema = z
      *  cannot express it: a cloned repo must never choose which vendor receives the session. */
     provider: z.enum(PROVIDER_NAMES).optional(),
     model: z.string().min(1).optional(),
-    maxSteps: z.number().int().positive().max(200).optional(),
+    maxSteps: z.number().int().positive().max(400).optional(),
     /** End-of-session project-memory updates (default on). USER layer only — a workspace file
      *  must not toggle harness memory writes (workspace config stays narrowing-only). */
     memoryUpdates: z.boolean().optional(),

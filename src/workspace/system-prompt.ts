@@ -105,6 +105,10 @@ function projectLines(ws?: DetectedWorkspace): string[] {
       'your own tool results outrank this block; run_check/preview/project_setup always resolve against the CURRENT state, and /checks re-probes on demand:',
     ...lines,
     ...(ws.units.length > MAX_PROMPT_PROJECTS ? [`  … and ${String(ws.units.length - MAX_PROMPT_PROJECTS)} more (see /checks)`] : []),
+    // Detection NOTES — above all the dropped-units line (S20.5): a unit past MAX_PROJECT_UNITS
+    // does not exist to run_check/preview/setup, and a model that cannot see the drop happened
+    // reads its refusals as "this project cannot", not "this project was never admitted".
+    ...ws.notes.slice(0, 4).map((n) => `  note: ${n.length > 300 ? `${n.slice(0, 300)}…` : n}`),
     ...(multi
       ? [
           '- This workspace holds SEVERAL projects. run_check, preview and project_setup each take a `project` (the id above); with more than one project the harness REFUSES to guess which you meant. Verify each project you changed, and bind plan tasks to their project so a green check in one is never mistaken for evidence about another.',
@@ -117,10 +121,11 @@ function projectLines(ws?: DetectedWorkspace): string[] {
 
 /**
  * Bounded: a repository with many packages must not push the operating rules out of the prompt.
- * 13, matching `MAX_PROJECT_UNITS` non-root ids PLUS the root unit — at 12 a workspace at full
- * capacity withheld one project id from a model that cannot name a project it was not told about.
+ * MAX_PROJECT_UNITS non-root ids PLUS the root unit (17 since S20.5's 12→16 raise) — below that,
+ * a workspace at full capacity withheld a project id from a model that cannot name a project it
+ * was not told about.
  */
-const MAX_PROMPT_PROJECTS = 13;
+const MAX_PROMPT_PROJECTS = 17;
 
 export function buildSystemPrompt(
   workspaceRoot: string,

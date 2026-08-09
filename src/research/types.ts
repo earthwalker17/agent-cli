@@ -41,7 +41,7 @@ export const EXTRACT_TIMEOUT_MS = 30_000;
  * failures at once, and it is the bound that matches the actual advice ("extract sparingly"):
  * four pages is a lot of reading for one bounded question.
  */
-export const EXTRACTS_PER_RESEARCH_TASK = 4;
+export const EXTRACTS_PER_RESEARCH_TASK = 6;
 
 // ── Per-session budget ─────────────────────────────────────────────────────────
 
@@ -50,12 +50,12 @@ export const EXTRACTS_PER_RESEARCH_TASK = 4;
  * `checkCaps` precedent — ONE live object, not a per-instance copy). Rebuilt from events on
  * resume so a restarted session cannot silently refill its budget.
  */
-export const SEARCHES_PER_SESSION = 24;
-export const EXTRACTS_PER_SESSION = 12;
+export const SEARCHES_PER_SESSION = 36;
+export const EXTRACTS_PER_SESSION = 20;
 /** Provider credits: search basic = 1, advanced = 2; extract = ceil(urls/5) × depth multiplier. */
-export const CREDITS_PER_SESSION = 80;
+export const CREDITS_PER_SESSION = 120;
 /** Total external content characters admitted into ANY context this session (parent + children). */
-export const CONTENT_CHARS_PER_SESSION = 800_000;
+export const CONTENT_CHARS_PER_SESSION = 1_200_000;
 
 // ── Domain model ───────────────────────────────────────────────────────────────
 

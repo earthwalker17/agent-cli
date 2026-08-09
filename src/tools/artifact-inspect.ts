@@ -21,8 +21,8 @@ import { identifyDocument } from '../artifacts/inspect.js';
 import { rasterizePdfPages, type Rasterize } from '../artifacts/pdf-pages.js';
 import type { BrowserAvailability } from '../browser/probe.js';
 
-export const INSPECTED_PAGES_PER_SESSION = 40;
-export const INSPECT_BYTES_PER_SESSION = 32 * 1024 * 1024;
+export const INSPECTED_PAGES_PER_SESSION = 80;
+export const INSPECT_BYTES_PER_SESSION = 48 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 
 export interface InspectBudget {

@@ -86,7 +86,7 @@ export interface ProjectSetupTool extends Tool<SetupInputT> {
   refresh(): DetectedWorkspace;
 }
 
-const FAIL_EXCERPT_CHARS = 4000;
+const FAIL_EXCERPT_CHARS = 8000;
 
 function refuse(output: string, error: string, startedAt: number): ToolResult {
   return { ok: false, output: `refused: ${output}`, error, durationMs: Date.now() - startedAt, truncated: false };

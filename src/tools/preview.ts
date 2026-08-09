@@ -66,7 +66,7 @@ export interface PreviewCaps {
 // that made the intended shape impossible. 4 leaves room for a worker or a second API without
 // becoming an invitation to leave processes lying around; the per-session start budget rises with
 // it, because restarts across three services legitimately cost more than restarts across one.
-export const PREVIEWS_PER_SESSION = 12;
+export const PREVIEWS_PER_SESSION = 16;
 export const MAX_CONCURRENT_PREVIEWS = 4;
 /** Tail excerpt shown to the model when a start fails or a preview is inspected. */
 const TAIL_EXCERPT_BYTES = 2_048;

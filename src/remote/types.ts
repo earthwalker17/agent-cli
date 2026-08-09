@@ -18,7 +18,7 @@ import type { CommandTermination } from '../types.js';
  * Remote round-trips one session may make. Reads are session-grantable, so this counter is what
  * `[s]` is actually bounded by — the research precedent, where the budget IS the consent.
  */
-export const REMOTE_READS_PER_SESSION = 40;
+export const REMOTE_READS_PER_SESSION = 60;
 /**
  * Remote MUTATIONS one session may make. Every one of them asks individually and none is ever
  * granted, so this is not a consent ceiling — it is a runaway bound. Ten publishes is already far

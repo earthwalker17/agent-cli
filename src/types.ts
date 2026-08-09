@@ -717,6 +717,8 @@ export type TaskEvidence =
        * charged attempts — including reviewer ROUNDS — from refunding across a resume.
        */
       role?: string;
+      /** Measured forwarded-approval wait (S20.5, additive) — excluded from the wall-clock budget. */
+      approvalWaitMs?: number;
     }
   | {
       /** An executor task's captured changes vs its base (V0.7) — the diff OUTLIVES the worktree. */
@@ -2263,6 +2265,8 @@ export type EventBody =
       durationMs: number;
       /** The task's role (S20.5, additive) — set on never-started attempts (childSessionId '') so caps folds can count them. */
       role?: string;
+      /** Measured forwarded-approval wait (S20.5, additive) — excluded from the wall-clock budget. */
+      approvalWaitMs?: number;
     }
   | {
       /**

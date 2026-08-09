@@ -11,7 +11,7 @@ import type { PreviewStopReason, StopResult, SupervisedExit, SupervisedHandle, S
  * a bound meant to stop leaks into an interruption of legitimate work. Still a hard TTL, still a
  * typed stop reason, still recorded.
  */
-export const DEFAULT_PREVIEW_TTL_MS = 60 * 60 * 1000;
+export const DEFAULT_PREVIEW_TTL_MS = 120 * 60 * 1000;
 export const DEFAULT_MAX_LOG_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_TAIL_BYTES = 8 * 1024;
 /** How often the log-size cap is checked (a cap, not an exact limit — stated honestly). */

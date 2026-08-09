@@ -248,6 +248,14 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
       process.stderr.write('note: the model declined this request (stop reason: refusal) — rephrase or narrow the task\n');
     }
     const reason = endReasonForTurn(result, ctx.maxSteps);
+    if (reason === 'max-steps') {
+      // A silent mid-work stop is the worst way for a one-shot run to end (S20.5): say what
+      // happened and hand the user the exact resume command — the work is NOT lost.
+      process.stderr.write(
+        `note: the step budget (${String(ctx.maxSteps)}) ended this turn MID-WORK — nothing failed. ` +
+          `Continue with: agent resume ${session.id} (raise with --max-steps <n>)\n`,
+      );
+    }
     if (reason !== 'aborted') {
       // Session-end hygiene before endSession (the event must land in the open log).
       if (pruneHarnessRefs !== undefined) {

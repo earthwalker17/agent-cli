@@ -34,7 +34,7 @@ const BrowserFlowInput = z
 export type BrowserFlowInputT = z.infer<typeof BrowserFlowInput>;
 
 export const NO_SHELL_COMMAND = '(in-process browser flow — no shell command)';
-export const ARTIFACT_BYTES_PER_SESSION = 64 * 1024 * 1024;
+export const ARTIFACT_BYTES_PER_SESSION = 96 * 1024 * 1024;
 
 /** Bytes of stored browser artifacts, REBUILT FROM EVENTS at assembly (the caps pattern). */
 export function artifactBytesFromEvents(events: readonly SessionEvent[]): number {

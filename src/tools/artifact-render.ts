@@ -31,7 +31,7 @@ import { imageInfo } from '../artifacts/img-dim.js';
 import { ArtifactError } from '../artifacts/errors.js';
 import type { BrowserAvailability } from '../browser/probe.js';
 
-export const RENDERS_PER_SESSION = 20;
+export const RENDERS_PER_SESSION = 30;
 const MAX_SPEC_BYTES = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 

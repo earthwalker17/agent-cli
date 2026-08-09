@@ -24,7 +24,7 @@ import type { DetectedProject, DetectedWorkspace, ManifestStamp } from './types.
  */
 
 /** Hard bounds. A repository is not allowed to make discovery expensive. */
-export const MAX_PROJECT_UNITS = 12;
+export const MAX_PROJECT_UNITS = 16;
 /** Depth BELOW the workspace root: `api` is 1, `apps/web` is 2. Nothing deeper is discovered. */
 export const MAX_UNIT_DEPTH = 2;
 const MAX_DIR_ENTRIES = 200;

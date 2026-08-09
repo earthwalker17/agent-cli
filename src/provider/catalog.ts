@@ -16,7 +16,7 @@
  * resolve; and claude-mythos-5, which is invite-only.
  */
 
-export const CATALOG_VERIFIED = '2026-07-29';
+export const CATALOG_VERIFIED = '2026-08-09';
 
 /** Selectable real providers ('mock' is flag-only and never a config preference). */
 export const PROVIDER_NAMES = ['anthropic', 'openai', 'deepseek', 'kimi', 'glm'] as const;
@@ -50,9 +50,19 @@ export interface ModelCaps {
   caching: 'explicit-breakpoints' | 'automatic' | 'none';
   /**
    * The harness's working-context cap in TOKENS — OUR cost/latency opinion, NOT the provider's
-   * window. Drives elision (triggerChars = ×4 chars). 100k reproduces the pre-S15 defaults and
-   * deliberately stays far below 1M windows (resending 500k tokens per step is a cost bug, and
-   * OpenAI bills >272k-token inputs at 2×).
+   * window. Drives elision (triggerChars = ×4 chars).
+   *
+   * Derivation rule (S20.5 — pinned by test/limits.test.ts, per model, not per class):
+   *   budget × 1.25  +  40_000  +  defaultMaxTokens  ≤  contextTokens
+   * The 1.25 covers the chars≈4×tokens heuristic's undercount on code (~3.3 chars/token is
+   * common), the 40k covers what elision cannot see (system prompt + map + tool schemas +
+   * memory/plan injections), and the output reservation is the provider-side share of the
+   * window. On top of the fit rule, two clamps: a provider BILLING threshold when one exists
+   * (gpt-5.6 bills the whole request at 2×in/1.5×out above 272K input — verified 2026-08-09),
+   * and a latency/cost opinion on the 1M-window models (re-sending half a window per step is a
+   * cost bug even at flat pricing). The old flat 100k — which merely reproduced the pre-S15
+   * 400k/200k chars — sat at ~10% of the real window on flagships and, worse, OVERFLOWED the
+   * 200k/128k-window models once the un-counted overhead was priced in.
    */
   budgetTokens: number;
   notes?: string[];
@@ -150,8 +160,13 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'native',
       reasoning: { mode: 'on-by-default', replay: 'current-loop' },
       caching: 'explicit-breakpoints',
-      budgetTokens: 100_000,
-      notes: ['adaptive thinking on by default (round-tripped)', 'refusal classifier possible', 'separate rate bucket from Opus 4.x'],
+      budgetTokens: 250_000,
+      notes: [
+        'adaptive thinking on by default (round-tripped)',
+        'refusal classifier possible',
+        'separate rate bucket from Opus 4.x',
+        'no long-context premium: flat pricing across the full 1M window (verified 2026-08-09)',
+      ],
     },
     {
       id: 'claude-sonnet-5',
@@ -164,7 +179,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'native',
       reasoning: { mode: 'on-by-default', replay: 'current-loop' },
       caching: 'explicit-breakpoints',
-      budgetTokens: 100_000,
+      budgetTokens: 250_000,
       notes: ['intro pricing through 2026-08-31', 'new tokenizer (~30% more tokens than Sonnet 4.6)'],
     },
     {
@@ -178,7 +193,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'native',
       reasoning: { mode: 'forced', replay: 'current-loop' },
       caching: 'explicit-breakpoints',
-      budgetTokens: 100_000,
+      budgetTokens: 250_000,
       notes: [
         'thinking always on (cannot be disabled)',
         '2x Opus-5 price ($10/$50 per MTok); lower rate-limit bucket',
@@ -197,7 +212,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'native',
       reasoning: { mode: 'off-by-default', replay: 'current-loop' },
       caching: 'explicit-breakpoints',
-      budgetTokens: 100_000,
+      budgetTokens: 250_000,
       notes: ['previous-generation Opus; thinking off unless enabled — the pre-v1.1 default'],
     },
     {
@@ -211,7 +226,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'native',
       reasoning: { mode: 'off-by-default', replay: 'current-loop' },
       caching: 'explicit-breakpoints',
-      budgetTokens: 100_000,
+      budgetTokens: 250_000,
     },
     {
       id: 'claude-haiku-4-5',
@@ -240,8 +255,8 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'on-by-default', replay: 'current-loop' },
       caching: 'automatic',
-      budgetTokens: 100_000,
-      notes: ['flagship (alias gpt-5.6)', 'input >272K tokens bills 2x — the budget cap stays below it'],
+      budgetTokens: 180_000,
+      notes: ['flagship (alias gpt-5.6)', 'input >272K tokens bills the WHOLE request 2x in / 1.5x out — the budget stays below it with chars/token slop (verified 2026-08-09)'],
     },
     {
       id: 'gpt-5.6-terra',
@@ -254,8 +269,8 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'on-by-default', replay: 'current-loop' },
       caching: 'automatic',
-      budgetTokens: 100_000,
-      notes: ['mid-tier: balances intelligence and cost'],
+      budgetTokens: 180_000,
+      notes: ['mid-tier: balances intelligence and cost', 'same 272K long-context billing threshold as sol'],
     },
     {
       id: 'gpt-5.6-luna',
@@ -268,8 +283,8 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'on-by-default', replay: 'current-loop' },
       caching: 'automatic',
-      budgetTokens: 100_000,
-      notes: ['cost-optimized high-volume tier'],
+      budgetTokens: 180_000,
+      notes: ['cost-optimized high-volume tier', 'same 272K long-context billing threshold as sol'],
     },
   ],
   deepseek: [
@@ -284,7 +299,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'current-loop' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 200_000,
       notes: ['no image input — screenshots degrade to recorded pointers', 'thinking on by default; reasoning echoed in tool loops', 'prepaid: 402 = balance'],
     },
     {
@@ -298,7 +313,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'current-loop' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 200_000,
       notes: ['fast/cheap tier ($0.14/$0.28 per MTok)', 'no image input'],
     },
   ],
@@ -314,12 +329,13 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'forced', replay: 'all' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 150_000,
       notes: [
         'thinking always on; the COMPLETE assistant message (incl. reasoning) round-trips',
         'sampling params locked (never sent)',
         'images: base64 data URIs only',
         'agent loops need recharge Tier 1+ (Tier 0 is 3 requests/min)',
+        'flat pricing across the 1M window; budget stays moderate because replay-all reasoning is un-elidable and grows the wire floor (verified 2026-08-09)',
       ],
     },
     {
@@ -333,7 +349,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'forced', replay: 'all' },
       caching: 'automatic',
-      budgetTokens: 60_000,
+      budgetTokens: 100_000,
       notes: ['coding-dedicated; thinking cannot be disabled'],
     },
     {
@@ -347,7 +363,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'forced', replay: 'all' },
       caching: 'automatic',
-      budgetTokens: 60_000,
+      budgetTokens: 100_000,
       notes: ['~180+ tok/s variant of k2.7-code'],
     },
     {
@@ -361,7 +377,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'on-by-default', replay: 'all' },
       caching: 'automatic',
-      budgetTokens: 60_000,
+      budgetTokens: 100_000,
     },
   ],
   glm: [
@@ -369,15 +385,18 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       id: 'glm-5.2',
       display: 'GLM-5.2',
       lifecycle: 'ga',
-      contextTokens: 1000 * K,
+      // 200K, not 1M: the 1M window belongs to the separate `glm-5.2[1m]` variant id — this base
+      // id is what the harness selects, and claiming its sibling's window overflowed the budget
+      // rule (verified 2026-08-09; the S20.5 catalog re-check found the overclaim).
+      contextTokens: 200 * K,
       maxOutputTokens: 128 * K,
       defaultMaxTokens: 64_000,
       visionInput: false,
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 100_000,
-      notes: ['text flagship — NO image input (use glm-5v-turbo for vision)', 'server strips prior reasoning (no round-trip needed)'],
+      budgetTokens: 75_000,
+      notes: ['text flagship — NO image input (use glm-5v-turbo for vision)', 'server strips prior reasoning (no round-trip needed)', '1M context is the glm-5.2[1m] variant id, not this one'],
     },
     {
       id: 'glm-5.1',
@@ -390,7 +409,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 75_000,
     },
     {
       id: 'glm-5',
@@ -403,7 +422,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 75_000,
     },
     {
       id: 'glm-5-turbo',
@@ -416,7 +435,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 75_000,
     },
     {
       id: 'glm-4.7',
@@ -429,7 +448,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'forced', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 75_000,
       notes: ['thinking cannot be disabled'],
     },
     {
@@ -457,7 +476,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 100_000,
+      budgetTokens: 75_000,
     },
     {
       id: 'glm-4.5-air',
@@ -470,7 +489,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'none',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 60_000,
+      budgetTokens: 42_000,
     },
     {
       id: 'glm-5v-turbo',
@@ -497,7 +516,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 60_000,
+      budgetTokens: 55_000,
     },
     {
       id: 'glm-4.6v-flash',
@@ -510,7 +529,7 @@ export const MODELS: Record<Exclude<ProviderName, 'mock'>, ModelCaps[]> = {
       toolResultImages: 'rehomed',
       reasoning: { mode: 'on-by-default', replay: 'none' },
       caching: 'automatic',
-      budgetTokens: 60_000,
+      budgetTokens: 55_000,
       notes: ['free vision tier'],
     },
   ],
@@ -571,8 +590,9 @@ export function defaultMaxTokensFor(provider: ProviderName, model: string): numb
 
 /**
  * The elision budget for a model — plain numbers, structurally compatible with ElisionOptions
- * (provider/ must not import runtime/). ×4 is the chars≈tokens heuristic elision documents;
- * 100k budget tokens reproduce the pre-S15 400k/200k chars on big-window models.
+ * (provider/ must not import runtime/). ×4 is the chars≈tokens heuristic elision documents; the
+ * per-model budgets follow the derivation rule on `budgetTokens` (window fit + billing clamps +
+ * a latency opinion on 1M windows), pinned in test/limits.test.ts (S20.5).
  */
 export function contextBudgetFor(provider: ProviderName, model: string): { triggerChars: number; targetChars: number } {
   const budget = capsFor(provider, model).budgetTokens;

@@ -126,18 +126,20 @@ export interface TurnResult {
 }
 
 /**
- * Tool calls one turn may make before the loop stops and reports `max-steps` (Session 16: 20→40).
+ * Tool calls one turn may make before the loop stops and reports `max-steps` (S16: 20→40;
+ * S20.5: 40→60).
  *
  * 20 was set when a task meant "edit a few files and run the tests". A dependency-bearing
  * full-stack turn is detect → install ×2 → write .env → migrate → seed → build → start two
- * previews → check each project → drive a browser flow, and it ran out of steps mid-work with an
- * honest but useless "step budget reached". Doubling it buys legitimate depth; it is still a hard
- * ceiling, still reported honestly, and still overridable with --max-steps.
+ * previews → check each project → drive a browser flow — and with research, documents, and
+ * remote delivery now real, one coherent instruction legitimately spans more steps than the
+ * v1.2 shape did. Still a hard ceiling, still reported honestly, still overridable with
+ * --max-steps (config ceiling 400).
  *
  * ONE exported constant: this default was written twice (here and in the CLI context builder),
  * which is how the library and the CLI quietly come to disagree about what a turn is.
  */
-export const DEFAULT_MAX_STEPS = 40;
+export const DEFAULT_MAX_STEPS = 60;
 
 export interface StartOptions {
   workspaceRoot: string;
@@ -903,6 +905,7 @@ export function recordTaskEvidence(session: Session, callId: string, e: TaskEvid
         resultSha256: e.resultSha256,
         durationMs: e.durationMs,
         ...(e.role !== undefined ? { role: e.role } : {}),
+        ...(e.approvalWaitMs !== undefined ? { approvalWaitMs: e.approvalWaitMs } : {}),
       });
       return;
     case 'changes':
@@ -1773,7 +1776,7 @@ function redactedForLog<I>(session: Session, tool: Tool<I>, result: ToolResult, 
 }
 
 /** Defensive spill ceiling — the exec capture cap already bounds real inputs well below this. */
-const SPILL_MAX_BYTES = 2 * 1024 * 1024;
+const SPILL_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Preserve truncated-away tool output as a content-addressed blob (Session 11.5). Opt-in per

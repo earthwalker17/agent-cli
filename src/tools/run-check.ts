@@ -74,7 +74,7 @@ export interface CheckCaps {
 
 /** No unbounded repetition: a repair loop that re-runs checks forever must hit a wall. */
 /** Session 16: 60 → 80. Per-project checks multiply the kinds a full-stack session legitimately runs. */
-export const CHECKS_PER_SESSION = 80;
+export const CHECKS_PER_SESSION = 160;
 
 export function checkCapsFromEvents(events: readonly SessionEvent[]): CheckCaps {
   // Counts every check that was ATTEMPTED, matching what the live counter increments. Neither
@@ -128,7 +128,7 @@ export interface RunCheckTool extends Tool<RunCheckInputT> {
 
 /** Excerpt of a failing check's output shown to the model; the full text spills to a blob. */
 /** Session 16: 3000 → 6000. The failing tail is the single most valuable text in a check result. */
-const FAIL_EXCERPT_CHARS = 6000;
+const FAIL_EXCERPT_CHARS = 12_000;
 
 function toFact(r: ResolvedCheck): ResolvedCheckFact {
   return {

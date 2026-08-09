@@ -84,7 +84,9 @@ const READ_ONLY_BUDGET: TaskBudget = { maxSteps: 15, timeoutMs: 300_000, maxOutp
  * orientation and the final report. 15 steps starved exactly the diligent lenses: they ended
  * 'budget-steps', and a round whose every lens died cannot qualify no matter what it recorded.
  */
-const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 480_000, maxOutputTokens: 30_000 };
+/** S20.5: 8 → 12 min. Two of three kimi lenses hit the 8-minute wall in S15's live review —
+ *  an always-thinking model spends wall clock on reasoning the step count cannot see. */
+const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 720_000, maxOutputTokens: 30_000 };
 /**
  * Session 19: research is interleaved like review (search → read → corroborate → record → search
  * again), so it needs more than the 15-step read-only budget. The wall clock is generous relative
@@ -100,12 +102,15 @@ const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 480_000, maxOutpu
 const RESEARCHER_BUDGET: TaskBudget = { maxSteps: 20, timeoutMs: 600_000, maxOutputTokens: 30_000 };
 
 /**
- * Executor budget is larger: mutating work takes more steps, and time spent WAITING on a
- * forwarded approval counts against the task's wall clock (documented limitation).
+ * Executor budget is larger: mutating work takes more steps. Since S20.5 the wall clock EXCLUDES
+ * time spent waiting on a forwarded approval (the runner subtracts measured wait — an away human
+ * used to kill the executor mid-work, which turned a consent pause into a task failure), so this
+ * bound is genuinely about the work again.
  */
-/** Session 16: 30 steps / 12 min → 40 / 20 min. Real multi-file work in a worktree on a project
- *  with actual dependencies takes more reads and more edits than a demo fixture did. */
-export const EXECUTOR_BUDGET: TaskBudget = { maxSteps: 40, timeoutMs: 1_200_000, maxOutputTokens: 50_000 };
+/** S16: 30 steps / 12 min → 40 / 20 min. S20.5: 20 → 30 min — real multi-file worktree work on
+ *  an installed project, under an always-thinking model, legitimately spends more wall than the
+ *  demo fixtures did; the step ceiling is unchanged, so this buys patience, not more actions. */
+export const EXECUTOR_BUDGET: TaskBudget = { maxSteps: 40, timeoutMs: 1_800_000, maxOutputTokens: 50_000 };
 
 export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
   explorer: {

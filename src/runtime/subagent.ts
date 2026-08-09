@@ -45,8 +45,8 @@ import type {
 /** Session 16: 12 → 16 tasks, 150k → 200k child output tokens. Multi-project work legitimately
  *  needs more units of delegated work; the per-task budgets and the group cap of 3 are unchanged,
  *  so this buys breadth, not longer or less bounded children. */
-export const TASKS_PER_SESSION = 16;
-export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 200_000;
+export const TASKS_PER_SESSION = 32;
+export const SESSION_CHILD_OUTPUT_TOKEN_CAP = 400_000;
 
 /**
  * Which policy FACTS a named per-session instance may carry into a child registry.
@@ -279,6 +279,8 @@ export interface SubagentResult {
   childLogPath: string;
   durationMs: number;
   budget: TaskBudget;
+  /** Measured forwarded-approval wait (S20.5) — excluded from the wall-clock budget; recorded for honesty. */
+  approvalWaitMs: number;
   /** Harness supervision observations (Session 11) — surfaced in the delegate group digest. */
   supervision: SupervisionNote[];
 }
@@ -302,6 +304,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     childLogPath: '',
     durationMs: Math.max(0, clock.now() - startedAt),
     budget,
+    approvalWaitMs: 0,
     supervision: [],
   });
 
@@ -346,21 +349,38 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   // A 'forward' role routes asks through the serialized parent-side forwarder, each request
   // stamped with this task's identity (the box fills right after startSession — no tool call
   // can run before that). No forwarder wired ⇒ fail closed. Read-only roles ALWAYS auto-deny.
+  //
+  // The wait is MEASURED (S20.5): time from entering the forwarder (queueing counts — a sibling
+  // holding the one prompt slot is still the human's pace, not this child's) to the answer is
+  // subtracted from the task's wall clock below. Before that, an away human killed the executor
+  // mid-work: the consent pause itself became a 'timeout' failure that spent an R10 attempt.
   const taskIdBox = { childSessionId: '' };
+  // REAL time, deliberately not the injectable clock: the wall-clock budget has always been
+  // enforced by real setTimeout (a mocked clock never bounded it), and the re-arming deadline
+  // below would spin forever under a frozen test clock.
+  const wallStartedAt = Date.now();
+  let approvalWaitMs = 0;
+  let askStartedAt: number | null = null;
   const approver: Approver =
     contract.approvals === 'forward' && deps.forwardAsk !== undefined
       ? async (req) => {
           pushStatus({ phase: 'approval-wait' }); // the live surface shows WHO is waiting on the human
+          askStartedAt = Date.now();
           try {
             return await deps.forwardAsk!(
               { ...req, taskContext: { childSessionId: taskIdBox.childSessionId, role: spec.role } },
               controller.signal,
             );
           } finally {
+            approvalWaitMs += Math.max(0, Date.now() - (askStartedAt ?? Date.now()));
+            askStartedAt = null;
             pushStatus({ phase: 'running' });
           }
         }
       : autoDenyApprover;
+  /** REAL wall-clock elapsed MINUS measured approval wait — what the budget genuinely bounds. */
+  const effectiveElapsed = (): number =>
+    Date.now() - wallStartedAt - approvalWaitMs - (askStartedAt !== null ? Math.max(0, Date.now() - askStartedAt) : 0);
   // Tools first, prompt second: the prompt states exactly the registry this child actually has
   // (retrieve is admitted per-session; the wording must not promise an absent tool).
   const researchTools = deps.researchTools;
@@ -446,7 +466,21 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   const onParentAbort = (): void => cancel('parent-abort');
   if (parentSignal?.aborted) onParentAbort();
   else parentSignal?.addEventListener('abort', onParentAbort, { once: true });
-  const timer = setTimeout(() => cancel('timeout'), budget.timeoutMs);
+  // Re-arming timeout on EFFECTIVE elapsed (S20.5): a fixed setTimeout charged approval wait to
+  // the task. When the deadline fires early (because wait accumulated), it re-arms for the
+  // remainder; while an ask is displayed the remainder holds steady and the timer just re-arms.
+  const timerBox: { t: NodeJS.Timeout | undefined } = { t: undefined };
+  const armTimeout = (): void => {
+    const remaining = budget.timeoutMs - effectiveElapsed();
+    timerBox.t = setTimeout(
+      () => {
+        if (effectiveElapsed() >= budget.timeoutMs) cancel('timeout');
+        else armTimeout();
+      },
+      Math.max(25, remaining),
+    );
+  };
+  armTimeout();
   // Stall + budget-pressure ticker. Thresholds scale down with narrowed test budgets but are
   // the production constants (60s stall, 30s cadence) at the real role budgets. A silent child
   // is probably mid-provider-call or waiting on a forwarded approval — both legitimate — so
@@ -478,7 +512,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
         supervise('stall', `no activity for ${Math.round(idleMs / 1000)}s`);
       }
     }
-    const elapsed = clock.now() - startedAt;
+    const elapsed = effectiveElapsed(); // approval wait excluded, like the timeout itself (S20.5)
     if (!wallPressureNoted && elapsed >= budget.timeoutMs * 0.8) {
       wallPressureNoted = true;
       supervise('budget-pressure', `wall clock at ${Math.round((100 * elapsed) / budget.timeoutMs)}% of ${Math.round(budget.timeoutMs / 1000)}s`);
@@ -536,7 +570,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   } catch (err) {
     error = err as Error;
   } finally {
-    clearTimeout(timer);
+    if (timerBox.t !== undefined) clearTimeout(timerBox.t);
     clearInterval(stallTimer);
     parentSignal?.removeEventListener('abort', onParentAbort);
     child.log.onAppend = undefined;
@@ -603,6 +637,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     childLogPath: deps.layout.sessionFile(child.id),
     durationMs: Math.max(0, clock.now() - startedAt),
     budget,
+    approvalWaitMs,
     supervision: supervisionNotes,
   };
   deps.reportTask?.({
@@ -613,6 +648,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     usage,
     resultSha256: sha256(Buffer.from(finalText, 'utf8')),
     durationMs: out.durationMs,
+    ...(approvalWaitMs > 0 ? { approvalWaitMs } : {}),
   });
   pushStatus({ phase: 'ended', status, steps: out.steps, outTokens: usage.outputTokens });
   return out;

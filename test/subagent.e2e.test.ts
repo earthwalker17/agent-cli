@@ -188,6 +188,26 @@ describe('delegate_task end to end', () => {
     expect(timeout.status).toBe('timeout');
     expect(EventLog.readLenient(layout.sessionFile(timeout.childSessionId)).events.at(-1)).toMatchObject({ reason: 'budget' });
 
+    // S20.5: a forwarded approval answered SLOWER than the whole wall clock must not time the
+    // task out — the wait is the human's pace, not the task's. Before the fix, an away human
+    // killed the executor mid-work and the consent pause read as a 'timeout' failure (which
+    // also spent an R10 attempt). The measured wait is excluded and recorded.
+    const slowHuman = await runSubagentTask(
+      subagentDeps(
+        [{ say: 'asking', calls: [{ name: 'run_command', input: { command: 'echo hi' } }] }, { say: 'done after the deny' }],
+        {
+          budget: { timeoutMs: 600, maxSteps: 5, maxOutputTokens: 30_000 },
+          forwardAsk: async () => {
+            await new Promise((r) => setTimeout(r, 1_200));
+            return { decision: 'deny', scope: 'once', source: 'user' };
+          },
+        },
+      ),
+      { role: 'executor', task: 'try a command', parentSessionId: 'p' },
+    );
+    expect(slowHuman.status).toBe('completed');
+    expect(slowHuman.approvalWaitMs).toBeGreaterThanOrEqual(1_000);
+
     // Parent abort cascades into the child.
     const controller = new AbortController();
     const pending = runSubagentTask(

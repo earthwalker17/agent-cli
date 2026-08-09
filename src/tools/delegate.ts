@@ -1013,6 +1013,7 @@ async function runExecutorTask(
       childLogPath: '',
       durationMs: 0,
       budget: { maxSteps: 0, timeoutMs: 0, maxOutputTokens: 0 },
+      approvalWaitMs: 0,
       supervision: [],
     },
     notes: [],

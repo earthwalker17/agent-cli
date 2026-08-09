@@ -136,7 +136,8 @@ describe('unit discovery', () => {
     const w = detectWorkspace(ws);
     expect(w.units).toHaveLength(MAX_PROJECT_UNITS);
     expect(w.notes.join('\n')).toContain(`only the first ${String(MAX_PROJECT_UNITS)} are used`);
-    expect(w.notes.join('\n')).toContain('apps/p12'); // the dropped ids are listed, not just counted
+    // The dropped ids are listed, not just counted (derived from the cap, so a retune moves it).
+    expect(w.notes.join('\n')).toContain(`apps/p${String(MAX_PROJECT_UNITS)}`);
   });
 
   it('degrades on an unparseable sub-manifest instead of throwing', () => {
