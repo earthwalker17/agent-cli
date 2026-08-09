@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { elideHistory } from '../src/runtime/elision.js';
 import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
-import { startSession, endSession, runTurn } from '../src/runtime/session.js';
+import { startSession, endSession, resumeSession, runTurn } from '../src/runtime/session.js';
 import { MockProvider } from '../src/provider/mock.js';
 import { autoDenyApprover } from '../src/runtime/approvals.js';
 import { fixedClock } from '../src/shared/clock.js';
@@ -172,5 +172,86 @@ describe('runTurn integration', () => {
     const compactions = session.log.events.filter((e) => e.type === 'context.compacted');
     expect(compactions.length).toBeGreaterThan(0);
     expect(compactions[0]).toMatchObject({ elidedCount: expect.any(Number) });
+  });
+
+  it('S20.5: monotonicity survives a RESUME — the sticky set is rebuilt from context.compacted', async () => {
+    // The sticky set was process memory only: a resumed session under a LARGER budget (a /model
+    // switch, or reconstruct rebuilding smaller content) re-derived from scratch and put outputs
+    // back on the wire that the log records as permanently elided.
+    fs.writeFileSync(path.join(ws, 'big.txt'), 'B'.repeat(3000));
+    const s1 = startSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-model',
+      mode: 'non-interactive',
+      provider: new MockProvider([{ say: 'r1', calls: [{ name: 'read_file', input: { path: 'big.txt' } }] }, { say: 'done' }]),
+      approver: autoDenyApprover,
+      saltHex: '0'.repeat(32),
+      maxSteps: 10,
+      clock: fixedClock(0, 1),
+      idGen: seededIdGen(),
+      contextBudget: { triggerChars: 2000, targetChars: 100, keepLastSteps: 0 },
+    });
+    await runTurn(s1, 'read the big file');
+    const elidedIds = [...(s1.elidedCallIds ?? new Set<string>())];
+    expect(elidedIds.length).toBeGreaterThan(0);
+    endSession(s1, 'user-quit');
+
+    const captured: ProviderRequest[] = [];
+    const inner = new MockProvider([{ say: 'continued' }]);
+    const s2 = resumeSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-model',
+      mode: 'non-interactive',
+      provider: {
+        name: 'capture',
+        complete: (req, onText, signal) => {
+          captured.push(req);
+          return inner.complete(req, onText, signal);
+        },
+      },
+      approver: autoDenyApprover,
+      saltHex: '0'.repeat(32),
+      clock: fixedClock(1000, 1),
+      sessionId: s1.id,
+      // A budget under which fresh derivation would elide NOTHING — the seeded set must win.
+      contextBudget: { triggerChars: 1_000_000, targetChars: 500_000, keepLastSteps: 0 },
+    });
+    expect([...(s2.elidedCallIds ?? new Set<string>())]).toEqual(expect.arrayContaining(elidedIds));
+    await runTurn(s2, 'continue');
+    endSession(s2, 'completed');
+    const wireResults = captured[0]!.messages.flatMap((m) => m.content).filter((b) => b.type === 'tool_result');
+    expect(wireResults.some((b) => b.type === 'tool_result' && typeof b.content === 'string' && b.content.includes('[elided'))).toBe(true);
+  });
+
+  it('S20.5: steady-state exhaustion is recorded once — not silenced when the elided set stops growing', async () => {
+    // Once every candidate is elided, un-elidable content (assistant text, reasoning) keeps
+    // growing while the growth-gated event never fires again: the session degraded silently
+    // until the provider hard-failed. The steady-state crossing now records ONE loud event.
+    fs.writeFileSync(path.join(ws, 'big.txt'), 'B'.repeat(3000));
+    const session = startSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-model',
+      mode: 'non-interactive',
+      provider: new MockProvider([
+        { say: 'r1', calls: [{ name: 'read_file', input: { path: 'big.txt' } }] },
+        { say: 'X'.repeat(4000) }, // un-elidable growth past the target
+        { say: 'ok' },
+      ]),
+      approver: autoDenyApprover,
+      saltHex: '0'.repeat(32),
+      maxSteps: 10,
+      clock: fixedClock(0, 1),
+      idGen: seededIdGen(),
+      contextBudget: { triggerChars: 2000, targetChars: 1000, keepLastSteps: 0 },
+    });
+    await runTurn(session, 'one');
+    await runTurn(session, 'two');
+    endSession(session, 'completed');
+    const compactions = session.log.events.filter((e) => e.type === 'context.compacted');
+    const steady = compactions.filter((e) => e.type === 'context.compacted' && e.exhausted && e.newlyElidedCallIds.length === 0);
+    expect(steady).toHaveLength(1);
   });
 });

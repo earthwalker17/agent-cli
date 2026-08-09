@@ -99,6 +99,11 @@ export interface Session {
   elidedCallIds?: Set<string>;
   /** callIds whose IMAGE parts were replaced with markers (Session 13; same lifecycle as above). */
   imageElidedCallIds?: Set<string>;
+  /**
+   * Latch: the steady-state "history exceeds the target even fully elided" condition has been
+   * recorded (S20.5). Resets when the pressure recedes, so a genuine re-crossing warns again.
+   */
+  exhaustedRecorded?: boolean;
   clock: Clock;
 }
 
@@ -109,6 +114,13 @@ export interface TurnResult {
   steps: number;
   /** True when the user chose "deny & stop", the turn was aborted, or the step budget was exhausted. */
   stopped: boolean;
+  /**
+   * True when the stop CAUSE was the user's deny-&-stop. Explicit because it can COINCIDE with
+   * the step budget: a deny-stop on the final allowed step used to read as 'max-steps' (and a
+   * child's as 'budget-steps' — a genuine failure spent against the R10 retry ceiling), turning
+   * a human intervention into an accounting event (S20.5 review).
+   */
+  userStopped?: boolean;
   /** True when the turn ended because the caller's AbortSignal fired (e.g. Ctrl+C in the REPL). */
   aborted: boolean;
 }
@@ -405,6 +417,20 @@ export function resumeSession(opts: ResumeOptions): Session {
   const priorSeq = log.events.length > 0 ? log.events[log.events.length - 1]!.seq : 0;
   const session = buildSession(opts.sessionId, { ...opts, argv: [] }, log, clock);
   session.messages = rebuilt.messages;
+  // Elision monotonicity must survive the resume: the sticky sets were process memory only, so a
+  // resumed session could put outputs back on the wire that the log records as permanently
+  // elided (e.g. after a /model switch raised the trigger, or because reconstruct rebuilds
+  // smaller content) — every sibling counter is rebuilt from events; this one silently reset
+  // (S20.5 review). Seeded from the same context.compacted events that recorded the elisions.
+  const priorElided = new Set<string>();
+  const priorImageElided = new Set<string>();
+  for (const e of log.events) {
+    if (e.type !== 'context.compacted') continue;
+    for (const id of e.newlyElidedCallIds ?? []) priorElided.add(id);
+    for (const id of e.newlyImageElidedCallIds ?? []) priorImageElided.add(id);
+  }
+  if (priorElided.size > 0) session.elidedCallIds = priorElided;
+  if (priorImageElided.size > 0) session.imageElidedCallIds = priorImageElided;
   log.append({
     type: 'session.resumed',
     priorSeq,
@@ -446,6 +472,9 @@ export function recordWorkspaceMap(
  */
 export function endReasonForTurn(result: TurnResult, maxSteps: number): 'completed' | 'user-quit' | 'max-steps' | 'aborted' {
   if (result.aborted) return 'aborted';
+  // The user's deny-&-stop wins over a coinciding step-budget exhaustion: the CAUSE is explicit
+  // on the result, never inferred from step arithmetic (S20.5).
+  if (result.stopped && result.userStopped === true) return 'user-quit';
   if (result.stopped && result.steps >= maxSteps) return 'max-steps';
   if (result.stopped) return 'user-quit';
   return 'completed';
@@ -519,7 +548,24 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
         exhausted: elision.exhausted,
         ...(newlyImages.length > 0 ? { newlyImageElidedCallIds: newlyImages } : {}),
       });
+      if (elision.exhausted) session.exhaustedRecorded = true;
+    } else if (elision.exhausted && session.exhaustedRecorded !== true) {
+      // Steady-state exhaustion: once every candidate is elided, the set stops growing while
+      // UN-ELIDABLE content (assistant text, reasoning payloads) keeps growing the history — the
+      // old growth-gated condition then never fired again, and the session degraded silently
+      // until the provider hard-failed with a context-window error (S20.5 review). Record it
+      // ONCE per crossing; the latch resets below if the pressure genuinely recedes.
+      session.exhaustedRecorded = true;
+      session.log.append({
+        type: 'context.compacted',
+        elidedCount: elision.elidedCallIds.length,
+        newlyElidedCallIds: [],
+        rawChars: elision.rawChars,
+        sentChars: elision.sentChars,
+        exhausted: true,
+      });
     }
+    if (!elision.exhausted) session.exhaustedRecorded = false;
     const req: ProviderRequest = {
       model: session.model,
       system: session.system,
@@ -609,7 +655,7 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
     }
     session.messages.push({ role: 'user', content: toolResults });
     if (sawAbort || signal?.aborted) return abortedResult('tools', steps + 1);
-    if (stopRequested) return { finalText, stopReason: lastStop, denials, steps: steps + 1, stopped: true, aborted: false };
+    if (stopRequested) return { finalText, stopReason: lastStop, denials, steps: steps + 1, stopped: true, userStopped: true, aborted: false };
   }
 
   const stopped = steps >= session.maxSteps;
@@ -642,22 +688,39 @@ export function repairDanglingToolUses(session: Session): boolean {
   if (uses.length === 0) return false;
 
   const completedBy = new Map<string, Extract<SessionEvent, { type: 'tool.completed' }>>();
+  const mutatedBy = new Set<string>();
+  const snapBy = new Set<string>();
+  const spawnedBy = new Set<string>();
   for (const e of session.log.events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
+    else if (e.type === 'file.mutated') mutatedBy.add(e.callId);
+    else if (e.type === 'snapshot.created') snapBy.add(e.callId);
+    else if (e.type === 'command.started' || e.type === 'check.started' || e.type === 'setup.started') spawnedBy.add(e.callId);
   }
+  // The appended completion SHADOWS reconstruct's own classification on every later resume
+  // (resultFor consults completions first), so it must tell the same truth reconstruct would:
+  // "never ran" was claimed for calls that had already snapshotted, written bytes, or spawned a
+  // process (S20.5 review — the throwing-after-write class is real; artifact-render documents it).
+  const messageFor = (id: string): string => {
+    if (mutatedBy.has(id)) return 'interrupted mid-call AFTER file changes were recorded — the writes are on disk and covered by /undo; verify before retrying';
+    if (snapBy.has(id)) return 'interrupted after a pre-write snapshot; the write may or may not have reached disk — verify before retrying';
+    if (spawnedBy.has(id)) return 'interrupted after this call spawned a process; its effects are unknown — verify before retrying';
+    return 'interrupted: the turn failed before this call ran';
+  };
 
   const results = uses.map((u) => {
     const done = completedBy.get(u.id);
     if (done) return toolResultBlock(u.id, done.outputPreview, !done.ok);
+    const message = messageFor(u.id);
     session.log.append({
       type: 'tool.completed',
       callId: u.id,
       ok: false,
-      outputPreview: 'interrupted: the turn failed before this call ran',
+      outputPreview: message,
       durationMs: 0,
       truncated: false,
     });
-    return toolResultBlock(u.id, 'interrupted: the turn failed before this call ran', true);
+    return toolResultBlock(u.id, message, true);
   });
   session.messages.push({ role: 'user', content: results });
   return true;
@@ -806,8 +869,8 @@ function callSandbox(session: Session, boundary: 'sandbox' | 'unsandboxed' | und
   };
 }
 
-/** Persist a tool-reported task lifecycle fact under the runtime-bound callId (mirrors commands). */
-function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): void {
+/** Persist a tool-reported task lifecycle fact under the runtime-bound callId (mirrors commands). Exported for tests. */
+export function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): void {
   switch (e.kind) {
     case 'started':
       session.log.append({
@@ -868,6 +931,9 @@ function recordTaskEvidence(session: Session, callId: string, e: TaskEvidence): 
       return;
     case 'base-checkpoint':
       session.log.append({ type: 'task.base-checkpoint', callId, ref: e.ref, oid: e.oid });
+      return;
+    case 'approval-resolved':
+      session.log.append({ type: 'approval.resolved', callId, decision: e.decision, scope: e.scope, source: e.source });
       return;
     case 'harness-checkpoint':
       session.log.append({ type: 'harness.checkpoint', kind: e.checkpointKind, ref: e.ref, oid: e.oid, callId });

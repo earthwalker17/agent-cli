@@ -201,7 +201,13 @@ async function requestNarrative(session: Session, codebaseExists: boolean, timeo
   });
   try {
     // The exact cached prefix: same system, same tools, same elided view — plus one instruction.
-    const elided = elideHistory(session.messages, session.contextBudget);
+    // The sticky set is part of "same elided view": without it the image pass frees budget and
+    // this request RESTORES previously-elided outputs — a divergent view that re-bills the whole
+    // suffix uncached on the most expensive call of the session (S20.5 review).
+    const elided = elideHistory(session.messages, {
+      ...session.contextBudget,
+      alreadyElided: [...(session.elidedCallIds ?? new Set<string>())],
+    });
     const req: ProviderRequest = {
       model: session.model,
       system: session.system,

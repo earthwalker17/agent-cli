@@ -169,6 +169,53 @@ describe('runMemoryUpdate', () => {
     expect(JSON.stringify(instruction.content)).toContain('ONLY a JSON object');
   });
 
+  it('S20.5: the narrative view keeps the STICKY elisions — a raised budget must not restore outputs', async () => {
+    // Divergence only appears when derivation inputs change after the last turn (a /model switch
+    // raising the budget, image aging): without the sticky set the narrative request re-derived
+    // from scratch, RESTORED previously-elided outputs, and re-billed the whole suffix uncached
+    // while contradicting the log's context.compacted record.
+    fs.writeFileSync(path.join(ws, 'big.txt'), 'B'.repeat(3000));
+    const requests: ProviderRequest[] = [];
+    const inner = new MockProvider([
+      { say: 'r1', calls: [{ name: 'read_file', input: { path: 'big.txt' } }] },
+      { say: 'writing', calls: [{ name: 'write_file', input: { path: 'f.txt', content: 'hello' } }] },
+      { say: 'done' },
+      { say: NARRATIVE_JSON },
+    ]);
+    const spy: Provider = {
+      name: 'mock',
+      complete(req, onText, signal): Promise<ProviderTurn> {
+        requests.push(req);
+        return inner.complete(req, onText, signal);
+      },
+    };
+    const session = startSession({
+      workspaceRoot: ws,
+      layout,
+      model: 'mock-model',
+      mode: 'non-interactive',
+      provider: spy,
+      approver: autoDenyApprover,
+      system: 'SYSTEM PROMPT',
+      saltHex: '00'.repeat(16),
+      clock: fixedClock(1_750_000_000_000, 1),
+      idGen: seededIdGen(),
+      contextBudget: { triggerChars: 2000, targetChars: 100, keepLastSteps: 0 },
+    });
+    recordWorkspaceMap(session, { text: 'a.txt\n', fileCount: 1, truncated: false, sha256: 'map-sha' });
+    await runTurn(session, 'read big then write');
+    expect((session.elidedCallIds ?? new Set()).size).toBeGreaterThan(0);
+    // Simulate the /model switch: a budget under which fresh derivation would elide NOTHING.
+    session.contextBudget = { triggerChars: 1_000_000, targetChars: 500_000, keepLastSteps: 0 };
+    await runMemoryUpdate(session, { layout, enabled: true, endedReason: 'user-quit' });
+    endSession(session, 'user-quit');
+
+    const last = requests.at(-1)!; // the narrative request
+    const results = last.messages.flatMap((m) => m.content).filter((b) => b.type === 'tool_result');
+    expect(results.some((b) => b.type === 'tool_result' && typeof b.content === 'string' && b.content.includes('[elided'))).toBe(true);
+    expect(results.some((b) => b.type === 'tool_result' && typeof b.content === 'string' && b.content.includes('B'.repeat(3000)))).toBe(false);
+  });
+
   it('refuses to overwrite an unreadable existing journal', async () => {
     fs.mkdirSync(path.join(memoryDir(layout.projectDir), 'JOURNAL.md'), { recursive: true }); // a directory
     const session = makeSession([...productiveTurns, { say: NARRATIVE_JSON }]);
@@ -192,6 +239,12 @@ describe('endReasonForTurn', () => {
     expect(endReasonForTurn({ ...base, stopped: true, steps: 20 }, 20)).toBe('max-steps');
     expect(endReasonForTurn({ ...base, stopped: true }, 20)).toBe('user-quit');
     expect(endReasonForTurn(base, 20)).toBe('completed');
+  });
+
+  it('S20.5: a deny-stop on the FINAL allowed step is user-quit, never max-steps', () => {
+    // The two can coincide (steps+1 === maxSteps); the explicit cause must win, or the human's
+    // intervention reads as budget exhaustion — and a child's counts toward the retry ceiling.
+    expect(endReasonForTurn({ ...base, stopped: true, steps: 20, userStopped: true }, 20)).toBe('user-quit');
   });
 });
 

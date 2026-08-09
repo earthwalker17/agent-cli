@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { resolveLayout, type ProjectLayout } from '../src/store/layout.js';
-import { startSession, runTurn, repairDanglingToolUses, type Session } from '../src/runtime/session.js';
+import { startSession, runTurn, repairDanglingToolUses, recordTaskEvidence, type Session } from '../src/runtime/session.js';
 import { MockProvider, parseScript, type ScriptTurn } from '../src/provider/mock.js';
 import { autoDenyApprover } from '../src/runtime/approvals.js';
 import { coalesceUserMessages } from '../src/provider/anthropic.js';
@@ -207,6 +207,49 @@ describe('turn-error repair', () => {
     const session = makeSession([{ say: 'done' }]);
     await runTurn(session, 'trivial');
     expect(repairDanglingToolUses(session)).toBe(false);
+    session.log.close();
+  });
+
+  it('S20.5: tells the truth about a call that crashed AFTER its snapshot — never "before this call ran"', async () => {
+    // The appended completion SHADOWS reconstruct's classification on every later resume, so the
+    // wording must carry the same honesty: a mutating tool that throws after runExecution took
+    // its snapshot may have already changed disk (the artifact-render hardening documents the
+    // class), and "the turn failed before this call ran" asserted the opposite.
+    const boomWrite: Tool<{ path: string; content: string }> = {
+      name: 'boom_write',
+      description: 'snapshots, then explodes',
+      schema: z.object({ path: z.string(), content: z.string() }),
+      mutates: (i) => ({ paths: [path.resolve(ws, i.path)] }),
+      execute: async () => {
+        throw new Error('tool exploded');
+      },
+    };
+    fs.writeFileSync(path.join(ws, 'x.txt'), 'before');
+    const session = makeSession([{ calls: [{ name: 'boom_write', input: { path: 'x.txt', content: 'after' } }] }, { say: 'r' }], {
+      tools: [...TOOLS, boomWrite as Tool],
+    });
+    await expect(runTurn(session, 'go')).rejects.toThrow('tool exploded');
+    expect(session.log.events.some((e) => e.type === 'snapshot.created')).toBe(true);
+    expect(repairDanglingToolUses(session)).toBe(true);
+    const repaired = session.messages[session.messages.length - 1]!;
+    const results = repaired.content.filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result');
+    expect(String(results[0]!.content)).toContain('after a pre-write snapshot');
+    expect(String(results[0]!.content)).not.toContain('before this call ran');
+    session.log.close();
+  });
+
+  it("S20.5: the delegate's mid-execute ask answer lands as a durable approval.resolved", () => {
+    // The task-base untracked guard bypasses executeCall (the one place approval.resolved is
+    // otherwise appended); its answer now rides the task-evidence channel so the only human
+    // consent in the harness without a durable record has one.
+    const session = makeSession([{ say: 'hi' }]);
+    recordTaskEvidence(session, 'call-guard', { kind: 'approval-resolved', decision: 'allow', scope: 'once', source: 'user' });
+    expect(session.log.events.find((e) => e.type === 'approval.resolved')).toMatchObject({
+      callId: 'call-guard',
+      decision: 'allow',
+      scope: 'once',
+      source: 'user',
+    });
     session.log.close();
   });
 });

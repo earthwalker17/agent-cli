@@ -529,7 +529,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
     }
   };
 
-  let result: { finalText: string; steps: number; stopped: boolean; aborted: boolean } | null = null;
+  let result: { finalText: string; steps: number; stopped: boolean; userStopped?: boolean; aborted: boolean } | null = null;
   let error: Error | null = null;
   try {
     result = await runTurn(child, delegationPrompt(spec), { signal: controller.signal });
@@ -560,11 +560,13 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
               : cause === 'stalled-loop'
                 ? 'stalled' // the supervisor's bounded loop intervention
                 : 'aborted'
-        : result!.stopped && result!.steps >= budget.maxSteps
+        : result!.stopped && result!.userStopped !== true && result!.steps >= budget.maxSteps
           ? 'budget-steps'
           : result!.stopped
-            ? 'user-stopped' // deny-&-stop at a forwarded approval: the user ended THIS child only
-            : 'completed';
+            ? 'user-stopped' // deny-&-stop at a forwarded approval: the user ended THIS child only —
+            : // even on the final allowed step, where it used to read 'budget-steps' and count
+              // toward the R10 retry ceiling as a genuine failure (S20.5).
+              'completed';
   const childReason =
     status === 'completed'
       ? 'completed'

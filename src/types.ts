@@ -721,6 +721,20 @@ export type TaskEvidence =
     }
   | {
       /**
+       * A human answer to the delegate's own mid-execute ask (today only the task-base
+       * large-untracked guard, S14.5 I7). Recorded through this channel because that ask goes
+       * straight to the forwarded approver and bypasses executeCall — the one place
+       * `approval.resolved` is otherwise appended — so the only human consent in the harness
+       * with NO durable record was this one (S20.5 review). The runtime binds the delegate
+       * call's id, so the record joins the group it authorized.
+       */
+      kind: 'approval-resolved';
+      decision: 'allow' | 'deny' | 'deny-stop';
+      scope: 'once' | 'session';
+      source: 'user' | 'non-interactive' | 'dangerous-mode' | 'task-aborted';
+    }
+  | {
+      /**
        * A harness workflow-transition checkpoint created by this call (Session 14), reported
        * through the onRefReady seam BEFORE update-ref (the event-before-ref contract). Today
        * only apply_task_changes creates one ('pre-integration', and only when un-snapshot-

@@ -677,6 +677,11 @@ export function createDelegateTool(
                       },
                       ctx.signal,
                     );
+                    // This ask bypasses executeCall (the one place approval.resolved is
+                    // otherwise appended), so record the human's answer through the evidence
+                    // channel — a consent with no durable record was the only one of its kind
+                    // in the harness (S20.5 review).
+                    ctx.reportTask?.({ kind: 'approval-resolved', decision: outcome.decision, scope: outcome.scope, source: outcome.source });
                     return outcome.decision === 'allow';
                   },
                 }
