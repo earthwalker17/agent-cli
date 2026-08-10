@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI **v1.2.1** is actually built. This describes the implemented system — its modules,
+How Agent CLI **v1.6.x** is actually built. This describes the implemented system — its modules,
 contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
 deferred; this file avoids session narration except where a decision's *reason* is the contract.
 
@@ -9,25 +9,38 @@ deferred; this file avoids session narration except where a decision's *reason* 
 A modular monolith in TypeScript (strict, ESM, Node 22). One runtime function (`runTurn`) drives
 the agent loop; both interfaces — the one-shot CLI and the interactive REPL — are thin consumers
 of it (no parallel execution path). Data is plain JSON-serializable discriminated unions; classes
-appear only where state genuinely lives (`EventLog`, `SnapshotStore`). Six runtime dependencies:
+appear only where state genuinely lives (`EventLog`, `SnapshotStore`). Nine runtime dependencies:
 `@anthropic-ai/sdk`, `zod` (v4, one schema source per tool), `ignore` (gitignore fallback walker),
-`undici` (proxy transport), `diff` (jsdiff line diffs), and `playwright-core` (browser
-verification; no install scripts, no bundled binaries — it drives the *system* browser).
+`undici` (proxy transport), `diff` (jsdiff line diffs), `playwright-core` (browser verification;
+no install scripts, no bundled binaries — it drives the *system* browser), and the documents
+pack's substrate: `fflate` (deterministic zip), `@rgrove/parse-xml` (bounded strict XML), `unpdf`
+(PDF reading + the bundled pdf.js the rasterizer injects).
+
+**Module boundaries are a TEST** (`test/architecture.test.ts`, S20.5): no `../../` imports,
+`shared/` is a leaf, `sandbox/` is imported only through its index, and module cycles are a
+frozen removal-only set — exactly two, both argued in place (`cli↔repl` the wiring hub,
+`runtime↔tools` the registry seam).
 
 ```
 src/
-  types.ts                 All shared contracts (no logic).
-  shared/
+  types.ts                 All shared contracts (no logic): action taxonomy, Tool<I> + facts,
+                           policy/approval/provider wire types, ExecSpec, the event-log union.
+  shared/                  LEAF utilities (imports nothing outside itself — test-pinned).
     clock.ts, ids.ts       Injectable clock + id generation (determinism levers for tests).
     hash.ts                sha256, the single truncation contract, HMAC secret redaction.
     pathutil.ts            caseFold + isInside + normalizeRelPrefix (containment, never probed).
     text.ts                sanitizeLine + neutralizeHarnessDelimiters (display/fence spoofing).
     diff.ts                jsdiff wrapper: lineDiffStat, unifiedDiff, binary/size guards.
     errors.ts              Typed error classes (branch on class, never on message).
+    secrets.ts             Credential-shape scrubbing (gh/git output, event emit sites).
+    domain.ts              Host/label predicates shared by research + remote denylists.
+    docio.ts               writeDocAtomic + frontmatter (S20.5 — was the plan↔memory cycle).
+    proc.ts                isAlive pid probe (S20.5 — was shared→exec's one outward edge).
     registry-lock.ts       The ONE file-registry lock (O_EXCL token + in-process chain).
   policy/
     paths.ts               validatePath — Windows-first boundary/hard-reject gate.
-    engine.ts              classify + decide + Grants. Pure. The single policy choke point.
+    engine.ts              classify + decide + Grants. Pure. The single policy choke point:
+                           nine fail-closed fact branches ahead of command/mutation/read.
     command-review.ts      analyzeCommand — deterministic positive-proof auto-run gate.
   store/
     layout.ts              State-dir resolution + refuse-if-inside-workspace.
@@ -35,78 +48,103 @@ src/
     snapshots.ts           Content-addressed pre-image blobs; capture/restore with drift refuse.
   exec/
     env.ts                 buildChildEnv — env hygiene (secret drops, core floor, proxy pass).
-    kill.ts                killTree — verified best-effort tree kill + isAlive.
+    kill.ts                killTree — verified best-effort tree kill (helper wait BOUNDED, S20.5).
     run.ts                 runManaged — the managed-subprocess runner. Policy- and log-free.
     shell.ts               shellInvocation — the ONE exit-code-fidelity shell wrapper.
   checks/                  Typed verification.
     types.ts               CheckRecipe / DetectedProject / CheckResult contracts.
     detect.ts              Bounded never-throwing manifest detection + stat fingerprint.
+    workspace.ts           Project-UNIT discovery (root/workspaces/depth-1/containers) +
+                           selectUnit; dropped-unit notes now reach the system prompt (S20.5).
+    session-workspace.ts   The ONE live SharedWorkspace holder (detect once, refresh on setup).
     toolchain.ts           Stat-only machine-toolchain probe + drift pseudo-stamps (S18).
     recipes.ts             The declarative recipe table + toCommand (the single composer).
     normalize.ts           Exit-code-is-the-verdict normalization + named signal extraction.
+  setup/intents.ts         install/migrate/seed resolution: lockfile→command, script allowlist.
   preview/                 Managed preview processes.
     types.ts               SupervisedSpec/Handle + PreviewRegistryEntry contracts.
     process.ts             startSupervised — the long-running runner (fd logging, TTL, log cap).
     recipes.ts             Preview script resolution (dev>preview>serve>start) + previewFact.
     ready.ts               Announced-port HTTP readiness (bounded, abortable, honest).
-    registry.ts            previews.json + the identity-verified crash sweep.
+    registry.ts            previews.json + the identity-verified crash sweep (recency before
+                           cap, newest first — S20.5).
     identity.ts            Process identity (encoded-CommandLine + creation-time tolerance).
   browser/                 Browser verification.
     types.ts               The zod FlowSpec (typed steps/asserts) + FlowRunResult contracts.
     probe.ts               Real launch probe (msedge→chrome→cache) + cheap plan-time guess.
     flow.ts                The deterministic flow executor (origin lock, typed taxonomy).
-  artifacts/               The documents workflow pack (Session 17) — bounded zip/XML substrate,
-                           format identification, DOCX/PPTX/PDF readers, the DocSpec model, the
-                           deterministic DOCX renderer, the self-contained HTML + browser PDF
-                           path, deterministic validators, and page rasterization.
+  artifacts/               The documents pack (S17): zip.ts/xml.ts/opc.ts bounded substrate,
+                           format.ts magic-byte identification, docx/pptx/pdf/xlsx readers with
+                           coverage verdicts, model.ts (DocSpec), docx-render.ts (deterministic),
+                           html-render.ts + pdf-render.ts (browser print), pdf-pages.ts
+                           (rasterization), validate.ts (parse-back), img-dim.ts, errors.ts.
+  research/                The web-research pack (S19): tavily.ts (the ONE egress host),
+                           sanitize.ts (ingestion neutralization + URL refusal), types.ts
+                           (budgets as data), format.ts, errors.ts.
+  remote/                  The remote-delivery pack (S20): gh.ts (managed gh runner), argv.ts
+                           (harness-composed argv), url.ts + refs.ts (endpoint/ref validation),
+                           observe.ts (ls-remote observation, scoped heads+tags — S20.5),
+                           parse.ts (tolerant gh JSON), format.ts, context.ts, errors.ts.
   recovery/                Typed recovery. (FailureClass lives in types.ts.)
     catalogue.ts           The eleven-class recovery matrix, as DATA.
     classify.ts            Deterministic classification from persisted evidence.
     ledger.ts              Pure fold: repair attempts with DERIVED outcomes.
     policy.ts              Bounded-repair eligibility + typed stop reasons.
-  review/
-    ledger.ts              Pure fold: derived requirement, round qualification, finding
+  review/ledger.ts         Pure fold: derived requirement, round qualification, finding
                            statuses with derived triage worth, blockers + caveats.
   git/
     types.ts               GitFacts / GitResult / porcelain contracts (harness capability).
     client.ts              runGit over runManaged — hardened on every invocation.
+    ls.ts                  The git-backed file listing (S20.5 — was the workspace↔retrieval cycle).
     facts.ts               detectGitFacts — session-start probe; explicit nulls on every degrade.
     porcelain.ts           Pure `status --porcelain=v2 -z` parser.
-    commit.ts              The deliberate-commit flow.
+    commit.ts              The deliberate-commit flow (preview → confirm → perform).
     checkpoint.ts          Hidden-ref checkpoints: create/list/prune + restore flows.
     worktree.ts            Detached task worktrees: version gate, add, EOL pin, honest removal.
-  sandbox/
+  sandbox/                 (imported from outside ONLY via index.ts — test-pinned)
     types.ts               SandboxBackend + EnforcementFacts contracts.
     bootstrap.ts           The versioned PowerShell + inline-C# Low-IL host script.
     windows-lowil.ts       The enforced Windows backend: transform-at-spawn (wrapSpec) + probe.
     none.ts                Honest no-enforcement backend; identity wrap.
     index.ts               selectSandbox — platform → backend.
-  tools/
-    index.ts               read_file/list_files/search/write_file/edit_file + registry + schemas.
+  tools/                   The model-facing surface. One file per tool; per-session factories
+                           close over caps rebuilt from events.
+    index.ts               read_file/list_files/search/write_file/edit_file + TOOLS registry.
     run-command.ts         Shell tool on runManaged; applies ctx.sandbox.wrap at spawn time.
     run-check.ts           run_check — typed verification (parent-only).
+    project-setup.ts       project_setup — install/migrate/seed with its own consent + events.
     preview.ts             preview — the managed preview-server tool (parent-only).
     browser-flow.ts        browser_flow — typed browser verification (parent-only).
     view-image.ts          view_image — session-artifact image reads (screenshots + pages).
     artifact-read.ts       read_document — bounded document reads with a coverage verdict.
     artifact-render.ts     render_document — spec → DOCX/PDF + deterministic validation.
     artifact-inspect.ts    inspect_pages — PDF pages → pixels the model can judge.
+    web-search.ts          web_search — the parent's bounded search (results, never pages).
+    web-extract.ts         web_extract — researcher-only full-page reads.
+    record-source.ts       record_source — the researcher's ONLY findings channel.
+    research-budget.ts     The ONE shared session research budget + its event fold.
+    remote-status.ts       remote_status — auth/repository/refs/pulls/issues/runs reads.
+    remote-push.ts         remote_push — observation-bound branch/tag publish.
+    remote-release.ts      remote_release — a Release for a tag ALREADY on the remote.
+    remote-state.ts        Remote spend/observations/identity state + event folds.
     recover.ts             recover — the bounded repair ledger tool (parent-only).
     report-finding.ts      report_finding — the reviewer child's ONLY findings channel.
     review.ts              review — parent triage over recorded findings.
     delegate.ts            delegate_task — parallel groups, executor orchestration, briefs,
-                           the DAG gate (checkDagRules R1–R12), caps, group digest.
+                           the DAG gate (R1–R12), caps, group digest.
     retrieve.ts            retrieve — read-only view over the session index.
     update-plan.ts         update_plan — the model's ONLY plan write path.
     apply-changes.ts       apply_task_changes + the captured-changes registry.
-  retrieval/               Git-backed inventory (+ path-SET digest) → regex symbol/import
-                           extraction (ts/js, python, rust, go, c/c++) → import-graph PageRank → a persisted
-                           incremental index written ONLY at assembly → ranking with traceable
-                           signals → tiered render under a HARD char budget; any failure falls
-                           back to the flat map.
+  retrieval/               inventory.ts (git-backed file facts + path-SET digest) →
+                           extract.ts (regex symbols/imports: ts/js, python, rust, go, c/c++) →
+                           graph.ts (import resolution + PageRank) → store.ts (the persisted
+                           incremental index, written ONLY at assembly) → rank.ts (traceable
+                           signals) → render.ts (tiered map under a HARD char budget) →
+                           ranked-map.ts (the assembly seam; any failure → flat map).
   net/transport.ts         Proxy-aware transport factory (pure resolver + custom fetch).
   provider/
-    catalog.ts             The capability model as DATA (models, caps, provider metadata).
+    catalog.ts             The capability model as DATA — incl. per-model context budgets under
+                           the S20.5 derivation rule (window fit + billing clamps, test-pinned).
     profiles.ts            Per-provider chat-compat wire deviations (deepseek/kimi/glm).
     errors.ts              ProviderError taxonomy + bounded connection-phase retry.
     sse.ts                 One incremental SSE parser for the fetch-based adapters.
@@ -115,9 +153,12 @@ src/
     anthropic.ts           Streaming SDK adapter + pure mapping + thinking round-trip.
     openai-responses.ts    OpenAI Responses API adapter (stateless, reasoning items replayed).
     openai-compat.ts       ONE Chat-Completions adapter, profile-parameterized.
-  memory/                  Capped never-throwing doc IO + JOURNAL rolling policy + CODEBASE
-                           provenance/staleness + the session-start load and end-of-session
-                           update (all pure except the IO edges).
+  memory/
+    store.ts               Capped never-throwing doc reads (docio re-export for memory callers).
+    load.ts                Session-start load: caps, crash notes from log tails, injection.
+    journal.ts             JOURNAL.md rolling policy (2 full + compressed stubs, 24 KiB).
+    codebase.ts            CODEBASE.md provenance/staleness (dual digests).
+    update.ts              End-of-session narrative (ONE cached-prefix call) + atomic writes.
   plan/
     store.ts               LEGACY markdown plan store — resumed pre-canonical sessions only.
     schema.ts              Canonical plan graph: zod shape, semantic validation, canonicalJson +
@@ -126,10 +167,13 @@ src/
                            readPlanState (the ONE reader) + approvedCurrentGraph (the ONE gate
                            filter every consumer shares).
     views.ts               Deterministic user/agent projections + the generated-view writer.
-    graph-state.ts         Pure event fold → per-task execution states (the DAG's truth).
+    graph-state.ts         Pure event fold → per-task execution states (the DAG's truth);
+                           plan-vs-event project ids fold case like selectUnit (S20.5).
   runtime/
-    session.ts             startSession / runTurn / resumeSession / reconstruct / endSession.
-    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn.
+    session.ts             startSession / runTurn / resumeSession / reconstruct / endSession;
+                           executeCall gate, spill choke, evidence recorders.
+    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn;
+                           supervision; the wall clock EXCLUDES measured approval wait (S20.5).
     roles.ts               Runtime role contracts over the policy fact table in types.ts.
     worktrees.ts           Worktree home, crash registry (owner-stamped, locked), guarded sweep.
     task-changes.ts        Bounded binary-safe executor change capture to blobs.
@@ -138,15 +182,32 @@ src/
     approvals.ts           Approvers + prompt formatting ([s] hidden where no grant would store).
     acceptance.ts          The session completion fold: complete/unfinished + /accept state.
     undo.ts                applyUndo (last / all) over the recorded mutations.
-  trust/                   trust.json + audit log; consent gate; `agent trust`.
-  config/config.ts         Layered narrowing-only config.
-  repl/                    runRepl + the ONE persistent readline (io) + the EventLog.onAppend
-                           renderer + the sticky status area (the ONLY cursor-moving code,
-                           TTY-only) + the live task table/cancel registry + slash commands.
-  workspace/               The FLAT map (fallback form) + the system-prompt builders.
-  report/                  report.ts (pure Event[] → {md, json}) + diff.ts (attributable diff).
-  cli/                     parseArgs dispatch; buildRunContext; assembleSession (the ONE
-                           construction path both interfaces consume); the TTY trust gate.
+    input-coerce.ts        The tolerant one-level decode for double-encoded tool arguments.
+  trust/                   trust.json + audit log (store.ts), consent gate (gate.ts),
+                           `agent trust` (commands.ts).
+  config/config.ts         Layered narrowing-only config (+ research/remote denylists).
+  repl/
+    repl.ts                runRepl — prompt → runTurn over ONE session; resume honesty notes.
+    io.ts                  The ONE persistent readline; mid-turn typed /-lines; EOF fail-closed.
+    render.ts              EventLog.onAppend renderer + live command-output preview.
+    commands.ts            Slash commands (/help … /remote); the ONE fold per surface.
+    status.ts              The sticky status area — the ONLY cursor-moving code, TTY-only.
+    live-tasks.ts          Render-only live task table + the /cancel registry.
+    heartbeat.ts           The dim "model working (Ns)" line for always-thinking models.
+    format.ts              Shared chrome formatters (tokens, durations).
+  workspace/
+    map.ts                 The FLAT map fallback (git listing via git/ls, else pure walker).
+    system-prompt.ts       System-prompt builders (main + per-role) incl. the project block
+                           with detection notes (S20.5).
+  report/
+    report.ts              Pure Event[] → {md, json}; CHECKED correlation; all sections.
+    diff.ts                The attributable session diff (pre-image blob → disk bytes).
+  cli/
+    index.ts               parseArgs dispatch + subcommand bodies; loud one-shot max-steps end.
+    context.ts             buildRunContext — flags > config > catalog precedence.
+    assemble.ts            assembleSession — the ONE construction path both interfaces consume;
+                           every cap fold rebuilt from events on resume.
+    trust-check.ts         The TTY trust gate.
 ```
 
 ## Startup order (load-bearing)
@@ -187,14 +248,13 @@ nothing to a model (documented exception) and keeps the pure walker pre-trust.
 
 `executeCall` is the gate: record `tool.requested` (verbatim, untrusted) → parse input against
 the tool's zod schema → `decide(...)` → record `policy.decision`. A parse FAILURE first passes
-through `input-coerce.ts` (S16.5b, found live): when an `invalid_type` issue expected
-object/array and a STRING sits at that path, and that string itself `JSON.parse`s to a
-structure, it is decoded and the input re-validated ONCE — kimi-k3 double-encodes nested
-arguments, and fed only the schema error it cycled serialization formats for twelve minutes
-without ever un-stringifying the value. Anything else keeps the original error plus a
-plain-language hint naming the stringified path. `tool.requested` and the wire history keep the
-model's ORIGINAL bytes; policy and execution both see the decoded input (the same thing an
-approval prompt shows). A still-failing parse is a recorded deny. On `deny`, return a terminal error result (with a `tool.completed` so resume
+through `input-coerce.ts`: when an `invalid_type` issue expected object/array and a STRING sits
+at that path that itself `JSON.parse`s to a structure, it is decoded and re-validated ONCE —
+kimi-k3 double-encodes nested arguments and cannot dig itself out from the schema error alone.
+Anything else keeps the original error plus a plain-language hint naming the stringified path.
+`tool.requested` and the wire history keep the model's ORIGINAL bytes; policy and execution both
+see the decoded input (the same thing an approval prompt shows). A still-failing parse is a
+recorded deny. On `deny`, return a terminal error result (with a `tool.completed` so resume
 never mistakes it for a crash). On `ask`, call the approver and record `approval.resolved`; a
 `session`-scope allow adds a grant. On `allow`/approved, run `runExecution`.
 
@@ -213,7 +273,7 @@ would leave `/undo` blind to bytes already on disk while the log claimed nothing
 `tool.completed` is also the SPILL choke point: when a tool attached transient
 `ToolResult.fullOutput` (only `run_command`, `run_check`, and `delegate_task` do) and the output
 was truncated, the runtime stores the full pre-truncation bytes as `objects/<sha>` and marks the
-event `fullOutputSaved` — skipped under ANY redaction, capped at 2 MiB, never turn-failing, and
+event `fullOutputSaved` — skipped under ANY redaction, capped at 8 MiB (S20.5: 2→8), never turn-failing, and
 flagged only when the stored blob's hash verifiably equals the recorded sha. `reconstruct`
 deliberately does NOT read blobs back (the model never saw the full bytes live). The report says
 "captured output preserved", never "full" — the exec capture cap may itself have dropped bytes.
@@ -242,13 +302,20 @@ PURE function recomputed per request:
 - **Image pass (unconditional):** image parts older than `IMAGE_KEEP_LAST_STEPS = 2` assistant
   steps become `[screenshot <label>: viewed live…; preserved at objects/<sha>]` markers even
   below the char trigger — a deliberately separate window from `keepLastSteps = 4`.
-- **Char pass:** when RAW history crosses `DEFAULT_TRIGGER_CHARS = 400_000`, the oldest
-  tool_result contents are replaced with a marker (char count + sha256 + evidence-log pointer)
-  until the sent size is ≤ `DEFAULT_TARGET_CHARS = 200_000`.
-- **Monotonicity is enforced, not assumed:** the runtime passes its live `alreadyElided` set and
-  those results STAY elided. Without it, an aging screenshot could free enough budget that the
-  char pass restored older outputs verbatim — invalidating the moving cache breakpoint (the whole
-  suffix re-billed) and contradicting the `context.compacted` record.
+- **Char pass:** when RAW history crosses the trigger, the oldest tool_result contents are
+  replaced with a marker (char count + sha256 + evidence-log pointer) until the sent size is ≤
+  the target. The bounds come from the model's catalog `budgetTokens` via `contextBudgetFor`
+  (×4 chars trigger, half target); `DEFAULT_TRIGGER_CHARS = 400_000` / `DEFAULT_TARGET_CHARS =
+  200_000` are the fallback for sessions with no catalog identity. S20.5 replaced the flat 100k
+  budget with a per-model derivation rule (window fit + provider billing clamps), so a 1M-window
+  model no longer elides at ~10% of its real window.
+- **Monotonicity is enforced, not assumed, AND survives resume (S20.5):** the runtime passes its
+  live `alreadyElided` set and those results STAY elided; on resume the set is re-seeded from the
+  log's `context.compacted` events (it was process-memory only, so a resumed session under a
+  larger budget could restore outputs the log records as permanently elided). Without it, an
+  aging screenshot could free budget that the char pass used to restore older outputs verbatim —
+  invalidating the moving cache breakpoint (the whole suffix re-billed) and contradicting the
+  record. The end-of-session narrative request carries the same set, for the same reason.
 - **Reasoning blocks weigh their PAYLOAD only** (plus `text` when no payload exists): `text` is a
   display copy that is never re-sent, and the compat adapters set it equal to the payload —
   charging both double-weighed every kimi/deepseek block and could fire the exhausted warning at
@@ -257,8 +324,12 @@ PURE function recomputed per request:
 Only tool_result CONTENT is replaced: tool_use/result pairing (API validity), assistant text,
 user messages, and the last 4 assistant steps are untouched; outputs smaller than their marker
 are skipped. `session.messages` and the log are NEVER mutated; `context.compacted` records
-exactly which outputs the model can no longer see (with a warning when even full elision exceeds
-the target — assistant/user text is deliberately not compacted).
+exactly which outputs the model can no longer see. The **exhausted** state (history over target
+even fully elided) is recorded even in the STEADY STATE where the elided set stops growing but
+un-elidable content — assistant text, reasoning payloads — keeps accumulating: a session-scoped
+latch fires ONE loud `context.compacted {exhausted:true}` at the crossing and re-arms if pressure
+recedes (S20.5 — the old growth-gated warning went silent exactly when the session was heading
+for a hard context-window failure).
 
 ## Repository intelligence (`retrieval/`, `tools/retrieve.ts`)
 
@@ -316,9 +387,8 @@ Large-repo understanding is selective and ranked, not a broad file dump. One in-
 
 ## Project units (`checks/workspace.ts`)
 
-A workspace holds one or more project UNITS, not one project at its root (before S16, a
-`web/`+`api/` repository with no root manifest went silently inert — nothing detected, every
-gate unrunnable).
+A workspace holds one or more project UNITS, not one project at its root — a `web/`+`api/`
+repository with no root manifest previously went silently inert, every gate unrunnable.
 
 - **Discovery** is bounded, stat-first and NEVER throwing (the `detect.ts` discipline): the root
   when it has a manifest, whatever the root `package.json` `workspaces` / `pnpm-workspace.yaml`
@@ -330,7 +400,7 @@ gate unrunnable).
   a cmake unit is NAMED without recipe rows so refusals say what the project is. Depth 1 is
   scanned GENERALLY rather than against a name list — a Python service in `svc/` is a real
   project; `target/` and `vendor/` join the scan skip set.
-  Caps: `MAX_PROJECT_UNITS = 12`, `MAX_UNIT_DEPTH = 2`, 200 directories per listing.
+  Caps: `MAX_PROJECT_UNITS = 16` (S20.5: 12→16, and the dropped-units note now renders into the system prompt — a unit past the cap is a visible drop, not a silent nonexistence), `MAX_UNIT_DEPTH = 2`, 200 directories per listing.
 - **Two rules are load-bearing.** A unit exists only where a MANIFEST exists (directory names are
   candidates, never units). And everything NOT interpreted is RECORDED as a `note`: the glob
   vocabulary is "a literal directory" or "a single trailing `/*`", and anything richer is refused
@@ -375,12 +445,10 @@ gate unrunnable).
 - **One detection per session, one LIVE holder.** Assembly detects once, before the system prompt,
   and `checks/session-workspace.ts` publishes that snapshot to `run_check`, `preview` and
   `project_setup` through a single `SharedWorkspace`. Per-tool copies protected a window that does
-  not exist — tool calls execute strictly one at a time, so `decide()` and `execute()` for one call
-  are back-to-back — and cost a real defect: after `project_setup install` created `node_modules`,
-  the next check resolved against a snapshot where nothing could run, was allowed as "nothing to
-  run", then refused at execute with *"the project changed after this call was approved"* for a
-  call nobody approved. `project_setup` refreshes the holder after a run; the drift guard is
-  unchanged, and the never-gated case now has its own honest message.
+  not exist (tool calls execute strictly one at a time, so `decide()` and `execute()` are
+  back-to-back) and let a post-install check resolve against a stale snapshot — refused at execute
+  for a call nobody approved. `project_setup` refreshes the holder after a run; the drift guard is
+  unchanged, and the never-gated case has its own honest message.
 - **The prompt block is a photograph.** It is built before the first turn and lives in the cached
   stable prefix, so it is labelled AS OBSERVED AT SESSION START and points at the tools that
   resolve against current state. A multi-project workspace also gets ONE startup chrome line naming
@@ -406,17 +474,16 @@ means "we fetched".
   false `no-recipe` capability claim for a project that declares the script (S16.5b).
 - **Consent, two different answers for two different consequences.** An install is `external` and
   MAY replay under `[s]`, bound to `sha(lockfile + package.json + every install-affecting config
-  file)` — never the lockfile alone, because
-  every package manager executes package.json's lifecycle scripts during an install, and `.npmrc`,
-  `.yarnrc.yml` (`yarnPath`) and `.pnpmfile.cjs` (a `readPackage` hook) each choose what code runs
-  and where it comes from — all of them ordinary auto-allowed writes. Binding the lockfile alone let an ordinary
-  auto-allowed package.json write turn one `[s]` into standing arbitrary-shell consent (found by
-  the S16 review; the S14.5 body-binding lesson, one file over). `migrate`/`seed` are
-  `destructive` and ask EVERY time: a migration is not idempotent, so "you approved this once"
-  cannot honestly mean "you approved it again". They issue no replay keys, and `destructive` is
-  structurally non-grantable — two independent reasons for the same answer. Installs deliberately
-  DO run lifecycle scripts; `--ignore-scripts` would break esbuild/playwright/prebuilds and make
-  the capability a lie, so the prompt says so instead.
+  file)` — never the lockfile alone, because every package manager executes package.json's
+  lifecycle scripts during an install, and `.npmrc`, `.yarnrc.yml` (`yarnPath`) and
+  `.pnpmfile.cjs` (a `readPackage` hook) each choose what code runs and where it comes from — all
+  ordinary auto-allowed writes, so binding the lockfile alone let an auto-allowed package.json
+  write turn one `[s]` into standing arbitrary-shell consent. `migrate`/`seed` are `destructive`
+  and ask EVERY time: a migration is not idempotent, so "you approved this once" cannot honestly
+  mean "you approved it again". They issue no replay keys, and `destructive` is structurally
+  non-grantable — two independent reasons for the same answer. Installs deliberately DO run
+  lifecycle scripts; `--ignore-scripts` would break esbuild/playwright/prebuilds and make the
+  capability a lie, so the prompt says so instead.
 - **Evidence:** `setup.started` (from `onSpawn` only) / `setup.completed` are NEW event types,
   additive, schema still v1. Reusing `check.*` would have taught every existing reader a
   falsehood — `collectPassingEvidence` marks a file CHECKED on a zero exit, gates count a passing
@@ -466,11 +533,11 @@ argument, and everything else follows from it.
   package dir). Holes are DECISIONS with stated reasons via `ECOSYSTEM_KIND_NOTES`: no rust
   test-targeted (cargo selects tests by NAME), no go format (`gofmt -l` exits 0 either way, and
   an output-parsed verdict would break the contract below). Preconditions are ROW-OWNED
-  (`UnmetPrecondition {reason, why}`, S18): whether a blocker is an uninstalled project
-  (curable), a missing machine toolchain (waives loudly), or a host incapability (waives
-  quietly) is a fact only the row can state — the old central curable rule was Node's answer
-  (`hasDependencies && !hasNodeModules`) hard-coded into generic control flow, and the node rows
-  still give byte-identical answers, test-pinned. Cross-target crates (a `[build].target` triple
+  (`UnmetPrecondition {reason, why}`): whether a blocker is an uninstalled project (curable), a
+  missing machine toolchain (waives loudly), or a host incapability (waives quietly) is a fact
+  only the row can state — the old central rule hard-coded Node's answer (`hasDependencies &&
+  !hasNodeModules`) into generic control flow; the node rows still answer byte-identically,
+  test-pinned. Cross-target crates (a `[build].target` triple
   in `.cargo/config.toml`) split honestly: `cargo fmt` stays host-verifiable, compiles gate on
   the installed rustup target (else `toolchain-unavailable` naming `rustup target add <triple>`),
   and `cargo test` refuses permanently as `precondition` — cross-compiled test binaries cannot
@@ -495,26 +562,23 @@ argument, and everything else follows from it.
 - **Three refusals that spawn nothing:** the resolved command (or the script BODY it invokes)
   changed since the gate; a malformed request (`test-targeted` with no usable scope) — refused as
   a CALL, with no event, so a caller mistake can never become gate evidence; and the session
-  check budget (`CHECKS_PER_SESSION = 80`, events-rebuilt).
+  check budget (`CHECKS_PER_SESSION = 160` — shared with browser flows; S20.5: 80→160, events-rebuilt).
 - **Evidence:** `check.started` is emitted from `onSpawn` ONLY, so it means exactly what
   `command.started` means — a process really started. An `unsupported` kind records a completed
   event alone carrying `unsupportedReason` (`no-recipe` | `precondition` | `precondition-curable`
-  | `bad-request` | `toolchain-unavailable` (S18)), which is what lets a gate distinguish "this
-  project cannot" from "you asked wrong" — and, since v1.2.1, from "this project is not
-  installed yet". `toolchain-unavailable` is the MACHINE-capability answer (no cargo/go on PATH,
-  a rustup component or target missing), produced before anything spawns and naming the exact
-  user cure; it waives a gate — the browser-unavailable precedent: an absence the harness will
-  never install on its own must not strand acceptance — but LOUDLY: the gate folds track these
-  waivers apart (`toolchainUnavailable`/`toolchainUnavailableIn`) and the acceptance caveat says
-  "TOOLCHAIN IS NOT INSTALLED on this machine" instead of the generic "unsupported".
-  `precondition-curable` is
-  produced when the project DECLARES dependencies and has no `node_modules`: a transient state with
-  a named cure (`project_setup install`), decided by the node rows themselves (row-owned `why`,
-  S18) exactly as the old central rule did. It does NOT waive a gate. Waiving it let a session that
-  installed `api` and forgot `web` be accepted as COMPLETE with its own caveat claiming a project
-  shipping a build and a test suite *cannot* run them — an uninstalled project is unverified, not
-  unverifiable. `reconstruct` replays an interrupted check as "produced no verdict; effects
-  unknown — re-run".
+  | `bad-request` | `toolchain-unavailable`), which lets a gate distinguish "this project cannot"
+  from "you asked wrong" and from "this project is not installed yet". `toolchain-unavailable` is
+  the MACHINE-capability answer (no cargo/go on PATH, a rustup component or target missing),
+  produced before anything spawns and naming the exact user cure; it waives a gate — the
+  browser-unavailable precedent: an absence the harness will never install on its own must not
+  strand acceptance — but LOUDLY: the gate folds track these waivers apart
+  (`toolchainUnavailable`/`toolchainUnavailableIn`) and the acceptance caveat says "TOOLCHAIN IS
+  NOT INSTALLED on this machine" instead of the generic "unsupported". `precondition-curable` is
+  produced when the project DECLARES dependencies and has no `node_modules`: a transient state
+  with a named cure (`project_setup install`), decided by the node rows themselves (row-owned
+  `why`). It does NOT waive a gate — an uninstalled project is unverified, not unverifiable (the
+  full reason lives with the gate fold below). `reconstruct` replays an interrupted check as
+  "produced no verdict; effects unknown — re-run".
 
 ### Consent for checks — replay, bound to what actually runs
 
@@ -543,7 +607,7 @@ explicit SESSION resource with recorded start, readiness, health, logs, and dete
   (`pid, exited, isAlive, stop, tail`) instead of awaiting an outcome. Output goes to a
   per-preview LOG FILE via an inherited fd — no pipes, so an orphan surviving harness death can
   never wedge on a full pipe buffer half-serving requests — and the parent's fd copy closes at
-  spawn. The child is `unref()`ed. Lifetime bounds are typed stop reasons: TTL (60 min), log cap
+  spawn. The child is `unref()`ed. Lifetime bounds are typed stop reasons: TTL (120 min — S20.5: a multi-hour session outlived 60), log cap
   (16 MiB → `log-overflow`), explicit stop, session end. `stop()` bounds BOTH the kill helper and
   the wait for death, and re-checks OS liveness first so a crash coinciding with a timer is never
   relabeled. POSIX children get their own process group; on Windows detaching is NOT viable
@@ -581,11 +645,10 @@ explicit SESSION resource with recorded start, readiness, health, logs, and dete
   killing a recycled pid is not); >24h unverifiable records are deregistered WITHOUT a kill; a
   20s identity wall budget bounds startup. Stop-all runs on every session-end path.
   `/accept` deliberately does NOT stop previews (the user may browse the accepted app).
-- **Honest answers when a preview is GONE (S16.5b):** the tool keeps an in-memory
-  `endedReason(previewId)` so the browser layer can tell a harness lifecycle stop apart from a
-  crash; `status` surfaces a PREVIOUS-life registry survivor of the SAME session id (an
-  unverifiable orphan used to be in neither the live nor the another-session list — invisible
-  exactly while it held the port Vite strictPort needs), and the resume note names the
+- **Honest answers when a preview is GONE:** the tool keeps an in-memory `endedReason(previewId)`
+  so the browser layer can tell a harness lifecycle stop apart from a crash; `status` surfaces a
+  PREVIOUS-life registry survivor of the SAME session id (an unverifiable orphan was previously
+  invisible exactly while it held the port Vite strictPort needs), and the resume note names the
   stop-it-first way out; the nothing-was-gated drift refusal says "nothing was approved and
   nothing started" instead of claiming a nonexistent approval was invalidated.
 
@@ -594,14 +657,17 @@ explicit SESSION resource with recorded start, readiness, health, logs, and dete
 The check inversion applied to UI: the model declares a TYPED FLOW; the harness owns execution,
 waits, and the failure taxonomy. `playwright-core` drives the SYSTEM browser — probe order
 msedge → chrome → Playwright-cache Chromium, cached per session **SUCCESS-only**
-(`cacheSuccessfulProbe`, S16.5b: a transiently failed probe cached for the session turned every
-later flow into the gate-WAIVING unsupported/precondition — acceptance could reach COMPLETE
-without the UI ever driven; a failed probe re-probes on the next flow, which costs seconds and
-never honesty); a machine with none degrades to the gate-waiving `unsupported/precondition`.
-A flow bound to a preview the HARNESS stopped (TTL / log cap / explicit stop) between approval
-and execution reports `preview-stopped-lifecycle` (routed to `timeout-resource` — a resource
-bound expired, nothing about the app failed), keeping `preview-died` → runtime-process for real
-crashes. Over-budget or store-failing SCREENSHOTS are counted (`screenshotsOmitted` on the event
+(`cacheSuccessfulProbe`: a cached transient failure turned every later flow into the gate-WAIVING
+unsupported/precondition — acceptance could reach COMPLETE without the UI ever driven; a failed
+probe re-probes on the next flow — seconds, never honesty); a machine with none degrades to the
+gate-waiving `unsupported/precondition`. A flow bound to a preview the HARNESS stopped (TTL / log
+cap / explicit stop) between approval and execution reports `preview-stopped-lifecycle` (routed
+to `timeout-resource` — a resource bound expired, nothing about the app failed), keeping
+`preview-died` → runtime-process for real crashes. S20.5 closed the two gaps in that split: a
+lifecycle stop landing MID-flow (the reapers are asynchronous) is reclassified after the run by
+re-consulting the ended reason, and an UNBOUND flow can name the reason too (via the most
+recently ended preview) — but only when nothing is left alive, so a sibling's death is never
+borrowed. Over-budget or store-failing SCREENSHOTS are counted (`screenshotsOmitted` on the event
 and a do-not-cite output line), matching the trace-omission honesty.
 
 - **FlowSpec (zod, strict)**: `goto{path (relative-only), ready_when{selector|text} REQUIRED}`,
@@ -655,14 +721,13 @@ machinery exists or is needed.
 - **Substrate.** `zip.ts` opens OOXML containers IN MEMORY ONLY (nothing is ever extracted to
   disk, so zip-slip is structurally impossible rather than defended against), validating every
   entry name and capping entries/bytes on `max(size, originalSize)` — a STORED entry is
-  materialized by its COMPRESSED size, and gating only the uncompressed field let a forged
-  central directory pull 300 KB past a 1 KB cap before the after-inflate check fired (S17
-  review). Writing is deterministic: sorted entries, FIXED mtime (fflate would stamp the live
-  clock into 2-second-resolution DOS fields), fixed level. `xml.ts` is a size- AND depth-bounded
-  strict parse (a 546-byte part nesting 5000 elements parsed fine and then overflowed the stack
-  in the recursive walk — an untyped RangeError that killed the turn instead of refusing the
-  file), plus the escapers every generated string must pass through, which also drop code points
-  XML 1.0 cannot carry.
+  materialized by its COMPRESSED size, so gating only the uncompressed field let a forged central
+  directory pull 300 KB past a 1 KB cap before the after-inflate check fired. Writing is
+  deterministic: sorted entries, FIXED mtime (fflate would stamp the live clock into
+  2-second-resolution DOS fields), fixed level. `xml.ts` is a size- AND depth-bounded strict
+  parse (unbounded nesting overflowed the recursive walk with an untyped RangeError instead of
+  refusing the file), plus the escapers every generated string must pass through, which also drop
+  code points XML 1.0 cannot carry.
 - **Identification is by MAGIC BYTES + the content-types part, never the extension**, and
   `identifyDocument` NEVER throws: every failure is an `unsupported` verdict with a reason that
   echoes no file content (a `.env` renamed `report.docx` must fail the sniff without leaking a
@@ -730,10 +795,15 @@ it (a render exiting clean after a mutation leaves the file UNCHECKED). They are
 in `WORK_EVENT_TYPES`: every render already emits snapshot-covered `file.mutated` events, which
 are what acceptance staleness counts. A failing LATEST validation per path is a loud acceptance
 CAVEAT, not unfinished work (blocker semantics need delete/undo resolution rules that do not
-exist yet; the caveat retires when the artifact is deleted or undone). Budgets are events-rebuilt
-like every other: `RENDERS_PER_SESSION = 20` counted over calls that produced an artifact or
+exist yet; the caveat retires when the artifact is overwritten, deleted or undone). That
+retirement actually FIRES since S20.5: it matches the render's additive absolute path against
+later `file.mutated`/`undo.applied` events (they carry absolute OS paths; the render's own `path`
+is workspace-relative — they could never be equal before), excludes the render call's own trailing
+mutation, and honors `undo.applied` (undo emits that, never `file.mutated`). Budgets are
+events-rebuilt
+like every other: `RENDERS_PER_SESSION = 30` (S20.5) counted over calls that produced an artifact, HARD-FAILED after being charged (the additive `artifact.render-failed` marker — an attempt is evidence), or
 completed (a browserless PDF-only render legitimately emits no artifact event),
-`INSPECTED_PAGES_PER_SESSION = 40` over UNIQUE image shas with a 32 MiB blob budget.
+`INSPECTED_PAGES_PER_SESSION = 80` over UNIQUE image shas with a 48 MiB blob budget (S20.5).
 
 **Honest limits, stated in the product, not only here:** DOCX visual fidelity belongs to Word, so
 DOCX claims are structural and parse-back verified while visual judgment happens on the PDF twin
@@ -772,7 +842,7 @@ policy-free and log-free: policy stays in the engine, evidence stays in the runt
   unreachable without Job Objects (documented gap).
 - **Capture**: stdin `'ignore'` (interactive children fail fast, never hang the turn); stdout and
   stderr captured separately and interleaved, head+tail under byte caps (stderr-prioritized
-  1/3–2/3 split of 512 KiB default) from raw buffers, decoded once. `truncateForModel` remains
+  1/3–2/3 split of the 4 MiB default — S20.5: 1→4 MiB, because capture truncation is UNRECOVERABLE, a middle gap no later spill or model-truncation can restore) from raw buffers, decoded once. `truncateForModel` remains
   the final model-facing truncation contract on top.
 - **Env hygiene**: children get the parent env minus names containing
   `key/secret/token/password/credential` (case-insensitive; config `envExcludePatterns` may add
@@ -814,7 +884,7 @@ persisted. Displayed paths pass through `sanitizeLine`. Every session appends
 
 Two strict-schema layers merged narrowing-only: user `<state>/config.json` (prefs `model`,
 `maxSteps`, `memoryUpdates` + narrowing) and workspace `<ws>/.agent-cli/config.json` (narrowing
-ONLY — no prefs, since a workspace is attacker-influencable). Narrowing knobs: `protectedPaths`,
+ONLY — no prefs, since a workspace is attacker-influencable). Narrowing knobs: `researchBlockedDomains`, `remoteBlockedHosts`, `protectedPaths`,
 `secretPatterns`, `envExcludePatterns`. The schemas cannot express widening; unknown keys/bad JSON
 are hard `ConfigError`s. Rules travel on `ToolContext`; provenance is recorded as
 `config.loaded {sources: [{path, sha256}]}`. The `.agent-cli/` directory is write-protected from
@@ -875,10 +945,13 @@ delegated task is a bounded, attributable unit beneath it.
   contract per role: tool registry (a subset of TOOLS; never the delegate/update_plan/apply tools
   ⇒ depth 1 and no self-integration, structurally), role prompt builder, harness-fixed budget,
   and approval mode (`auto-deny` | `forward`). A load-time check pins the two tables consistent.
-  Budgets: read-only 15 steps / 5 min / 30k out; **reviewer 24 steps / 8 min / 30k out** (its
+  Budgets: read-only 15 steps / 5 min / 30k out; **reviewer 24 steps / 12 min / 30k out** (its
   brief demands interleaved read→record work, and 15 starved exactly the diligent lenses into
-  `budget-steps`, which cannot qualify a round); executor 40 / 20 min / 50k (approval wait counts
-  against its wall clock).
+  `budget-steps`, which cannot qualify a round; S20.5: 8→12 min after two of three kimi lenses
+  hit the wall); executor 40 / 30 min / 50k, and the wall clock now **EXCLUDES measured
+  forwarded-approval wait** (S20.5 — an away human used to kill the executor mid-work and spend
+  an R10 attempt; the runner re-arms a real-time deadline on effective elapsed, and the wait is
+  recorded on `task.ended.approvalWaitMs`).
 - **Named admission seams.** `retrieve` and `report_finding` exist only as per-session instances
   and reach children ONLY through named `SubagentDeps` fields; `childTools()` admits one iff the
   role contract names it AND the instance is structurally free of command/delegates/planDoc facts
@@ -907,8 +980,9 @@ delegated task is a bounded, attributable unit beneath it.
   AGENT.md injected (generated memory docs deliberately not). Read-only roles get
   `autoDenyApprover`; the executor's asks FORWARD to the parent's approver.
 - **Caps (harness-fixed, never model-controlled):** per-role budgets; group ≤ 3; `TASKS_PER_SESSION
-  = 16`, group-atomic (a group that does not fully fit is refused whole, spawning nothing); a
-  cumulative `SESSION_CHILD_OUTPUT_TOKEN_CAP = 200_000`; `MAX_REVIEW_ROUNDS = 2` (a third reviewer
+  = 32` (S20.5: 16→32 — one pool for all five roles), group-atomic (a group that does not fully
+  fit is refused whole, spawning nothing); a cumulative `SESSION_CHILD_OUTPUT_TOKEN_CAP =
+  400_000` (S20.5: 200k→400k); `MAX_REVIEW_ROUNDS = 2` (a third reviewer
   group refuses, naming the real exits — triage, or `/accept confirm`); no automatic retries.
   Cause-tracked cancellation maps parent-abort / wall-clock / token-cap / forwarded deny-stop onto
   distinct `TaskStatus` values and child end reasons. Progress lines carry `role·childId` identity
@@ -1082,7 +1156,11 @@ the read/write spend IS rebuilt from events — authority is not durable, spendi
 refs, no FETCH_HEAD. The cost is honest — a commit the remote holds and this repository has never
 seen is genuinely outside our object database, so the relation is reported `unknown` and a force
 push over it is **refused even with `force`**, because the harness cannot say what would be
-discarded.
+discarded. The observation listing is SCOPED to `refs/heads/*` + `refs/tags/*` (plus the target),
+carries a 4 MiB capture bound and a 20,000-row parser cap, and treats either truncation as an
+incomplete listing that forces a single-ref absence re-check before `new` (S20.5 — GitHub exposes
+two refs per PR under `refs/pull/`, which sort before tags and, unscoped, starved the parser so a
+real tag read as absent).
 
 **What the human approved is what executes.** The refspec source is the observed OID, not a branch
 name, so a local branch that moves while a human reads the prompt cannot change what is sent.
@@ -1273,7 +1351,10 @@ is green**. The mechanism is one predicate, not a new state.
   (capture happens for failed children too, and an earlier attempt's files can be applied later).
   Satisfaction is harness-derived from event seq, not attested by the model's `plan_task` label.
   For `test-targeted` the SCOPE is the check: the run's recorded `scopePaths` must overlap the
-  task's `touches`.
+  task's `touches`. Project scoping folds CASE (S20.5): a plan authored `project: 'API'` matches a
+  check recorded under the on-disk canonical `api`, because `selectUnit` matches case-insensitively
+  and would otherwise leave the gate permanently unsatisfiable AND unwaivable — the exact
+  unclearable-gate trap selection was fixed for, one fold layer up.
 - **Waivers, honestly:** an `unsupported` result waives the kind — but ONLY when the reason is a
   capability one. Neither a `bad-request` nor a `precondition-curable` may (the latter
   means the project simply has not been installed yet, and `project_setup install` is the named
@@ -1472,7 +1553,8 @@ errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as `user-quit` 
 `completed`.
 
 Commands: `/help /status /undo /diff /commit /checkpoint /plan /tasks /cancel /accept /review
-/checks /preview /report /map /quit`. `/checks` re-probes the detected project on demand and shows
+/checks /preview /report /map /provider /model /research /remote /quit`. `/checks` re-probes the
+detected project on demand and shows
 the latest EVIDENCE per kind — a check that spawned and never completed reads as "NO VERDICT",
 not as the older passing run. `/diff` carries the report's CHECKED verdict per file through the
 same correlation the report uses (one implementation, so CHECKED cannot mean two things).
@@ -1663,13 +1745,13 @@ lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The a
 | context | `context.compacted` (+`newlyImageElidedCallIds`) |
 | memory | `memory.loaded`, `memory.narrative`, `memory.updated` |
 | retrieval | `workspace.mapped` (+`inventorySha256`, `indexedFiles`, `indexState`) |
-| tasks | `task.started` (+`planTaskId`, `planTaskSha`), `task.ended`, `task.changes`, `task.applied`, `task.base-checkpoint`, `task.supervision`, `worktree.created`, `worktree.removed` |
+| tasks | `task.started` (+`planTaskId`, `planTaskSha`), `task.ended` (+`role` and `approvalWaitMs`, S20.5 — a never-started attempt still counts; approval wait is excluded from the wall clock), `task.changes`, `task.applied`, `task.base-checkpoint`, `task.supervision`, `worktree.created`, `worktree.removed` |
 | plans | `plan.route {mode, source}`, `plan.updated` (+`graph`), `plan.approved {sha256}`, `plan.discarded` (+`reason: 'accepted'`) |
 | verification | `check.started` (a REAL spawn — a `WORK_EVENT_TYPES` member), `check.completed` (verdict + named signals + `scopePaths`), both +`projectId` |
 | setup | `setup.started` (a REAL spawn; a `WORK_EVENT_TYPES` member), `setup.completed` (`ok`/`failed`/`error`/`unsupported` — never `pass`, and never readable as verification) |
 | recovery | `repair.attempted` (+`projectId` — a proof must come from the project that failed), `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash) |
 | preview/browser | `preview.started`, `preview.ready`, `preview.ended`, `preview.swept`, `browser.flow` (+`traceOmittedBytes`, `screenshotsOmitted`) |
-| documents | `artifact.rendered` (validation verdict + `failureCount`; `embeddedWorkspaceImages` gates inherited inspect consent), `artifact.inspected` (page-image blob pointers) — PRODUCTS, never verification, and never `WORK_EVENT_TYPES` members |
+| documents | `artifact.rendered` (validation verdict + `failureCount`; +`absPath` for caveat retirement, S20.5; `embeddedWorkspaceImages` gates inherited inspect consent), `artifact.render-failed` (S20.5 — a charged attempt that produced NO artifact; budget-fold evidence only), `artifact.inspected` (page-image blob pointers) — PRODUCTS, never verification, and never `WORK_EVENT_TYPES` members |
 | review | `review.findings` (an EMPTY list is a recorded clean lens), `review.triage` (deliberately NO `review.completed` — a round is derived from its capture events) |
 | acceptance | `session.accepted {complete, summary, unfinished?, deliveryRef?, deliveryOid?}` |
 
@@ -1756,7 +1838,10 @@ not a name).
 ```
 catalog.ts    Capability model as DATA: per-model context/output caps, defaultMaxTokens, vision +
               `toolResultImages` ('native'|'rehomed'|'none'), reasoning {mode, replay}, caching
-              style, lifecycle, quirk notes, and `budgetTokens` (OUR cost cap, not the provider's
+              style, lifecycle, quirk notes, and `budgetTokens` — OUR working-context cap under
+              the S20.5 derivation rule (`budget×1.25 + 40k overhead + defaultMaxTokens ≤
+              contextTokens`, then clamped under provider billing thresholds; test-pinned), not
+              the provider's
               window) + PROVIDERS (key envs, base-URL env, key URL, default model, models path).
               `CATALOG_VERIFIED` is rendered by every listing. Retired ids are ABSENT; invite-only
               models are never listed. An uncataloged model gets conservative defaults + a note.

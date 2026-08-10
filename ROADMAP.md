@@ -6,338 +6,127 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
-## Session 20 (2026-08-08) — Remote Git and GitHub delivery
+## Session 20.5 (2026-08-09) — Full-system review, limits retune, and a zero-to-remote proof
 
 ### Objective
 
-Carry a verified, accepted, committed local result across the machine boundary to an explicitly
-identified GitHub destination — and do it without ever letting "the work is done" become "the work
-may be published".
+A consolidation-and-proof session before S21's memory work, not a feature session: find and fix
+what six sessions of rapid capability growth (S15–S20) left behind — real bugs, fail-open seams,
+doc/code drift, and above all **fixed caps sized for the fixtures they were introduced against**
+rather than for what a v1.6 session now does (research + documents + remote delivery in one
+coherent run) — then prove the whole system end to end from an empty folder to a real GitHub
+release.
 
-The failure this exists to prevent is not "the agent cannot push". It is **authority creep**: a
-capability that reads a remote and one that changes a remote, arriving as one thing, so that
-consent to look becomes consent to publish, and a green check becomes a licence.
+### What shipped — the review (5 lenses, bounded, hand-verified)
 
-### What shipped
+One Workflow, five differentiated finder lenses over the whole system; every finding verified by
+hand against the code before any fix, each fix with a regression test, committed in five clusters.
+The largest class was **accounting and honesty seams that only bite hours into a real session**:
 
-**Two policy facts, not one capability with a mode.** `FACT_KINDS` gains `remoteRead` AND
-`remoteWrite`, each with its own fail-closed branch before the command branch. The split is
-structural rather than documentary: the engine's existing conflicting-contract rule now makes a
-tool that could both read and publish an **automatic deny**, so "the read tool cannot publish" is
-verified by grepping this object for a second fact and finding none. Consent follows the split —
-a read asks `external` and is session-grantable within a real counter (`[s] allow further remote
-READS this session (never a push, tag or release)`); a write asks every time, is never passed
-through `applyGrant`, offers no `[s]`, and stores nothing at the grant-storage site. That last
-sentence is written in three places on purpose: a consent surface that disagrees with itself is
-how standing authority gets won by accident.
+- **Policy ordering.** A pre-resolution remote refusal (budget spent, gh absent, no repo — all of
+  which legitimately have no host yet) recorded `remote.unresolved-target` with a cure no input
+  could satisfy; the guard now honors the tool's own blocked fact before the host checks, with
+  lineage above both so a child hears the permanent answer. `command()`/`readsPaths()` were the
+  last two bare fact calls in `decide()` — a throw escaped the gate and crashed the turn; both now
+  deny like every other branch.
+- **Remote accounting + scale.** `remote_release` charged the write allowance on success only
+  while every failure recorded its `remote.mutated` event, so live and events-rebuilt spends
+  disagreed both ways (the S20 push invariant, which this tool had only half of). And the
+  observation `ls-remote` was unscoped with a silent 2,000-row cap: GitHub exposes two refs per PR
+  under `refs/pull/`, which sort before tags, so a busy repo starved a real tag out of the listing
+  and misreported it `new`. Now scoped to heads+tags, 4 MiB capture, 20k reported rows, truncation
+  folded into `basesIncomplete` with a single-ref absence re-check.
+- **Runtime honesty (six gaps).** A deny-&-stop on a turn's final step read as `max-steps` (a
+  child's as `budget-steps`, spending an R10 attempt) — the cause is now explicit on `TurnResult`.
+  `repairDanglingToolUses` claimed "the turn failed before this call ran" for calls that had
+  snapshotted, written bytes, or spawned — and its appended completion SHADOWS reconstruct on every
+  resume; it now tells the same truth. Elision monotonicity was process-memory only and reset on
+  resume (and diverged in the end-of-session narrative) — both seeded from `context.compacted` now.
+  The exhausted-context warning was gated on the elided set GROWING, so it went silent exactly in
+  the steady state heading for a hard context-window failure — a latch fires it once at the
+  crossing. The task-base untracked guard was the only human consent with no durable record.
+- **Gate folds (one HIGH + three refunds).** Project-scoped gates compared `projectId`
+  case-SENSITIVELY while `selectUnit` folds case, so a plan scoped `'API'` over on-disk `api` was
+  permanently unsatisfiable AND unwaivable — the exact unclearable-gate trap, one fold layer up.
+  Plus three quiet budget refunds across resume (a never-started delegated attempt, an
+  all-formats-failed render, a failed release), each closed with an additive event.
+- **Long-run robustness.** A wedged `taskkill` could hang the exec outcome forever (the helper
+  wait was unbounded while settle awaits it — the sibling preview module already bounded the same
+  call); a TTL/log-cap reap landing mid-flow was misdiagnosed `preview-died` → runtime-process; the
+  spawn-to-register crash scan sliced 50 entries before the recency filter, so >50 accumulated logs
+  blinded the window. All three fixed.
 
-**Observation binding.** A mutation must carry the live look at the remote its effect was computed
-from. Absent, or older than `REMOTE_OBSERVATION_MAX_AGE_MS`, is a **deny** — the
-`browser.no-preview` precedent — and the bound is kernel-owned so a workflow pack cannot widen its
-own leash. Only `remote_status view=refs` produces observations, so "understand the remote before
-you change it" is enforced by the engine rather than requested in a prompt. Observations and the
-gh identity are in memory only and do not survive a resume; the read/write SPEND is rebuilt from
-events. Authority is not durable; spending is.
+Bounded deferred-pool pickups: **CI test portability** (21 Windows-shaped fixtures ported so the
+advisory Linux job can assert real behavior — zero src changes), **`reasoningTokens`** surfaced in
+the report and `/status`.
 
-**Looking never writes.** The only network verb is `git ls-remote` — no fetch, no remote-tracking
-refs, no `FETCH_HEAD` — so an agent being curious can never change the state of the user's
-repository. The honest cost is stated rather than hidden: a commit the remote holds and this
-repository has never seen is genuinely outside our object database, so the relation reports
-`unknown` and a force push over it is refused **even with `force`**, because the harness cannot say
-what would be discarded.
+### What shipped — the limits retune (audit acted on)
 
-**What the human approved is what executes.** The refspec source is the observed OID, not a branch
-name. Execute re-resolves the push URL from git's own config, re-reads the local rev and the remote
-ref, runs `git push --dry-run --porcelain` and compares it **structurally** (exactly one ref line,
-to the approved ref, from the approved oid, on a run git said it finished), pushes with
-`--no-follow-tags`, and re-reads the remote to record `verified` as a field distinct from `ok`. A
-force push carries `--force-with-lease=<ref>:<observed-oid>`, so the server enforces the same
-binding; `--force-if-includes` is deliberately absent because it is a no-op without a lease and its
-real check reads a reflog this pack never writes.
+The S16 principle, reaffirmed: **raise SCALE bounds, never REPETITION or CONSENT bounds.** Pinned
+with per-change rationale in `test/limits.test.ts`. The load-bearing one: catalog context budgets
+became a **per-model derivation rule** — `budget×1.25 + 40k overhead + defaultMaxTokens ≤
+contextTokens`, clamped under provider billing thresholds (gpt-5.6's 272K whole-request 2×,
+verified live) — replacing a flat 100k that sat at ~10% of a 1M window on flagships and
+*overflowed* the 200k/128k-window models once overhead was priced in. A latent GLM overclaim
+surfaced (`glm-5.2`'s row named its `[1m]` sibling's window; corrected to 200K). Provider windows
+and pricing re-verified 2026-08-09. Other raises: steps 40→60 (+ loud one-shot end), task pool
+16→32 / 400k, checks 80→160, research pools raised, preview TTL 60→120 min, exec capture 1→4 MiB.
+The **executor wall clock now excludes measured approval wait** (an away human used to kill the
+executor mid-work), coupled with the worktree sweep's live-pid hatch (2h→8h).
 
-**Three tools, and a deliberately small catalogue.** `remote_status` (auth / repository / refs /
-pulls / issues / runs / run), `remote_push` (branch or tag, optional destructive force),
-`remote_release` (a Release for a tag that is ALREADY on the remote, always `--verify-tag` —
-without it gh creates the tag from the default branch as a side effect, a publish nobody asked for
-at a commit nobody named). No `gh api` passthrough, no generic escape: every argv is
-harness-composed in `--flag=value` form, so model text lands only in value positions.
+### What shipped — maintainability (boundaries, not reorganization)
 
-**The harness never holds a credential.** Authentication is gh's own store and git's credential
-helper. `buildChildEnv` drops every `*token*` name, so a `GH_TOKEN` in the user's shell is not
-forwarded and cannot be — recorded as a fact rather than worked around. `GH_REPO` is scrubbed (it
-retargets every gh command the way `GIT_DIR` does) and `GH_DEBUG`/`DEBUG` with it (gh's debug mode
-prints the Authorization header); `GH_HOST`/`GH_CONFIG_DIR` pass through because an enterprise
-install needs them, are recorded so an override is auditable, and now refuse a gh read whose host
-they contradict. `shared/secrets.ts` scrubs credential shapes from all gh/git output at the pack
-boundary and again at the event emit site — the installed gh 2.96.0 predates the
-GHSA-cg6r-mpgc-h9mm fix in which `gh auth status` printed part of the token.
+Verdict from the structural audit (171 files, 28 flat modules): the flat depth-2 tree is the right
+design — moving files would churn 164 test files and the published layout for aesthetics. What was
+eroding was BOUNDARIES. `test/architecture.test.ts` now pins the invariants (no `../../`, `shared/`
+leaf, `sandbox/` entry-only, module cycles a frozen removal-only set) — and immediately found a
+fifth cycle nobody knew about. Three cut: `plan↔memory` (→ `shared/docio.ts`),
+`retrieval↔workspace` (→ `git/ls.ts`), `types↔exec` (`ExecSpec` → `types.ts`); `shared/` made a
+true leaf (`isAlive` → `shared/proc.ts`). ARCHITECTURE's src tree regenerated complete (three whole
+modules had been missing).
 
-**Surfaces.** `/remote` (an accountability record: remotes, identity, live observations, every
-read, every mutation with its verification verdict — including failures), a `## Remote delivery`
-report section, REPL chrome, a conditional system-prompt paragraph, and acceptance **caveats** in
-both directions. `remote.*` is deliberately absent from `WORK_EVENT_TYPES` — accept → commit →
-push is the ordinary order, so a publish must not stale the acceptance it delivers.
+### The live proof (`agent-cli-s205-live/`, Kimi K3, EMPTY folder → `earthwalker17/agent-cli-e2e`)
 
-**The compound invariant.** The model cannot commit (`/commit` is still user-typed) and a push
-transmits committed refs only. Together: *the model cannot publish content a human did not commit.*
-
-### The live proof (`agent-cli-s20-live/`, Kimi K3, against the real `earthwalker17/agent-cli`)
-
-Dogfooding, at the user's explicit choice. The fixture is a real clone; the branches are real; the
-destination has real CI and a real credential whose scopes are what they are. The scripted human is
-deliberately **not** "always yes": reads take the session grant once, and the **first publish is
-DENIED**, because a run in which every prompt is answered `y` proves the automation and not the
-boundary.
-
-**225 events, 12 remote reads, 3 mutations — all verified against the remote, zero
-credential-shaped strings anywhere in the log.** Eleven approvals resolved: two `allow/session`
-(both remote READS), eight `allow/once`, and **one `deny/once`**. Published to the real repository
-and verified there at the time: `refs/heads/s20-proof-b`, the annotated tag `refs/tags/s20-tag-b`,
-and a draft Release for it. Every one of those was deleted by hand once v1.6.0 shipped, so none of
-it is inspectable on the repository today — the transcript and the event log are the evidence; the
-refs were only what the evidence was about.
-
-The order that matters. `/remote` before any authority reports the local inventory and nothing
-else — no identity, full allowance, no observations. The first read asks and offers `[s] allow
-further remote READS this session (never a push, tag or release)`. The first **publish is denied**,
-and `/remote` immediately afterwards still says *"Mutations (0) — nothing on any remote was changed
-by this session"*: the refusal is not a message, it is the absence of a mutation in the durable
-record. Re-asked, the same publish executes and is verified by re-reading the ref. Asked for a
-release, the model reads the remote, finds the tag absent and reports the two-step shape before
-being told — `--verify-tag` surfacing as behaviour — so the tag is published under its own
-approval and the release under a third. Four publishes, four separate approvals, no `[s]` anywhere.
-
-**The resume leg is the other half.** Resumed, the session reports `spent 10 read(s), 3
-mutation(s)` and **`Live observations (0)`**; the read grant is gone too. Told to publish again
-"right now", it is denied twice by policy, in order: `remote.unauthenticated` (no gh identity is
-established — identity is in-memory only), then, after re-reading `auth`, `remote.precondition`
-(the ref already holds that commit). Spending is durable so a restart cannot refill an allowance;
-authority is not, so a restart cannot inherit one.
-
-**What the live run found that 2000 hermetic tests could not** — two honesty defects, both fixed
-with regression tests:
-
-- **A new branch reported the whole branch.** Publishing ONE commit to a fresh branch announced
-  *"207 commit(s)"* and a `.github/workflows/` change published months earlier, because a ref the
-  remote lacks was previewed by walking the tip's own history. The observation now takes one full
-  `ls-remote` and uses every other remote ref whose objects we hold as exclusion bases; the same
-  push now reads *"CREATE … (1 commit(s) in the branch)"*, one file.
-- **The workflow-scope warning was asserted as a certainty, and was wrong.** The first run said
-  *"GitHub will REJECT this push"* over an https remote and GitHub accepted it: `git push` over
-  https authenticates with the CREDENTIAL HELPER's token, not gh's, and they routinely carry
-  different scopes — the harness can see one and not the other. It is now a stated risk that names
-  which credential it means. In the second run the model reached the same conclusion from evidence
-  (*"it must have been pushed under a differently-scoped credential or via the web UI"*), declined
-  the workflow-touching push and asked how to proceed — so that path was previewed here and
-  executed in the earlier run, which is where the overclaim was disproved.
-
-A third, smaller one is visible in the run-b log and was fixed after it: `basesIncomplete` fired on
-every repository with annotated tags, because `ls-remote` reports the tag OBJECT id and a
-membership test over commits never finds it. A signal that always fires tells a reader nothing.
-
-Full transcript, evidence and honest limits: `agent-cli-s20-live/DEMO.md`.
-
-### Decisions (and why)
-
-- **Two facts rather than one with a mode.** Read and write are different authorities, and the
-  cheapest way to make that true rather than merely stated was to let the existing
-  conflicting-contract rule enforce it. It cost nothing and it closes the whole class.
-- **A write is never granted, and the class still tells the truth.** Publishing is `external`;
-  overwriting remote history is `destructive` (non-grantable by construction, so the strongest
-  case is protected twice). Reaching for `destructive` on an ordinary publish would have been the
-  cheap way to make it non-grantable, and would have spent the word.
-- **Local verification is SHOWN, never required.** Making a green gate a precondition would make a
-  green gate an authorization — the exact inversion this capability exists to prevent. So the
-  prompt states the gate state and enforces nothing.
-- **`ls-remote`, never `fetch`.** Looking at a remote must not mutate the user's repository as a
-  side effect of the agent being curious. The cost is a genuinely `unknown` relation, which is
-  reported as unknown.
-- **A publish is an acceptance caveat, never a blocker** — and so is a publish that failed, and a
-  publish that succeeded unverifiably. Local completion and remote delivery are separate questions
-  in both directions.
-
-### Open issues / boundaries
-
-- **A GUI credential prompt cannot be structurally prevented on Windows.** `-c
-  credential.interactive=false` plus a bounded timeout is the backstop, and a non-conforming helper
-  ignores both.
-- **`--dangerously-allow-all` covers remote mutations.** The engine always returns `ask` and never
-  consults a grant, but that flag replaces the human at the prompt; the publish is auto-allowed and
-  recorded as `source: "dangerous-mode"`. Documented in SECURITY.md and printed by `/remote`.
-- **The workflow-scope preview is a risk, not a verdict** — see the live findings above.
-- **Out of scope by decision:** `gh api` passthrough, PR/issue creation, merges, repository
-  creation or deletion, settings/secrets/workflow dispatch, `git fetch`/`pull` (being behind is
-  reported, not fixed), multi-repo and fork/upstream-sync flows, and upstream-tracking
-  configuration as a side effect of a push.
-- The gh JSON parsers are tolerant by design; a gh that renames a field degrades to an empty value
-  rather than crashing a publish flow, which means a silent shape change reads as missing data.
-- Only `github.com` was exercised live. Enterprise hosts are handled by the same code paths and are
-  **not** live-proven.
-
-### Recommended next step
-
-Session 21 per BLUEPRINT: bounded memory and initialization — size and token budgets, staleness
-rules, provenance, `LESSONS.md`, and the `RESEARCH.md` deferred from S19 precisely because a
-durable research surface needs the staleness and provenance semantics that session builds.
-
----
-
-## Session 19 (2026-08-07/08) — Source-backed web research
-
-### Objective
-
-Give the harness its first deliberate connection to the external web, as a bounded read-only
-capability: search deliberately, prefer primary sources, corroborate anything load-bearing, and
-hand the main agent short **source-backed claims** rather than raw pages — with network authority
-that is explicit, budgeted, and honest about what it is.
-
-The failure this exists to prevent is not "the agent cannot search". It is **stale confidence**:
-writing code against an API that moved, from recall, sure of itself.
-
-### What shipped
-
-**A seventh policy fact and its branch.** `Tool.research()` + engine branch 0g, before the command
-branch and every fall-through. The S6 trap it closes is sharper than the previous six: a research
-call is command-less and mutation-less, so it would auto-allow as `observe` with the recorded
-reason *"read-only workspace access"*. For a call that ships model-authored text to a third party
-that sentence is not imprecise — it is false in the only direction that matters. Reading is not the
-consequence; **sending** is, and the network is the one boundary the OS sandbox explicitly does not
-confine.
-
-**The budget is the consent.** The first call asks (`external`, grantable) with the query verbatim,
-the per-call bounds, and the remaining session allowance in the reason, so `[s]` means "the bounded
-research capability is authorized this session" against a real shared counter. An exhausted budget
-is a DENY the engine owns; a held grant does not rescue it, nor a blocked domain, nor an unusable
-target, nor a mutating spawn.
-
-**A `researcher` subagent role** (`read-only-external`, a third access class — the engine's ordering
-is a total order over strictness, and a boolean flag would let a future role be both without anyone
-deciding which ask wins). Spawned through the existing `delegate_task`: one runtime, one loop, no
-new orchestration. It holds `web_search`, `web_extract`, `record_source` and the workspace read
-tools, and **nothing that writes, runs, or delegates**.
-
-**The parent gets `web_search` only.** Full page text and the findings channel are researcher-only,
-which makes "the main agent never receives raw webpages" a property of the registry rather than a
-hope about behaviour.
-
-**`record_source` is where research stops being a pile of search results.** One falsifiable claim,
-the URLs behind it, and a corroboration verdict — and it **refuses** `corroborated` backed by a
-single distinct source, which is the exact way one page becomes consensus. `retrievedAt` is stamped
-by the harness clock: research is perishable, and a date the model authors is a date it can be
-wrong about.
-
-**Untrusted content, three mechanisms.** Character neutralization at ingestion (`sanitizeBlock` —
-like `sanitizeLine` but preserving newlines, because a page is a block), fence neutralization
-shared with the memory docs, and the fence itself with the prompt contract. The third is documented
-as a **mitigation, not a boundary**: a sufficiently persuasive page can still influence a model.
-What it cannot do is act, because a researcher holds no tool that acts.
-
-**Research is never verification.** Not in `WORK_EVENT_TYPES`, never marks a file CHECKED, never
-satisfies a plan gate — the S16 setup / S17 artifact asymmetry, reused. But acceptance carries a
-**caveat**: a session accepted as COMPLETE whose conclusions rest on external sources says so, and
-a second caveat names findings resting on a single source or on sources that disagreed.
-
-### Structural fixes made along the way
-
-Three fail-open patterns were found and closed while working here, each the same shape — a
-hand-maintained list that silently stops covering things:
-
-- The six `conflicting-contract` guards each carried a hand-written list of the other five. A
-  seventh fact is absent from all six until someone remembers. They now derive from one
-  `FACT_KINDS` table with a `Record<FactKind, string>` label map, so the **eighth** fact breaks the
-  typecheck.
-- `childTools`' admissibility predicate was a deny-list of the facts that existed when it was
-  written — which is why `artifact` was missing from it. Now `satisfies Record<FactKind, boolean>`.
-- The provider naming rule read a tool list that had gone **four names stale** since S16. A rule
-  that cannot see a tool enforces nothing about it, and nothing failed. Both it and the child
-  registry checks now read `SESSION_TOOL_NAMES` / `CHILD_ONLY_TOOL_NAMES`, pinned three ways
-  against a real assembly.
+<!-- FILL FROM EVIDENCE AFTER THE TAKE: two legs (bootstrap; build→verify→docs→accept→commit→
+publish); event counts; approval breakdown; research findings; per-unit checks incl. Go; two
+previews + browser flow; DOCX/PDF validated + inspected; the three verified mutations with OIDs;
+VALIDATION.txt (~45 checks over both logs + the real remote); what the live run found that the
+hermetic suite could not. DEMO.md holds the full transcript. -->
 
 ### Verification
 
-Suite **1547 → 1828** (12 new files, 292 research tests; 119 files, 0 failures). `npm run typecheck` clean.
+Suite **2038 → ~2100+** (net; new regression + architecture tests, minus none). `npm run
+typecheck` clean, `npm run build` clean. Full suite green (the browser-dependent suites flake only
+under parallel msedge contention; each passes in isolation — a documented non-defect). The retune's
+expected fallout — seven fixtures that hardcoded an old bound's value — now derive from the
+constants, so the next retune moves them for free.
 
-**Live E2E — two runs, one variable.** Same fixture, same provider (Kimi K3), differing only in
-whether `TAVILY_API_KEY` was in the child env. The task: implement a client for the Tavily Search
-API, whose current auth header is a known stale-prior trap. Full record: `agent-cli-s19-live/DEMO.md`.
+### Decisions (and why)
 
-- The **control** implemented from recall, typechecked PASS, and said: *"Moderately confident — not
-  certain. No live verification… a quick check of `docs.tavily.com` would settle everything below.
-  Auth mechanism drift: earlier versions passed the key in the JSON body as `api_key`."*
-- The **proof** delegated a researcher, which ran 14 searches and 3 extracts in its own context and
-  recorded **7 corroborated findings with real source URLs** — including the `api_key`-in-body
-  legacy trap the control had flagged as its top risk, and an honest *"could NOT establish an
-  authoritative date/changelog for the switch"*. The main agent implemented from those findings,
-  typechecked PASS, and the produced code names both pitfalls it avoids.
-- Budget accounting held across both logs: `/research` showed 15 searches = 1 parent + 14 child,
-  and pointed at the child's log rather than pretending to have read it.
+- **A per-model budget RULE, not a flat number.** The flat 100k was only ever "reproduce the
+  pre-S15 chars"; on a 1M-window model that is a 90%-idle window paying cache-invalidation cost,
+  and on a 200k model it was a silent OVERFLOW. Pinning the fit-and-billing rule as an invariant
+  over every catalog row means the next model added cannot quietly overflow.
+- **The boundary is a TEST, not a matrix.** A full allowed-edge matrix breaks on every legitimate
+  import and decays into a change log; invariants + a frozen removal-only cycle set catch the
+  thing that actually matters (a NEW cycle) without taxing ordinary work.
+- **Consent and repetition bounds stay put, again.** The audit raised scale bounds only. Migrate/
+  seed still ask every time; a remote write still asks every time; MAX_REVIEW_ROUNDS, MAX_TASK_
+  ATTEMPTS, the 5-minute observation staleness — untouched. Those are authority, not capacity.
 
-**Honest reading of that result:** the control's wire format was already *correct*. Research did not
-rescue a wrong answer; it converted a plausible one into a supported one, added `exclude_domains`,
-and named what remained unknown. That is a narrower claim than "research fixed it", and it is the
-true one.
+### Open issues / boundaries
 
-**Adversarial review — 4 lenses, 20 findings, 12 fixed**, every one verified by hand. Two lenses
-independently found the same accounting bug, which is the shape of a real one. The three that
-mattered most:
-
-- A single **trailing dot** defeated every name-based internal-host refusal (`http://localhost./`
-  passed). `URL` preserves it on non-IPv4 hosts, so `'localhost.'` beat the loopback check, all
-  four private-suffix checks, and the single-label check at once. `shared/domain.ts` had always
-  stripped it — the denylist and the validator disagreed about what an internal name is.
-- **Parallel researchers each recorded the whole group's spend.** The delegate diffed the shared
-  budget around each task, but the group fans out under one `Promise.all`, so every sibling
-  snapshotted the same "before" (live 2, rebuilt 4). Spend now comes from a per-task counter, and
-  the regression test asserts the live object EQUALS a fresh fold of the parent log.
-- The **extract page URL** escaped ingestion sanitization on the no-match fallback — the one
-  provider string that reached the untrusted fence and the durable log verbatim.
-
-Plus: the client's timeouts had drifted from the pack constants so the prompt declared a bound it
-did not enforce; a per-task cap was reported as the session budget being spent; *"the only host
-contacted"* is false under a proxy; a partial extract rendered "N of N"; `/research` hid the privacy
-record precisely when a user auditing a past run would need it; and excluding a denylisted domain
-was denied with a reason asserting the model had tried to reach it.
-
-**Three defects the live run found that no hermetic test did** — the spawn ask rendering with
-generic wording, a duplicated budget line, and a researcher timing out at 420 s with 8 searches and
-10 extracts spent and **zero findings recorded**. The last one is the interesting one: the
-budget-pressure supervision note reaches the **parent**, not the child, so a researcher cannot pace
-itself. Fixed with a per-task page cap, an extract timeout no longer exceeding the provider's own,
-a larger wall clock, and a prompt that says a timeout takes unrecorded findings with it.
-
-### Decisions
-
-- **Consent comes from lineage, not a constructor flag.** The first design had the delegate hand
-  the child an instance carrying `delegatedConsent: true` — a `() => true` constant, the tool
-  telling policy it is authorized. The engine now reads `ctx.lineage.role`, which `startSession`
-  stamps from the same value that lands on `session.started`. The rule says *"whose spawn this
-  engine allowed"*, never *"the human approved"*: under `--dangerously-allow-all` no human approved
-  anything, and a reason string must not claim otherwise.
-- **The egress claim is scoped.** "The research tools' egress is one host" — never "the harness's
-  egress". `npm view` sits on the auto-run allowlist and the sandbox does not confine network.
-- **No `researcher` in `PlanTaskRole`.** `planner` is already absent; adding it would inherit the
-  queued-forever acceptance dead-end that reviewers needed a dedicated clause to escape.
-- **No credential ⇒ no tools registered**, and the prompt paragraph is conditional on the same flag
-  (the `retrieveTool` precedent). A tool the model can see but never use costs a step and a retry
-  loop every time it looks useful.
-
-### Left open
-
-- **`RESEARCH.md` was deferred** — it was the plan's declared cut line. Ephemeral research works as
-  bounded session evidence, which is what BLUEPRINT S19 required; the durable curated surface
-  belongs with Session 21's memory budgets, staleness rules and `LESSONS.md`.
-- **A child cannot see its own budget pressure.** Supervision notes go to the parent. The bounds
-  compensate; a real fix would surface pressure into the child's own context.
-- **The live proof is one provider, one task, one API.** It shows the path works and the findings
-  were sourced; it is not a measurement of research quality.
-- `ResolvedCheckFact.effects.network` remains a declared-but-dead field, read by nothing.
-- Tavily `/crawl`, `/map` and the async `/research` endpoint are unimplemented; there is no
-  direct-fetch tool, deliberately.
+- The executor approval-wait exclusion is proven hermetically (the E2E's scripted driver answers
+  in seconds, so the live run does not exercise it); the LOUD max-steps end likewise.
+- The context-budget rule is verified against each provider's *documentation* as of 2026-08-09,
+  not against a live long-context bill; catalogs go stale before harnesses do.
+- The advisory Linux CI job's fixtures are ported but the green is validated by CI on the next
+  push, not on this Windows machine — the advisory flag flips only once it is OBSERVED green.
 
 ### Recommended next step
 
-Session 20 per BLUEPRINT: remote Git and GitHub delivery — the other half of the external
-authority split, where read and **write** must stay visibly different things.
+Session 21 per BLUEPRINT, unchanged: bounded memory and initialization — size/token budgets,
+staleness, provenance, `LESSONS.md`, and the `RESEARCH.md` deferred from S19.
 
 ---
 
@@ -345,6 +134,105 @@ authority split, where read and **write** must stay visibly different things.
 
 Contract detail lives in `ARCHITECTURE.md`; entries keep the objective, lasting decisions, the
 evidence, and what stayed open.
+
+### Session 20 (2026-08-08) — Remote Git and GitHub delivery
+
+Carried a verified, accepted, committed local result across the machine boundary to an explicitly
+identified GitHub destination — v1.6.0, pushed, tagged and released (commits `3f34c8f`…`19269f9`;
+suite 1828 → 2037). The failure it prevents is **authority creep**: reading a remote and changing
+one arriving as one capability, so that consent to look becomes consent to publish and a green
+check becomes a licence.
+
+**Lasting decisions.** Two policy facts, not one capability with a mode — `remoteRead` AND
+`remoteWrite`, each fail-closed — so the existing conflicting-contract rule makes a tool that
+could both read and publish an automatic deny. A read asks `external` and is session-grantable
+within a real counter; a **write asks every time**, never passes `applyGrant`, offers no `[s]`,
+stores nothing — written at all three consent surfaces, because a consent surface that disagrees
+with itself is how standing authority is won by accident (publishing stays `external`, force
+`destructive`, so the strong word is not spent on an ordinary publish). A mutation must cite a
+live **observation** of its ref within a kernel-owned age bound no pack can widen, and only
+`remote_status view=refs` produces one — "understand the remote before you change it",
+engine-enforced. Observations and gh identity are memory-only and die at resume; read/write SPEND
+is rebuilt from events: authority is not durable, spending is. **Looking never writes** — the
+only network verb is `git ls-remote`, never fetch, at the honest cost of a genuinely `unknown`
+relation, which refuses a force push **even with `force`**. What the human approved is what
+executes: refspec from the observed OID, a structurally compared `--dry-run --porcelain`,
+`--no-follow-tags`, `--force-with-lease=<ref>:<observed-oid>`, `verified` recorded apart from
+`ok`, `remote_release` always `--verify-tag`. Three tools, no `gh api` escape, no credential ever
+held by the harness. Local verification is SHOWN, never required — a green gate must not become
+an authorization. The compound invariant: the model cannot commit and a push transmits committed
+refs only, so *the model cannot publish content a human did not commit.*
+
+**Evidence — the live run** (Kimi K3 against the real `earthwalker17/agent-cli`; the scripted
+human deliberately not always-yes): **225 events, 12 remote reads, 3 mutations — all verified
+against the remote, zero credential-shaped strings in the log**; eleven approvals — two
+`allow/session` (both READS), eight `allow/once`, and the **first publish DENIED**, with
+`/remote` right after still reporting "Mutations (0)"; four publishes under four separate
+approvals, no `[s]` anywhere. Resumed: `spent 10 read(s), 3 mutation(s)` yet `Live observations
+(0)` and no read grant, then a re-publish denied twice by policy (`remote.unauthenticated`, then
+`remote.precondition`) — a restart can neither refill an allowance nor inherit an authority.
+Review: 4 lenses, 20 findings; **two overclaims only the live run caught** — a fresh branch
+previewed as "207 commit(s)" by walking the tip's own history (now one full `ls-remote` with
+exclusion bases: "1 commit(s)", one file), and "GitHub will REJECT this push" asserted where
+https authenticates with the CREDENTIAL HELPER's token, not gh's; GitHub accepted it, and it is
+now a stated risk naming which credential it means. The proof refs were deleted from the remote
+once v1.6.0 shipped, and the local evidence directory `agent-cli-s20-live/` (`DEMO.md`) is gone
+from disk too — the transcripts and this record are what remains.
+
+**Still open.** Only `github.com` was exercised live; enterprise hosts run the same code paths
+and are NOT live-proven. The gh JSON parsers are tolerant by design — a renamed field degrades to
+missing data rather than crash a publish flow, so a silent shape change reads as absence. A
+Windows GUI credential prompt cannot be structurally prevented (bounded-timeout backstop), and
+`--dangerously-allow-all` auto-allows remote mutations, recorded as `source: "dangerous-mode"`.
+
+### Session 19 (2026-08-07/08) — Source-backed web research
+
+Gave the harness its first deliberate connection to the external web, as a bounded, budgeted,
+read-only capability that hands the main agent short **source-backed claims** rather than raw
+pages — v1.5.0 (commits `60dc67b`…`17f0456`; suite 1547 → 1828, 292 research tests). The failure
+it prevents is **stale confidence**: writing code against an API that moved, from recall, sure of
+itself.
+
+**Lasting decisions.** A seventh policy fact and engine branch 0g, because a command-less,
+mutation-less research call would auto-allow as `observe` ("read-only workspace access") — false
+in the only direction that matters: **sending** model-authored text to a third party is the
+consequence, and network is the one boundary the OS sandbox does not confine. **The budget IS
+the consent**: the first call asks `external` with the query verbatim and the remaining session
+allowance, so `[s]` authorizes the bounded capability against a real shared counter, and an
+exhausted budget is an engine-owned DENY no held grant rescues. A `researcher` subagent role at
+`read-only-external` — a third access class, not a boolean flag, because the engine's ordering
+is a total order over strictness and a flag would let a future role be both without anyone
+deciding which ask wins — holds nothing that writes, runs, or delegates, and the parent gets
+`web_search` only, so "the main agent never receives raw webpages" is a registry property, not
+a hope. `record_source` takes one falsifiable claim, its URLs, and a corroboration verdict, and
+**refuses** `corroborated` backed by a single distinct source — the exact way one page becomes
+consensus — with `retrievedAt` stamped by the harness clock; research never satisfies a
+verification gate, and acceptance instead carries caveats naming externally-sourced and
+single-source conclusions. Three fail-open hand-lists were closed en route, all one shape (a
+list that silently stops covering things): the conflicting-contract guards now derive from the
+one `FACT_KINDS` table so an eighth fact breaks the typecheck, `childTools` admissibility became
+`satisfies Record<FactKind, boolean>`, and the provider naming rule — four names stale since
+S16 — now reads `SESSION_TOOL_NAMES`/`CHILD_ONLY_TOOL_NAMES` pinned against a real assembly.
+
+**Evidence — a control-vs-proof experiment**: two live runs, same fixture, same provider (Kimi
+K3), one variable — whether `TAVILY_API_KEY` was in the child env — on a task whose current auth
+header is a known stale-prior trap. The control implemented from recall, typechecked PASS, and
+flagged the auth drift as its own top risk; the proof's researcher ran 14 searches and 3
+extracts in its own context and recorded **7 corroborated findings with real source URLs** —
+including that exact legacy trap and an honest "could NOT establish an authoritative date for
+the switch" — with budget accounting holding across both logs (15 searches = 1 parent + 14
+child). The honest reading: the control's wire format was already correct, so **research
+converted a plausible answer into a supported one** — the narrower, true claim. Review: 4
+lenses, 20 findings, 12 fixed, each verified by hand; the live run alone found a researcher
+timing out at 420 s with **zero findings recorded**, because the budget-pressure note reaches
+the parent, never the child. The live evidence directory `agent-cli-s19-live/` (`DEMO.md`) has
+since been deleted from disk — the transcripts and this record are what remains.
+
+**Still open.** `RESEARCH.md` deferred to Session 21, the plan's declared cut line: a durable
+curated research surface needs that session's staleness and provenance semantics. A researcher
+still cannot see its own budget pressure (the bounds compensate). The live proof is one
+provider, one task, one API — it shows the path works and the findings were sourced, not a
+measurement of research quality.
 
 ### Session 18 (2026-08-07) — Polyglot repository intelligence and verification
 

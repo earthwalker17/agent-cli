@@ -7,6 +7,56 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.6.1] — 2026-08-09
+
+**Consolidation and a zero-to-remote proof.** No new capability — a full-system review, a limits
+retune sized for what a v1.6 session actually does, three module-boundary cleanups, and a live
+end-to-end run from an empty folder to a real GitHub release. A five-lens engineering review of
+the whole system found and fixed 18 defects (each hand-verified, each with a regression test);
+the largest class was accounting and honesty seams that only bite hours into a real session.
+
+### Fixed
+
+- **Policy:** a pre-resolution remote refusal (budget spent, gh missing, no repository) kept its
+  own rule id instead of the misleading "name the host it contacts"; a throwing `command()` /
+  `readsPaths()` fact now denies instead of crashing the turn — the last two bare fact calls.
+- **Remote:** a failed `gh release create` now charges the write allowance (record and charge
+  were inseparable everywhere but here, so live and resume-rebuilt spends disagreed); the
+  observation `ls-remote` is scoped to heads+tags with a real capture bound, so a repository with
+  many pull-request refs can no longer starve a tag out of the listing and misreport it absent.
+- **Runtime honesty:** a deny-&-stop on a turn's final step reads as user-quit, not max-steps (a
+  child's no longer spends an R10 attempt); the crash-repair replay tells the truth about a call
+  that changed disk before it was interrupted; elision monotonicity survives resume and the
+  end-of-session narrative; the context-exhausted warning fires in the steady state instead of
+  going silent exactly when a hard context-window failure is coming.
+- **Gate folds:** a plan scoped `project: 'API'` now matches checks recorded under the on-disk
+  `api` (it was permanently unsatisfiable AND unwaivable); the failing-artifact caveat's
+  retirement actually fires; three quiet budget refunds across resume (a never-started delegated
+  attempt, an all-formats-failed render, a failed release) are closed.
+- **Long-run:** a wedged `taskkill` can no longer hang the exec outcome forever (the helper wait
+  is bounded); a preview reaped mid-flow is no longer misdiagnosed as an app crash; the
+  spawn-to-register crash scan can no longer be blinded by accumulated logs.
+
+### Changed
+
+- **Context budgets** move from a flat 100k tokens to a per-model derivation rule (window fit +
+  provider billing clamps, verified against each provider's docs and pinned by test): a
+  1M-window model no longer elides at ~10% of its real window, and the 200k/128k-window models
+  that were quietly overflowing now fit. `CATALOG_VERIFIED` → 2026-08-09; `glm-5.2`'s row
+  corrected to its real 200K base window.
+- **Scale bounds retuned** for the v1.6 shape (research + documents + remote delivery in one
+  session), while every repetition and consent bound is deliberately unchanged: max steps
+  40→60, delegated-task pool 16→32, checks 80→160, preview TTL 60→120 min, research session
+  pools raised, exec capture 1→4 MiB, and more — all pinned with their rationale in
+  `test/limits.test.ts`. The executor wall clock now EXCLUDES time spent waiting on a human
+  approval (an away human used to kill the executor mid-work). A one-shot run that hits the step
+  budget ends loudly, with the resume command.
+- **Reasoning tokens** surface in the report and `/status` when a provider reports them.
+- **Module boundaries** are enforced by a test: three cycles cut (`plan↔memory`,
+  `retrieval↔workspace`, `types↔exec`), `shared/` made a true leaf, and the frozen removal-only
+  cycle set pinned. The Windows-shaped test fixtures were ported so the advisory Linux CI job can
+  assert real behavior.
+
 ## [1.6.0] — 2026-08-08
 
 **Deliberate remote delivery to GitHub.** The harness could take a project from a natural-language

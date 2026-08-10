@@ -128,25 +128,26 @@ work rather than bolted onto a capability release.
 
 ### Session 20 — Remote Git and GitHub Delivery — **DONE (v1.6.0)**
 
-Delivered, and the read/write split is structural rather than documentary: **two** policy facts
-(`remoteRead`, `remoteWrite`) with separate fail-closed branches, so the engine's existing
-conflicting-contract rule makes a tool that could both read and publish an automatic deny. Reads
-ask once and are session-grantable within a real counter; a publish asks EVERY time, is never
-passed through `applyGrant`, offers no `[s]` and stores nothing — the same rule written at all
-three consent surfaces. A mutation must cite a fresh `ls-remote` observation of that exact ref
-(absent or stale is a DENY, on a kernel-owned bound a pack cannot widen); the refspec source is the
-observed OID; execute re-resolves the push URL, re-reads both sides, compares a `--dry-run
---porcelain` structurally, and verifies against the remote afterwards. Three tools — `remote_status`
-(auth/repository/refs/pulls/issues/runs/run), `remote_push`, `remote_release` — plus `/remote`, a
-report section, and acceptance caveats in both directions. The harness never holds a credential.
+Delivered: **two** policy facts (`remoteRead`, `remoteWrite`) with separate fail-closed branches,
+so the engine's conflicting-contract rule makes a tool that could both read and publish an automatic
+deny; reads session-grantable within a counter, a publish asks every time and stores nothing; a
+mutation must cite a fresh `ls-remote` observation of that exact ref; `ls-remote`-never-`fetch`.
+Three tools, `/remote`, acceptance caveats both ways, the harness never holds a credential. Full
+contract, evidence, and the deliberately-out-of-scope list: `ROADMAP.md` Session 20 milestone,
+`ARCHITECTURE.md` "The remote-delivery pack", CHANGELOG 1.6.0.
 
-**Deliberately out of scope:** `gh api` passthrough or any generic escape, PR/issue creation,
-merges, repository creation or deletion, settings/secrets/workflow dispatch, `git fetch`/`pull`,
-and upstream-tracking configuration as a side effect of a push. Details and honest limits:
-`ROADMAP.md` Session 20, `ARCHITECTURE.md` "The remote-delivery pack", `agent-cli-s20-live/DEMO.md`,
-CHANGELOG 1.6.0.
+### Session 20.5 — Full-System Review and Zero-to-Remote E2E — **DONE (v1.6.1)**
 
-### Session 21 — Bounded Memory and Initialization
+A consolidation-and-proof session, not a feature session. A five-lens engineering review of the
+whole system (18 defects, each hand-verified with a regression test — the largest class was
+accounting/honesty seams that bite hours into a real run); a **limits retune** that replaced the
+flat 100k context budget with a per-model derivation rule (window fit + provider billing clamps,
+verified 2026-08-09) and sized the scale bounds for the v1.6 shape while leaving every repetition
+and consent bound untouched; three module cycles cut with the boundary now pinned by
+`test/architecture.test.ts`; and a live zero-to-remote E2E from an empty folder to a real GitHub
+release. Details: `ROADMAP.md` Session 20.5, CHANGELOG 1.6.1, `agent-cli-s205-live/DEMO.md`.
+
+### Session 21 — Bounded Memory and Initialization  ← **NEXT**
 
 Strengthen memory without turning startup into prompt dumping.
 
