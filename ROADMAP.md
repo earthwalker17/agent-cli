@@ -85,21 +85,49 @@ fifth cycle nobody knew about. Three cut: `plan↔memory` (→ `shared/docio.ts`
 true leaf (`isAlive` → `shared/proc.ts`). ARCHITECTURE's src tree regenerated complete (three whole
 modules had been missing).
 
-### The live proof (`agent-cli-s205-live/`, Kimi K3, EMPTY folder → `earthwalker17/agent-cli-e2e`)
+### The live proof (`agent-cli-s205-live/`, Kimi K3, EMPTY folder → `earthwalker17/agent-cli-e2e`) — **STARTED, NOT COMPLETED; deferred to S20.6**
 
-<!-- FILL FROM EVIDENCE AFTER THE TAKE: two legs (bootstrap; build→verify→docs→accept→commit→
-publish); event counts; approval breakdown; research findings; per-unit checks incl. Go; two
-previews + browser flow; DOCX/PDF validated + inspected; the three verified mutations with OIDs;
-VALIDATION.txt (~45 checks over both logs + the real remote); what the live run found that the
-hermetic suite could not. DEMO.md holds the full transcript. -->
+The E2E was built and partially run, then **blocked by provider-account funding, not by any code,
+harness or driver defect**. What was proven live before it stalled:
+
+- **Leg 0 (bootstrap):** an EMPTY folder became a git repo on `main` with `.gitignore` and origin
+  = the scratch repo — correctly gated by run_command approvals, on camera.
+- **Leg 1 (partial):** source-backed **web research** on Open-Meteo (a researcher subagent, 12
+  searches, corroborated findings with sources) PLUS the model directly probing the live API with
+  `curl` to verify the wire format; a well-formed **task graph** (three executor scaffolds with
+  per-unit checks incl. Go, a main integrate-verify, three reviewer lenses); user plan approval
+  (sha-bound); and **three parallel executors that scaffolded and CAPTURED real code** (9/12/9
+  files in isolated worktrees, `task.changes` ×3). Every stage that ran, ran correctly.
+
+**Why it stalled:** the **Moonshot/Kimi account was suspended for insufficient balance** — HTTP
+429 `exceeded_current_quota_error` — mid-run. Early turns had funds; later turns returned empty
+completions, so the parent never integrated the captured changes and `/accept` correctly refused
+incomplete work. Confirmed by a direct API probe (`agent-cli-s205-live/probe-kimi.mjs`). Anthropic
+is out of credit and DeepSeek/GLM keys are absent, so Kimi was the only funded option and it ran
+dry. The account was **recharged ($20) by the user after the session**, so a re-run is unblocked.
+
+**Two real driver fixes made along the way** (the harness itself needed none): an **engagement
+gate** — the scripted driver's `atIdle()` could match the `› ` prompt in the seconds before an
+always-thinking model starts, silently returning before the turn ran (this skipped the git
+bootstrap and the post-build integration); it now waits for the model to visibly engage
+(heartbeat / output / approval) and surfaces a genuine non-response loudly. And an **explicit
+integration push** — after the executor group returns, drive `apply_task_changes` + verification
+rather than accepting a premature idle.
+
+**Remaining, deferred to Session 20.6:** run leg 1 to completion on the recharged Kimi (integrate
+→ per-unit checks → two previews → browser flow → DOCX/PDF + inspect → review → `/accept` →
+`/commit` → push + tag + release), record it, run the ~45-check validator, cut the subtitled MP4,
+and fill this subsection + `DEMO.md` from the evidence. The full run-book is in the handoff:
+`agent-cli-s205-live/HANDOFF.md` and the `[[s205-handoff]]` memory.
 
 ### Verification
 
-Suite **2038 → ~2100+** (net; new regression + architecture tests, minus none). `npm run
-typecheck` clean, `npm run build` clean. Full suite green (the browser-dependent suites flake only
-under parallel msedge contention; each passes in isolation — a documented non-defect). The retune's
-expected fallout — seven fixtures that hardcoded an old bound's value — now derive from the
-constants, so the next retune moves them for free.
+Suite **2038 → ~2080** (net; new regression + architecture tests, minus none). `npm run typecheck`
+clean, `npm run build` clean. Full suite verified green by running it in two halves (the
+browser-dependent suites flake only under parallel msedge contention; each passes in isolation — a
+documented non-defect). The retune's expected fallout — seven fixtures that hardcoded an old
+bound's value — now derive from the constants, so the next retune moves them for free. The E2E
+post-hoc validator (`validate.mjs`, ~45 checks) has NOT run — it needs a completed live take.
 
 ### Decisions (and why)
 
@@ -125,8 +153,14 @@ constants, so the next retune moves them for free.
 
 ### Recommended next step
 
-Session 21 per BLUEPRINT, unchanged: bounded memory and initialization — size/token budgets,
+**Session 20.6 FIRST: complete the deferred live E2E and the demo video** (Kimi recharged; the
+harness is built and the driver hardened — see `agent-cli-s205-live/HANDOFF.md`). Only the live
+proof and the MP4 remain before v1.6.1 can be honestly published; the engineering is done and
+reviewed. THEN Session 21 per BLUEPRINT: bounded memory and initialization — size/token budgets,
 staleness, provenance, `LESSONS.md`, and the `RESEARCH.md` deferred from S19.
+
+**Do NOT publish v1.6.1 until the live E2E is genuinely green** — the release protocol requires a
+live-proven capability, and the zero-to-remote claim is exactly what the E2E exists to prove.
 
 ---
 

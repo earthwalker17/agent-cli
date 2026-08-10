@@ -7,13 +7,16 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## [1.6.1] — 2026-08-09
+## [1.6.1] — UNRELEASED (engineering complete; pending the S20.6 live E2E before publish)
 
-**Consolidation and a zero-to-remote proof.** No new capability — a full-system review, a limits
-retune sized for what a v1.6 session actually does, three module-boundary cleanups, and a live
-end-to-end run from an empty folder to a real GitHub release. A five-lens engineering review of
-the whole system found and fixed 18 defects (each hand-verified, each with a regression test);
-the largest class was accounting and honesty seams that only bite hours into a real session.
+**Consolidation.** No new capability — a full-system review, a limits retune sized for what a v1.6
+session actually does, and three module-boundary cleanups. A five-lens engineering review of the
+whole system found and fixed 18 defects (each hand-verified, each with a regression test); the
+largest class was accounting and honesty seams that only bite hours into a real session. The
+zero-to-remote live E2E that this release's claims rest on was built and partially proven but not
+completed (the Kimi provider account ran out of balance mid-run — an external block, since
+recharged); it and the demo video are deferred to Session 20.6, and **this version is not
+published until that live proof is green** (see ROADMAP Session 20.5 / 20.6).
 
 ### Fixed
 
