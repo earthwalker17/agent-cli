@@ -69,30 +69,32 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.6.0.** 2038 hermetic tests across 130 files (real-OS sandbox, real-repository git,
+> **Status: v1.6.1.** 2078 hermetic tests across 131 files (real-OS sandbox, real-repository git,
 > **a local bare repo standing in as a real remote**, real browser flows, real PDF print +
 > rasterization, hermetic HTTP wire pins, adversarial-review suites) plus opt-in live smokes.
-> Proven live end-to-end across sixteen recorded runs — newest: **remote delivery to this
-> project's own GitHub repository**. One Kimi K3 session read the remote, published a branch, a tag
-> and a draft release — **three mutations, three separate approvals, each verified by re-reading
-> the remote** — and, before that, had its **first publish denied**, after which `/remote` still
-> read *"nothing on any remote was changed by this session"*. Resumed, the same session remembered
-> what it had spent and forgot what it was allowed: `Live observations (0)`, and two policy
-> denials in a row. Zero credential-shaped strings anywhere in the 225-event log. The live run also
-> found two honesty defects hermetic tests could not — a preview that reported an entire 207-commit
-> branch as new, and a workflow-scope rejection asserted as certain that GitHub then did not
-> perform — both fixed, both now regression-tested (`agent-cli-s20-live/DEMO.md`). Before it:
-> **web research as a controlled experiment** — the same task twice on Kimi K3, differing only in
-> whether the research credential was present; the control said *"moderately confident — not
-> certain… a quick check of docs.tavily.com would settle everything below"*, and the proof's
-> researcher recorded **7 corroborated findings with real source URLs** including the exact legacy
-> trap the control had flagged (`agent-cli-s19-live/DEMO.md`). Before that: **polyglot
-> verification proven three ways** including
-> a before-capture of the defect it fixes; **the documents workflow in a 21-minute session** (the
-> model seeing its own too-cramped pages and revising the spec); **the full multi-project workflow
-> in one 84-minute session** (plan → sha-bound approval → installs → parallel worktree executors →
-> two dev servers → three browser flows → a review that caught a seeded XSS → kill → resume →
-> `/accept`, validated post hoc 38/38 from persisted evidence alone); and **all five providers
+> Proven live end-to-end across seventeen recorded runs — newest: **an empty folder to a real
+> GitHub release, one continuous session**. One Kimi K3 session (1,006 events, three lives —
+> the terminal died twice and `agent resume` carried the plan, evidence and spend across a
+> compacted history both times) researched the current Open-Meteo docs through a sandboxed
+> researcher (**8 findings, every one with source URLs and a stamped retrieval date**), got its
+> task graph sha-approved, built `web/` + `api/` + `cli/` through **three parallel worktree
+> executors**, found and fixed **two real test failures live** (Node and Go), drove **five
+> passing browser flows** against its own managed previews, wrote a DOCX/PDF overview and
+> **corrected a visual defect it saw in its own pages**, took one user-typed commit, and
+> published — push, tag, Release, **each under its own approval, each verified by re-reading the
+> remote, with the first release attempt denied by policy for citing a stale observation**.
+> Validated post hoc **62/62** from persisted evidence plus the live remote. The honest
+> asterisk the proof surfaced: acceptance ended **PARTIAL by the documented override**, because
+> a session-targeted escalation has no closure path in this version — a known deferred gap, now
+> live-demonstrated and first in line for S21 (`agent-cli-s205-live/DEMO.md`). Before it:
+> **remote delivery to this project's own repository** — three mutations, three approvals, a
+> first publish denied, and a resumed session that remembered what it had spent while forgetting
+> what it was allowed (`agent-cli-s20-live/DEMO.md`); **web research as a controlled
+> experiment** — the same task with and without the credential, the proof's researcher recording
+> 7 corroborated findings including the exact legacy trap the control could only flag
+> (`agent-cli-s19-live/DEMO.md`); **polyglot verification proven three ways**; **the documents
+> workflow revising its own too-cramped pages**; **the full multi-project workflow in one
+> 84-minute session** validated 38/38 from persisted evidence alone; and **all five providers
 > exercised live through the real bounded tool loop**. No credential appears anywhere in the
 > evidence. This is an open, build-in-public engineering effort — see `PROJECT.md` for the thesis,
 > `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is done, deferred, and next.

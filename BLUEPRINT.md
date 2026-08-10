@@ -145,11 +145,20 @@ flat 100k context budget with a per-model derivation rule (window fit + provider
 verified 2026-08-09) and sized the scale bounds for the v1.6 shape while leaving every repetition
 and consent bound untouched; three module cycles cut with the boundary now pinned by
 `test/architecture.test.ts`; and a live zero-to-remote E2E from an empty folder to a real GitHub
-release. Details: `ROADMAP.md` Session 20.5, CHANGELOG 1.6.1, `agent-cli-s205-live/DEMO.md`.
+release (completed 2026-08-10 after a balance-stalled first attempt; post-hoc validator 62/62).
+The E2E's headline finding: a session-targeted escalation has no closure path, so a fully-green
+session accepted PARTIAL via the documented `/accept confirm` override — inherited by Session 21.
+Details: `ROADMAP.md` Session 20.5, CHANGELOG 1.6.1, `agent-cli-s205-live/DEMO.md`.
 
 ### Session 21 — Bounded Memory and Initialization  ← **NEXT**
 
 Strengthen memory without turning startup into prompt dumping.
+
+Carry in the two S20.5 live-found items: the **user-side repair dismissal surface** (a
+session-targeted escalation currently has no closure path — the agreed shape is a user-typed
+dismissal recorded as an event, the `/review dismiss` analog for repairs), and a decision on
+whether **unbound review rounds should consume `MAX_REVIEW_ROUNDS`** when a plan-bound round is
+what the plan's review task needs.
 
 Add explicit size and token budgets, staleness rules, provenance, and deterministic or reviewable
 compaction for harness-managed project memory. Introduce `LESSONS.md` for reusable failure patterns

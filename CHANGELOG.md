@@ -7,16 +7,25 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## [1.6.1] — UNRELEASED (engineering complete; pending the S20.6 live E2E before publish)
+## [1.6.1] — UNRELEASED (live proof complete; publish pending explicit approval)
 
 **Consolidation.** No new capability — a full-system review, a limits retune sized for what a v1.6
 session actually does, and three module-boundary cleanups. A five-lens engineering review of the
 whole system found and fixed 18 defects (each hand-verified, each with a regression test); the
-largest class was accounting and honesty seams that only bite hours into a real session. The
-zero-to-remote live E2E that this release's claims rest on was built and partially proven but not
-completed (the Kimi provider account ran out of balance mid-run — an external block, since
-recharged); it and the demo video are deferred to Session 20.6, and **this version is not
-published until that live proof is green** (see ROADMAP Session 20.5 / 20.6).
+largest class was accounting and honesty seams that only bite hours into a real session.
+
+**The zero-to-remote live E2E this release's claims rest on is COMPLETE** (2026-08-10, Kimi K3, a
+first attempt having stalled on provider balance): an empty folder → source-backed research → a
+sha-approved task graph → three parallel worktree executors → typed checks across Node, TypeScript
+and Go with two real failures found and fixed live → managed previews and five passing browser
+flows → a DOCX/PDF overview the model visually corrected → two adversarial review rounds → one
+user-typed commit → verified push, tag `v0.1.0` and GitHub Release on a repository that started
+verified-empty. Post-hoc validator **62/62** over the persisted logs plus the live remote.
+**Honest caveat the proof surfaced:** the session's acceptance is PARTIAL by the documented
+`/accept confirm` override — a session-targeted escalation has no closure path in this version
+(the known deferred-pool gap, now live-demonstrated and scheduled for S21) — with every check
+green and the escalation named in the handoff. Full record: `ROADMAP.md` Session 20.5 and the
+evidence directory's `DEMO.md`.
 
 ### Fixed
 
@@ -778,6 +787,11 @@ likely to matter:
 - Non-Node/Python projects report check kinds as `unsupported` with a reason rather than guessing.
 - Single-user assumption on the session lock.
 
+[1.6.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.6.1
+[1.6.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.6.0
+[1.5.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.5.0
+[1.4.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.4.0
+[1.3.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.3.0
 [1.2.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.2.1
 [1.2.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.2.0
 [1.1.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.1.1

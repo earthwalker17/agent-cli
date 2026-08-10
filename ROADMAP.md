@@ -6,7 +6,7 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
-## Session 20.5 (2026-08-09) — Full-system review, limits retune, and a zero-to-remote proof
+## Session 20.5 (2026-08-09/10) — Full-system review, limits retune, and a zero-to-remote proof
 
 ### Objective
 
@@ -85,49 +85,69 @@ fifth cycle nobody knew about. Three cut: `plan↔memory` (→ `shared/docio.ts`
 true leaf (`isAlive` → `shared/proc.ts`). ARCHITECTURE's src tree regenerated complete (three whole
 modules had been missing).
 
-### The live proof (`agent-cli-s205-live/`, Kimi K3, EMPTY folder → `earthwalker17/agent-cli-e2e`) — **STARTED, NOT COMPLETED; deferred to S20.6**
+### The live proof (`agent-cli-s205-live/`, Kimi K3, EMPTY folder → `earthwalker17/agent-cli-e2e`) — **COMPLETED 2026-08-10; validator 62/62**
 
-The E2E was built and partially run, then **blocked by provider-account funding, not by any code,
-harness or driver defect**. What was proven live before it stalled:
+(A first attempt on 2026-08-09 stalled on provider balance — HTTP 429 mid-run, no code defect —
+and was re-run after the account was recharged.) The completed record, validated post hoc
+**62/62** against both legs' persisted logs plus the live remote (`VALIDATION.txt`; full detail
+in `agent-cli-s205-live/DEMO.md` — the validator itself hardened by a four-lens adversarial
+review of the evidence, which also corrected this section's numbers against the logs):
 
-- **Leg 0 (bootstrap):** an EMPTY folder became a git repo on `main` with `.gitignore` and origin
-  = the scratch repo — correctly gated by run_command approvals, on camera.
-- **Leg 1 (partial):** source-backed **web research** on Open-Meteo (a researcher subagent, 12
-  searches, corroborated findings with sources) PLUS the model directly probing the live API with
-  `curl` to verify the wire format; a well-formed **task graph** (three executor scaffolds with
-  per-unit checks incl. Go, a main integrate-verify, three reviewer lenses); user plan approval
-  (sha-bound); and **three parallel executors that scaffolded and CAPTURED real code** (9/12/9
-  files in isolated worktrees, `task.changes` ×3). Every stage that ran, ran correctly.
+- **Leg 0** (63 events, 4 approvals, ~3 min): an EMPTY folder became a git repo on `main` with
+  `.gitignore` and origin, trust consent on camera, no commits.
+- **Leg 1** (ONE session, `20260810-095329-ccbf4e71`, **1006 events across three lives**, 26
+  approvals, 0 denials): a researcher child ran 6 searches + 1 extract and recorded **8
+  source-backed findings** (every one with URLs + harness-stamped `retrievedAt`) that the api
+  client was genuinely built against; a 5-task graph sha-approved; **three parallel worktree
+  executors captured 9/8/10 files** — two hit their token budgets and their captures still
+  integrated (`task.applied` ×3); **46 typed check completions: 38 pass (5 browser flows), 2
+  REAL failures (api test, go test) found, fixed, re-proven live**, 6 honest `unsupported`;
+  two managed previews; five passing browser flows (`exitCode: null`); the DOCX/PDF loop
+  refused two malformed specs, then `inspect_pages` caught a real visual defect the model
+  fixed before calling it done; two adversarial review rounds, 16 findings, 0 critical/high,
+  all 16 triaged; compaction ended at 111 elided tool outputs with the S20.5
+  exhausted-context latch firing live; the session then
+  **resumed twice over the compacted history**; one user-typed `/commit`; **5 remote reads, 3
+  mutations — push main `0f98080…`, tag `v0.1.0`, the GitHub Release — all verified after the
+  act, and the first release attempt was DENIED by `remote.precondition`** (it cited the
+  pre-push observation; gh would have created the tag as a side effect) then re-observed and
+  retried under a fresh approval. The built app was driven live on camera.
 
-**Why it stalled:** the **Moonshot/Kimi account was suspended for insufficient balance** — HTTP
-429 `exceeded_current_quota_error` — mid-run. Early turns had funds; later turns returned empty
-completions, so the parent never integrated the captured changes and `/accept` correctly refused
-incomplete work. Confirmed by a direct API probe (`agent-cli-s205-live/probe-kimi.mjs`). Anthropic
-is out of credit and DeepSeek/GLM keys are absent, so Kimi was the only funded option and it ran
-dry. The account was **recharged ($20) by the user after the session**, so a re-run is unblocked.
+**The headline live finding — the unclosable session escalation.** The model recorded
+`recover escalate target:session` (timeout-resource) as its "I stopped and need you"; later,
+with everything green, `/accept` still refused — correctly — but v1.6.1 has NO closure path for
+a session-targeted escalation (`evaluateRepair` refuses attempts for non-auto-eligible classes;
+`resolvedTargets` covers plan tasks only). The deferred pool predicted exactly this; the live
+run demonstrated it. The code's documented exit — the user's `/accept confirm` — was used, so
+**the acceptance is honestly PARTIAL** with the escalation named in the handoff. A second
+interaction surfaced with it: both review rounds ran while the plan approval was invalidated
+(amendments), so neither bound to the plan's `review` task, and the round cap then blocked the
+bound round that would close it — the model's legitimate exit was a **waiver amendment with the
+reason on record, re-approved by the human**. The full consent chain (amendment → approval
+invalidated → executors blocked → harness note naming the cure → user re-approves) ran live,
+twice, and held.
 
-**Two real driver fixes made along the way** (the harness itself needed none): an **engagement
-gate** — the scripted driver's `atIdle()` could match the `› ` prompt in the seconds before an
-always-thinking model starts, silently returning before the turn ran (this skipped the git
-bootstrap and the post-build integration); it now waits for the model to visibly engage
-(heartbeat / output / approval) and surfaces a genuine non-response loudly. And an **explicit
-integration push** — after the executor group returns, drive `apply_task_changes` + verification
-rather than accepting a premature idle.
-
-**Remaining, deferred to Session 20.6:** run leg 1 to completion on the recharged Kimi (integrate
-→ per-unit checks → two previews → browser flow → DOCX/PDF + inspect → review → `/accept` →
-`/commit` → push + tag + release), record it, run the ~45-check validator, cut the subtitled MP4,
-and fill this subsection + `DEMO.md` from the evidence. The full run-book is in the handoff:
-`agent-cli-s205-live/HANDOFF.md` and the `[[s205-handoff]]` memory.
+**Disclosed interventions and driver lessons** (harness-external): a human typed
+`/plan approve` mid-take at 11:40Z (re-approval is user-only and the scripted driver lacked
+that cue); legs 1b/1c are on-camera resumes with drivers acting as the user (waiver approval,
+`/accept confirm`, `/commit`, publish approvals). Driver bugs found: the accept-retry bound
+expired one round early; a cue matched stale scrollback; the engagement gate cannot tell
+"errored instantly" from "finished" (cure: post-condition checks). None is a harness defect;
+all are recorded in `DEMO.md` for the next harness.
 
 ### Verification
 
-Suite **2038 → ~2080** (net; new regression + architecture tests, minus none). `npm run typecheck`
+Suite **2038 → 2078** across 131 files (net; new regression + architecture tests, minus none;
+re-verified pre-publish 2026-08-10: 2065 pass + 11 skip in the full run, the two browser-PDF
+timeouts passing 11/11 in isolation). `npm run typecheck`
 clean, `npm run build` clean. Full suite verified green by running it in two halves (the
 browser-dependent suites flake only under parallel msedge contention; each passes in isolation — a
 documented non-defect). The retune's expected fallout — seven fixtures that hardcoded an old
 bound's value — now derive from the constants, so the next retune moves them for free. The E2E
-post-hoc validator (`validate.mjs`, ~45 checks) has NOT run — it needs a completed live take.
+post-hoc validator ran against the completed take: **62/62** (`agent-cli-s205-live/VALIDATION.txt`),
+including the remote ground truth (`git ls-remote` OIDs + the gh release, each mutation bound to
+its own resolved approval by callId) and log integrity (no key-shaped strings incl. GitHub-token
+shapes, no inline image payloads, seq monotone).
 
 ### Decisions (and why)
 
@@ -144,6 +164,15 @@ post-hoc validator (`validate.mjs`, ~45 checks) has NOT run — it needs a compl
 
 ### Open issues / boundaries
 
+- **A session-targeted escalation has no closure path** (live-demonstrated, above): the model's
+  own `escalate target:session` pinned a fully-green session at PARTIAL acceptance, because
+  attempts are refused for non-auto-eligible classes and `resolvedTargets` covers plan tasks
+  only. The documented `/accept confirm` override works, but S21 should build the already-agreed
+  user-side dismissal surface (the `/review dismiss` analog for repairs).
+- **Unbound review rounds consume the cap of a plan task they cannot close**: rounds run while
+  the plan approval is invalidated cannot bind to the plan's `review` task, yet count against
+  `MAX_REVIEW_ROUNDS` — leaving the bound round unrunnable. The waiver-amendment exit is
+  legitimate and was used live; whether unbound rounds should count there deserves S21 thought.
 - The executor approval-wait exclusion is proven hermetically (the E2E's scripted driver answers
   in seconds, so the live run does not exercise it); the LOUD max-steps end likewise.
 - The context-budget rule is verified against each provider's *documentation* as of 2026-08-09,
@@ -153,14 +182,11 @@ post-hoc validator (`validate.mjs`, ~45 checks) has NOT run — it needs a compl
 
 ### Recommended next step
 
-**Session 20.6 FIRST: complete the deferred live E2E and the demo video** (Kimi recharged; the
-harness is built and the driver hardened — see `agent-cli-s205-live/HANDOFF.md`). Only the live
-proof and the MP4 remain before v1.6.1 can be honestly published; the engineering is done and
-reviewed. THEN Session 21 per BLUEPRINT: bounded memory and initialization — size/token budgets,
-staleness, provenance, `LESSONS.md`, and the `RESEARCH.md` deferred from S19.
-
-**Do NOT publish v1.6.1 until the live E2E is genuinely green** — the release protocol requires a
-live-proven capability, and the zero-to-remote claim is exactly what the E2E exists to prove.
+The live E2E and demo video are DONE (validator 62/62; `agent-cli-skylight-demo.mp4`); v1.6.1
+publishes on explicit user approval. THEN Session 21 per BLUEPRINT: bounded memory and
+initialization — size/token budgets, staleness, provenance, `LESSONS.md`, the `RESEARCH.md`
+deferred from S19 — plus the two live-found items above (the session-escalation dismissal
+surface, the review-cap/bound-round interaction).
 
 ---
 
@@ -671,7 +697,8 @@ before the first spawn — a workspace-authored script run by an earlier kind co
 kind's body within one approved batch (per-iteration re-probe is the likely shape); run_check's
 `planTouches` fact reads the plan document at decide and the plan file is outside the drift
 stamps (stamp it in); a `session`-targeted escalation has no harness-derived resolution (a
-user-side dismissal recorded as an event is the likely shape); per-task gates are unit-tested only,
+user-side dismissal recorded as an event is the likely shape) — **LIVE-DEMONSTRATED in the S20.5
+E2E, where it pinned a fully-green session at PARTIAL acceptance; promoted to S21**; per-task gates are unit-tested only,
 since a plan of all-`main` tasks cannot declare them; executors cannot self-verify (parent-only
 `run_check`, because a worktree lacks gitignored deps); more ecosystems as data-shaped recipe rows;
 an incremental check cache keyed by file hashes + tool versions.
