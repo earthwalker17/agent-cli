@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## [1.6.1] — UNRELEASED (live proof complete; publish pending explicit approval)
+## [1.6.1] — 2026-08-10
 
 **Consolidation.** No new capability — a full-system review, a limits retune sized for what a v1.6
 session actually does, and three module-boundary cleanups. A five-lens engineering review of the
