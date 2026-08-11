@@ -75,6 +75,27 @@ describe('loadMemory', () => {
     expect(prompt.indexOf('CODEBASE.md')).toBeLessThan(prompt.indexOf('Workspace root:'));
   });
 
+  it('LESSONS.md loads, shows in the banner, and injects AFTER codebase inside the memory fence (S21)', () => {
+    const { ws, layout, dir } = fixture();
+    fs.writeFileSync(path.join(dir, 'CODEBASE.md'), stampCodebase('# Shape', { sessionId: 's-1', updatedAt: 'u', mapSha256: MAP.sha256, inventorySha256: null, head: null }));
+    fs.writeFileSync(path.join(dir, 'LESSONS.md'), '---\ndoc: lessons\n---\n## npm-shim — shims lie\n\nbody\n\n*(session s-1, 2026-08-10)*\n');
+
+    const m = loadMemory(layout, ws, { currentMapSha256: MAP.sha256 });
+    expect(m.lessons.status).toBe('ok');
+    expect(m.bannerLine).toContain('lessons');
+
+    const prompt = buildSystemPrompt(ws, MAP, undefined, undefined, {
+      codebaseText: m.codebase.text,
+      lessonsText: m.lessons.text,
+    });
+    expect(prompt).toContain('LESSONS.md (durable project lessons');
+    expect(prompt).toContain('npm-shim — shims lie');
+    expect(prompt.indexOf('CODEBASE.md')).toBeLessThan(prompt.indexOf('LESSONS.md'));
+    expect(prompt.indexOf('LESSONS.md')).toBeLessThan(prompt.indexOf('Workspace root:'));
+    // Inside the one CONTEXT-NOT-AUTHORITY fence, like every generated doc.
+    expect(prompt.indexOf('CONTEXT, NOT AUTHORITY')).toBeLessThan(prompt.indexOf('LESSONS.md'));
+  });
+
   it('inventory-digest stamps: staleness tracks the file SET, immune to map-format changes (Session 10)', () => {
     const { ws, layout, dir } = fixture();
     fs.writeFileSync(

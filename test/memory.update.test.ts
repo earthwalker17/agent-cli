@@ -71,7 +71,13 @@ describe('runMemoryUpdate', () => {
 
     const types = session.log.events.map((e) => e.type);
     const tail = types.slice(types.indexOf('memory.narrative'));
-    expect(tail).toEqual(['memory.narrative', 'memory.updated', 'memory.updated', 'session.ended']);
+    // journal (written) → lessons (skipped: none proposed) → codebase (written) → end.
+    expect(tail).toEqual(['memory.narrative', 'memory.updated', 'memory.updated', 'memory.updated', 'session.ended']);
+    expect(session.log.events.filter((e) => e.type === 'memory.updated').map((e) => (e.type === 'memory.updated' ? `${e.doc}:${e.status}` : ''))).toEqual([
+      'journal:written',
+      'lessons:skipped',
+      'codebase:written',
+    ]);
 
     const narrative = session.log.events.find((e) => e.type === 'memory.narrative');
     expect(narrative).toMatchObject({ status: 'ok', usage: { inputTokens: 3, outputTokens: 42 } });
@@ -89,6 +95,50 @@ describe('runMemoryUpdate', () => {
     expect(codebase.stamp?.sessionId).toBe(session.id);
     expect(codebase.stamp?.mapSha256).toBe('map-sha'); // bound to what THIS session recorded
     expect(codebase.body).toContain('One module.');
+  });
+
+  it('proposed lessons land in LESSONS.md (provenance-stamped); slug reuse UPDATES; user entries survive', async () => {
+    // Pre-seed: one existing entry the model will update by reusing its slug, one hand-edited
+    // entry it never names — the latter must survive byte-verbatim.
+    const dir = memoryDir(layout.projectDir);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'LESSONS.md'),
+      '---\ndoc: lessons\n---\n## old-slug — stale title\n\nold body\n\n*(session s-0, 2026-08-01)*\n\n## hand-edit — user wisdom\n\nMY OWN NOTES stay exactly as typed.\n',
+    );
+    const withLessons = JSON.stringify({
+      ...JSON.parse(NARRATIVE_JSON),
+      codebaseUpdate: null,
+      lessons: [
+        { slug: 'old-slug', title: 'sharper title', body: 'the updated body, learned again this session' },
+        { slug: 'vitest-hang', title: 'vitest hangs on orphaned grandchildren', body: 'kill the tree, then drain bounded — never await close unconditionally.' },
+      ],
+    });
+    const session = makeSession([...productiveTurns, { say: withLessons }]);
+    await runTurn(session, 'make f.txt');
+    await runMemoryUpdate(session, { layout, enabled: true, endedReason: 'user-quit' });
+    endSession(session, 'user-quit');
+
+    expect(session.log.events.find((e) => e.type === 'memory.updated' && e.doc === 'lessons')).toMatchObject({ status: 'written' });
+    const text = fs.readFileSync(path.join(dir, 'LESSONS.md'), 'utf8');
+    // New + updated entries lead (newest first), stamped with THIS session's identity.
+    expect(text.indexOf('## old-slug — sharper title')).toBeGreaterThan(-1);
+    expect(text.indexOf('## vitest-hang')).toBeLessThan(text.indexOf('## hand-edit'));
+    expect(text).toContain('the updated body, learned again this session');
+    expect(text).not.toContain('old body');
+    expect(text).toContain(`*(session ${session.id}, `);
+    // The untouched user entry survives byte-verbatim.
+    expect(text).toContain('MY OWN NOTES stay exactly as typed.');
+  });
+
+  it('a narrative WITHOUT the lessons key still succeeds (optional by design — older-model shape)', async () => {
+    const session = makeSession([...productiveTurns, { say: NARRATIVE_JSON }]);
+    await runTurn(session, 'make f.txt');
+    await runMemoryUpdate(session, { layout, enabled: true, endedReason: 'user-quit' });
+    endSession(session, 'user-quit');
+    expect(session.log.events.find((e) => e.type === 'memory.narrative')).toMatchObject({ status: 'ok' });
+    expect(session.log.events.find((e) => e.type === 'memory.updated' && e.doc === 'lessons')).toMatchObject({ status: 'skipped' });
+    expect(fs.existsSync(path.join(memoryDir(layout.projectDir), 'LESSONS.md'))).toBe(false);
   });
 
   it('narrative failure (script exhausted) degrades to a skeleton entry, honestly marked', async () => {

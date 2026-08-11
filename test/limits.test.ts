@@ -44,6 +44,7 @@ import { SWEEP_LIVE_MAX_AGE_MS } from '../src/runtime/worktrees.js';
 import { MODELS, UNKNOWN_MODEL_CAPS, capsFor, contextBudgetFor } from '../src/provider/catalog.js';
 import { AGENT_MD_CAP_CHARS, JOURNAL_INJECT_CAP_CHARS, CODEBASE_CAP_CHARS } from '../src/memory/load.js';
 import { JOURNAL_KEEP_FULL, JOURNAL_MAX_CHARS } from '../src/memory/journal.js';
+import { LESSONS_MAX_CHARS, LESSONS_INJECT_CAP_CHARS, MAX_LESSONS, MAX_LESSONS_PER_SESSION } from '../src/memory/lessons.js';
 
 /**
  * The harness's bounds, asserted as ONE visible contract (Session 16; retuned Session 20.5).
@@ -260,5 +261,14 @@ describe('memory-doc budgets (S21 — every startup-injection bound is a visible
   it('the journal growth policy: 2 full entries, 24 KiB on disk', () => {
     expect(JOURNAL_KEEP_FULL).toBe(2);
     expect(JOURNAL_MAX_CHARS).toBe(24_576);
+  });
+
+  it('the lessons growth policy (S21): 30 entries / 16 KiB on disk, 8 KiB injected, ≤3 proposals per session', () => {
+    expect(MAX_LESSONS).toBe(30);
+    expect(LESSONS_MAX_CHARS).toBe(16_384);
+    expect(LESSONS_INJECT_CAP_CHARS).toBe(8_192);
+    // A repetition-flavored bound: how much durable memory ONE session may mint. Deliberately
+    // small — a session that "learned" ten lessons learned none worth keeping.
+    expect(MAX_LESSONS_PER_SESSION).toBe(3);
   });
 });

@@ -9,7 +9,7 @@ import { sha256 } from '../shared/hash.js';
  * facts (sha256/bytes) the memory.* evidence events record.
  */
 
-export type MemoryDocName = 'AGENT.md' | 'JOURNAL.md' | 'CODEBASE.md';
+export type MemoryDocName = 'AGENT.md' | 'JOURNAL.md' | 'CODEBASE.md' | 'LESSONS.md' | 'RESEARCH.md';
 
 export interface MemoryDoc {
   name: MemoryDocName;

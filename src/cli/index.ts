@@ -672,20 +672,23 @@ function cmdMemory(values: CliValues): number {
   out.write(`AGENT.md (user-owned project constitution, loaded into every session)\n`);
   out.write(`  ${agentFile}\n  ${agent.status === 'missing' ? 'absent — create it to give every session durable instructions' : describeDoc(agent)}\n\n`);
 
-  for (const name of ['JOURNAL.md', 'CODEBASE.md'] as const) {
+  for (const name of ['JOURNAL.md', 'CODEBASE.md', 'LESSONS.md'] as const) {
     const doc = readDocCapped(path.join(dir, name), name, 1024 * 1024);
-    const kind = name === 'JOURNAL.md' ? 'rolling session memory' : 'architecture summary';
+    const kind = name === 'JOURNAL.md' ? 'rolling session memory' : name === 'CODEBASE.md' ? 'architecture summary' : 'durable project lessons';
     out.write(`${name} (harness-managed ${kind}; edits are welcome and preserved)\n`);
     out.write(`  ${path.join(dir, name)}\n`);
     if (doc.status === 'missing') {
-      out.write('  absent — written automatically after the first productive session\n\n');
+      out.write(
+        name === 'LESSONS.md'
+          ? '  absent — written when a session ends having recorded a durable lesson\n\n'
+          : '  absent — written automatically after the first productive session\n\n',
+      );
       continue;
     }
     const { fields } = parseFrontmatter(doc.text);
+    const bySession = fields !== null ? (fields['last-session'] ?? fields['session']) : undefined;
     const provenance =
-      fields !== null
-        ? ` · updated ${fields['updated'] ?? '?'} by session ${fields['last-session'] ?? fields['session'] ?? '?'}`
-        : '';
+      fields !== null ? ` · updated ${fields['updated'] ?? '?'}${bySession !== undefined ? ` by session ${bySession}` : ''}` : '';
     out.write(`  ${describeDoc(doc)}${provenance}\n\n`);
   }
   return 0;

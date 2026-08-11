@@ -447,7 +447,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   recordWorkspaceMap(session, map);
   session.log.append({
     type: 'memory.loaded',
-    files: [memory.agent, memory.journal, memory.codebase].map((d) => ({
+    files: [memory.agent, memory.journal, memory.codebase, memory.lessons].map((d) => ({
       name: d.name,
       sha256: d.sha256,
       bytes: d.bytes,
@@ -1020,6 +1020,7 @@ function promptMemory(memory: LoadedMemory): SystemPromptMemory {
     ...(usable(memory.codebase.status)
       ? { codebaseText: memory.codebase.text, codebaseStale: memory.codebase.stale, codebaseTruncated: memory.codebase.truncated }
       : {}),
+    ...(usable(memory.lessons.status) ? { lessonsText: memory.lessons.text, lessonsTruncated: memory.lessons.truncated } : {}),
     ...(memory.crashNote !== null ? { crashNote: memory.crashNote } : {}),
   };
 }

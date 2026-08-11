@@ -8,6 +8,7 @@ import { buildReport } from '../report/report.js';
 import type { ContentBlock, ProviderRequest, Usage } from '../types.js';
 import { buildEntry, parseJournal, rollJournal, type Narrative } from './journal.js';
 import { stampCodebase } from './codebase.js';
+import { parseLessons, rollLessons, MAX_LESSONS_PER_SESSION, type LessonProposal } from './lessons.js';
 import { memoryDir, readDocCapped, writeDocAtomic } from './store.js';
 import { readPlanState } from '../plan/canonical.js';
 import { foldGraphState } from '../plan/graph-state.js';
@@ -35,6 +36,25 @@ const NarrativeResponse = z
     openIssues: z.array(z.string().max(500)).max(10),
     nextSteps: z.array(z.string().max(500)).max(10),
     codebaseUpdate: z.union([z.null(), z.object({ text: z.string().max(20_000) }).strict()]),
+    // S21: durable lessons, OPTIONAL by design — .strict() degrades the WHOLE narrative to a
+    // skeleton on any shape error, and "the model omitted a new key" must cost the lessons,
+    // never the journal. Absence reads as null.
+    lessons: z
+      .union([
+        z.null(),
+        z
+          .array(
+            z
+              .object({
+                slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,40}$/),
+                title: z.string().min(1).max(80),
+                body: z.string().min(1).max(500),
+              })
+              .strict(),
+          )
+          .max(MAX_LESSONS_PER_SESSION),
+      ])
+      .optional(),
   })
   .strict();
 
@@ -117,6 +137,28 @@ async function runInner(session: Session, deps: MemoryUpdateDeps): Promise<void>
     }
   }
 
+  // Lessons (S21): merged only when the model proposed any — the same disk discipline as the
+  // journal (re-read, refuse-if-unreadable, roll, atomic write). A skipped write is recorded,
+  // matching the codebase pattern, so "no lessons" is evidence rather than silence.
+  const lessonsFile = path.join(dir, 'LESSONS.md');
+  if (outcome.lessons === null || outcome.lessons.length === 0) {
+    session.log.append({ type: 'memory.updated', doc: 'lessons', status: 'skipped', detail: outcome.narrative === null ? 'no narrative' : 'no lessons proposed' });
+  } else {
+    const currentLessons = readDocCapped(lessonsFile, 'LESSONS.md', ROLL_READ_CAP_CHARS);
+    if (currentLessons.status === 'unreadable') {
+      session.log.append({ type: 'memory.updated', doc: 'lessons', status: 'failed', detail: 'existing LESSONS.md unreadable; refusing to overwrite it' });
+    } else {
+      try {
+        const rolled = rollLessons(parseLessons(currentLessons.text), outcome.lessons, { sessionId: session.id, nowIso });
+        const written = await writeDocAtomic(lessonsFile, rolled);
+        session.log.append({ type: 'memory.updated', doc: 'lessons', status: 'written', sha256: written.sha256, bytes: written.bytes });
+        deps.announce?.(`memory: ${outcome.lessons.length} lesson${outcome.lessons.length === 1 ? '' : 's'} recorded`);
+      } catch (err) {
+        session.log.append({ type: 'memory.updated', doc: 'lessons', status: 'failed', detail: (err as Error).message });
+      }
+    }
+  }
+
   // Codebase: rewritten only when the model proposed an update (or supplied the missing doc).
   if (outcome.codebaseUpdate === null) {
     session.log.append({ type: 'memory.updated', doc: 'codebase', status: 'skipped', detail: outcome.narrative === null ? 'no narrative' : 'no update proposed' });
@@ -188,6 +230,8 @@ function isProductive(session: Session): boolean {
 interface NarrativeOutcome {
   narrative: Narrative | null;
   codebaseUpdate: { text: string } | null;
+  /** S21: proposed durable lessons; null/absent = none this session. */
+  lessons: LessonProposal[] | null;
   durationMs: number;
   usage?: Usage;
   detail?: string;
@@ -217,7 +261,7 @@ async function requestNarrative(session: Session, codebaseExists: boolean, timeo
     };
     const turn = await session.provider.complete(req, undefined, AbortSignal.timeout(timeoutMs));
     if (turn.stopReason === 'tool_use') {
-      return done({ narrative: null, codebaseUpdate: null, usage: turn.usage, detail: 'model attempted tool use instead of answering' });
+      return done({ narrative: null, codebaseUpdate: null, lessons: null, usage: turn.usage, detail: 'model attempted tool use instead of answering' });
     }
     const text = turn.blocks
       .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
@@ -225,12 +269,12 @@ async function requestNarrative(session: Session, codebaseExists: boolean, timeo
       .join('');
     const parsed = NarrativeResponse.safeParse(JSON.parse(stripFences(text)));
     if (!parsed.success) {
-      return done({ narrative: null, codebaseUpdate: null, usage: turn.usage, detail: 'response failed schema validation' });
+      return done({ narrative: null, codebaseUpdate: null, lessons: null, usage: turn.usage, detail: 'response failed schema validation' });
     }
-    const { codebaseUpdate, ...narrative } = parsed.data;
-    return done({ narrative, codebaseUpdate, usage: turn.usage });
+    const { codebaseUpdate, lessons, ...narrative } = parsed.data;
+    return done({ narrative, codebaseUpdate, lessons: lessons ?? null, usage: turn.usage });
   } catch (err) {
-    return done({ narrative: null, codebaseUpdate: null, detail: `narrative call failed: ${(err as Error).message}` });
+    return done({ narrative: null, codebaseUpdate: null, lessons: null, detail: `narrative call failed: ${(err as Error).message}` });
   }
 }
 
@@ -254,6 +298,7 @@ function instruction(codebaseExists: boolean): string {
     '  "openIssues": string[],       // known problems / unverified work left behind; [] if none',
     '  "nextSteps": string[],        // the recommended next actions; [] if none',
     `  "codebaseUpdate": null | { "text": string }  // full replacement CODEBASE.md body (markdown: repo shape, modules, key flows). Provide it ONLY if the repository structure materially changed this session${codebaseExists ? '' : ' or because no codebase document exists yet (it is currently missing — provide one if you understand the repository)'}; otherwise null`,
+    `  "lessons": null | [ { "slug": string, "title": string, "body": string } ]  // up to ${String(MAX_LESSONS_PER_SESSION)} DURABLE, NON-OBVIOUS lessons about working in THIS repository that would save a future session real time: pitfalls actually hit, failure patterns diagnosed, debugging tricks that worked, conventions discovered the hard way. Ground each in something that HAPPENED this session; slug is a short kebab-case id (reusing a slug from the injected LESSONS.md UPDATES that entry); title ≤80 chars, body ≤500 chars. null when this session taught nothing durable — most sessions teach nothing durable, and an obvious or session-specific "lesson" is noise that crowds out real ones`,
     '}',
     'Report honestly: do not claim verification that did not happen; unverified work belongs in openIssues.',
   ].join('\n');

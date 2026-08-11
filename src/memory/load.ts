@@ -4,6 +4,7 @@ import { EventLog } from '../store/event-log.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { memoryDir, readDocCapped, type MemoryDoc } from './store.js';
 import { parseCodebase, isStale } from './codebase.js';
+import { LESSONS_INJECT_CAP_CHARS } from './lessons.js';
 
 /**
  * Session-start memory load: the three project-memory documents, read with hard caps and
@@ -23,6 +24,8 @@ export interface LoadedMemory {
   agent: MemoryDoc;
   journal: MemoryDoc & { sessionCount: number };
   codebase: MemoryDoc & { stale: boolean };
+  /** S21: durable project lessons (harness-managed, newest first). */
+  lessons: MemoryDoc;
   /** One-line banner summary, e.g. "AGENT.md 2.1k · journal 8.4k (3 sessions) · codebase (stale)". */
   bannerLine: string;
   /** Honest note about a recent sibling log with no recorded clean end; null when none. */
@@ -44,6 +47,8 @@ export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: L
   // The journal is newest-first by construction, so a top slice keeps the most recent entries.
   const journalDoc = readDocCapped(path.join(dir, 'JOURNAL.md'), 'JOURNAL.md', JOURNAL_INJECT_CAP_CHARS);
   const codebaseDoc = readDocCapped(path.join(dir, 'CODEBASE.md'), 'CODEBASE.md', CODEBASE_CAP_CHARS);
+  // Newest-first by construction (like the journal), so the top slice keeps the newest lessons.
+  const lessonsDoc = readDocCapped(path.join(dir, 'LESSONS.md'), 'LESSONS.md', LESSONS_INJECT_CAP_CHARS);
 
   const sessionCount = (journalDoc.text.match(/^## Session /gm) ?? []).length;
   const { stamp } = parseCodebase(codebaseDoc.text);
@@ -58,17 +63,24 @@ export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: L
     agent,
     journal,
     codebase,
-    bannerLine: bannerLine(agent, journal, codebase),
+    lessons: lessonsDoc,
+    bannerLine: bannerLine(agent, journal, codebase, lessonsDoc),
     crashNote: detectCrashNote(layout, opts.resumeId),
   };
 }
 
-function bannerLine(agent: MemoryDoc, journal: MemoryDoc & { sessionCount: number }, codebase: MemoryDoc & { stale: boolean }): string {
+function bannerLine(
+  agent: MemoryDoc,
+  journal: MemoryDoc & { sessionCount: number },
+  codebase: MemoryDoc & { stale: boolean },
+  lessons: MemoryDoc,
+): string {
   const parts: string[] = [];
   if (loaded(agent)) parts.push(`AGENT.md ${kb(agent.bytes)}${flag(agent)}`);
   if (loaded(journal)) parts.push(`journal ${kb(journal.bytes)} (${journal.sessionCount} session${journal.sessionCount === 1 ? '' : 's'})${flag(journal)}`);
   if (loaded(codebase)) parts.push(`codebase ${kb(codebase.bytes)} (${codebase.stale ? 'may be stale' : 'fresh'})${flag(codebase)}`);
-  for (const d of [agent, journal, codebase]) {
+  if (loaded(lessons)) parts.push(`lessons ${kb(lessons.bytes)}${flag(lessons)}`);
+  for (const d of [agent, journal, codebase, lessons]) {
     if (d.status === 'unreadable') parts.push(`${d.name} UNREADABLE (skipped)`);
   }
   return parts.length > 0 ? parts.join(' · ') : 'none';

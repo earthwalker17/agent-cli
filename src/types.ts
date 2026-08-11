@@ -2443,9 +2443,10 @@ export type EventBody =
       detail?: string;
     }
   | {
-      /** A project-memory document write outcome at session end (V0.6). Failures are honest, never silent. */
+      /** A project-memory document write outcome at session end (V0.6). Failures are honest, never
+       *  silent. 'lessons' and 'research' are S21 additive values (old readers ignore them). */
       type: 'memory.updated';
-      doc: 'journal' | 'codebase';
+      doc: 'journal' | 'codebase' | 'lessons' | 'research';
       status: 'written' | 'skipped' | 'failed';
       sha256?: string;
       bytes?: number;
