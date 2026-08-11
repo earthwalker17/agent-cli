@@ -164,6 +164,11 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   if (assembled.projectsNote !== undefined) {
     renderer.chromeLine(style.dim(`  projects: ${sanitizeLine(assembled.projectsNote)}`));
   }
+  // S21: a one-line, TTY-only pointer at onboarding — shown only while no global AGENT.md
+  // exists, never a flow the user has to escape from.
+  if (memory.user.status === 'missing' && streams.isTTY) {
+    renderer.chromeLine(style.dim('  tip: /init creates your global AGENT.md (who you are, how you like to work) — loaded into every session on this machine'));
+  }
 
   const pendingNotes: string[] = [];
   const researchUnavailable = assembled.researchUnavailable;

@@ -12,6 +12,7 @@ import { completionGateState, foldGraphState, integrationGateState, type PlanTas
 import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
 import { foldRepairs } from '../recovery/ledger.js';
 import { foldReview, type ReviewState } from '../review/ledger.js';
+import { runInit } from './init.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import { CHECKS_PER_SESSION, describeWorkspace, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
@@ -125,6 +126,9 @@ export const HELP = [
   '  /remote         remote delivery this session: the configured remotes, which GitHub account',
   '                  would act, live observations, every remote read, and every remote MUTATION',
   '                  (what changed, whether it verified, and whether it overwrote anything)',
+  '  /init           optional onboarding: create your global AGENT.md (machine-wide user',
+  '                  instructions; a few skippable questions) and, when this project has none,',
+  '                  a starter project AGENT.md. Never rewrites an existing file.',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -954,6 +958,11 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       for (const c of rv.caveats) lines.push(`  caveat: ${sanitizeLine(c)}`);
       lines.push(`  gate: ${rv.satisfied ? 'satisfied' : 'NOT satisfied — /accept will refuse COMPLETE'}`);
       ctx.renderer.chromeLine(lines.join('\n'));
+      return 'continue';
+    }
+
+    case 'init': {
+      await runInit(ctx, ctx.session.clock.iso());
       return 'continue';
     }
 

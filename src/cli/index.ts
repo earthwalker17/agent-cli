@@ -65,6 +65,8 @@ Usage:
   agent sessions                 List sessions for this workspace
   agent map [--budget <n>]       Print the workspace map the model would receive
   agent memory                   Show the project-memory documents (paths, status, provenance)
+  agent init                     Points at /init (the interactive onboarding lives in the REPL)
+  agent grants [revoke <id>]     List or revoke durable machine grants ("always allow" records)
   agent trust [--revoke|--list]  Manage recorded workspace trust (consent, not a sandbox)
   agent providers [--json]       List providers, models, key env vars (presence only — never
                                  values), base URLs, and where to obtain keys. No network.
@@ -100,7 +102,7 @@ recorded consent, not isolation. See README "Security model & honest limitations
 // 'version' and 'help' MUST be members: an unknown first positional falls through to a REAL
 // one-shot model session, so before they were named here, `agent version` silently started a
 // paid agent run with the literal task string "version".
-const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust', 'providers', 'version', 'help']);
+const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust', 'providers', 'grants', 'init', 'version', 'help']);
 
 interface Args {
   values: CliValues;
@@ -832,6 +834,16 @@ export async function main(argv: string[]): Promise<number> {
     if (cmd === 'providers') return cmdProviders(values);
     if (cmd === 'map') return cmdMap(values);
     if (cmd === 'memory') return cmdMemory(values);
+    if (cmd === 'init') {
+      // In KNOWN so the bare word cannot start a PAID one-shot session (the `agent version`
+      // lesson); the interactive flow itself lives in the REPL where the question seam exists.
+      process.stdout.write(
+        'agent init is interactive: start the REPL (`agent`) and type /init.\n' +
+          'It creates your global AGENT.md (machine-wide user instructions) and, when this project\n' +
+          'has none, offers a starter project AGENT.md. It never rewrites an existing file.\n',
+      );
+      return 0;
+    }
     if (cmd === 'undo') return await cmdUndo(values);
     if (cmd === 'trust') {
       return await cmdTrust({ ...(values.revoke !== undefined ? { revoke: values.revoke } : {}), ...(values.list !== undefined ? { list: values.list } : {}) }, resolveStateRoot(), workspaceRoot(values));
