@@ -382,6 +382,10 @@ export function createRenderer(opts: {
           chromeLine(style.yellow(`  ${g.warn} repair ESCALATED on ${sanitizeLine(e.target)} [${e.failureClass}]: ${sanitizeLine(e.reason)}`));
           break;
         }
+        case 'repair.dismissed': {
+          chromeLine(style.dim(`  ${g.arrow} repair escalation on ${sanitizeLine(e.target)} [${e.failureClass}] DISMISSED by user: ${sanitizeLine(e.reason)}`));
+          break;
+        }
         case 'turn.aborted': {
           chromeLine(style.yellow(`  ${g.warn} turn interrupted`));
           break;

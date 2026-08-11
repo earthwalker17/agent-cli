@@ -10,6 +10,7 @@ import { readPlan, setPlanStatus } from '../plan/store.js';
 import { approvedCurrentGraph, readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
 import { completionGateState, foldGraphState, integrationGateState, type PlanTaskState } from '../plan/graph-state.js';
 import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
+import { foldRepairs } from '../recovery/ledger.js';
 import { foldReview, type ReviewState } from '../review/ledger.js';
 import { renderUserPlanView, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
@@ -111,6 +112,11 @@ export const HELP = [
   '  /checks         what this project can be verified with, and the latest result per kind',
   '  /review         the structural review gate: rounds, recorded findings, triage state,',
   '                  blockers (executor plans require a recorded review round before /accept)',
+  '  /repair [dismiss <n> <reason>]',
+  '                  the bounded-repair ledger: attempts (outcomes derived from evidence) and',
+  '                  escalations. "dismiss <n> <reason>" closes OPEN escalation n as YOUR',
+  '                  decision — recorded as evidence and kept as an acceptance caveat, never',
+  '                  presented as a resolution',
   '  /preview [stop <id>]',
   '                  list this session\'s managed preview servers (pid, url, uptime, log tail);',
   '                  "stop <id>" stops one — a preview otherwise runs until session end or its TTL',
@@ -235,6 +241,20 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             const blocking = rv.findings.filter((f) => f.blocking).length;
             return [
               `  review: ${rv.requirement.kind === 'required' ? `required (${rv.requirement.source})` : rv.requirement.kind} · ${rv.rounds.filter((r) => r.qualifying).length}/${rv.rounds.length} qualifying round(s) · ${rv.findings.length} finding(s)${blocking > 0 ? ` · ${blocking} BLOCKING` : ''} (${rv.satisfied ? 'satisfied' : 'blocking /accept'}; /review)`,
+            ];
+          })(),
+          ...((): string[] => {
+            // The repair ledger at a glance (S21): open escalations were previously visible only
+            // through a refused /accept — the one surface a user meets AFTER deciding to finish.
+            const ledger = foldRepairs(ctx.session.log.events);
+            if (ledger.total === 0 && ledger.escalations.length === 0) return [];
+            const openEsc = ledger.escalations.filter((e) => e.open).length;
+            const dismissed = ledger.escalations.filter((e) => e.dismissed !== null).length;
+            const unproven = ledger.attempts.filter((a) => a.outcome === 'open' && a.pendingChecks.length > 0).length;
+            return [
+              `  repairs: ${ledger.total} attempt(s) · ${ledger.escalations.length} escalation(s)` +
+                `${openEsc > 0 ? ` — ${openEsc} OPEN` : ''}${dismissed > 0 ? ` — ${dismissed} dismissed` : ''}` +
+                `${unproven > 0 ? ` · ${unproven} unproven attempt(s)` : ''} (/repair)`,
             ];
           })(),
           ...((): string[] => {
@@ -933,6 +953,80 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       for (const b of rv.openBlockers) lines.push(`  BLOCKER: ${sanitizeLine(b)}`);
       for (const c of rv.caveats) lines.push(`  caveat: ${sanitizeLine(c)}`);
       lines.push(`  gate: ${rv.satisfied ? 'satisfied' : 'NOT satisfied — /accept will refuse COMPLETE'}`);
+      ctx.renderer.chromeLine(lines.join('\n'));
+      return 'continue';
+    }
+
+    case 'repair': {
+      // The bounded-repair ledger surface (S21): the user-side closure path for escalations.
+      // A dismissal is the USER's typed decision — the recover tool has no dismiss action, so
+      // consent stays here structurally. The fold re-derives everything; this case only appends.
+      const ledger = foldRepairs(ctx.session.log.events);
+      const openEscalations = ledger.escalations.filter((e) => e.open);
+      const sub = (rest[0] ?? '').toLowerCase();
+      if (sub === 'dismiss') {
+        const n = Number.parseInt(rest[1] ?? '', 10);
+        const reason = rest.slice(2).join(' ').trim();
+        if (!Number.isInteger(n) || n < 1 || n > openEscalations.length) {
+          ctx.renderer.chromeLine(
+            openEscalations.length === 0
+              ? 'nothing to dismiss: no OPEN repair escalation is on record (/repair shows the ledger)'
+              : `usage: /repair dismiss <n> <reason> — n is the OPEN escalation number /repair shows (1..${openEscalations.length})`,
+          );
+          return 'continue';
+        }
+        if (reason.length === 0) {
+          ctx.renderer.chromeLine(
+            'a dismissal needs a reason: it is recorded as evidence and shown as an acceptance caveat (e.g. /repair dismiss 1 verified by hand; timeout was environmental)',
+          );
+          return 'continue';
+        }
+        const esc = openEscalations[n - 1]!;
+        ctx.session.log.append({
+          type: 'repair.dismissed',
+          escalationSeq: esc.seq,
+          target: esc.target,
+          failureClass: esc.failureClass,
+          signature: esc.signature,
+          reason: sanitizeLine(reason),
+          source: 'user',
+        });
+        ctx.renderer.chromeLine(
+          `escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) dismissed — recorded as evidence. It no longer blocks /accept and will appear as an acceptance caveat, not as a resolution.`,
+        );
+        ctx.pendingNotes.push(
+          `the user DISMISSED the open repair escalation on '${esc.target}' (${esc.failureClass}) with reason: ${sanitizeLine(reason)}. ` +
+            'It no longer blocks acceptance and is recorded as a caveat. Do not re-escalate the same failure without new evidence.',
+        );
+        return 'continue';
+      }
+      const lines: string[] = [];
+      if (ledger.total === 0 && ledger.escalations.length === 0) {
+        lines.push('no repair activity this session (the recover tool records attempts and escalations here).');
+      } else {
+        lines.push(`repair ledger: ${ledger.total} attempt(s), ${ledger.escalations.length} escalation(s)`);
+        for (const a of ledger.attempts) {
+          lines.push(
+            `  attempt ${a.attempt} on '${sanitizeLine(a.target)}' (${a.failureClass}) → ${a.outcome}` +
+              `${a.outcome === 'open' && a.pendingChecks.length > 0 ? ` — UNPROVEN (pending: ${a.pendingChecks.join(', ')})` : ''}`,
+          );
+        }
+        let n = 0;
+        for (const esc of ledger.escalations) {
+          if (esc.open) {
+            n++;
+            lines.push(`  [${n}] OPEN escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — ${sanitizeLine(esc.reason)}`);
+          } else if (esc.dismissed !== null) {
+            lines.push(`  escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — DISMISSED by you: ${sanitizeLine(esc.dismissed.reason)}`);
+          } else {
+            lines.push(`  escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — resolved by a proven repair`);
+          }
+        }
+        if (n > 0) {
+          lines.push('  dismiss an OPEN escalation you have verified or decided to accept: /repair dismiss <n> <reason>');
+          lines.push('  (recorded as evidence and kept as an acceptance caveat — dismissed is not resolved)');
+        }
+      }
       ctx.renderer.chromeLine(lines.join('\n'));
       return 'continue';
     }

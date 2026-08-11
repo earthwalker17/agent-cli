@@ -131,8 +131,8 @@ export function createRecoverTool(deps: RecoverDeps): Tool<RecoverInputT> {
             `escalated: ${target} — ${classification.class} (${classification.detail})`,
             'Recorded as an unresolved blocker: it appears in /status, the report, and the session handoff, and it prevents accepting the session as complete.',
             target === 'session'
-              ? 'It clears only if a later repair attempt for this same failure is recorded and proven. Otherwise it stands for the rest of the session, and the user can still record a partial acceptance with /accept confirm.'
-              : `It clears by EVIDENCE: once plan task '${target}' is completed with its declared check gate satisfied, the blocker resolves itself. The user can also record a partial acceptance with /accept confirm.`,
+              ? 'It clears if a later repair attempt for this same failure is recorded and proven, or if the USER dismisses it with /repair dismiss (their decision, recorded as evidence and kept as an acceptance caveat). Otherwise it stands for the rest of the session, and the user can still record a partial acceptance with /accept confirm.'
+              : `It clears by EVIDENCE: once plan task '${target}' is completed with its declared check gate satisfied, the blocker resolves itself. The user can also dismiss it with /repair dismiss, or record a partial acceptance with /accept confirm.`,
             'Tell the user plainly what is blocked and what you need from them. Do not keep retrying.',
           ].join('\n'),
           durationMs: Math.max(0, Date.now() - startedAt),

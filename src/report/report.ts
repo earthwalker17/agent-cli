@@ -197,6 +197,8 @@ export interface ReportRepair {
   /** escalations only. */
   reason?: string;
   open?: boolean;
+  /** S21 (additive): set when the USER dismissed this escalation — closed, but never "resolved". */
+  dismissedReason?: string;
 }
 export interface ReportSandbox {
   mode: string;
@@ -1041,6 +1043,7 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
       signature: e.signature.slice(0, 12),
       reason: e.reason,
       open: e.open,
+      ...(e.dismissed !== null ? { dismissedReason: e.dismissed.reason } : {}),
     })),
   ];
 
@@ -1470,7 +1473,13 @@ function renderMarkdown(r: ReportJson): string {
     L.push(`## Recovery (classified failures and bounded repairs)`);
     for (const p of r.repairs) {
       if (p.kind === 'escalation') {
-        L.push(`- ESCALATED ${p.target} [${p.failureClass}] ${p.open === true ? '(UNRESOLVED)' : '(resolved by a later repair)'} — ${p.reason ?? ''}`);
+        const state =
+          p.dismissedReason !== undefined
+            ? `(DISMISSED by the user: ${p.dismissedReason} — closed, not resolved)`
+            : p.open === true
+              ? '(UNRESOLVED)'
+              : '(resolved by a later repair)';
+        L.push(`- ESCALATED ${p.target} [${p.failureClass}] ${state} — ${p.reason ?? ''}`);
         continue;
       }
       const outcome =
