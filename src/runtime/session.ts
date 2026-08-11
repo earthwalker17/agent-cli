@@ -1750,11 +1750,19 @@ async function runExecution<I>(
   // answer has to be durable — the wire-side pointer text is ephemeral, so a log without this
   // could not distinguish a visually-judged flow from one the model never saw.
   const imagesWithheld = hasImages && !capsFor(session.provider.name as ProviderName, session.model).visionInput;
+  // outputPreview is contractually "the exact string the model saw" (S14.5) — and for a FAILING
+  // result the wire content leads with the ERROR text. The preview recorded `output` alone, so a
+  // refusal carrying its message only in `error` with an empty output (the delegate gate's exact
+  // shape) persisted as "" — the log, the report, and every resumed conversation lost WHY the
+  // call failed (found by the S21 live-E2E validator against a real Fix B refusal).
+  const persistedPreview = result.ok
+    ? persisted.output
+    : `${result.error ?? 'error'}${persisted.output ? `\n${persisted.output}` : ''}`;
   session.log.append({
     type: 'tool.completed',
     callId,
     ok: result.ok,
-    outputPreview: persisted.output,
+    outputPreview: persistedPreview,
     durationMs: result.durationMs,
     truncated: result.truncated,
     ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
