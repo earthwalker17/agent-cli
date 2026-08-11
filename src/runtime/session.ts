@@ -43,7 +43,7 @@ import { systemClock, type Clock } from '../shared/clock.js';
 import { systemIdGen, type IdGen } from '../shared/ids.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { SETUP_ACTIONS } from '../types.js';
-import type { Approver, ExecSandbox, ResolvedCheckFact, SetupEvidence } from '../types.js';
+import type { Approver, ExecSandbox, PersistGrantRecord, ResolvedCheckFact, SetupEvidence } from '../types.js';
 import type { SandboxBackend, EnforcementFacts } from '../sandbox/index.js';
 import type { GitFacts } from '../git/types.js';
 import type { ExecSpec } from '../exec/run.js';
@@ -81,6 +81,13 @@ export interface Session {
   onModelRequest?: (inFlight: boolean) => void;
   /** Narrowing-only policy additions from config; passed to every tool/policy context. */
   rules?: PolicyRules;
+  /**
+   * S21: the durable-grant persistence seam, wired by assembly (which owns the state root, the
+   * workspace key, and the eligibility re-check). Absent in child sessions and tests — a
+   * 'machine' answer then downgrades honestly to a session grant. A closure rather than a store
+   * import keeps the runtime free of a runtime→store/grants edge.
+   */
+  persistGrant?: (record: PersistGrantRecord) => Promise<void>;
   /**
    * Present only for subagent child sessions: who spawned this session and as what role — the
    * same value recorded on `session.started`. Carried on the live session (Session 19) because
@@ -808,7 +815,40 @@ async function executeCall(
   if (decision.decision === 'ask') {
     const req = buildApprovalRequest(tool, input, decision, callId);
     const outcome = await session.approver(req);
-    session.log.append({ type: 'approval.resolved', callId, decision: outcome.decision, scope: outcome.scope, source: outcome.source });
+    // S21: a 'machine' answer persists the durable grant BEFORE the approval event is recorded,
+    // so the recorded scope is what actually happened. A failed or unavailable persist (no seam
+    // in tests/children; store locked; ineligible identity reaching this far) downgrades
+    // HONESTLY to 'session' with the reason on the event — the user pressed [a]; recording
+    // 'machine' while nothing durable was stored would be the consent surface lying.
+    let recordedScope = outcome.scope;
+    let persistNote: string | undefined;
+    if (outcome.decision === 'allow' && outcome.scope === 'machine') {
+      const record: PersistGrantRecord | null =
+        decision.checkReplayKeys !== undefined && decision.checkReplayKeys.length > 0
+          ? { kind: 'check-replay', replayKeys: [...decision.checkReplayKeys], label: req.summary }
+          : tool.command === undefined && tool.check === undefined && tool.remoteWrite === undefined
+            ? { kind: 'class', tool: tool.name, cls: decision.classification }
+            : null;
+      if (record === null || session.persistGrant === undefined) {
+        recordedScope = 'session';
+        persistNote = record === null ? 'not durable-eligible; kept as a session grant' : 'no durable-grant store in this context; kept as a session grant';
+      } else {
+        try {
+          await session.persistGrant(record);
+        } catch (err) {
+          recordedScope = 'session';
+          persistNote = `durable grant NOT stored (${(err as Error).message}); kept as a session grant`;
+        }
+      }
+    }
+    session.log.append({
+      type: 'approval.resolved',
+      callId,
+      decision: outcome.decision,
+      scope: recordedScope,
+      source: outcome.source,
+      ...(persistNote !== undefined ? { detail: persistNote } : {}),
+    });
     if (outcome.decision !== 'allow') {
       session.log.append({ type: 'tool.completed', callId, ok: false, outputPreview: 'denied by user', durationMs: 0, truncated: false });
       return { toolResult: toolResultBlock(callId, 'denied by user', true), denied: true, stop: outcome.decision === 'deny-stop' };
@@ -830,14 +870,17 @@ async function executeCall(
     // user would believe they had authorized "publishing this session", which is exactly the
     // standing authority this capability is built to withhold. The prompt offers no [s] for a
     // remote write; the storage site is told the same thing, in the same place as its siblings.
-    if (outcome.scope === 'session' && tool.command === undefined && tool.check === undefined && tool.remoteWrite === undefined) {
+    // A 'machine' answer is a session grant PLUS persistence (already attempted above): the
+    // in-memory effect is identical for the rest of this session either way.
+    const storesInSession = outcome.scope === 'session' || outcome.scope === 'machine';
+    if (storesInSession && tool.command === undefined && tool.check === undefined && tool.remoteWrite === undefined) {
       session.grants.add(tool.name, decision.classification);
     }
     // Typed-check replay consent (Session 12): a session-scope approval on a check stores the
     // per-command keys the decision computed — consent to re-run those EXACT harness-resolved
     // commands. Deliberately not a class grant (Grants.add refuses `reversible` anyway): a
     // manifest edit that changes what a recipe resolves to produces a new key and asks again.
-    if (outcome.scope === 'session' && decision.checkReplayKeys !== undefined) {
+    if (storesInSession && decision.checkReplayKeys !== undefined) {
       for (const key of decision.checkReplayKeys) session.grants.addCheckReplay(key);
     }
   }

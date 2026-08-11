@@ -143,7 +143,12 @@ async function runInner(session: Session, deps: MemoryUpdateDeps): Promise<void>
   // matching the codebase pattern, so "no lessons" is evidence rather than silence.
   const lessonsFile = path.join(dir, 'LESSONS.md');
   if (outcome.lessons === null || outcome.lessons.length === 0) {
-    session.log.append({ type: 'memory.updated', doc: 'lessons', status: 'skipped', detail: outcome.narrative === null ? 'no narrative' : 'no lessons proposed' });
+    session.log.append({
+      type: 'memory.updated',
+      doc: 'lessons',
+      status: 'skipped',
+      detail: outcome.lessonsInvalid === true ? 'lessons proposal failed validation — dropped (journal preserved)' : outcome.narrative === null ? 'no narrative' : 'no lessons proposed',
+    });
   } else {
     const currentLessons = readDocCapped(lessonsFile, 'LESSONS.md', ROLL_READ_CAP_CHARS);
     if (currentLessons.status === 'unreadable') {
@@ -263,6 +268,8 @@ interface NarrativeOutcome {
   codebaseUpdate: { text: string } | null;
   /** S21: proposed durable lessons; null/absent = none this session. */
   lessons: LessonProposal[] | null;
+  /** S21: the lessons value was present but invalid and was dropped (the journal survived). */
+  lessonsInvalid?: boolean;
   durationMs: number;
   usage?: Usage;
   detail?: string;
@@ -298,12 +305,26 @@ async function requestNarrative(session: Session, codebaseExists: boolean, timeo
       .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
       .map((b) => b.text)
       .join('');
-    const parsed = NarrativeResponse.safeParse(JSON.parse(stripFences(text)));
+    const raw: unknown = JSON.parse(stripFences(text));
+    let parsed = NarrativeResponse.safeParse(raw);
+    let lessonsInvalid = false;
+    if (!parsed.success && typeof raw === 'object' && raw !== null && 'lessons' in raw) {
+      // The invariant, enforced not just stated (S21 review): a lessons problem must cost the
+      // LESSONS, never the journal. A present-but-invalid lessons value (4 entries, a bad slug)
+      // previously failed the one strict parse and skeletonized the whole narrative — retry
+      // without it, and record that the lessons were dropped for shape.
+      const { lessons: _invalid, ...rest } = raw as Record<string, unknown>;
+      const retry = NarrativeResponse.safeParse(rest);
+      if (retry.success) {
+        parsed = retry;
+        lessonsInvalid = true;
+      }
+    }
     if (!parsed.success) {
       return done({ narrative: null, codebaseUpdate: null, lessons: null, usage: turn.usage, detail: 'response failed schema validation' });
     }
     const { codebaseUpdate, lessons, ...narrative } = parsed.data;
-    return done({ narrative, codebaseUpdate, lessons: lessons ?? null, usage: turn.usage });
+    return done({ narrative, codebaseUpdate, lessons: lessons ?? null, usage: turn.usage, ...(lessonsInvalid ? { lessonsInvalid: true } : {}) });
   } catch (err) {
     return done({ narrative: null, codebaseUpdate: null, lessons: null, detail: `narrative call failed: ${(err as Error).message}` });
   }

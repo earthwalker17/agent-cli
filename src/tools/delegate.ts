@@ -630,10 +630,18 @@ export function createDelegateTool(
               : st.status === 'approved'
                 ? 'the document changed after approval'
                 : `status: ${st.status}`;
+          // The cure must be one that WORKS in the named state (S16.5's refusable-cure lesson,
+          // re-checked by the S21 review): with the document MISSING, /plan approve and
+          // /plan discard both refuse — the real exit is a new plan via update_plan, which the
+          // user then approves (matching the executor F3 wording for the same state).
+          const cure =
+            st.kind === 'none'
+              ? 'The approved plan document is MISSING: write a new plan with update_plan and have the user /plan approve it before running a review round'
+              : 'Have the user re-approve the current plan (/plan approve) or discard it (/plan discard) first';
           return refuse(
             `a plan was approved this session but its approval is no longer current (${why}) — a review round started now ` +
               `could not bind to the plan's reviewer task and would still spend one of the ${MAX_REVIEW_ROUNDS} review rounds. ` +
-              'Have the user re-approve the current plan (/plan approve) or discard it (/plan discard) first; nothing was spawned',
+              `${cure}; nothing was spawned`,
           );
         }
       }

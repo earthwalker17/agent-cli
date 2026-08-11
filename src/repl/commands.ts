@@ -129,6 +129,8 @@ export const HELP = [
   '  /init           optional onboarding: create your global AGENT.md (machine-wide user',
   '                  instructions; a few skippable questions) and, when this project has none,',
   '                  a starter project AGENT.md. Never rewrites an existing file.',
+  '  /grants         the durable machine grants ("always allow" records) active in THIS session',
+  '                  — list and revoke with `agent grants [revoke <id>]`',
   '  /report         print the evidence report for this session',
   '  /map            print the workspace map the model receives',
   '  /quit           end the session (Ctrl+D on an empty line also works)',
@@ -158,6 +160,24 @@ export function sessionReview(ctx: Pick<CommandContext, 'session' | 'layout'>): 
   const events = ctx.session.log.events;
   const state = readPlanState(ctx.layout, ctx.session.id, events);
   return foldReview(approvedCurrentGraph(state), events);
+}
+
+/**
+ * The plan-task targets acceptance treats as repair-resolved BY EVIDENCE (completed with a
+ * satisfied gate, or parent-owned) — the same predicate computeAcceptance builds (S21 review:
+ * /repair and /status previously folded without it, so an escalation acceptance had already
+ * released still displayed OPEN — two surfaces, one log, opposite answers).
+ */
+function resolvedRepairTargets(ctx: Pick<CommandContext, 'session' | 'layout'>): Set<string> {
+  const events = ctx.session.log.events;
+  const state = readPlanState(ctx.layout, ctx.session.id, events);
+  const g = state.canonical?.graph ?? null;
+  const gs = g !== null ? foldGraphState(g, events) : null;
+  return new Set(
+    (gs?.tasks ?? [])
+      .filter((t) => (t.state === 'completed' && t.verification.status !== 'pending') || t.state === 'parent-owned')
+      .map((t) => t.id),
+  );
 }
 
 /** The one-line completion summary used by /status and the quit path. */
@@ -250,9 +270,11 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           ...((): string[] => {
             // The repair ledger at a glance (S21): open escalations were previously visible only
             // through a refused /accept — the one surface a user meets AFTER deciding to finish.
+            // OPEN excludes evidence-resolved targets, the same closure acceptance applies.
             const ledger = foldRepairs(ctx.session.log.events);
             if (ledger.total === 0 && ledger.escalations.length === 0) return [];
-            const openEsc = ledger.escalations.filter((e) => e.open).length;
+            const resolved = resolvedRepairTargets(ctx);
+            const openEsc = ledger.escalations.filter((e) => e.open && !resolved.has(e.target)).length;
             const dismissed = ledger.escalations.filter((e) => e.dismissed !== null).length;
             const unproven = ledger.attempts.filter((a) => a.outcome === 'open' && a.pendingChecks.length > 0).length;
             return [
@@ -966,12 +988,40 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       return 'continue';
     }
 
+    case 'grants': {
+      // Read-only view of standing authority IN THIS SESSION (the newest grants.loaded — a
+      // resumed life re-loads and re-records). Mutation lives in `agent grants`, deliberately
+      // outside the conversation: revoking authority should not require a session.
+      const loaded = ctx.session.log.events.filter((e) => e.type === 'grants.loaded').at(-1);
+      const lines: string[] = [];
+      if (loaded === undefined || loaded.type !== 'grants.loaded') {
+        lines.push('no durable machine grants were active when this session was assembled.');
+      } else {
+        lines.push(`durable machine grants active this session (loaded at assembly, recorded as grants.loaded):`);
+        for (const g of loaded.entries) lines.push(`  ${g.id}  ${sanitizeLine(g.label)} · created ${g.createdAt}`);
+      }
+      // Grants minted mid-session by [a] are active in-session immediately and durably stored,
+      // but grants.loaded is assembly-only — without this line, /grants right after an [a]
+      // answered "none were active", which reads as "nothing was recorded" (S21 review).
+      const minted = ctx.session.log.events.filter((e) => e.type === 'approval.resolved' && e.scope === 'machine').length;
+      if (minted > 0) {
+        lines.push(`plus ${minted} durable grant answer(s) recorded by [a] DURING this session — active now; \`agent grants\` lists the stored entries.`);
+      }
+      lines.push('list / revoke: agent grants [revoke <id>] — a revoke applies from the NEXT session assembly.');
+      ctx.renderer.chromeLine(lines.join('\n'));
+      return 'continue';
+    }
+
     case 'repair': {
       // The bounded-repair ledger surface (S21): the user-side closure path for escalations.
       // A dismissal is the USER's typed decision — the recover tool has no dismiss action, so
       // consent stays here structurally. The fold re-derives everything; this case only appends.
+      // Evidence-resolved escalations (acceptance's resolvedTargets) are excluded from the
+      // dismissible OPEN list — this surface and /accept must not disagree about the same log,
+      // and dismissing a self-resolved escalation would mint a needless permanent caveat.
       const ledger = foldRepairs(ctx.session.log.events);
-      const openEscalations = ledger.escalations.filter((e) => e.open);
+      const resolvedByEvidence = resolvedRepairTargets(ctx);
+      const openEscalations = ledger.escalations.filter((e) => e.open && !resolvedByEvidence.has(e.target));
       const sub = (rest[0] ?? '').toLowerCase();
       if (sub === 'dismiss') {
         const n = Number.parseInt(rest[1] ?? '', 10);
@@ -1000,11 +1050,19 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           reason: sanitizeLine(reason),
           source: 'user',
         });
+        // Honest scope (S21 review): the DISMISSAL clears the escalation blocker only — an
+        // unproven repair ATTEMPT for the same failure keeps its own blocker until its declared
+        // regression checks pass, and the confirmation must not promise /accept more than that.
+        const remainingAttempts = ledger.attempts.filter(
+          (a) => a.signature === esc.signature && a.outcome === 'open' && a.pendingChecks.length > 0,
+        ).length;
         ctx.renderer.chromeLine(
-          `escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) dismissed — recorded as evidence. It no longer blocks /accept and will appear as an acceptance caveat, not as a resolution.`,
+          `escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) dismissed — recorded as evidence. The escalation no longer blocks /accept` +
+            `${remainingAttempts > 0 ? `; NOTE: ${remainingAttempts} unproven repair attempt(s) for the same failure still block until their regression checks pass` : ''}` +
+            ' and it will appear as an acceptance caveat, not as a resolution.',
         );
         ctx.pendingNotes.push(
-          `the user DISMISSED the open repair escalation on '${esc.target}' (${esc.failureClass}) with reason: ${sanitizeLine(reason)}. ` +
+          `the user DISMISSED the open repair escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) with reason: ${sanitizeLine(reason)}. ` +
             'It no longer blocks acceptance and is recorded as a caveat. Do not re-escalate the same failure without new evidence.',
         );
         return 'continue';
@@ -1022,7 +1080,10 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         }
         let n = 0;
         for (const esc of ledger.escalations) {
-          if (esc.open) {
+          if (esc.open && resolvedByEvidence.has(esc.target)) {
+            // The same closure acceptance applies (resolvedTargets): the surfaces must agree.
+            lines.push(`  escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — resolved by EVIDENCE (its plan task completed with a satisfied gate)`);
+          } else if (esc.open) {
             n++;
             lines.push(`  [${n}] OPEN escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — ${sanitizeLine(esc.reason)}`);
           } else if (esc.dismissed !== null) {

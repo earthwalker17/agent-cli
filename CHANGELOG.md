@@ -50,16 +50,17 @@ patched around.
   state root, injected before the project `AGENT.md` (which overrides it on conflict). Created
   only by `/init`; hand-edited after; recorded in `memory.loaded` with `scope: 'user'`.
 - **`/init`** — optional, skippable onboarding: four questions into the global `AGENT.md`, plus
-  a starter project `AGENT.md` offer when none exists. Never rewrites an existing file; EOF at
-  any question aborts with nothing written. `agent init` points at it (and can no longer start a
-  paid one-shot session by accident).
+  a starter project `AGENT.md` offer when none exists. Never rewrites an existing file; each
+  file is written atomically or not at all (EOF during the global questions aborts with nothing
+  written; after the global doc exists, an abort in the project phase keeps it and says so).
+  `agent init` points at it (and can no longer start a paid one-shot session by accident).
 - **Durable machine approvals** — an `[a]` "always allow on this machine" option on exactly
   four eligible surfaces: a typed check's exact resolved commands (body-sha-bound and
   workspace-scoped — any drift re-asks), bounded web searches, research-subagent spawns, and
   remote READS (machine-wide; per-session budgets still bound all three). Stored in
   `<state>/grants.json` (strict schema, corrupt = hard error, registry-locked writes) with an
   append-only `grants.log` audit; loaded VISIBLY at every assembly as a `grants.loaded` event;
-  inspected and revoked via `agent grants [revoke <id>]` and `/grants`. A publish, a migration,
+  inspected via `/grants` in-session and revoked via `agent grants revoke <id>`. A publish, a migration,
   an executor spawn, a raw shell command, and every sensitive read remain ineligible — each
   with its reason written on the closed eligibility set. A failed persist downgrades the
   recorded scope honestly; `--dangerously-allow-all` can never create one.

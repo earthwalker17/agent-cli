@@ -1430,6 +1430,15 @@ export interface ApprovalOutcome {
 }
 export type Approver = (req: ApprovalRequest) => Promise<ApprovalOutcome>;
 
+/**
+ * S21: what a 'machine'-scope answer asks the assembly-wired seam to persist. Two shapes only —
+ * the exact replay keys of the approved check batch, or one (tool, class) pair. The seam
+ * re-validates eligibility; the runtime composes but never stores.
+ */
+export type PersistGrantRecord =
+  | { kind: 'check-replay'; replayKeys: string[]; label: string }
+  | { kind: 'class'; tool: string; cls: ActionClass };
+
 // ── Provider wire types (mirror the Anthropic shape; MockProvider needs no SDK) ─────────────
 /**
  * Parts of a structured tool_result (Session 13). `sha256`/`label` on an image part are
@@ -1595,10 +1604,15 @@ export type EventBody =
       type: 'approval.resolved';
       callId: string;
       decision: 'allow' | 'deny' | 'deny-stop';
-      /** 'machine' (S21, additive): the answer also persisted a durable grant to the state root. */
+      /** 'machine' (S21, additive): the answer also persisted a durable grant to the state root.
+       *  Recorded ONLY when the persist actually succeeded — a failed persist downgrades to
+       *  'session' with the reason in `detail`, so the record never claims standing authority
+       *  that does not exist. */
       scope: 'once' | 'session' | 'machine';
       /** 'task-aborted' (V0.7, additive): a forwarded child ask auto-denied because its task died first. */
       source: 'user' | 'non-interactive' | 'dangerous-mode' | 'task-aborted';
+      /** S21 (additive): honesty note when a machine answer could not be persisted durably. */
+      detail?: string;
     }
   | {
       type: 'snapshot.created';

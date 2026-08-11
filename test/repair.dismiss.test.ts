@@ -152,6 +152,34 @@ describe('/repair — the bounded-repair ledger surface (S21)', () => {
     }
   });
 
+  it('S21 review: the confirmation names remaining unproven-attempt blockers instead of overclaiming', async () => {
+    const session = makeSession();
+    try {
+      // An attempt with a pending regression check shares the signature with the escalation.
+      session.log.append({
+        type: 'repair.attempted',
+        callId: 'c0',
+        target: 'session',
+        failureClass: 'timeout-resource',
+        signature: 'sig-1',
+        hypothesis: 'h',
+        hypothesisSha: 'hs',
+        scopePaths: [],
+        regressionChecks: ['test'],
+        attempt: 1,
+      });
+      escalate(session);
+      const chrome: string[] = [];
+      const ctx = ctxFor(session, chrome);
+      await dispatchSlash('/repair dismiss 1 decided to accept it', ctx);
+      const text = chrome.join('\n');
+      expect(text).toContain('The escalation no longer blocks /accept');
+      expect(text).toContain('1 unproven repair attempt(s) for the same failure still block');
+    } finally {
+      await endSession(session, 'completed');
+    }
+  });
+
   it('/status gains the repairs line; the report renders DISMISSED with the reason', async () => {
     const session = makeSession();
     try {

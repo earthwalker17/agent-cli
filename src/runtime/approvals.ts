@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { sanitizeLine } from '../shared/text.js';
-import { isGrantable } from '../policy/engine.js';
+import { isDurableClassEligible, isGrantable } from '../policy/engine.js';
 import type { ApprovalOutcome, ApprovalRequest, Approver } from '../types.js';
 
 /** Non-interactive mode: every `ask` becomes a recorded denial (fails safe). */
@@ -25,7 +25,21 @@ export const dangerousApprover: Approver = async () => ({
 /** Detail lines rendered before truncation. Kept small so a prompt stays readable at a glance. */
 const DETAIL_LINE_CAP = 12;
 
-export function formatApprovalPrompt(req: ApprovalRequest): string {
+/**
+ * Whether THIS request may offer `[a]` (S21 durable grants). Three gates, all structural:
+ * `offerDurable` (an interactive prompt the user deliberately drives — never non-interactive,
+ * never dangerous mode), never a FORWARDED child ask (durable authority is not minted from
+ * inside a delegation), and the identity must be durable-eligible — a check's replay keys
+ * (body-bound, drift re-asks), or one of the closed DURABLE_CLASS_ELIGIBLE pairs. Everything
+ * else never sees the option, which is the primary control; the storage site re-checks.
+ */
+function durableOffered(req: ApprovalRequest, offerDurable: boolean): boolean {
+  if (!offerDurable || req.taskContext !== undefined) return false;
+  if (req.kind === 'check') return req.checkCount !== undefined;
+  return isDurableClassEligible(req.tool, req.classification);
+}
+
+export function formatApprovalPrompt(req: ApprovalRequest, offerDurable = false): string {
   // For a shell command the class is only a best-effort LABEL (string matching over untrusted
   // model output, bypassable by design) — the header must say so, not present it as a verdict
   // that visually contradicts the NOT-undoable warning ("[observe]" next to "NOT undoable").
@@ -150,19 +164,37 @@ export function formatApprovalPrompt(req: ApprovalRequest): string {
               ? '   [s] allow for the rest of THIS TASK'
               : '   [s] allow for the rest of this session'
             : '';
+  // S21: the durable option. The wording prints the LITERAL rule and its scope before anything
+  // persists — the studied failure (Codex #22181) is a vague "don't ask again" that turned out
+  // to be a machine-wide program-name allow. Ours is exact or it is not offered.
+  const aPart = !durableOffered(req, offerDurable)
+    ? ''
+    : req.kind === 'check'
+      ? `\n  [a] ALWAYS allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'} in this workspace on this machine (a changed script or command re-asks; revoke: agent grants)`
+      : req.kind === 'research'
+        ? `\n  [a] ALWAYS allow ${req.tool === 'delegate_task' ? 'research-subagent spawns' : 'bounded web searches'} on this machine — every workspace you trust; per-session budgets still apply (stored rule: ${req.tool}::external; revoke: agent grants)`
+        : req.kind === 'remote-read'
+          ? `\n  [a] ALWAYS allow remote READS on this machine — never a push, tag or release; the per-session read allowance still applies (stored rule: ${req.tool}::external; revoke: agent grants)`
+          : '';
   lines.push(
     `  [y] allow once${sPart}   [n] deny   ` +
-      (forwarded ? '[q] deny & stop THIS TASK (the rest of the turn continues)' : '[q] deny & stop'),
+      (forwarded ? '[q] deny & stop THIS TASK (the rest of the turn continues)' : '[q] deny & stop') +
+      aPart,
   );
   return lines.join('\n');
 }
 
-function parseAnswer(answer: string): ApprovalOutcome {
+function parseAnswer(answer: string, offeredDurable: boolean): ApprovalOutcome {
   switch (answer.trim().toLowerCase()[0]) {
     case 'y':
       return { decision: 'allow', scope: 'once', source: 'user' };
     case 's':
       return { decision: 'allow', scope: 'session', source: 'user' };
+    // 'a' means machine-durable ONLY where the prompt actually offered it; everywhere else it
+    // stays what any unrecognized key is — a deny. An answer key that silently upgraded scope
+    // on prompts that never mentioned it would be standing authority won by a typo.
+    case 'a':
+      return offeredDurable ? { decision: 'allow', scope: 'machine', source: 'user' } : { decision: 'deny', scope: 'once', source: 'user' };
     case 'q':
       return { decision: 'deny-stop', scope: 'once', source: 'user' };
     default:
@@ -177,14 +209,20 @@ function parseAnswer(answer: string): ApprovalOutcome {
  * readline question resolves it as deny-stop instead of leaving the prompt hanging — the REPL
  * path (io) has its own interrupt wiring and ignores it.
  */
-export function createInteractiveApprover(io?: { question: (q: string) => Promise<string> }, signal?: AbortSignal): Approver {
+export function createInteractiveApprover(
+  io?: { question: (q: string) => Promise<string> },
+  signal?: AbortSignal,
+  opts?: { offerDurable?: boolean },
+): Approver {
+  const offerDurable = opts?.offerDurable === true;
   return async (req: ApprovalRequest): Promise<ApprovalOutcome> => {
-    const prompt = formatApprovalPrompt(req) + '\n  > ';
-    if (io) return parseAnswer(await io.question(prompt));
+    const offered = durableOffered(req, offerDurable);
+    const prompt = formatApprovalPrompt(req, offerDurable) + '\n  > ';
+    if (io) return parseAnswer(await io.question(prompt), offered);
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
       const answer = await rl.question(prompt, signal !== undefined ? { signal } : {});
-      return parseAnswer(answer);
+      return parseAnswer(answer, offered);
     } catch (err) {
       if (signal?.aborted) return { decision: 'deny-stop', scope: 'once', source: 'user' };
       throw err;

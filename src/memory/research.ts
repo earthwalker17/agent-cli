@@ -75,12 +75,23 @@ function parseEntries(text: string): { fields: Record<string, string> | null; pr
   return { fields, preamble, entries };
 }
 
+/**
+ * A claim is model text derived from untrusted web pages, rendered as a column-0 line in a
+ * document the next fold re-parses BY HEADING — so a claim beginning `## <id> — retrieved
+ * <date>` would fabricate an entry with a model-chosen retrieval date that sorts to the top
+ * and evades the staleness horizon (S21 review, HIGH). The lessons defuse, one document over:
+ * heading-shaped lines are visibly prefixed, never trusted.
+ */
+function defuseHeadingShape(line: string): string {
+  return /^\s*#/.test(line) ? `· ${line}` : line;
+}
+
 function renderNote(n: ResearchNote): ResearchEntry {
   const date = n.retrievedAt.slice(0, 10);
   const parsedMs = Date.parse(`${date}T00:00:00.000Z`);
   const lines = [
     '',
-    sanitizeLine(n.claim),
+    defuseHeadingShape(sanitizeLine(n.claim)),
     '',
     `- ${n.corroboration} · confidence ${n.confidence}`,
     `- sources: ${n.sources.map((s) => sanitizeLine(s)).join(' · ')}`,
@@ -104,7 +115,15 @@ function renderNote(n: ResearchNote): ResearchEntry {
 export function foldResearchDoc(currentText: string, notes: readonly ResearchNote[], nowIso: string): ResearchFoldResult {
   const parsed = parseEntries(currentText);
   const existing = new Set(parsed.entries.map((e) => e.noteId));
-  const incoming = notes.filter((n) => !existing.has(sanitizeLine(n.noteId))).map(renderNote);
+  const nowMsForAdd = Date.parse(nowIso);
+  const staleBeforeForAdd = Number.isFinite(nowMsForAdd) ? nowMsForAdd - RESEARCH_STALE_DAYS * 24 * 60 * 60 * 1000 : Number.MIN_SAFE_INTEGER;
+  // Count `added` AFTER the staleness test (S21 review): a session resumed and quit >30 days
+  // after its findings were recorded must not announce "N recorded" while the same fold drops
+  // all N as stale — incoming notes older than the horizon are excluded from both.
+  const incoming = notes
+    .filter((n) => !existing.has(sanitizeLine(n.noteId)))
+    .map(renderNote)
+    .filter((e) => e.retrievedMs === null || e.retrievedMs >= staleBeforeForAdd);
   const added = incoming.length;
 
   let entries = [...incoming, ...parsed.entries];

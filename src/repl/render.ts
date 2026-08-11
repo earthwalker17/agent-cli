@@ -174,7 +174,13 @@ export function createRenderer(opts: {
         }
         case 'approval.resolved': {
           if (e.decision !== 'allow') counters.denials++;
-          chromeLine(style.dim(`  ${g.arrow} ${e.decision}${e.scope === 'session' ? ' (rest of session)' : ''}`));
+          // Standing authority must be VISIBLE at the moment it is created — a machine mint
+          // rendering identically to a one-time [y] hid exactly that (S21 review). The detail
+          // field is the failed-persist honesty note; a silent downgrade must not stay silent.
+          const scopeBit =
+            e.scope === 'session' ? ' (rest of session)' : e.scope === 'machine' ? ' (ALWAYS on this machine — durable grant recorded; agent grants)' : '';
+          chromeLine(style.dim(`  ${g.arrow} ${e.decision}${scopeBit}`));
+          if (e.detail !== undefined) chromeLine(style.yellow(`  ${g.warn} ${sanitizeLine(e.detail)}`));
           break;
         }
         case 'file.mutated': {
@@ -384,6 +390,11 @@ export function createRenderer(opts: {
         }
         case 'repair.dismissed': {
           chromeLine(style.dim(`  ${g.arrow} repair escalation on ${sanitizeLine(e.target)} [${e.failureClass}] DISMISSED by user: ${sanitizeLine(e.reason)}`));
+          break;
+        }
+        case 'grants.loaded': {
+          // Standing authority must be VISIBLE where it applies, not only in the log.
+          chromeLine(style.dim(`  ${g.arrow} durable grants active: ${e.entries.length} (${e.entries.map((x) => x.id).join(', ')}) — /grants`));
           break;
         }
         case 'turn.aborted': {

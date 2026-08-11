@@ -4,6 +4,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { resolveLayout, resolveStateRoot, type ProjectLayout } from '../store/layout.js';
+import { grantsFile, grantsLogFile, readGrants, revokeGrant } from '../store/grants.js';
 import { cmdTrust } from '../trust/commands.js';
 import { checkTrust } from './trust-check.js';
 import { loadConfig } from '../config/config.js';
@@ -709,6 +710,47 @@ function cmdMemory(values: CliValues): number {
   return 0;
 }
 
+/**
+ * `agent grants` (S21): list or revoke durable machine grants. Ungated and read-only except
+ * `revoke`, which edits ONLY harness state at the state root (like `agent trust --revoke`).
+ * A corrupt store propagates as the hard ConfigError it is — never rewritten from here.
+ */
+async function cmdGrants(positionals: string[]): Promise<number> {
+  const stateRoot = resolveStateRoot();
+  const out = process.stdout;
+  if (positionals[1] === 'revoke') {
+    const id = positionals[2];
+    if (id === undefined || id.length === 0) {
+      process.stderr.write('usage: agent grants revoke <id>   (agent grants lists the ids)\n');
+      return 1;
+    }
+    const removed = await revokeGrant(stateRoot, id, new Date().toISOString());
+    if (removed === null) {
+      process.stderr.write(`no durable grant with id ${id} — agent grants lists what exists\n`);
+      return 1;
+    }
+    out.write(`revoked ${removed.id} — ${removed.label}\n`);
+    out.write('takes effect at the NEXT session assembly; a session already running keeps its in-memory copy until it ends.\n');
+    return 0;
+  }
+  const entries = readGrants(stateRoot);
+  out.write(`durable machine grants — ${grantsFile(stateRoot)}\n`);
+  out.write('("always allow" records created by the [a] option at eligible approval prompts;\n each is loaded VISIBLY into matching sessions as a grants.loaded event)\n\n');
+  if (entries.length === 0) {
+    out.write('  none recorded\n');
+    return 0;
+  }
+  for (const g of entries) {
+    // The store is hand-editable and treated as untrusted bytes everywhere else — the one
+    // listing a user consults to AUDIT standing authority must not render raw escapes (S21
+    // review; the REPL /grants surface already sanitized).
+    out.write(`  ${g.id}  [${g.kind}]  ${g.workspaceKey === null ? 'machine-wide (every trusted workspace)' : `workspace: ${sanitizeLine(g.workspaceKey)}`}\n`);
+    out.write(`    ${sanitizeLine(g.label)}\n    created ${sanitizeLine(g.createdAt)}\n`);
+  }
+  out.write(`\nrevoke one: agent grants revoke <id> · audit trail: ${grantsLogFile(stateRoot)}\n`);
+  return 0;
+}
+
 function describeDoc(doc: { status: string; bytes: number }): string {
   const size = doc.bytes >= 1024 ? `${(doc.bytes / 1024).toFixed(1)} KiB` : `${doc.bytes} B`;
   return doc.status === 'unreadable' ? 'UNREADABLE (will be skipped at session start)' : `present (${size})`;
@@ -844,6 +886,7 @@ export async function main(argv: string[]): Promise<number> {
       );
       return 0;
     }
+    if (cmd === 'grants') return await cmdGrants(positionals);
     if (cmd === 'undo') return await cmdUndo(values);
     if (cmd === 'trust') {
       return await cmdTrust({ ...(values.revoke !== undefined ? { revoke: values.revoke } : {}), ...(values.list !== undefined ? { list: values.list } : {}) }, resolveStateRoot(), workspaceRoot(values));

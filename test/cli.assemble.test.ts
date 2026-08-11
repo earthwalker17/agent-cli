@@ -10,6 +10,8 @@ import { MockProvider } from '../src/provider/mock.js';
 import { autoDenyApprover } from '../src/runtime/approvals.js';
 import { findGitOnPath, runGit } from '../src/git/client.js';
 import { detectGitFacts } from '../src/git/facts.js';
+import { addGrant } from '../src/store/grants.js';
+import { trustKey } from '../src/trust/store.js';
 import { indexFilePath } from '../src/retrieval/ranked-map.js';
 import type { GitFacts } from '../src/git/types.js';
 import type { SessionEvent } from '../src/types.js';
@@ -75,6 +77,33 @@ describe('assembleSession', () => {
       'memory.loaded',
     ]);
     endSession(session, 'completed');
+  });
+
+  it('S21: durable grants seed the session, only for THIS workspace, recorded as grants.loaded', async () => {
+    const deps = makeDeps();
+    const key = trustKey(deps.ctx.ws);
+    const NOW = '2026-08-11T00:00:00.000Z';
+    await addGrant(deps.layout.stateRoot, { kind: 'class', workspaceKey: null, tool: 'web_search', cls: 'external', label: 'machine-wide research' }, NOW);
+    await addGrant(deps.layout.stateRoot, { kind: 'check-replay', workspaceKey: key, replayKey: 'rk-here', label: 'npm test' }, NOW);
+    await addGrant(deps.layout.stateRoot, { kind: 'check-replay', workspaceKey: 'somewhere-else', replayKey: 'rk-other', label: 'not here' }, NOW);
+
+    const { session } = await assembleSession(deps);
+    expect(session.grants.has('web_search', 'external')).toBe(true);
+    // Durable replay keys live in the SEPARATE durable set (S21 review) — only the pure-check
+    // branch consults it, so an install/preview-shaped hand-edited key can never gain authority.
+    expect(session.grants.hasDurableCheckReplay('rk-here')).toBe(true);
+    expect(session.grants.hasCheckReplay('rk-here')).toBe(false);
+    expect(session.grants.hasDurableCheckReplay('rk-other')).toBe(false); // another workspace's consent
+    const ev = session.log.events.find((e) => e.type === 'grants.loaded');
+    expect(ev !== undefined && ev.type === 'grants.loaded' ? ev.entries.map((g) => g.kind).sort() : []).toEqual(['check-replay', 'class']);
+    expect(session.persistGrant).toBeDefined();
+    endSession(session, 'completed');
+  });
+
+  it('S21: an ineligible hand-edited class grant refuses assembly, naming the revoke cure', async () => {
+    const deps = makeDeps();
+    await addGrant(deps.layout.stateRoot, { kind: 'class', workspaceKey: null, tool: 'project_setup', cls: 'external', label: 'hand-minted' }, '2026-08-11T00:00:00.000Z');
+    await expect(assembleSession(deps)).rejects.toThrow(/ineligible rule[\s\S]*agent grants revoke/);
   });
 
   it('uses injected sandbox/git facts (no real probe) and reports them truthfully', async () => {

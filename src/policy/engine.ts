@@ -165,6 +165,20 @@ export class Grants {
   hasCheckReplay(key: string): boolean {
     return this.checkReplays.has(key);
   }
+  /**
+   * DURABLE-seeded replay keys live in a THIRD set (S21 review): the session replay set is also
+   * consulted by the INSTALL and PREVIEW replay branches, whose consequences ([a] deliberately
+   * never offers them) a hand-edited grants.json key must not be able to unlock — keys are
+   * opaque shas, so provenance is the only separator. Only the pure-CHECK branch consults this
+   * set; an install or preview key planted here is dead weight, never authority.
+   */
+  private readonly durableCheckReplays = new Set<string>();
+  addDurableCheckReplay(key: string): void {
+    if (key.length > 0) this.durableCheckReplays.add(key);
+  }
+  hasDurableCheckReplay(key: string): boolean {
+    return this.durableCheckReplays.has(key);
+  }
 }
 
 /**
@@ -571,7 +585,11 @@ export function decide<I>(
     // hence distinct rule ids and reasons. Mixed rows take the preview wording: the strictest
     // consequence governs the whole call.
     const isPreview = fact.resolved.some((r) => r.kind === 'preview');
-    if (replayable && keys.every((k) => grants.hasCheckReplay(k))) {
+    // Durable keys satisfy CHECK rows only (S21): a batch containing any preview row keeps the
+    // session-consent requirement — a keeps-running port-binding process must re-ask each
+    // session, exactly what its [s] wording promises. The install branch above likewise never
+    // consults the durable set.
+    if (replayable && keys.every((k) => grants.hasCheckReplay(k) || (!isPreview && grants.hasDurableCheckReplay(k)))) {
       return decision(
         'reversible',
         'allow',

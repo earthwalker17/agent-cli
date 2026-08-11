@@ -132,21 +132,39 @@ function appendAudit(stateRoot: string, record: object): void {
   }
 }
 
-/** Insert-or-replace by stable id under the registry lock. Returns the stored entry. */
-export async function addGrant(stateRoot: string, spec: GrantSpec, nowIso: string): Promise<DurableGrant> {
+/**
+ * Insert-or-replace a BATCH by stable id under ONE lock and ONE atomic write (S21 review: a
+ * check batch's keys persisted one write per key, so a mid-batch failure left grants the
+ * consent record then denied storing — a record that lies about standing authority). All or
+ * nothing: either every spec lands in the store or none does.
+ */
+export async function addGrants(stateRoot: string, specs: readonly GrantSpec[], nowIso: string): Promise<DurableGrant[]> {
+  if (specs.length === 0) return [];
   const file = grantsFile(stateRoot);
   return withRegistryLock(file, () => {
-    const entries = readGrants(stateRoot); // corrupt store throws INSIDE the lock — never rewritten
-    const id = grantIdFor(spec);
-    const entry: DurableGrant =
-      spec.kind === 'check-replay'
-        ? { v: GRANTS_SCHEMA_VERSION, kind: 'check-replay', id, workspaceKey: spec.workspaceKey, replayKey: spec.replayKey, label: spec.label, createdAt: nowIso }
-        : { v: GRANTS_SCHEMA_VERSION, kind: 'class', id, workspaceKey: spec.workspaceKey, tool: spec.tool, cls: spec.cls, label: spec.label, createdAt: nowIso };
-    const next = [...entries.filter((e) => e.id !== id), entry];
+    let next = readGrants(stateRoot); // corrupt store throws INSIDE the lock — never rewritten
+    const out: DurableGrant[] = [];
+    for (const spec of specs) {
+      const id = grantIdFor(spec);
+      const entry: DurableGrant =
+        spec.kind === 'check-replay'
+          ? { v: GRANTS_SCHEMA_VERSION, kind: 'check-replay', id, workspaceKey: spec.workspaceKey, replayKey: spec.replayKey, label: spec.label, createdAt: nowIso }
+          : { v: GRANTS_SCHEMA_VERSION, kind: 'class', id, workspaceKey: spec.workspaceKey, tool: spec.tool, cls: spec.cls, label: spec.label, createdAt: nowIso };
+      next = [...next.filter((e) => e.id !== id), entry];
+      out.push(entry);
+    }
     saveAtomic(file, next);
-    appendAudit(stateRoot, { ts: nowIso, action: 'grant', id, kind: entry.kind, label: entry.label, workspaceKey: entry.workspaceKey });
-    return entry;
+    for (const entry of out) {
+      appendAudit(stateRoot, { ts: nowIso, action: 'grant', id: entry.id, kind: entry.kind, label: entry.label, workspaceKey: entry.workspaceKey });
+    }
+    return out;
   });
+}
+
+/** Insert-or-replace by stable id under the registry lock. Returns the stored entry. */
+export async function addGrant(stateRoot: string, spec: GrantSpec, nowIso: string): Promise<DurableGrant> {
+  const [entry] = await addGrants(stateRoot, [spec], nowIso);
+  return entry!;
 }
 
 /** Remove by id under the registry lock. Returns the removed entry, or null when absent. */

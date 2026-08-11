@@ -111,7 +111,11 @@ export function makeApprover(
 ): Approver {
   if (values['dangerously-allow-all']) return dangerousApprover;
   if (mode === 'non-interactive') return autoDenyApprover;
-  return createInteractiveApprover(io, approvalSignal);
+  // S21: the durable [a] option exists exactly where the interactive approver does — mode
+  // 'interactive' already means a real TTY or an explicit --interactive (the documented
+  // "I am driving this deliberately" opt-in). Dangerous mode returned above and can never
+  // persist anything; non-interactive runs auto-deny and never see a prompt.
+  return createInteractiveApprover(io, approvalSignal, { offerDurable: true });
 }
 
 export interface RunContext {

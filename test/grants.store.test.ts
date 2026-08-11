@@ -80,6 +80,23 @@ describe('the durable-grants store', () => {
     expect(here.map((e) => e.label).sort()).toEqual(['machine-wide', 'this ws']);
   });
 
+  it('S21 review: a batch persists under ONE write — all keys present, one audit line each', async () => {
+    const { addGrants } = await import('../src/store/grants.js');
+    const stored = await addGrants(
+      stateRoot,
+      [
+        { kind: 'check-replay', workspaceKey: WS_KEY, replayKey: 'k1', label: 'batch a' },
+        { kind: 'check-replay', workspaceKey: WS_KEY, replayKey: 'k2', label: 'batch b' },
+        { kind: 'check-replay', workspaceKey: WS_KEY, replayKey: 'k3', label: 'batch c' },
+      ],
+      NOW,
+    );
+    expect(stored).toHaveLength(3);
+    expect(readGrants(stateRoot)).toHaveLength(3);
+    const audit = fs.readFileSync(grantsLogFile(stateRoot), 'utf8').trim().split('\n');
+    expect(audit).toHaveLength(3);
+  });
+
   it('grant ids are derived from identity, so the same rule from two prompts collides on purpose', () => {
     const a = grantIdFor({ kind: 'class', workspaceKey: null, tool: 'web_search', cls: 'external', label: 'one wording' });
     const b = grantIdFor({ kind: 'class', workspaceKey: null, tool: 'web_search', cls: 'external', label: 'another wording' });

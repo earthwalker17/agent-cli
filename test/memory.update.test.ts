@@ -132,6 +132,27 @@ describe('runMemoryUpdate', () => {
     expect(text).toContain('MY OWN NOTES stay exactly as typed.');
   });
 
+  it('S21 review: an INVALID lessons value costs the lessons, never the journal', async () => {
+    const badLessons = JSON.stringify({
+      ...JSON.parse(NARRATIVE_JSON),
+      codebaseUpdate: null,
+      lessons: [{ slug: 'UPPER-INVALID', title: 'bad slug', body: 'x' }], // fails the slug regex
+    });
+    const session = makeSession([...productiveTurns, { say: badLessons }]);
+    await runTurn(session, 'make f.txt');
+    await runMemoryUpdate(session, { layout, enabled: true, endedReason: 'user-quit' });
+    endSession(session, 'user-quit');
+
+    // The narrative SURVIVED (no skeleton) and the lessons were dropped with the honest detail.
+    expect(session.log.events.find((e) => e.type === 'memory.narrative')).toMatchObject({ status: 'ok' });
+    const journalEntry = parseJournal(fs.readFileSync(path.join(memoryDir(layout.projectDir), 'JOURNAL.md'), 'utf8')).entries[0]!;
+    expect(journalEntry.body).toContain('Widget written and verified.');
+    const lessonsEv = session.log.events.find((e) => e.type === 'memory.updated' && e.doc === 'lessons');
+    expect(lessonsEv).toMatchObject({ status: 'skipped' });
+    expect(lessonsEv !== undefined && lessonsEv.type === 'memory.updated' ? lessonsEv.detail : '').toContain('failed validation');
+    expect(fs.existsSync(path.join(memoryDir(layout.projectDir), 'LESSONS.md'))).toBe(false);
+  });
+
   it('a narrative WITHOUT the lessons key still succeeds (optional by design — older-model shape)', async () => {
     const session = makeSession([...productiveTurns, { say: NARRATIVE_JSON }]);
     await runTurn(session, 'make f.txt');

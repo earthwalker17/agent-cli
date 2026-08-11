@@ -52,6 +52,11 @@ import type { PlanGraph } from '../plan/schema.js';
 import { foldGraphState, integrationGateState } from '../plan/graph-state.js';
 import { deleteCheckpointRefs } from '../git/checkpoint.js';
 import { randomSaltHex } from '../shared/hash.js';
+import { sanitizeLine } from '../shared/text.js';
+import { ConfigError } from '../shared/errors.js';
+import { addGrant, addGrants, grantsForWorkspace, readGrants } from '../store/grants.js';
+import { isDurableClassEligible } from '../policy/engine.js';
+import { trustKey } from '../trust/store.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
 import type { TrustDecision } from '../trust/gate.js';
@@ -469,6 +474,61 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
       ...(previewSweepResult.retiredStale.length > 0 ? { retiredStale: previewSweepResult.retiredStale } : {}),
       ...(previewSweepResult.unaccountedLogs.length > 0 ? { unaccountedLogs: previewSweepResult.unaccountedLogs } : {}),
     });
+  }
+
+  // S21: durable machine grants. Loaded at EVERY assembly (resume identical — this is the one
+  // deliberate exception to "authority is not durable", and it must behave the same on every
+  // path), validated against the closed eligibility set, seeded into the session's in-memory
+  // Grants, and recorded as evidence. A corrupt store or an ineligible hand-edited entry is a
+  // hard error naming the cure — a consent DB is never guessed at and never silently rebuilt.
+  {
+    const workspaceKey = trustKey(ctx.ws);
+    const active = grantsForWorkspace(readGrants(deps.layout.stateRoot), workspaceKey);
+    for (const g of active) {
+      if (g.kind === 'class' && !isDurableClassEligible(g.tool, g.cls)) {
+        throw new ConfigError(
+          `durable grant ${g.id} names an ineligible rule (${g.tool}::${g.cls}) — revoke it: agent grants revoke ${g.id}`,
+        );
+      }
+    }
+    for (const g of active) {
+      // Class grants join the ordinary grant set; replay grants join the DURABLE set, which
+      // only the pure-check branch consults — a hand-edited key shaped like an install or
+      // preview replay key must not unlock those consequences (S21 review).
+      if (g.kind === 'class') session.grants.add(g.tool, g.cls);
+      else session.grants.addDurableCheckReplay(g.replayKey);
+    }
+    if (active.length > 0) {
+      session.log.append({
+        type: 'grants.loaded',
+        entries: active.map((g) => ({ id: g.id, kind: g.kind, label: g.label, createdAt: g.createdAt })),
+      });
+    }
+    session.persistGrant = async (record) => {
+      if (record.kind === 'class') {
+        if (record.cls !== 'external' || !isDurableClassEligible(record.tool, record.cls)) {
+          throw new Error(`not durable-eligible: ${record.tool}::${record.cls}`);
+        }
+        await addGrant(
+          deps.layout.stateRoot,
+          { kind: 'class', workspaceKey: null, tool: record.tool, cls: 'external', label: classGrantLabel(record.tool) },
+          session.clock.iso(),
+        );
+      } else {
+        // ONE lock, ONE atomic write for the whole batch (S21 review): a mid-batch failure must
+        // not leave keys 1..N-1 durable while the approval record honestly reports "not stored".
+        await addGrants(
+          deps.layout.stateRoot,
+          record.replayKeys.map((key) => ({
+            kind: 'check-replay' as const,
+            workspaceKey,
+            replayKey: key,
+            label: sanitizeLine(record.label).slice(0, 300) || 'check replay',
+          })),
+          session.clock.iso(),
+        );
+      }
+    };
   }
 
   // Child→parent approval forwarding (V0.7): the queue wraps the SESSION approver — never io
@@ -1013,6 +1073,17 @@ export async function pruneHarnessCheckpointRefs(
     line: `pruned ${parts.join(' + ')} checkpoint ref(s)` + (failed.length > 0 ? `; ${failed.length} failed (agent checkpoint prune)` : ''),
     failed,
   };
+}
+
+/** The fixed human-readable description a durable class grant carries (shown by agent grants). */
+function classGrantLabel(tool: string): string {
+  return tool === 'web_search'
+    ? 'always allow bounded web searches (per-session budgets still apply)'
+    : tool === 'delegate_task'
+      ? 'always allow research-subagent spawns (per-session budgets still apply)'
+      : tool === 'remote_status'
+        ? 'always allow remote READS (never a push, tag or release)'
+        : `always allow ${tool} (external)`;
 }
 
 /** Map the loaded docs onto the system-prompt injection shape (only usable docs are injected). */

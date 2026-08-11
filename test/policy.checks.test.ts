@@ -146,6 +146,30 @@ describe('replay consent', () => {
     expect(decide(stubTool([tsc]), {}, ctx(), grants)).toMatchObject({ decision: 'allow', rule: 'check.replay-consent' });
   });
 
+  it('S21: DURABLE-seeded keys satisfy pure-CHECK batches only — never a preview or install row', () => {
+    // The provenance belt (S21 review): the session replay set is also consulted by the install
+    // and preview branches, whose consequences [a] never offers. Durable keys therefore live in
+    // a THIRD set the pure-check branch alone reads — a hand-edited grants.json key shaped like
+    // an install or preview replay key is dead weight, never authority.
+    const grants = new Grants();
+    const check = fact();
+    grants.addDurableCheckReplay(checkReplayKey(check.recipeId, check.command));
+    expect(decide(stubTool([check]), {}, ctx(), grants)).toMatchObject({ decision: 'allow', rule: 'check.replay-consent' });
+
+    const prev = fact({ recipeId: 'preview.dev', kind: 'preview', command: 'npm run dev' });
+    grants.addDurableCheckReplay(checkReplayKey(prev.recipeId, prev.command));
+    expect(decide(stubTool([prev]), {}, ctx(), grants)).toMatchObject({ decision: 'ask' });
+    // A MIXED batch containing a preview row keeps the ask even when the check key is durable.
+    expect(decide(stubTool([check, prev]), {}, ctx(), grants)).toMatchObject({ decision: 'ask' });
+
+    const install = fact({ recipeId: 'setup.install.npm', kind: 'install', command: 'npm ci' });
+    grants.addDurableCheckReplay(checkReplayKey(install.recipeId, install.command));
+    expect(decide(stubTool([install]), {}, ctx(), grants)).toMatchObject({ decision: 'ask' });
+    // The SESSION set still covers all three shapes — only durability is check-scoped.
+    grants.addCheckReplay(checkReplayKey(install.recipeId, install.command));
+    expect(decide(stubTool([install]), {}, ctx(), grants)).toMatchObject({ decision: 'allow', rule: 'setup.install-replay-consent' });
+  });
+
   it('lives in its own store: it is not an ActionClass grant and cannot leak into one', () => {
     const grants = new Grants();
     grants.addCheckReplay(checkReplayKey('node.script.test', 'npm run test'));

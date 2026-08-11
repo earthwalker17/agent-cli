@@ -12,8 +12,10 @@ import type { CommandContext } from './commands.js';
  * - NEVER touches an existing AGENT.md, global or project. Both files are user-owned; /init
  *   creates, reports, and stops — there is no rewrite path (a proposed rewrite would need its
  *   own reviewed flow, deliberately not built in v1).
- * - Every question is skippable (blank = skip); EOF / Ctrl+C at ANY question aborts the whole
- *   flow with NOTHING written — a half-answered onboarding must not leave a half-written file.
+ * - Every question is skippable (blank = skip). Each FILE is written atomically or not at all:
+ *   EOF / Ctrl+C during the four GLOBAL questions aborts with nothing written; once the global
+ *   doc exists, an abort during the PROJECT phase keeps it (and says so) — a half-answered
+ *   QUESTION SET must not leave a half-written FILE, but a completed file is never unwritten.
  * - Stores preferences and instructions ONLY. The flow says so: secrets and credentials stay in
  *   the environment; authority (grants) lives in its own store with its own consent.
  * - Answers pass sanitizeLine before landing in a file that is injected into every prompt.

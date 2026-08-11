@@ -1621,8 +1621,10 @@ Commands: `/help /status /undo /diff /commit /checkpoint /plan /tasks /cancel /a
 /repair /checks /preview /report /map /init /grants /provider /model /research /remote /quit`.
 `/repair` (S21) renders the bounded-repair ledger and carries the user-side dismissal;
 `/init` (S21) is the skippable onboarding flow (global AGENT.md + project starter — never
-rewrites an existing file, EOF aborts with nothing written); `/grants` (S21) is the read-only
-view of durable machine grants active in this session. `/checks` re-probes the
+rewrites an existing file; each file writes atomically or not at all, and an abort after the
+global doc exists keeps it and says so); `/grants` (S21) is the read-only
+view of durable machine grants loaded at this session's assembly, plus a count of any minted
+mid-session by `[a]`. `/checks` re-probes the
 detected project on demand and shows
 the latest EVIDENCE per kind — a check that spawned and never completed reads as "NO VERDICT",
 not as the older passing run. `/diff` carries the report's CHECKED verdict per file through the
@@ -1738,8 +1740,12 @@ reason (which embeds untrusted model text for command asks).
   validates class entries against the eligibility set (a hand-edited ineligible rule refuses the
   session, naming `agent grants revoke <id>`), seeds the in-memory `Grants`, and appends
   `grants.loaded` — standing authority is visible in the evidence of every session it touches.
-  Revocation (`agent grants revoke`, or read-only `/grants` in-session) applies from the next
-  assembly; a running session keeps its in-memory copy until it ends (documented, not hidden).
+  Revocation is `agent grants revoke <id>` (deliberately outside the conversation; `/grants` is
+  the in-session READ-ONLY view) and applies from the next assembly; a running session keeps its
+  in-memory copy until it ends (documented, not hidden). Load-time eligibility refusal covers
+  CLASS entries; replay entries are opaque shas, so their belt is provenance instead — durable
+  keys are seeded into a separate set only the pure-check branch consults, and a hand-edited
+  install- or preview-shaped key is dead weight, never authority.
 
 ## Sandbox and enforced isolation (`sandbox/`)
 
