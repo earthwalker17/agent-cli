@@ -61,7 +61,7 @@ describe('tool.completed for error results', () => {
       expect(ev !== undefined && ev.type === 'tool.completed' ? ev.outputPreview : '').toContain('refused: the reviewer round could not bind');
 
       // Resume fidelity: the reconstructed tool_result carries the reason, not a placeholder.
-      const rebuilt = reconstruct(session.log.events);
+      const rebuilt = reconstruct(session.log.events, ws);
       const flat = JSON.stringify(rebuilt.messages);
       expect(flat).toContain('refused: the reviewer round could not bind');
       expect(flat).not.toContain('(no output recorded)');
