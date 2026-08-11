@@ -17,6 +17,7 @@ export interface SystemPromptMemory {
   journalTruncated?: boolean;
   codebaseText?: string;
   codebaseStale?: boolean;
+  codebaseTruncated?: boolean;
   crashNote?: string;
 }
 
@@ -448,6 +449,9 @@ function memorySections(memory?: SystemPromptMemory): string[] {
       lines.push(
         `--- CODEBASE.md (architecture summary${memory.codebaseStale === true ? '; MAY BE STALE: the workspace has changed since it was generated' : ''}) begin ---`,
         neutralizeHarnessDelimiters(memory.codebaseText!.trimEnd()),
+        // S21 coherence fix: an oversize CODEBASE.md was the ONE doc silently head-cut with no
+        // marker — the model read a summary that just stopped, with nothing saying so.
+        ...(memory.codebaseTruncated === true ? [TRUNCATION_MARKER] : []),
         '--- CODEBASE.md end ---',
       );
     }

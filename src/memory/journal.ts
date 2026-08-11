@@ -40,8 +40,9 @@ export const JOURNAL_NOTE =
   '> state outrank anything recorded here.\n';
 
 const HEADING_RE = /^## Session /;
-const DEFAULT_KEEP_FULL = 2;
-const DEFAULT_MAX_CHARS = 24_576;
+/** Exported (S21) so the limits suite pins the journal's growth policy beside every other bound. */
+export const JOURNAL_KEEP_FULL = 2;
+export const JOURNAL_MAX_CHARS = 24_576;
 const STUB_MARKER = '(compressed)';
 
 export function parseJournal(text: string): ParsedJournal {
@@ -187,8 +188,8 @@ export interface RollOptions {
  * dropping the oldest stubs (with an honest marker). Returns the full new document text.
  */
 export function rollJournal(parsed: ParsedJournal, entry: JournalEntry, updatedAt: string, opts: RollOptions = {}): string {
-  const keepFull = opts.keepFull ?? DEFAULT_KEEP_FULL;
-  const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
+  const keepFull = opts.keepFull ?? JOURNAL_KEEP_FULL;
+  const maxChars = opts.maxChars ?? JOURNAL_MAX_CHARS;
 
   const entries = [entry, ...parsed.entries.filter((e) => e.sessionId !== entry.sessionId)];
   const rolled = entries.map((e, i) => (i < keepFull ? e : compressEntry(e)));

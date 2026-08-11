@@ -1017,7 +1017,9 @@ function promptMemory(memory: LoadedMemory): SystemPromptMemory {
   return {
     ...(usable(memory.agent.status) ? { agentText: memory.agent.text, agentTruncated: memory.agent.truncated } : {}),
     ...(usable(memory.journal.status) ? { journalText: memory.journal.text, journalTruncated: memory.journal.truncated } : {}),
-    ...(usable(memory.codebase.status) ? { codebaseText: memory.codebase.text, codebaseStale: memory.codebase.stale } : {}),
+    ...(usable(memory.codebase.status)
+      ? { codebaseText: memory.codebase.text, codebaseStale: memory.codebase.stale, codebaseTruncated: memory.codebase.truncated }
+      : {}),
     ...(memory.crashNote !== null ? { crashNote: memory.crashNote } : {}),
   };
 }

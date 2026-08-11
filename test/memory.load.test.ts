@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadMemory, AGENT_MD_CAP_CHARS } from '../src/memory/load.js';
+import { loadMemory, AGENT_MD_CAP_CHARS, CODEBASE_CAP_CHARS } from '../src/memory/load.js';
 import { memoryDir } from '../src/memory/store.js';
 import { stampCodebase } from '../src/memory/codebase.js';
 import { buildSystemPrompt } from '../src/workspace/system-prompt.js';
@@ -117,6 +117,27 @@ describe('loadMemory', () => {
       agentTruncated: m.agent.truncated,
     });
     expect(prompt).toContain('truncated to the memory budget');
+  });
+
+  it('oversize CODEBASE.md → injected with the truncation marker (S21: it was the one doc silently head-cut)', () => {
+    const { ws, layout, dir } = fixture();
+    fs.writeFileSync(
+      path.join(dir, 'CODEBASE.md'),
+      stampCodebase('# Shape\n' + 'x'.repeat(CODEBASE_CAP_CHARS + 100), {
+        sessionId: 's-1', updatedAt: 'u', mapSha256: MAP.sha256, inventorySha256: null, head: null,
+      }),
+    );
+    const m = loadMemory(layout, ws, { currentMapSha256: MAP.sha256 });
+    expect(m.codebase.status).toBe('oversize');
+    expect(m.codebase.truncated).toBe(true);
+
+    const prompt = buildSystemPrompt(ws, MAP, undefined, undefined, {
+      codebaseText: m.codebase.text,
+      codebaseStale: m.codebase.stale,
+      codebaseTruncated: m.codebase.truncated,
+    });
+    const codebaseBlock = prompt.slice(prompt.indexOf('--- CODEBASE.md'), prompt.indexOf('--- CODEBASE.md end ---'));
+    expect(codebaseBlock).toContain('truncated to the memory budget');
   });
 
   it('crash note: fires for an unended newest log, not for clean/child/resumed ones', () => {

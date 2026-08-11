@@ -42,6 +42,8 @@ import { MAX_PROJECT_UNITS, MAX_UNIT_DEPTH } from '../src/checks/workspace.js';
 import { DEFAULT_TRIGGER_CHARS, DEFAULT_TARGET_CHARS } from '../src/runtime/elision.js';
 import { SWEEP_LIVE_MAX_AGE_MS } from '../src/runtime/worktrees.js';
 import { MODELS, UNKNOWN_MODEL_CAPS, capsFor, contextBudgetFor } from '../src/provider/catalog.js';
+import { AGENT_MD_CAP_CHARS, JOURNAL_INJECT_CAP_CHARS, CODEBASE_CAP_CHARS } from '../src/memory/load.js';
+import { JOURNAL_KEEP_FULL, JOURNAL_MAX_CHARS } from '../src/memory/journal.js';
 
 /**
  * The harness's bounds, asserted as ONE visible contract (Session 16; retuned Session 20.5).
@@ -243,5 +245,20 @@ describe('repetition and consent bounds (deliberately UNCHANGED — in S16 and a
     // Production budgets flow from catalog budgetTokens via contextBudgetFor.
     expect(DEFAULT_TRIGGER_CHARS).toBe(400_000);
     expect(DEFAULT_TARGET_CHARS).toBe(200_000);
+  });
+});
+
+describe('memory-doc budgets (S21 — every startup-injection bound is a visible contract)', () => {
+  // These caps decide how many chars of durable memory ride the cached stable prefix of EVERY
+  // request. They were previously private to their modules; a growing doc raised nobody's hand.
+  it('per-doc injection caps', () => {
+    expect(AGENT_MD_CAP_CHARS).toBe(24_576);
+    expect(JOURNAL_INJECT_CAP_CHARS).toBe(12_288);
+    expect(CODEBASE_CAP_CHARS).toBe(16_384);
+  });
+
+  it('the journal growth policy: 2 full entries, 24 KiB on disk', () => {
+    expect(JOURNAL_KEEP_FULL).toBe(2);
+    expect(JOURNAL_MAX_CHARS).toBe(24_576);
   });
 });
