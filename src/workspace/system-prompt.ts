@@ -11,6 +11,9 @@ import type { DetectedWorkspace } from '../checks/types.js';
  * context that current intent and observable state outrank — never as authority.
  */
 export interface SystemPromptMemory {
+  /** S21: the GLOBAL user constitution (state-root AGENT.md) — injected before the project's. */
+  userAgentText?: string;
+  userAgentTruncated?: boolean;
   agentText?: string;
   agentTruncated?: boolean;
   journalText?: string;
@@ -422,6 +425,16 @@ const TRUNCATION_MARKER = '[… truncated to the memory budget; the full file is
 function memorySections(memory?: SystemPromptMemory): string[] {
   if (memory === undefined) return [];
   const lines: string[] = [];
+  if (memory.userAgentText !== undefined && memory.userAgentText.length > 0) {
+    lines.push(
+      '',
+      'User constitution (the global AGENT.md in the Agent CLI home — written by the USER; durable instructions that apply to every workspace on this machine. The project constitution below overrides it where they conflict):',
+      '--- global AGENT.md begin ---',
+      neutralizeHarnessDelimiters(memory.userAgentText.trimEnd()),
+      ...(memory.userAgentTruncated === true ? [TRUNCATION_MARKER] : []),
+      '--- global AGENT.md end ---',
+    );
+  }
   if (memory.agentText !== undefined && memory.agentText.length > 0) {
     lines.push(
       '',

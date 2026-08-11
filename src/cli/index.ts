@@ -668,6 +668,10 @@ function cmdMemory(values: CliValues): number {
   const out = process.stdout;
 
   out.write(`memory home: ${dir}\n\n`);
+  const userFile = path.join(layout.stateRoot, 'AGENT.md');
+  const user = readDocCapped(userFile, 'AGENT.md', 1024 * 1024);
+  out.write(`global AGENT.md (user-owned, machine-wide — loaded into every session in every workspace; the project AGENT.md overrides it on conflict)\n`);
+  out.write(`  ${userFile}\n  ${user.status === 'missing' ? 'absent — create it with /init inside the REPL, or by hand' : describeDoc(user)}\n\n`);
   const agent = readDocCapped(agentFile, 'AGENT.md', 1024 * 1024);
   out.write(`AGENT.md (user-owned project constitution, loaded into every session)\n`);
   out.write(`  ${agentFile}\n  ${agent.status === 'missing' ? 'absent — create it to give every session durable instructions' : describeDoc(agent)}\n\n`);

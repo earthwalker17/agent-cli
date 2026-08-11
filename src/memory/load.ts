@@ -18,10 +18,19 @@ import { RESEARCH_INJECT_CAP_CHARS } from './research.js';
 export const AGENT_MD_CAP_CHARS = 24_576;
 export const JOURNAL_INJECT_CAP_CHARS = 12_288;
 export const CODEBASE_CAP_CHARS = 16_384;
+/**
+ * The GLOBAL user constitution (S21): `<stateRoot>/AGENT.md` — the user's durable instructions
+ * for every workspace on this machine, layered BELOW the project AGENT.md (the ecosystem's
+ * local-wins convention). Deliberately smaller than the project cap: a machine-wide profile is
+ * prose about the person, not a project constitution.
+ */
+export const USER_AGENT_CAP_CHARS = 16_384;
 /** How many recent sibling logs the crash check inspects (bounded first/last-line reads only). */
 const CRASH_SCAN_LOGS = 5;
 
 export interface LoadedMemory {
+  /** S21: the global user constitution from the state root (name 'AGENT.md', scope user). */
+  user: MemoryDoc;
   agent: MemoryDoc;
   journal: MemoryDoc & { sessionCount: number };
   codebase: MemoryDoc & { stale: boolean };
@@ -46,6 +55,7 @@ export interface LoadMemoryOptions {
 
 export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: LoadMemoryOptions): LoadedMemory {
   const dir = memoryDir(layout.projectDir);
+  const user = readDocCapped(path.join(layout.stateRoot, 'AGENT.md'), 'AGENT.md', USER_AGENT_CAP_CHARS);
   const agent = readDocCapped(path.join(workspaceRoot, 'AGENT.md'), 'AGENT.md', AGENT_MD_CAP_CHARS);
   // The journal is newest-first by construction, so a top slice keeps the most recent entries.
   const journalDoc = readDocCapped(path.join(dir, 'JOURNAL.md'), 'JOURNAL.md', JOURNAL_INJECT_CAP_CHARS);
@@ -64,17 +74,19 @@ export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: L
   const journal = { ...journalDoc, sessionCount };
   const codebase = { ...codebaseDoc, stale };
   return {
+    user,
     agent,
     journal,
     codebase,
     lessons: lessonsDoc,
     research: researchDoc,
-    bannerLine: bannerLine(agent, journal, codebase, lessonsDoc, researchDoc),
+    bannerLine: bannerLine(user, agent, journal, codebase, lessonsDoc, researchDoc),
     crashNote: detectCrashNote(layout, opts.resumeId),
   };
 }
 
 function bannerLine(
+  user: MemoryDoc,
   agent: MemoryDoc,
   journal: MemoryDoc & { sessionCount: number },
   codebase: MemoryDoc & { stale: boolean },
@@ -82,13 +94,14 @@ function bannerLine(
   research: MemoryDoc,
 ): string {
   const parts: string[] = [];
+  if (loaded(user)) parts.push(`global AGENT.md ${kb(user.bytes)}${flag(user)}`);
   if (loaded(agent)) parts.push(`AGENT.md ${kb(agent.bytes)}${flag(agent)}`);
   if (loaded(journal)) parts.push(`journal ${kb(journal.bytes)} (${journal.sessionCount} session${journal.sessionCount === 1 ? '' : 's'})${flag(journal)}`);
   if (loaded(codebase)) parts.push(`codebase ${kb(codebase.bytes)} (${codebase.stale ? 'may be stale' : 'fresh'})${flag(codebase)}`);
   if (loaded(lessons)) parts.push(`lessons ${kb(lessons.bytes)}${flag(lessons)}`);
   if (loaded(research)) parts.push(`research ${kb(research.bytes)}${flag(research)}`);
-  for (const d of [agent, journal, codebase, lessons, research]) {
-    if (d.status === 'unreadable') parts.push(`${d.name} UNREADABLE (skipped)`);
+  for (const d of [user, agent, journal, codebase, lessons, research]) {
+    if (d.status === 'unreadable') parts.push(`${d.name === 'AGENT.md' && d === user ? 'global AGENT.md' : d.name} UNREADABLE (skipped)`);
   }
   return parts.length > 0 ? parts.join(' · ') : 'none';
 }

@@ -447,13 +447,17 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
   recordWorkspaceMap(session, map);
   session.log.append({
     type: 'memory.loaded',
-    files: [memory.agent, memory.journal, memory.codebase, memory.lessons, memory.research].map((d) => ({
-      name: d.name,
-      sha256: d.sha256,
-      bytes: d.bytes,
-      truncated: d.truncated,
-      status: d.status,
-    })),
+    files: [
+      // The global doc keeps the AGENT.md basename; the additive `scope` field disambiguates.
+      { name: memory.user.name, sha256: memory.user.sha256, bytes: memory.user.bytes, truncated: memory.user.truncated, status: memory.user.status, scope: 'user' as const },
+      ...[memory.agent, memory.journal, memory.codebase, memory.lessons, memory.research].map((d) => ({
+        name: d.name,
+        sha256: d.sha256,
+        bytes: d.bytes,
+        truncated: d.truncated,
+        status: d.status,
+      })),
+    ],
   });
   if (previewSweepResult !== undefined) {
     session.log.append({
@@ -1015,6 +1019,7 @@ export async function pruneHarnessCheckpointRefs(
 function promptMemory(memory: LoadedMemory): SystemPromptMemory {
   const usable = (status: string): boolean => status === 'ok' || status === 'oversize';
   return {
+    ...(usable(memory.user.status) ? { userAgentText: memory.user.text, userAgentTruncated: memory.user.truncated } : {}),
     ...(usable(memory.agent.status) ? { agentText: memory.agent.text, agentTruncated: memory.agent.truncated } : {}),
     ...(usable(memory.journal.status) ? { journalText: memory.journal.text, journalTruncated: memory.journal.truncated } : {}),
     ...(usable(memory.codebase.status)

@@ -75,6 +75,37 @@ describe('loadMemory', () => {
     expect(prompt.indexOf('CODEBASE.md')).toBeLessThan(prompt.indexOf('Workspace root:'));
   });
 
+  it('the GLOBAL AGENT.md (state root) loads, injects FIRST, and the project constitution outranks it (S21)', () => {
+    const { ws, layout } = fixture();
+    fs.writeFileSync(path.join(layout.stateRoot, 'AGENT.md'), '# Global\nCall me Sam. Prefer terse answers.');
+    fs.writeFileSync(path.join(ws, 'AGENT.md'), 'Always run tests.');
+
+    const m = loadMemory(layout, ws, { currentMapSha256: MAP.sha256 });
+    expect(m.user.status).toBe('ok');
+    expect(m.bannerLine).toContain('global AGENT.md');
+
+    const prompt = buildSystemPrompt(ws, MAP, undefined, undefined, {
+      userAgentText: m.user.text,
+      userAgentTruncated: m.user.truncated,
+      agentText: m.agent.text,
+      agentTruncated: m.agent.truncated,
+    });
+    expect(prompt).toContain('every workspace on this machine');
+    expect(prompt).toContain('The project constitution below overrides it where they conflict');
+    expect(prompt).toContain('Call me Sam.');
+    // Global first, project second — the local-wins layering (later = closer = more salient).
+    expect(prompt.indexOf('global AGENT.md begin')).toBeLessThan(prompt.indexOf('--- AGENT.md begin'));
+    // Neutralized like every injected doc.
+    expect(prompt.indexOf('global AGENT.md begin')).toBeGreaterThan(-1);
+  });
+
+  it('an absent global AGENT.md injects nothing (the zero-memory byte-identical pin holds)', () => {
+    const { ws, layout } = fixture();
+    const m = loadMemory(layout, ws, { currentMapSha256: MAP.sha256 });
+    expect(m.user.status).toBe('missing');
+    expect(m.bannerLine).toBe('none');
+  });
+
   it('LESSONS.md loads, shows in the banner, and injects AFTER codebase inside the memory fence (S21)', () => {
     const { ws, layout, dir } = fixture();
     fs.writeFileSync(path.join(dir, 'CODEBASE.md'), stampCodebase('# Shape', { sessionId: 's-1', updatedAt: 'u', mapSha256: MAP.sha256, inventorySha256: null, head: null }));

@@ -42,7 +42,7 @@ import { MAX_PROJECT_UNITS, MAX_UNIT_DEPTH } from '../src/checks/workspace.js';
 import { DEFAULT_TRIGGER_CHARS, DEFAULT_TARGET_CHARS } from '../src/runtime/elision.js';
 import { SWEEP_LIVE_MAX_AGE_MS } from '../src/runtime/worktrees.js';
 import { MODELS, UNKNOWN_MODEL_CAPS, capsFor, contextBudgetFor } from '../src/provider/catalog.js';
-import { AGENT_MD_CAP_CHARS, JOURNAL_INJECT_CAP_CHARS, CODEBASE_CAP_CHARS } from '../src/memory/load.js';
+import { AGENT_MD_CAP_CHARS, JOURNAL_INJECT_CAP_CHARS, CODEBASE_CAP_CHARS, USER_AGENT_CAP_CHARS } from '../src/memory/load.js';
 import { JOURNAL_KEEP_FULL, JOURNAL_MAX_CHARS } from '../src/memory/journal.js';
 import { LESSONS_MAX_CHARS, LESSONS_INJECT_CAP_CHARS, MAX_LESSONS, MAX_LESSONS_PER_SESSION } from '../src/memory/lessons.js';
 import { RESEARCH_MAX_CHARS, RESEARCH_INJECT_CAP_CHARS, MAX_RESEARCH_ENTRIES, RESEARCH_STALE_DAYS } from '../src/memory/research.js';
@@ -257,6 +257,24 @@ describe('memory-doc budgets (S21 — every startup-injection bound is a visible
     expect(AGENT_MD_CAP_CHARS).toBe(24_576);
     expect(JOURNAL_INJECT_CAP_CHARS).toBe(12_288);
     expect(CODEBASE_CAP_CHARS).toBe(16_384);
+    // The global profile is deliberately SMALLER than the project constitution: machine-wide
+    // prose about the person, not a project rulebook.
+    expect(USER_AGENT_CAP_CHARS).toBe(16_384);
+  });
+
+  it('the TOTAL worst-case memory injection is one deliberate ceiling — adding a doc must trip this', () => {
+    // Every char here rides the cached stable prefix of EVERY request (and the end-of-session
+    // narrative call re-reads the same prefix). ~86k chars ≈ ~21k tokens worst case; real docs
+    // run far smaller, but the ceiling is the contract.
+    const total =
+      USER_AGENT_CAP_CHARS +
+      AGENT_MD_CAP_CHARS +
+      JOURNAL_INJECT_CAP_CHARS +
+      CODEBASE_CAP_CHARS +
+      LESSONS_INJECT_CAP_CHARS +
+      RESEARCH_INJECT_CAP_CHARS;
+    expect(total).toBe(86_016);
+    expect(total).toBeLessThanOrEqual(90_000);
   });
 
   it('the journal growth policy: 2 full entries, 24 KiB on disk', () => {

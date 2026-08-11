@@ -2217,6 +2217,8 @@ export type EventBody =
         bytes: number;
         truncated: boolean;
         status: 'ok' | 'missing' | 'oversize' | 'unreadable';
+        /** S21 (additive): 'user' marks the state-root global AGENT.md (same basename, machine scope). */
+        scope?: 'user';
       }[];
     }
   | {
