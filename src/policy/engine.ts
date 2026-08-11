@@ -104,6 +104,38 @@ export function isGrantable(cls: ActionClass): boolean {
   return GRANTABLE.includes(cls);
 }
 
+/**
+ * Durable-grant eligibility (Session 21): the CLOSED set of (tool, class) pairs an `[a]` answer
+ * may persist machine-durably, spelled as `tool::class`. Everything else is ineligible by
+ * construction — membership here is the allowlist, so a hand-edited grants.json entry naming
+ * any other pair is refused at load and a prompt never offers `[a]` for one.
+ *
+ * What is IN, and why it is safe to stand: the three read-only-external consents whose blast
+ * radius is already bounded elsewhere — `web_search` (per-session research budget), the
+ * researcher-subagent spawn via `delegate_task` (same budget; the stored class is `external`,
+ * which a MUTATING spawn — classified `reversible` — can never match), and `remote_status`
+ * reads (per-session read counter; reads only). Trust remains the outer gate: a grant applies
+ * only inside workspaces the user separately trusted.
+ *
+ * What is OUT, each for a stated reason: remote WRITE (asks every time by design — three
+ * surfaces enforce it); migrate/seed (destructive, no replay keys); executor spawns (every
+ * spawn is a human decision); `run_command` (a command label is never consent identity);
+ * outside-workspace and secret-name reads (`sensitive` — a standing "read anything anywhere"
+ * is too broad to mint); artifact inspect (pixels cannot be redacted); preview replay (its
+ * `[s]` wording promises "this session"); install replay (deferred — revisit deliberately).
+ * Check-replay keys are durable-eligible separately, per EXACT key (body-sha-bound, so any
+ * drift re-asks structurally) — see the grants store.
+ */
+export const DURABLE_CLASS_ELIGIBLE: ReadonlySet<string> = new Set([
+  'web_search::external',
+  'delegate_task::external',
+  'remote_status::external',
+]);
+
+export function isDurableClassEligible(tool: string, cls: ActionClass): boolean {
+  return DURABLE_CLASS_ELIGIBLE.has(`${tool}::${cls}`);
+}
+
 /** In-memory, session-scoped approval grants. Not persisted; not restored on resume. */
 export class Grants {
   private readonly set = new Set<string>();

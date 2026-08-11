@@ -780,7 +780,8 @@ export type TaskEvidence =
        */
       kind: 'approval-resolved';
       decision: 'allow' | 'deny' | 'deny-stop';
-      scope: 'once' | 'session';
+      /** 'machine' never appears here in practice — forwarded asks are structurally not offered [a]. */
+      scope: 'once' | 'session' | 'machine';
       source: 'user' | 'non-interactive' | 'dangerous-mode' | 'task-aborted';
     }
   | {
@@ -1417,8 +1418,13 @@ export interface ApprovalRequest {
 }
 export interface ApprovalOutcome {
   decision: 'allow' | 'deny' | 'deny-stop';
-  /** 'session' grants apply to future (tool, class) matches; run_command is never granted. */
-  scope: 'once' | 'session';
+  /**
+   * 'session' grants apply to future (tool, class) matches; run_command is never granted.
+   * 'machine' (S21, additive) additionally persists the grant to the state-root grants store —
+   * offered only for the closed DURABLE_CLASS_ELIGIBLE set (or a check-replay key), only from
+   * an interactive prompt, and never for a forwarded child ask.
+   */
+  scope: 'once' | 'session' | 'machine';
   /** 'task-aborted' = a forwarded ask auto-denied because its task died first (V0.7). */
   source: 'user' | 'non-interactive' | 'dangerous-mode' | 'task-aborted';
 }
@@ -1589,7 +1595,8 @@ export type EventBody =
       type: 'approval.resolved';
       callId: string;
       decision: 'allow' | 'deny' | 'deny-stop';
-      scope: 'once' | 'session';
+      /** 'machine' (S21, additive): the answer also persisted a durable grant to the state root. */
+      scope: 'once' | 'session' | 'machine';
       /** 'task-aborted' (V0.7, additive): a forwarded child ask auto-denied because its task died first. */
       source: 'user' | 'non-interactive' | 'dangerous-mode' | 'task-aborted';
     }
@@ -2095,6 +2102,16 @@ export type EventBody =
       /** Which config files were loaded (post-trust) and their content hashes. */
       type: 'config.loaded';
       sources: { path: string; sha256: string }[];
+    }
+  | {
+      /**
+       * S21 (additive): the durable machine grants ACTIVE in this session, loaded from the
+       * state-root store at assembly. Standing authority must be visible in the evidence of
+       * every session it touches — this event is that visibility. Appended only when at least
+       * one entry applies to this workspace; absent means no durable authority was in play.
+       */
+      type: 'grants.loaded';
+      entries: { id: string; kind: 'check-replay' | 'class'; label: string; createdAt: string }[];
     }
   | {
       /**
