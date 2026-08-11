@@ -153,6 +153,12 @@ function evidenceLines(report: ReportJson, endedReason: string, logPath: string)
       );
     }
   }
+  {
+    // S21: recorded research findings were the one evidence class with NO journal line — they
+    // vanished from cross-session memory entirely at quit. The durable copy lives in RESEARCH.md.
+    const notes = (report.research ?? []).filter((r) => r.kind === 'findings').reduce((n, r) => n + r.notes.length, 0);
+    if (notes > 0) lines.push(`- research: ${notes} source-backed finding(s) recorded (durable copy: memory/RESEARCH.md)`);
+  }
   // The durable anchor is the ref the ACCEPTANCE consumed — not the newest creation event, which
   // a phantom (event appended, update-ref failed) can hold and which session-end pruning then
   // discards. The journal is the cross-session handoff, so naming a pruned ref there is the

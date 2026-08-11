@@ -71,11 +71,12 @@ describe('runMemoryUpdate', () => {
 
     const types = session.log.events.map((e) => e.type);
     const tail = types.slice(types.indexOf('memory.narrative'));
-    // journal (written) → lessons (skipped: none proposed) → codebase (written) → end.
-    expect(tail).toEqual(['memory.narrative', 'memory.updated', 'memory.updated', 'memory.updated', 'session.ended']);
+    // journal (written) → lessons (skipped) → research (skipped) → codebase (written) → end.
+    expect(tail).toEqual(['memory.narrative', 'memory.updated', 'memory.updated', 'memory.updated', 'memory.updated', 'session.ended']);
     expect(session.log.events.filter((e) => e.type === 'memory.updated').map((e) => (e.type === 'memory.updated' ? `${e.doc}:${e.status}` : ''))).toEqual([
       'journal:written',
       'lessons:skipped',
+      'research:skipped',
       'codebase:written',
     ]);
 

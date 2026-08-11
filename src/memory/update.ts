@@ -9,6 +9,7 @@ import type { ContentBlock, ProviderRequest, Usage } from '../types.js';
 import { buildEntry, parseJournal, rollJournal, type Narrative } from './journal.js';
 import { stampCodebase } from './codebase.js';
 import { parseLessons, rollLessons, MAX_LESSONS_PER_SESSION, type LessonProposal } from './lessons.js';
+import { foldResearchDoc } from './research.js';
 import { memoryDir, readDocCapped, writeDocAtomic } from './store.js';
 import { readPlanState } from '../plan/canonical.js';
 import { foldGraphState } from '../plan/graph-state.js';
@@ -155,6 +156,36 @@ async function runInner(session: Session, deps: MemoryUpdateDeps): Promise<void>
         deps.announce?.(`memory: ${outcome.lessons.length} lesson${outcome.lessons.length === 1 ? '' : 's'} recorded`);
       } catch (err) {
         session.log.append({ type: 'memory.updated', doc: 'lessons', status: 'failed', detail: (err as Error).message });
+      }
+    }
+  }
+
+  // Research (S21): a DETERMINISTIC fold over this session's recorded findings — no model call
+  // involved, so it succeeds even when the narrative failed. Notes were sanitized and
+  // harness-stamped at record time; dedupe by noteId keeps resume re-folds idempotent.
+  const researchNotes = session.log.events.flatMap((e) => (e.type === 'research.findings' ? e.notes : []));
+  const researchFile = path.join(dir, 'RESEARCH.md');
+  if (researchNotes.length === 0) {
+    session.log.append({ type: 'memory.updated', doc: 'research', status: 'skipped', detail: 'no research findings recorded this session' });
+  } else {
+    const currentResearch = readDocCapped(researchFile, 'RESEARCH.md', ROLL_READ_CAP_CHARS);
+    if (currentResearch.status === 'unreadable') {
+      session.log.append({ type: 'memory.updated', doc: 'research', status: 'failed', detail: 'existing RESEARCH.md unreadable; refusing to overwrite it' });
+    } else {
+      try {
+        const folded = foldResearchDoc(currentResearch.text, researchNotes, nowIso);
+        const written = await writeDocAtomic(researchFile, folded.text);
+        session.log.append({
+          type: 'memory.updated',
+          doc: 'research',
+          status: 'written',
+          sha256: written.sha256,
+          bytes: written.bytes,
+          detail: `${folded.added} added${folded.droppedStale > 0 ? `; ${folded.droppedStale} stale dropped` : ''}${folded.droppedOverflow > 0 ? `; ${folded.droppedOverflow} dropped to budget` : ''}`,
+        });
+        if (folded.added > 0) deps.announce?.(`memory: ${folded.added} research finding${folded.added === 1 ? '' : 's'} recorded`);
+      } catch (err) {
+        session.log.append({ type: 'memory.updated', doc: 'research', status: 'failed', detail: (err as Error).message });
       }
     }
   }

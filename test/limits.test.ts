@@ -45,6 +45,7 @@ import { MODELS, UNKNOWN_MODEL_CAPS, capsFor, contextBudgetFor } from '../src/pr
 import { AGENT_MD_CAP_CHARS, JOURNAL_INJECT_CAP_CHARS, CODEBASE_CAP_CHARS } from '../src/memory/load.js';
 import { JOURNAL_KEEP_FULL, JOURNAL_MAX_CHARS } from '../src/memory/journal.js';
 import { LESSONS_MAX_CHARS, LESSONS_INJECT_CAP_CHARS, MAX_LESSONS, MAX_LESSONS_PER_SESSION } from '../src/memory/lessons.js';
+import { RESEARCH_MAX_CHARS, RESEARCH_INJECT_CAP_CHARS, MAX_RESEARCH_ENTRIES, RESEARCH_STALE_DAYS } from '../src/memory/research.js';
 
 /**
  * The harness's bounds, asserted as ONE visible contract (Session 16; retuned Session 20.5).
@@ -270,5 +271,13 @@ describe('memory-doc budgets (S21 — every startup-injection bound is a visible
     // A repetition-flavored bound: how much durable memory ONE session may mint. Deliberately
     // small — a session that "learned" ten lessons learned none worth keeping.
     expect(MAX_LESSONS_PER_SESSION).toBe(3);
+  });
+
+  it('the research surface (S21): 50 entries / 16 KiB on disk, 8 KiB injected, 30-day staleness horizon', () => {
+    expect(MAX_RESEARCH_ENTRIES).toBe(50);
+    expect(RESEARCH_MAX_CHARS).toBe(16_384);
+    expect(RESEARCH_INJECT_CAP_CHARS).toBe(8_192);
+    // The perishability bound: a research note without an expiry is stale confidence deferred.
+    expect(RESEARCH_STALE_DAYS).toBe(30);
   });
 });

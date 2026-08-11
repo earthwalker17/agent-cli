@@ -672,16 +672,25 @@ function cmdMemory(values: CliValues): number {
   out.write(`AGENT.md (user-owned project constitution, loaded into every session)\n`);
   out.write(`  ${agentFile}\n  ${agent.status === 'missing' ? 'absent — create it to give every session durable instructions' : describeDoc(agent)}\n\n`);
 
-  for (const name of ['JOURNAL.md', 'CODEBASE.md', 'LESSONS.md'] as const) {
+  for (const name of ['JOURNAL.md', 'CODEBASE.md', 'LESSONS.md', 'RESEARCH.md'] as const) {
     const doc = readDocCapped(path.join(dir, name), name, 1024 * 1024);
-    const kind = name === 'JOURNAL.md' ? 'rolling session memory' : name === 'CODEBASE.md' ? 'architecture summary' : 'durable project lessons';
+    const kind =
+      name === 'JOURNAL.md'
+        ? 'rolling session memory'
+        : name === 'CODEBASE.md'
+          ? 'architecture summary'
+          : name === 'LESSONS.md'
+            ? 'durable project lessons'
+            : 'research findings with sources (perishable; entries age out)';
     out.write(`${name} (harness-managed ${kind}; edits are welcome and preserved)\n`);
     out.write(`  ${path.join(dir, name)}\n`);
     if (doc.status === 'missing') {
       out.write(
         name === 'LESSONS.md'
           ? '  absent — written when a session ends having recorded a durable lesson\n\n'
-          : '  absent — written automatically after the first productive session\n\n',
+          : name === 'RESEARCH.md'
+            ? '  absent — written when a session ends having recorded research findings\n\n'
+            : '  absent — written automatically after the first productive session\n\n',
       );
       continue;
     }

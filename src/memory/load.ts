@@ -5,6 +5,7 @@ import type { ProjectLayout } from '../store/layout.js';
 import { memoryDir, readDocCapped, type MemoryDoc } from './store.js';
 import { parseCodebase, isStale } from './codebase.js';
 import { LESSONS_INJECT_CAP_CHARS } from './lessons.js';
+import { RESEARCH_INJECT_CAP_CHARS } from './research.js';
 
 /**
  * Session-start memory load: the three project-memory documents, read with hard caps and
@@ -26,6 +27,8 @@ export interface LoadedMemory {
   codebase: MemoryDoc & { stale: boolean };
   /** S21: durable project lessons (harness-managed, newest first). */
   lessons: MemoryDoc;
+  /** S21: durable research findings (harness-managed, newest first, perishable by design). */
+  research: MemoryDoc;
   /** One-line banner summary, e.g. "AGENT.md 2.1k · journal 8.4k (3 sessions) · codebase (stale)". */
   bannerLine: string;
   /** Honest note about a recent sibling log with no recorded clean end; null when none. */
@@ -47,8 +50,9 @@ export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: L
   // The journal is newest-first by construction, so a top slice keeps the most recent entries.
   const journalDoc = readDocCapped(path.join(dir, 'JOURNAL.md'), 'JOURNAL.md', JOURNAL_INJECT_CAP_CHARS);
   const codebaseDoc = readDocCapped(path.join(dir, 'CODEBASE.md'), 'CODEBASE.md', CODEBASE_CAP_CHARS);
-  // Newest-first by construction (like the journal), so the top slice keeps the newest lessons.
+  // Newest-first by construction (like the journal), so the top slice keeps the newest entries.
   const lessonsDoc = readDocCapped(path.join(dir, 'LESSONS.md'), 'LESSONS.md', LESSONS_INJECT_CAP_CHARS);
+  const researchDoc = readDocCapped(path.join(dir, 'RESEARCH.md'), 'RESEARCH.md', RESEARCH_INJECT_CAP_CHARS);
 
   const sessionCount = (journalDoc.text.match(/^## Session /gm) ?? []).length;
   const { stamp } = parseCodebase(codebaseDoc.text);
@@ -64,7 +68,8 @@ export function loadMemory(layout: ProjectLayout, workspaceRoot: string, opts: L
     journal,
     codebase,
     lessons: lessonsDoc,
-    bannerLine: bannerLine(agent, journal, codebase, lessonsDoc),
+    research: researchDoc,
+    bannerLine: bannerLine(agent, journal, codebase, lessonsDoc, researchDoc),
     crashNote: detectCrashNote(layout, opts.resumeId),
   };
 }
@@ -74,13 +79,15 @@ function bannerLine(
   journal: MemoryDoc & { sessionCount: number },
   codebase: MemoryDoc & { stale: boolean },
   lessons: MemoryDoc,
+  research: MemoryDoc,
 ): string {
   const parts: string[] = [];
   if (loaded(agent)) parts.push(`AGENT.md ${kb(agent.bytes)}${flag(agent)}`);
   if (loaded(journal)) parts.push(`journal ${kb(journal.bytes)} (${journal.sessionCount} session${journal.sessionCount === 1 ? '' : 's'})${flag(journal)}`);
   if (loaded(codebase)) parts.push(`codebase ${kb(codebase.bytes)} (${codebase.stale ? 'may be stale' : 'fresh'})${flag(codebase)}`);
   if (loaded(lessons)) parts.push(`lessons ${kb(lessons.bytes)}${flag(lessons)}`);
-  for (const d of [agent, journal, codebase, lessons]) {
+  if (loaded(research)) parts.push(`research ${kb(research.bytes)}${flag(research)}`);
+  for (const d of [agent, journal, codebase, lessons, research]) {
     if (d.status === 'unreadable') parts.push(`${d.name} UNREADABLE (skipped)`);
   }
   return parts.length > 0 ? parts.join(' · ') : 'none';
