@@ -59,9 +59,12 @@ const WORK_EVENT_TYPES = new Set([
   // double-count one unit of work and make staleness noisier without adding information.
   'check.started',
   // Repair ledger writes are state changes a user would want to re-accept over: an attempt
-  // declares work about to happen, and an escalation changes what is outstanding.
+  // declares work about to happen, and an escalation changes what is outstanding. A user
+  // DISMISSAL changes the derivation the other way (S21) — after a refused or PARTIAL accept it
+  // is exactly the event that makes re-accepting meaningful, so it must count as work-since.
   'repair.attempted',
   'repair.escalated',
+  'repair.dismissed',
   // Review records change what is outstanding the same way (Session 14): a captured round or
   // a triage after an acceptance makes re-accepting meaningful. `harness.checkpoint` is
   // deliberately NOT here — the accept's own delivery checkpoint must never stale the accept
@@ -300,7 +303,16 @@ export function computeAcceptance(
       .filter((t) => (t.state === 'completed' && t.verification.status !== 'pending') || t.state === 'parent-owned')
       .map((t) => t.id),
   );
-  for (const blocker of openRepairBlockers(foldRepairs(events), { resolvedTargets })) unfinished.push(blocker);
+  const repairLedger = foldRepairs(events);
+  for (const blocker of openRepairBlockers(repairLedger, { resolvedTargets })) unfinished.push(blocker);
+  // A user dismissal (S21) closes the blocker but is ALWAYS a caveat, on the complete path too:
+  // dismissed is not resolved, and a reader of "complete" must meet the escalation that was
+  // waved off — the refuted-critical-finding precedent one axis over.
+  for (const esc of repairLedger.escalations) {
+    if (esc.dismissed !== null) {
+      caveats.push(`repair escalation on '${esc.target}' (${esc.failureClass}) dismissed by the user: ${esc.dismissed.reason}`);
+    }
+  }
 
   // Review axis (Session 14): the structural review gate. The REQUIREMENT derives only from a
   // plan the user actually APPROVED (a draft/superseded/diverged plan is already blocked or

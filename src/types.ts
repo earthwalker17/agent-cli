@@ -1798,6 +1798,26 @@ export type EventBody =
       reason: string;
     }
   /**
+   * Session 21 (additive): the USER's recorded dismissal of an open escalation — the
+   * review-dismiss analog for repairs, and the closure path a `session`-targeted escalation of a
+   * non-auto-eligible class otherwise lacks (live-demonstrated in the S20.5 E2E, where it pinned
+   * a fully-green session at PARTIAL acceptance). Only the REPL's `/repair dismiss` appends it:
+   * the recover tool's schema has no dismiss action, so the model structurally cannot, and the
+   * fold ALSO requires `source: 'user'` so a forged or model-sourced record is inert. A dismissal
+   * closes the escalation as a BLOCKER while always leaving an acceptance caveat — dismissed is
+   * not resolved, and the record must keep saying so.
+   */
+  | {
+      type: 'repair.dismissed';
+      /** seq of the `repair.escalated` event this closes — the durable join key. */
+      escalationSeq: number;
+      target: string;
+      failureClass: FailureClass;
+      signature: string;
+      reason: string;
+      source: 'user';
+    }
+  /**
    * The structural review gate (Session 14, additive). `review.findings` is the delegate's
    * capture of ONE reviewer child's typed findings (possibly empty — a recorded clean lens);
    * the gate reads only these records, never reviewer prose. `review.triage` is the parent's

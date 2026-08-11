@@ -103,6 +103,12 @@ describe('validatePlanGraph', () => {
     expect(v.errors.join('\n')).toContain('duplicate dependency');
   });
 
+  it("refuses task id 'session' — the repair-escalation sentinel (S21)", () => {
+    const v = validatePlanGraph(graph({ tasks: [T('session')] }));
+    expect(v.ok).toBe(false);
+    expect(v.errors.join('\n')).toContain("task id 'session' is reserved");
+  });
+
   it('requires verify for executor and main, not for read-only roles', () => {
     const v = validatePlanGraph(
       graph({

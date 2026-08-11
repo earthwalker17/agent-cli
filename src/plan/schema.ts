@@ -311,6 +311,10 @@ export function validatePlanGraph(input: PlanGraph, opts: PlanValidationOptions 
   const ids = new Set<string>();
   for (const t of input.tasks) {
     if (ids.has(t.id)) errors.push(`duplicate task id '${t.id}'`);
+    // 'session' is the recover tool's escalation sentinel ("work outside the task graph", S21):
+    // a plan task with that literal id would make an escalation's target ambiguous between the
+    // task and the whole-session reading everywhere the two are told apart.
+    if (t.id === 'session') errors.push(`task id 'session' is reserved (it names whole-session repair escalations)`);
     ids.add(t.id);
   }
 

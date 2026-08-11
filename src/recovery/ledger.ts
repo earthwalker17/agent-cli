@@ -39,8 +39,17 @@ export interface RepairEscalationState {
   failureClass: FailureClass;
   signature: string;
   reason: string;
-  /** True when no LATER attempt for this signature has succeeded — the escalation still stands. */
+  /**
+   * True when neither a LATER proven attempt for this signature nor a user dismissal has closed
+   * it — the escalation still stands.
+   */
   open: boolean;
+  /**
+   * The user's recorded dismissal (S21), when one closed this escalation. Distinct from proven
+   * closure on purpose: a dismissed escalation stops blocking acceptance but ALWAYS surfaces as
+   * a caveat — dismissed is not resolved.
+   */
+  dismissed: { seq: number; reason: string } | null;
 }
 
 export interface RepairLedger {
@@ -102,6 +111,7 @@ function withinScope(relPath: string, allowed: readonly string[]): boolean {
 export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOptions = {}): RepairLedger {
   const attempts: RepairAttemptState[] = [];
   const escalations: RepairEscalationState[] = [];
+  const dismissals: { seq: number; escalationSeq: number; reason: string }[] = [];
   // Which plan task each child belongs to — so integrating ANOTHER task's reviewed work is never
   // mistaken for this repair's diff spreading.
   const childTarget = new Map<string, string>();
@@ -129,7 +139,12 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
         ageMs: activeMsSince(events, e.seq),
       });
     } else if (e.type === 'repair.escalated') {
-      escalations.push({ seq: e.seq, target: e.target, failureClass: e.failureClass, signature: e.signature, reason: e.reason, open: true });
+      escalations.push({ seq: e.seq, target: e.target, failureClass: e.failureClass, signature: e.signature, reason: e.reason, open: true, dismissed: null });
+    } else if (e.type === 'repair.dismissed' && e.source === 'user') {
+      // The source guard is defense in depth over the type: the fold reads LENIENTLY-parsed disk
+      // bytes, and consent must stay the user's even against a hand-forged event (the
+      // review-triage precedent: every rule enforced at the call AND re-derived in the fold).
+      dismissals.push({ seq: e.seq, escalationSeq: e.escalationSeq, reason: e.reason });
     }
   }
 
@@ -203,9 +218,16 @@ export function foldRepairs(events: readonly SessionEvent[], opts: RepairFoldOpt
     }
   }
 
-  // An escalation stands until a LATER attempt for the same signature actually succeeded.
+  // An escalation stands until a LATER attempt for the same signature actually succeeded — or
+  // the user dismissed it (S21). The dismissal joins on the escalation's OWN seq, so dismissing
+  // one escalation can never quietly clear a different one that happens to share a signature.
   for (const esc of escalations) {
     esc.open = !attempts.some((a) => a.signature === esc.signature && a.seq > esc.seq && a.outcome === 'succeeded');
+    const d = dismissals.find((x) => x.escalationSeq === esc.seq && x.seq > esc.seq);
+    if (d !== undefined) {
+      esc.dismissed = { seq: d.seq, reason: d.reason };
+      esc.open = false;
+    }
   }
 
   const firstAttemptSeq = attempts.length > 0 ? attempts[0]!.seq : Number.MAX_SAFE_INTEGER;

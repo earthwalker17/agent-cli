@@ -421,4 +421,45 @@ describe('acceptance is blocked by unresolved recovery', () => {
     expect(acc.unfinished.join(' ')).not.toContain('repair escalated');
     expect(acc.complete).toBe(true);
   });
+
+  it('a USER-dismissed session escalation stops blocking and is ALWAYS a caveat (S21)', async () => {
+    const { computeAcceptance, workSince } = await import('../src/runtime/acceptance.js');
+    reset();
+    const g = graph();
+    const state = {
+      kind: 'canonical',
+      status: 'approved',
+      approvedAndCurrent: true,
+      approvedSha: 's',
+      diverged: false,
+      canonical: { graph: g },
+    } as unknown as PlanState;
+    const escalated = ev({ type: 'repair.escalated', callId: 'c', target: 'session', failureClass: 'timeout-resource', signature: 'sigX', reason: 'wall clock expired' });
+    const escSeq = (escalated as { seq: number }).seq;
+    const base = [
+      started('ch1'),
+      ev({ type: 'task.ended', callId: 'c-ch1', childSessionId: 'ch1', status: 'completed', steps: 1, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+      ev({ type: 'task.changes', callId: 'c-ch1', childSessionId: 'ch1', baseOid: 'o', files: [{ relPath: 'src/api/a.ts', kind: 'modify', blobSha256: 'b', baseSha256: null, bytes: 1 }] }),
+      ev({ type: 'task.applied', callId: 'c-ch1', childSessionId: 'ch1', applied: ['src/api/a.ts'], refused: [] }),
+      ev({ type: 'check.completed', callId: 'k', check: 'typecheck' as CheckKind, recipeId: 'r', status: 'pass', exitCode: 0, termination: 'exited', durationMs: 1, summary: 'ok' }),
+      ev({ type: 'task.started', callId: 'rv', role: 'reviewer', childSessionId: 'child-rv', budget: {} }),
+      ev({ type: 'task.ended', callId: 'rv', childSessionId: 'child-rv', status: 'completed', steps: 1, usage: { inputTokens: 0, outputTokens: 0 }, resultSha256: 'x', durationMs: 1 }),
+      ev({ type: 'review.findings', callId: 'rv', childSessionId: 'child-rv', findings: [] }),
+      escalated,
+    ];
+    // Before the dismissal: the session-targeted escalation blocks (the S20.5 live deadlock).
+    const before = computeAcceptance(state, foldGraphState(g, base), base);
+    expect(before.complete).toBe(false);
+    expect(before.unfinished.join(' ')).toContain('repair escalated and unresolved: session');
+
+    const dismissal = ev({ type: 'repair.dismissed', escalationSeq: escSeq, target: 'session', failureClass: 'timeout-resource', signature: 'sigX', reason: 'verified by hand', source: 'user' });
+    const after = [...base, dismissal];
+    const acc = computeAcceptance(state, foldGraphState(g, after), after);
+    expect(acc.complete).toBe(true);
+    expect(acc.unfinished.join(' ')).not.toContain('repair escalated');
+    expect(acc.caveats.join(' ')).toContain("repair escalation on 'session' (timeout-resource) dismissed by the user: verified by hand");
+    // The dismissal is work-shaped: after a refused/PARTIAL accept it is exactly the event that
+    // makes re-accepting meaningful (and it forces a fresh delivery checkpoint).
+    expect(workSince(after, (escalated as { seq: number }).seq)).toBe(true);
+  });
 });

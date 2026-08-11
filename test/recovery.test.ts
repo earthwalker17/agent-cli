@@ -298,6 +298,42 @@ describe('the repair ledger derives outcomes; it never records them', () => {
     expect(openRepairBlockers(foldRepairs([attempt()]))[0]).toContain('is unproven');
   });
 
+  it('a USER dismissal closes the escalation, joined on the escalation seq (S21)', () => {
+    reset();
+    const escalated = ev({ type: 'repair.escalated', callId: 'c', target: 'session', failureClass: 'timeout-resource', signature: 'sig1', reason: 'wall clock' });
+    const escSeq = (escalated as { seq: number }).seq;
+    const events = [
+      escalated,
+      ev({ type: 'repair.dismissed', escalationSeq: escSeq, target: 'session', failureClass: 'timeout-resource', signature: 'sig1', reason: 'reviewed by hand; timeout was environmental', source: 'user' }),
+    ];
+    const ledger = foldRepairs(events);
+    expect(ledger.escalations[0]!.open).toBe(false);
+    expect(ledger.escalations[0]!.dismissed).toEqual({ seq: (events[1] as { seq: number }).seq, reason: 'reviewed by hand; timeout was environmental' });
+    expect(openRepairBlockers(ledger)).toEqual([]);
+  });
+
+  it('a dismissal for a DIFFERENT escalation seq does not clear this one, even with the same signature', () => {
+    reset();
+    const escalated = ev({ type: 'repair.escalated', callId: 'c', target: 'session', failureClass: 'timeout-resource', signature: 'sig1', reason: 'wall clock' });
+    const events = [
+      escalated,
+      ev({ type: 'repair.dismissed', escalationSeq: 999_999, target: 'session', failureClass: 'timeout-resource', signature: 'sig1', reason: 'stale index', source: 'user' }),
+    ];
+    const ledger = foldRepairs(events);
+    expect(ledger.escalations[0]!.open).toBe(true);
+    expect(ledger.escalations[0]!.dismissed).toBeNull();
+  });
+
+  it('a dismissal whose source is not the user is inert (fold-level consent, the review-triage precedent)', () => {
+    reset();
+    const escalated = ev({ type: 'repair.escalated', callId: 'c', target: 'session', failureClass: 'timeout-resource', signature: 'sig1', reason: 'wall clock' });
+    const escSeq = (escalated as { seq: number }).seq;
+    const forged = ev({ type: 'repair.dismissed', escalationSeq: escSeq, target: 'session', failureClass: 'timeout-resource', signature: 'sig1', reason: 'model says fine', source: 'model' } as never);
+    const ledger = foldRepairs([escalated, forged]);
+    expect(ledger.escalations[0]!.open).toBe(true);
+    expect(openRepairBlockers(ledger).length).toBe(1);
+  });
+
   it('is identical when re-derived (crash-resume safety)', () => {
     reset();
     const events = [attempt(), checkPass('typecheck')];
