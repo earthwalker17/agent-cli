@@ -150,31 +150,25 @@ The E2E's headline finding: a session-targeted escalation has no closure path, s
 session accepted PARTIAL via the documented `/accept confirm` override — inherited by Session 21.
 Details: `ROADMAP.md` Session 20.5, CHANGELOG 1.6.1, `agent-cli-s205-live/DEMO.md`.
 
-### Session 21 — Bounded Memory and Initialization  ← **NEXT**
+### Session 21 — Bounded Memory and Initialization — **DONE (v1.7.0)**
 
-Strengthen memory without turning startup into prompt dumping.
+Delivered in full, plus the durable-approvals design the session brief added: both S20.5
+carried-in defects closed from the runtime's own semantics (`repair.dismissed` — the user-side
+escalation closure, always a caveat, never a resolution; the reviewer gate refusing rounds that
+could not bind, with `MAX_REVIEW_ROUNDS` untouched and the unbound-rounds-count decision written
+on the constant); the memory system grown three → six documents (`LESSONS.md` merged by slug from
+an optional-and-lenient narrative key; `RESEARCH.md` as a deterministic, PERISHABLE fold with a
+30-day horizon; the global `AGENT.md`; every cap plus ONE total-injection ceiling pinned in the
+limits suite); `/init` onboarding that never rewrites an existing file; and durable machine
+grants — exact identity only, a closed four-surface eligibility set, evidence-visible via
+`grants.loaded`, revocable via `agent grants`. Four-lens adversarial review: 14 findings, all
+hand-verified and fixed (the HIGH: a heading-shaped research claim forging a never-stale entry).
+Live E2E on a fresh state root (Kimi K3 + Tavily, five legs, post-hoc validated): /init → both
+constitutions injected → `[a]` minting → unattended consumption under `--no-input` → revocation →
+escalate/dismiss/accept-with-caveat → cross-session check replay → the Fix B refusal, all on the
+persisted record. Details: `ROADMAP.md` Session 21, CHANGELOG 1.7.0, `agent-cli-s21-live/`.
 
-Carry in the two S20.5 live-found items: the **user-side repair dismissal surface** (a
-session-targeted escalation currently has no closure path — the agreed shape is a user-typed
-dismissal recorded as an event, the `/review dismiss` analog for repairs), and a decision on
-whether **unbound review rounds should consume `MAX_REVIEW_ROUNDS`** when a plan-bound round is
-what the plan's review task needs.
-
-Add explicit size and token budgets, staleness rules, provenance, and deterministic or reviewable
-compaction for harness-managed project memory. Introduce `LESSONS.md` for reusable failure patterns
-and practical project knowledge, and `RESEARCH.md` — deferred from S19 precisely because a durable
-research surface needs the staleness and provenance semantics this session builds: a research note
-is perishable in a way a lesson is not, and it must carry its sources and its retrieval date or it
-becomes exactly the stale confidence S19 exists to prevent. Keep startup context small and retrieve older detail only when it is
-relevant.
-
-Add an optional `/init` or first-run onboarding flow for a transparent global profile in the normal
-Agent CLI user-state directory, plus project initialization for a missing `AGENT.md`. Ask only a few
-skippable questions, keep answers inspectable and editable, and separate preferences from secrets,
-permissions, and authority. User-owned instruction files must never be silently rewritten or
-compressed; the system may offer a reviewed update when they become too large.
-
-### Session 22 — Terminal UX Consolidation
+### Session 22 — Terminal UX Consolidation  ← **NEXT**
 
 Polish the terminal surface after the new states are real. Explore bounded folding and expansion of
 long outputs, clearer color and hierarchy, compact provider/model/task/check/research/remote status,
@@ -232,7 +226,11 @@ Before calling the next phase mature, Agent CLI should have demonstrated:
   facts so read and write cannot be confused, an observation-bound publish that refuses to reason
   about a remote from memory, and a live proof against a real GitHub repository in which the
   scripted human DENIED the first push and the record showed nothing had left the machine)**;
-- bounded project/global memory that can be inspected, edited, compacted, and removed;
+- ~~bounded project/global memory that can be inspected, edited, compacted, and removed~~ **(MET
+  in S21: six documents with pinned per-doc caps and one total-injection ceiling, deterministic
+  or slug-merged compaction, per-entry provenance and a 30-day research staleness horizon, all
+  hand-editable and all removable — plus the machine-level grants store as inspectable,
+  revocable, audit-logged authority kept apart from memory)**;
 - terminal presentation that scales to these states without changing runtime truth.
 
 Each substantial session still requires tests, differentiated adversarial review, documentation

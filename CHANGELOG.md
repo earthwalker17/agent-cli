@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## [1.7.0] — UNRELEASED
+## [1.7.0] — 2026-08-11
 
 **Bounded memory and global initialization** (Session 21), plus the two runtime defects the
 S20.5 live E2E carried forward — both closed from the runtime's own semantics rather than
@@ -32,6 +32,11 @@ patched around.
   and still count — that decision is now written on the constant.
 - An oversize `CODEBASE.md` now injects with the shared truncation marker (it was the one
   memory doc silently head-cut), and every memory cap is pinned in the limits suite.
+- **`tool.completed` now records the ERROR text the model saw** (found by this session's live
+  E2E validator against a real refusal): a failing result whose message lived only in `error`
+  with an empty `output` — every delegate-gate refusal — persisted an EMPTY preview, so the log
+  could not say why the call failed and a resumed conversation replayed a placeholder where the
+  live model had read the reason.
 
 ### Added
 

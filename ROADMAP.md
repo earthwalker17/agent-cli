@@ -6,187 +6,178 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
-## Session 20.5 (2026-08-09/10) — Full-system review, limits retune, and a zero-to-remote proof
+## Session 21 (2026-08-11) — Bounded memory and global initialization (v1.7.0)
 
 ### Objective
 
-A consolidation-and-proof session before S21's memory work, not a feature session: find and fix
-what six sessions of rapid capability growth (S15–S20) left behind — real bugs, fail-open seams,
-doc/code drift, and above all **fixed caps sized for the fixtures they were introduced against**
-rather than for what a v1.6 session now does (research + documents + remote delivery in one
-coherent run) — then prove the whole system end to end from an empty folder to a real GitHub
-release.
+Make project memory deliberate, bounded and useful over long-running projects; give the harness
+a user-level global workspace with an optional onboarding flow; design durable machine-level
+approvals as the one explicit exception to "authority is not durable" — and first, close the two
+runtime defects the S20.5 live E2E carried forward, from the runtime's own semantics rather than
+as patches.
 
-### What shipped — the review (5 lenses, bounded, hand-verified)
+### What shipped — the two carried-in fixes
 
-One Workflow, five differentiated finder lenses over the whole system; every finding verified by
-hand against the code before any fix, each fix with a regression test, committed in five clusters.
-The largest class was **accounting and honesty seams that only bite hours into a real session**:
+- **A session-targeted repair escalation finally has a user-side closure** (`repair.dismissed`).
+  The live-demonstrated deadlock was a three-part conjunction: the ledger closes an escalation
+  only via a later PROVEN attempt, `evaluateRepair` refuses to record attempts for
+  non-auto-eligible classes, and acceptance's `resolvedTargets` covers plan tasks only — so a
+  fully-green session pinned at PARTIAL. Now: `/repair` renders the ledger; `/repair dismiss <n>
+  <reason>` appends the additive event, joined on the escalation event's OWN seq (a shared
+  signature can never clear a neighbor), `source: 'user'` required by the fold (the recover tool
+  has no dismiss action — consent stays the user's structurally), the blocker closed while an
+  acceptance CAVEAT always remains. `repair.dismissed` joins `WORK_EVENT_TYPES` so a prior
+  PARTIAL acceptance goes stale and re-accepting is meaningful; plan task id `session` is now
+  refused as reserved; `/status` gains the repairs line the surface never had.
+- **A review round can no longer be spent where it could never bind.** While a once-approved
+  plan's approval is invalidated (`approvedSha !== null && !approvedAndCurrent` — an amendment,
+  a diverged hand-edit, a vanished document), a reviewer group refuses EX ANTE naming a cure
+  that works in the named state. The S20.5 dead end — both rounds ran unbound inside an
+  amendment window and the spent cap then blocked the bound round the plan's review task needed
+  — is prevented at the gate; `MAX_REVIEW_ROUNDS` itself is untouched, and the decision that
+  unbound rounds still count (a binding-aware count would be a repetition-bound loosening) is
+  now written on the constant. `planApprovalSha` clears on `plan.discarded`, so discarded plans,
+  never-approved drafts and plan-less sessions keep voluntary rounds.
 
-- **Policy ordering.** A pre-resolution remote refusal (budget spent, gh absent, no repo — all of
-  which legitimately have no host yet) recorded `remote.unresolved-target` with a cure no input
-  could satisfy; the guard now honors the tool's own blocked fact before the host checks, with
-  lineage above both so a child hears the permanent answer. `command()`/`readsPaths()` were the
-  last two bare fact calls in `decide()` — a throw escaped the gate and crashed the turn; both now
-  deny like every other branch.
-- **Remote accounting + scale.** `remote_release` charged the write allowance on success only
-  while every failure recorded its `remote.mutated` event, so live and events-rebuilt spends
-  disagreed both ways (the S20 push invariant, which this tool had only half of). And the
-  observation `ls-remote` was unscoped with a silent 2,000-row cap: GitHub exposes two refs per PR
-  under `refs/pull/`, which sort before tags, so a busy repo starved a real tag out of the listing
-  and misreported it `new`. Now scoped to heads+tags, 4 MiB capture, 20k reported rows, truncation
-  folded into `basesIncomplete` with a single-ref absence re-check.
-- **Runtime honesty (six gaps).** A deny-&-stop on a turn's final step read as `max-steps` (a
-  child's as `budget-steps`, spending an R10 attempt) — the cause is now explicit on `TurnResult`.
-  `repairDanglingToolUses` claimed "the turn failed before this call ran" for calls that had
-  snapshotted, written bytes, or spawned — and its appended completion SHADOWS reconstruct on every
-  resume; it now tells the same truth. Elision monotonicity was process-memory only and reset on
-  resume (and diverged in the end-of-session narrative) — both seeded from `context.compacted` now.
-  The exhausted-context warning was gated on the elided set GROWING, so it went silent exactly in
-  the steady state heading for a hard context-window failure — a latch fires it once at the
-  crossing. The task-base untracked guard was the only human consent with no durable record.
-- **Gate folds (one HIGH + three refunds).** Project-scoped gates compared `projectId`
-  case-SENSITIVELY while `selectUnit` folds case, so a plan scoped `'API'` over on-disk `api` was
-  permanently unsatisfiable AND unwaivable — the exact unclearable-gate trap, one fold layer up.
-  Plus three quiet budget refunds across resume (a never-started delegated attempt, an
-  all-formats-failed render, a failed release), each closed with an additive event.
-- **Long-run robustness.** A wedged `taskkill` could hang the exec outcome forever (the helper
-  wait was unbounded while settle awaits it — the sibling preview module already bounded the same
-  call); a TTL/log-cap reap landing mid-flow was misdiagnosed `preview-died` → runtime-process; the
-  spawn-to-register crash scan sliced 50 entries before the recency filter, so >50 accumulated logs
-  blinded the window. All three fixed.
+### What shipped — the memory system (three documents → six, every bound a pinned contract)
 
-Bounded deferred-pool pickups: **CI test portability** (21 Windows-shaped fixtures ported so the
-advisory Linux job can assert real behavior — zero src changes), **`reasoningTokens`** surfaced in
-the report and `/status`.
+- **`LESSONS.md`** — durable project lessons, proposed (≤3) in the existing end-of-session
+  narrative response as an OPTIONAL schema key (a missed or INVALID value costs the lessons,
+  never the journal — enforced by a lenient two-stage parse), merged by slug (reuse = update,
+  entry moves to front), harness-stamped provenance per entry, heading-shaped body lines
+  visibly defused so a proposal cannot fabricate an entry boundary, user edits preserved
+  byte-verbatim. 30 entries / 16 KiB on disk, 8 KiB injected.
+- **`RESEARCH.md`** — the durable surface S19 deferred, PERISHABLE by design: a deterministic
+  fold over recorded `research.findings` (no model call — it succeeds when the narrative fails),
+  idempotent by noteId across resume re-folds, newest-first by harness-stamped retrieval date,
+  entries past 30 days dropped at the next write with an honest leading count. Findings
+  previously vanished from cross-session memory at quit; the journal evidence section gains the
+  missing research line.
+- **Coherence pass:** the one truncation-marker gap fixed (an oversize CODEBASE.md was silently
+  head-cut); every memory cap pinned in `test/limits.test.ts`, including ONE worst-case
+  total-injection ceiling (86,016 chars across all six docs — a new doc must trip a deliberate
+  decision, not quietly grow the cached prefix).
 
-### What shipped — the limits retune (audit acted on)
+### What shipped — the global workspace and /init
 
-The S16 principle, reaffirmed: **raise SCALE bounds, never REPETITION or CONSENT bounds.** Pinned
-with per-change rationale in `test/limits.test.ts`. The load-bearing one: catalog context budgets
-became a **per-model derivation rule** — `budget×1.25 + 40k overhead + defaultMaxTokens ≤
-contextTokens`, clamped under provider billing thresholds (gpt-5.6's 272K whole-request 2×,
-verified live) — replacing a flat 100k that sat at ~10% of a 1M window on flagships and
-*overflowed* the 200k/128k-window models once overhead was priced in. A latent GLM overclaim
-surfaced (`glm-5.2`'s row named its `[1m]` sibling's window; corrected to 200K). Provider windows
-and pricing re-verified 2026-08-09. Other raises: steps 40→60 (+ loud one-shot end), task pool
-16→32 / 400k, checks 80→160, research pools raised, preview TTL 60→120 min, exec capture 1→4 MiB.
-The **executor wall clock now excludes measured approval wait** (an away human used to kill the
-executor mid-work), coupled with the worktree sweep's live-pid hatch (2h→8h).
+- **The global `AGENT.md`** at the state root: one user constitution for every workspace on this
+  machine, injected FIRST with a heading stating that the project constitution overrides it on
+  conflict (the ecosystem's local-wins convention — Codex/Gemini/goose all layer this way, per
+  the session's primary-doc research). Cap 16 KiB, deliberately smaller than the project's;
+  recorded in `memory.loaded` with additive `scope: 'user'`; deliberately NOT injected into
+  subagents (children execute briefs; injected chars multiply across fan-outs).
+- **`/init`** — skippable onboarding no surveyed CLI agent combines: four questions into the
+  global doc plus a starter project `AGENT.md` offer. Never rewrites an existing file; each file
+  writes atomically or not at all; EOF during the global questions aborts with nothing written;
+  answers sanitized; the model told via a pending note that the docs load NEXT session. A
+  TTY-only one-line tip points at it while no global doc exists. `agent init` joins `KNOWN`
+  (the `agent version` lesson: an unknown positional starts a PAID one-shot).
 
-### What shipped — maintainability (boundaries, not reorganization)
+### What shipped — durable machine approvals
 
-Verdict from the structural audit (171 files, 28 flat modules): the flat depth-2 tree is the right
-design — moving files would churn 164 test files and the published layout for aesthetics. What was
-eroding was BOUNDARIES. `test/architecture.test.ts` now pins the invariants (no `../../`, `shared/`
-leaf, `sandbox/` entry-only, module cycles a frozen removal-only set) — and immediately found a
-fifth cycle nobody knew about. Three cut: `plan↔memory` (→ `shared/docio.ts`),
-`retrieval↔workspace` (→ `git/ls.ts`), `types↔exec` (`ExecSpec` → `types.ts`); `shared/` made a
-true leaf (`isAlive` → `shared/proc.ts`). ARCHITECTURE's src tree regenerated complete (three whole
-modules had been missing).
+The one explicit, user-recorded exception to "authority is not durable, spending is", designed
+against the ecosystem's studied failure (Codex #22181: a vague "don't ask again" minting a
+machine-wide program-name allow):
 
-### The live proof (`agent-cli-s205-live/`, Kimi K3, EMPTY folder → `earthwalker17/agent-cli-e2e`) — **COMPLETED 2026-08-10; validator 62/62**
-
-(A first attempt on 2026-08-09 stalled on provider balance — HTTP 429 mid-run, no code defect —
-and was re-run after the account was recharged.) The completed record, validated post hoc
-**62/62** against both legs' persisted logs plus the live remote (`VALIDATION.txt`; full detail
-in `agent-cli-s205-live/DEMO.md` — the validator itself hardened by a four-lens adversarial
-review of the evidence, which also corrected this section's numbers against the logs):
-
-- **Leg 0** (63 events, 4 approvals, ~3 min): an EMPTY folder became a git repo on `main` with
-  `.gitignore` and origin, trust consent on camera, no commits.
-- **Leg 1** (ONE session, `20260810-095329-ccbf4e71`, **1006 events across three lives**, 26
-  approvals, 0 denials): a researcher child ran 6 searches + 1 extract and recorded **8
-  source-backed findings** (every one with URLs + harness-stamped `retrievedAt`) that the api
-  client was genuinely built against; a 5-task graph sha-approved; **three parallel worktree
-  executors captured 9/8/10 files** — two hit their token budgets and their captures still
-  integrated (`task.applied` ×3); **46 typed check completions: 38 pass (5 browser flows), 2
-  REAL failures (api test, go test) found, fixed, re-proven live**, 6 honest `unsupported`;
-  two managed previews; five passing browser flows (`exitCode: null`); the DOCX/PDF loop
-  refused two malformed specs, then `inspect_pages` caught a real visual defect the model
-  fixed before calling it done; two adversarial review rounds, 16 findings, 0 critical/high,
-  all 16 triaged; compaction ended at 111 elided tool outputs with the S20.5
-  exhausted-context latch firing live; the session then
-  **resumed twice over the compacted history**; one user-typed `/commit`; **5 remote reads, 3
-  mutations — push main `0f98080…`, tag `v0.1.0`, the GitHub Release — all verified after the
-  act, and the first release attempt was DENIED by `remote.precondition`** (it cited the
-  pre-push observation; gh would have created the tag as a side effect) then re-observed and
-  retried under a fresh approval. The built app was driven live on camera.
-
-**The headline live finding — the unclosable session escalation.** The model recorded
-`recover escalate target:session` (timeout-resource) as its "I stopped and need you"; later,
-with everything green, `/accept` still refused — correctly — but v1.6.1 has NO closure path for
-a session-targeted escalation (`evaluateRepair` refuses attempts for non-auto-eligible classes;
-`resolvedTargets` covers plan tasks only). The deferred pool predicted exactly this; the live
-run demonstrated it. The code's documented exit — the user's `/accept confirm` — was used, so
-**the acceptance is honestly PARTIAL** with the escalation named in the handoff. A second
-interaction surfaced with it: both review rounds ran while the plan approval was invalidated
-(amendments), so neither bound to the plan's `review` task, and the round cap then blocked the
-bound round that would close it — the model's legitimate exit was a **waiver amendment with the
-reason on record, re-approved by the human**. The full consent chain (amendment → approval
-invalidated → executors blocked → harness note naming the cure → user re-approves) ran live,
-twice, and held.
-
-**Disclosed interventions and driver lessons** (harness-external): a human typed
-`/plan approve` mid-take at 11:40Z (re-approval is user-only and the scripted driver lacked
-that cue); legs 1b/1c are on-camera resumes with drivers acting as the user (waiver approval,
-`/accept confirm`, `/commit`, publish approvals). Driver bugs found: the accept-retry bound
-expired one round early; a cue matched stale scrollback; the engagement gate cannot tell
-"errored instantly" from "finished" (cure: post-condition checks). None is a harness defect;
-all are recorded in `DEMO.md` for the next harness.
+- **`[a]` appears on exactly four surfaces**: a typed check's exact resolved commands
+  (replay-sha bound — body drift re-asks structurally; workspace-scoped via the SAME `trustKey`
+  derivation trust uses) and three read-only-external class rules (`web_search`, researcher
+  spawns via `delegate_task`, `remote_status` reads — machine-wide, per-session budgets still
+  bounding). The prompt prints the LITERAL stored rule, its scope, and the revoke path. The
+  closed `DURABLE_CLASS_ELIGIBLE` set carries every exclusion with its reason: remote writes,
+  migrate/seed, executor spawns, `run_command`, sensitive reads, artifact inspect, preview,
+  install (deferred).
+- **Structural offer, honest record**: `[a]` renders only from an interactive approver, never on
+  forwarded child asks; an unoffered `'a'` parses as DENY; dangerous mode answers prompts that
+  never render and can never persist. Persistence runs BEFORE `approval.resolved` is appended —
+  a failed persist downgrades the recorded scope to `session` with the reason in `detail`.
+- **Store + visibility + revocation**: `<state>/grants.json` (strict schema, corrupt = hard
+  error, never rewritten — trust-store discipline) with registry-locked ATOMIC batch writes and
+  an append-only `grants.log`; loaded at every assembly (resume identical), class entries
+  validated against the eligibility set (an ineligible hand-edit refuses the session naming the
+  revoke cure), replay entries seeded into a SEPARATE Grants set only the pure-check branch
+  consults (a hand-minted install/preview-shaped key is dead weight); `grants.loaded` recorded
+  whenever any entry applies. `agent grants [revoke <id>]` mutates; `/grants` is the in-session
+  read-only view.
 
 ### Verification
 
-Suite **2038 → 2078** across 131 files (net; new regression + architecture tests, minus none;
-re-verified pre-publish 2026-08-10: 2065 pass + 11 skip in the full run, the two browser-PDF
-timeouts passing 11/11 in isolation). `npm run typecheck`
-clean, `npm run build` clean. Full suite verified green by running it in two halves (the
-browser-dependent suites flake only under parallel msedge contention; each passes in isolation — a
-documented non-defect). The retune's expected fallout — seven fixtures that hardcoded an old
-bound's value — now derive from the constants, so the next retune moves them for free. The E2E
-post-hoc validator ran against the completed take: **62/62** (`agent-cli-s205-live/VALIDATION.txt`),
-including the remote ground truth (`git ls-remote` OIDs + the gh release, each mutation bound to
-its own resolved approval by callId) and log integrity (no key-shaped strings incl. GitHub-token
-shapes, no inline image payloads, seq monotone).
+`npm run typecheck` clean. Observed runs, stated exactly: one full parallel run at the
+mid-session state ran **2,140 tests (2,126 pass, 11 skip, 3 contention flakes — different files
+each run, the S20.5 documented class; every flaked file green in isolation)**; the FINAL tree
+(review fixes + the outputPreview fix included; 139 test files, 7 tests added after that full
+run) was verified in two sequential halves — half B fully green (69 files), half A green with
+one browser flake that passed in isolation. **Adversarial review:
+one bounded workflow, four differentiated lenses (consent/authority; memory injection
+provenance; fold/event correctness incl. resume; prompt/docs honesty) — 14 findings, every one
+hand-verified REAL and fixed with regression pins.** The sharpest: a research CLAIM shaped like
+an entry heading forged a RESEARCH.md entry with a model-chosen retrieval date that evaded the
+staleness horizon (HIGH — the lessons defuse, missed one document over); durable replay keys
+seeded into the shared set would have let a hand-edited grants.json key unlock INSTALL replay;
+and the reviewer-gate refusal for a missing plan document named two cures that both refuse in
+that state — the S16.5 refusable-cure class, reintroduced and caught by the review.
+
+**The live E2E (`agent-cli-s21-live/`, Kimi K3 + Tavily, fresh state root, piped driver — no
+recording, per the session's scope): five legs, post-hoc validator 31/31 over persisted
+evidence alone (`VALIDATION.txt`).** Its product yield beyond the S21 surfaces: the validator's
+one initial FAIL exposed a PRE-EXISTING runtime honesty gap — `tool.completed.outputPreview`
+recorded `output` alone, so a refusal carrying its message only in `error` (every delegate-gate
+refusal) persisted as an EMPTY preview, and a resumed conversation lost why the call failed.
+Fixed (error-led wire composition now persisted, resume-fidelity pinned) and proven by
+re-running the leg against the fixed build. Leg 1: `/init` created both constitutions from a genuinely fresh machine
+state (trust via the non-TTY `agent trust` consent path). Leg 2: the next session's banner
+showed BOTH constitutions loading; a researcher spawn ask rendered `[a]` with the literal rule;
+one keystroke minted the durable grant (verified in `grants.json` + `grants.log` + the
+`scope: 'machine'` approval event); the researcher recorded source-backed findings and quit
+wrote JOURNAL + RESEARCH.md. Leg 3: a `--no-input` one-shot CONSUMED the grant with nobody at
+the keyboard (researcher spawned, zero user approvals, `grants.loaded` on the record), then
+`agent grants revoke` removed it and the same shape auto-denied. Leg 4: a deliberately failing
+check (its `[a]` minting durable replay), a live `recover escalate target:session`, `/accept`
+refusing, `/repair dismiss`, and `/accept` COMPLETE with the caveat — the S20.5 deadlock,
+closed on camera-less record. Leg 5: the check REPLAYED across sessions under the durable key
+with no ask, and a plan approve → amend → reviewer-spawn attempt drew the Fix B refusal live.
 
 ### Decisions (and why)
 
-- **A per-model budget RULE, not a flat number.** The flat 100k was only ever "reproduce the
-  pre-S15 chars"; on a 1M-window model that is a 90%-idle window paying cache-invalidation cost,
-  and on a 200k model it was a silent OVERFLOW. Pinning the fit-and-billing rule as an invariant
-  over every catalog row means the next model added cannot quietly overflow.
-- **The boundary is a TEST, not a matrix.** A full allowed-edge matrix breaks on every legitimate
-  import and decays into a change log; invariants + a frozen removal-only cycle set catch the
-  thing that actually matters (a NEW cycle) without taxing ordinary work.
-- **Consent and repetition bounds stay put, again.** The audit raised scale bounds only. Migrate/
-  seed still ask every time; a remote write still asks every time; MAX_REVIEW_ROUNDS, MAX_TASK_
-  ATTEMPTS, the 5-minute observation staleness — untouched. Those are authority, not capacity.
+- **Exact identity or no durable grant at all.** Claude Code documents its own Bash prefix-rule
+  fragility; Codex's #22181 minted a machine-wide program-name allow from a vague prompt;
+  Gemini closed "persist always-allow" as not-planned. The design answer: a durable grant is a
+  body-bound replay sha or one (tool, class) pair from a closed set — no prefixes, no patterns,
+  the literal rule printed before anything persists.
+- **Class grants are machine-wide; replay grants are workspace-scoped.** The brief asks for
+  decisions remembered across projects; trust remains the outer gate (grants apply only inside
+  workspaces separately trusted), and the three eligible class rules are read-only-external
+  with per-session budgets. Replay keys are project-relative by construction.
+- **Lessons ride the narrative; research rides events.** No new tool, no mid-session memory
+  writes, no second engine: the model's judgment enters through the one existing model call
+  (optional, lenient), and the perishable surface is a pure fold that works even when that call
+  fails.
+- **Startup stays small by construction, not hope**: per-doc caps plus ONE pinned total ceiling;
+  the global doc deliberately smaller than the project's; subagents excluded.
+- **Ex-ante prevention over cap arithmetic** for the review-round trap: refusing the unbindable
+  round keeps `MAX_REVIEW_ROUNDS` a repetition bound nobody loosened.
 
 ### Open issues / boundaries
 
-- **A session-targeted escalation has no closure path** (live-demonstrated, above): the model's
-  own `escalate target:session` pinned a fully-green session at PARTIAL acceptance, because
-  attempts are refused for non-auto-eligible classes and `resolvedTargets` covers plan tasks
-  only. The documented `/accept confirm` override works, but S21 should build the already-agreed
-  user-side dismissal surface (the `/review dismiss` analog for repairs).
-- **Unbound review rounds consume the cap of a plan task they cannot close**: rounds run while
-  the plan approval is invalidated cannot bind to the plan's `review` task, yet count against
-  `MAX_REVIEW_ROUNDS` — leaving the bound round unrunnable. The waiver-amendment exit is
-  legitimate and was used live; whether unbound rounds should count there deserves S21 thought.
-- The executor approval-wait exclusion is proven hermetically (the E2E's scripted driver answers
-  in seconds, so the live run does not exercise it); the LOUD max-steps end likewise.
-- The context-budget rule is verified against each provider's *documentation* as of 2026-08-09,
-  not against a live long-context bill; catalogs go stale before harnesses do.
-- The advisory Linux CI job's fixtures are ported but the green is validated by CI on the next
-  push, not on this Windows machine — the advisory flag flips only once it is OBSERVED green.
+- The `[a]`/durable-grant surfaces are live-proven for the research class grant and the check
+  replay; the `remote_status` class grant is unit-tested only (no remote in the E2E workspace).
+- `/init`'s TTY tip line and the real-TTY trust prompt are untestable through the piped driver
+  (unit-tested); the piped `--interactive` driver IS the documented deliberate-opt-in path that
+  makes `[a]` offerable there.
+- Durable-grant revocation applies from the next assembly; a running session keeps its
+  in-memory copy until it ends (documented on every surface).
+- LESSONS.md quality depends on the model's judgment under the ≤3/session bound; the live E2E
+  exercised the mechanism (skip evidence recorded honestly) — a long-horizon quality read needs
+  real project mileage.
+- The cross-process memory-doc lock stays deferred (last-writer-wins seconds window at
+  simultaneous quits), as do SQLite/topic retrieval, trust.json write locking, `/init` rewrite
+  flows, and install-replay durability (each recorded in the deferred pool).
 
 ### Recommended next step
 
-The live E2E and demo video are DONE (validator 62/62; `agent-cli-skylight-demo.mp4`); v1.6.1
-publishes on explicit user approval. THEN Session 21 per BLUEPRINT: bounded memory and
-initialization — size/token budgets, staleness, provenance, `LESSONS.md`, the `RESEARCH.md`
-deferred from S19 — plus the two live-found items above (the session-escalation dismissal
-surface, the review-cap/bound-round interaction).
+v1.7.0 publishes on explicit user approval (push + tag + Release). Then Session 22 per
+BLUEPRINT: terminal UX consolidation — the new states (repair ledger, grants, six memory docs)
+put real pressure on the flat chrome, which is exactly the evidence that session needs.
 
 ---
 
@@ -194,6 +185,28 @@ surface, the review-cap/bound-round interaction).
 
 Contract detail lives in `ARCHITECTURE.md`; entries keep the objective, lasting decisions, the
 evidence, and what stayed open.
+
+### Session 20.5 (2026-08-09/10) — Full-system review, limits retune, and a zero-to-remote proof
+
+A consolidation-and-proof session (v1.6.1; suite 2038 → 2078): a five-lens engineering review of
+the whole system fixed 18 hand-verified defects — the largest class was accounting/honesty seams
+that only bite hours into a real run (policy ordering, remote spend symmetry, six runtime-honesty
+gaps, one unclearable case-folded gate, three long-run failure modes). The **limits retune**
+replaced the flat 100k context budget with a per-model derivation rule (window fit + provider
+billing clamps, verified 2026-08-09) and re-sized SCALE bounds for the v1.6 shape while touching
+no repetition or consent bound — the reaffirmed S16 principle. Module boundaries became a TEST
+(`test/architecture.test.ts`: no `../../`, shared/ leaf, frozen two-cycle set), which immediately
+found and cut a fifth cycle. **The live proof: an EMPTY folder → a real GitHub release in one
+Kimi K3 session** (1,006 events, three lives, 26 approvals; researcher findings all source-backed;
+three parallel worktree executors; 46 typed check completions incl. two REAL failures found and
+fixed live; the DOCX/PDF loop catching a visual defect; two review rounds; a first release attempt
+DENIED by `remote.precondition` then re-observed and retried) — post-hoc validator **62/62**
+(`agent-cli-s205-live/DEMO.md`). **The headline finding shaped S21**: the model's own
+`escalate target:session` had no closure path, pinning a fully-green session at PARTIAL via
+`/accept confirm`; and rounds run under an invalidated approval consumed the review cap they
+could not satisfy. Still open from it: the executor approval-wait exclusion and LOUD max-steps
+end are hermetically proven only; the context-budget rule is verified against provider docs, not
+a live long-context bill; the advisory Linux CI green is validated by CI, not this machine.
 
 ### Session 20 (2026-08-08) — Remote Git and GitHub delivery
 
@@ -696,9 +709,7 @@ re-probe drift once,
 before the first spawn — a workspace-authored script run by an earlier kind could rewrite a later
 kind's body within one approved batch (per-iteration re-probe is the likely shape); run_check's
 `planTouches` fact reads the plan document at decide and the plan file is outside the drift
-stamps (stamp it in); a `session`-targeted escalation has no harness-derived resolution (a
-user-side dismissal recorded as an event is the likely shape) — **LIVE-DEMONSTRATED in the S20.5
-E2E, where it pinned a fully-green session at PARTIAL acceptance; promoted to S21**; per-task gates are unit-tested only,
+stamps (stamp it in); per-task gates are unit-tested only,
 since a plan of all-`main` tasks cannot declare them; executors cannot self-verify (parent-only
 `run_check`, because a worktree lacks gitignored deps); more ecosystems as data-shaped recipe rows;
 an incremental check cache keyed by file hashes + tool versions.
@@ -707,6 +718,13 @@ an incremental check cache keyed by file hashes + tool versions.
 lines; sibling-task chrome printing over a DISPLAYED forwarded-approval prompt (part of the io
 redesign); plan-file pruning (folded into `agent gc` above); a `/cancel` surface for non-TTY
 sessions; richer wave guidance.
+
+**Memory/init/grants (new, S21):** install-replay and preview-replay durable grants (each
+excluded from `[a]` deliberately — revisit with real usage pressure, not by default); a
+reviewed `/init` rewrite path for existing AGENT.md files; a one-shot `agent init` Q&A;
+workspace-scoping the class grants if machine-wide proves too broad in practice; `/review
+dismiss` (the review-finding analog of `/repair dismiss` — design agreed since S14.5, still
+pooled); LESSONS.md quality metrics once real project mileage accumulates.
 
 **Tasks/memory/git/sandbox:** task resume/continue; deeper scanning of child reports for
 instruction-shaped content (v1 ships delimiters + provenance labels); the stale-displayed-

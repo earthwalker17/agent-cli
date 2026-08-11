@@ -69,10 +69,16 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.6.1.** 2078 hermetic tests across 131 files (real-OS sandbox, real-repository git,
-> **a local bare repo standing in as a real remote**, real browser flows, real PDF print +
+> **Status: v1.7.0.** 2,147 hermetic tests across 139 files (real-OS sandbox, real-repository
+> git, **a local bare repo standing in as a real remote**, real browser flows, real PDF print +
 > rasterization, hermetic HTTP wire pins, adversarial-review suites) plus opt-in live smokes.
-> Proven live end-to-end across seventeen recorded runs — newest: **an empty folder to a real
+> Newest live proof (S21, validated **31/31** from persisted evidence alone): a **fresh machine
+> state** onboarded with `/init`, both constitutions injected the next session, a **durable
+> "always allow" grant** minted with one keystroke, **consumed by an unattended `--no-input`
+> run**, then revoked and honestly denied; a live repair escalation dismissed by the user and
+> accepted WITH the caveat; a typed check replaying **across sessions** under its body-bound
+> durable key; and the review-round gate refusing a round that could not bind
+> (`agent-cli-s21-live/DEMO.md`). Before it: **an empty folder to a real
 > GitHub release, one continuous session**. One Kimi K3 session (1,006 events, three lives —
 > the terminal died twice and `agent resume` carried the plan, evidence and spend across a
 > compacted history both times) researched the current Open-Meteo docs through a sandboxed
