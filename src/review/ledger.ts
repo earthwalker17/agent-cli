@@ -6,6 +6,13 @@ import type { ReviewFinding, SessionEvent } from '../types.js';
  * the pure fold can tell when the cap is spent and stop prescribing a reviewer group that
  * delegate would refuse (S16.5b review). Matches the prompt guidance ("≤2 rounds"); clearing
  * findings needs the review TRIAGE tool, not another fan-out.
+ *
+ * S21 decision, recorded: UNBOUND rounds count against this cap too — a round is a round, and
+ * a binding-aware count would let unbounded review fan-outs ride a plan-less session (the exact
+ * repetition-bound loosening the retune principle forbids). The trap the S20.5 live run found —
+ * rounds forced unbound by an invalidated approval spending the cap the bound round needed —
+ * is prevented EX ANTE instead: delegate refuses a reviewer group while a once-approved plan's
+ * approval is not current, naming /plan approve as the cure.
  */
 export const MAX_REVIEW_ROUNDS = 2;
 

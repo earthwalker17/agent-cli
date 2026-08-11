@@ -600,14 +600,41 @@ export function createDelegateTool(
 
       // Executor preconditions — all checked BEFORE anything spawns, so a refusal spawns nothing.
       const executorCount = input.tasks.filter((t) => t.role === 'executor').length;
+      const hasReviewer = input.tasks.some((t) => t.role === 'reviewer');
       let gate: PlanGateInfo | null = null;
       try {
         gate = opts?.planContext?.() ?? null;
       } catch (err) {
-        // Fail closed where the gate matters: an unreadable plan state must not wave executors
-        // or bindings through; unbound read-only groups are unaffected (nothing to gate).
-        if (executorCount > 0 || input.tasks.some((t) => t.plan_task !== undefined)) {
-          return refuse(`plan state unavailable (${(err as Error).message}) — executor tasks and plan bindings are blocked until it can be read`);
+        // Fail closed where the gate matters: an unreadable plan state must not wave executors,
+        // reviewer rounds (an expensive consumable, S21) or bindings through; unbound read-only
+        // groups are unaffected (nothing to gate).
+        if (executorCount > 0 || hasReviewer || input.tasks.some((t) => t.plan_task !== undefined)) {
+          return refuse(`plan state unavailable (${(err as Error).message}) — executor tasks, reviewer rounds and plan bindings are blocked until it can be read`);
+        }
+      }
+      // S21 (the S20.5 live finding): a review round started while a once-approved plan's
+      // approval is invalidated CANNOT bind to the plan's reviewer task — checkDagRules refuses
+      // `plan_task` against a non-current approval — yet it would still spend one of the
+      // MAX_REVIEW_ROUNDS. The live E2E demonstrated the dead end: both rounds ran unbound
+      // inside an amendment window, and the spent cap then blocked the bound round the plan's
+      // review task needed, leaving a waiver amendment as the only exit. Refuse EX ANTE, naming
+      // the cure. The cap itself is deliberately untouched: unbound rounds in no-plan /
+      // never-approved / discarded sessions stay legal and still count — a round is a round
+      // (planApprovalSha clears on plan.discarded, so a discarded plan never trips this).
+      if (hasReviewer && gate !== null) {
+        const st = gate.state;
+        if (st.approvedSha !== null && !st.approvedAndCurrent) {
+          const why =
+            st.kind === 'none'
+              ? 'the plan document is missing'
+              : st.status === 'approved'
+                ? 'the document changed after approval'
+                : `status: ${st.status}`;
+          return refuse(
+            `a plan was approved this session but its approval is no longer current (${why}) — a review round started now ` +
+              `could not bind to the plan's reviewer task and would still spend one of the ${MAX_REVIEW_ROUNDS} review rounds. ` +
+              'Have the user re-approve the current plan (/plan approve) or discard it (/plan discard) first; nothing was spawned',
+          );
         }
       }
       if (executorCount > 0) {
