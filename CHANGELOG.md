@@ -7,6 +7,70 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.7.0] — UNRELEASED
+
+**Bounded memory and global initialization** (Session 21), plus the two runtime defects the
+S20.5 live E2E carried forward — both closed from the runtime's own semantics rather than
+patched around.
+
+### Fixed
+
+- **A session-targeted repair escalation finally has a closure path.** The live-demonstrated
+  deadlock (an escalation of a non-auto-eligible class could only clear via a proven repair
+  attempt the policy refuses to record, pinning a fully-green session at PARTIAL acceptance) is
+  closed by the user-side dismissal: `/repair` renders the bounded-repair ledger, and
+  `/repair dismiss <n> <reason>` records `repair.dismissed` — joined on the escalation event's
+  own seq, `source: 'user'` required by the fold (the recover tool has no dismiss action), the
+  blocker closed while an acceptance CAVEAT always remains. Dismissed is not resolved, and every
+  surface says so. Plan task id `session` is now refused as reserved.
+- **A review round can no longer be spent where it could never bind.** While a once-approved
+  plan's approval is invalidated (an amendment, a diverged hand-edit), a reviewer group refuses
+  ex ante naming `/plan approve` as the cure — previously the round ran UNBOUND, still consumed
+  one of the two `MAX_REVIEW_ROUNDS`, and the spent cap then blocked the bound round the plan's
+  review task needed (the S20.5 live dead end, exited only by a waiver amendment). The cap
+  itself is untouched; unbound rounds in plan-less/never-approved/discarded sessions stay legal
+  and still count — that decision is now written on the constant.
+- An oversize `CODEBASE.md` now injects with the shared truncation marker (it was the one
+  memory doc silently head-cut), and every memory cap is pinned in the limits suite.
+
+### Added
+
+- **`LESSONS.md`** — durable project lessons (pitfalls, failure patterns, debugging knowledge).
+  The model may propose up to 3 in the existing end-of-session narrative (no tool, no
+  mid-session writes; an optional schema key, so a missed key never costs the journal); the
+  harness merges by slug (reuse = update), stamps per-entry provenance, preserves user edits
+  byte-verbatim, and rolls under 30 entries / 16 KiB.
+- **`RESEARCH.md`** — the durable research surface S19 deferred. A deterministic fold over the
+  session's recorded findings (claim, sources, corroboration, harness-stamped retrieval date) —
+  perishable by design: entries age out after 30 days with an honest count, because a stale
+  research note is the exact overconfidence web research exists to prevent. Findings previously
+  vanished from cross-session memory at quit; the journal evidence section gains the missing
+  research line.
+- **The global `AGENT.md`** — one user constitution for every workspace on this machine, at the
+  state root, injected before the project `AGENT.md` (which overrides it on conflict). Created
+  only by `/init`; hand-edited after; recorded in `memory.loaded` with `scope: 'user'`.
+- **`/init`** — optional, skippable onboarding: four questions into the global `AGENT.md`, plus
+  a starter project `AGENT.md` offer when none exists. Never rewrites an existing file; EOF at
+  any question aborts with nothing written. `agent init` points at it (and can no longer start a
+  paid one-shot session by accident).
+- **Durable machine approvals** — an `[a]` "always allow on this machine" option on exactly
+  four eligible surfaces: a typed check's exact resolved commands (body-sha-bound and
+  workspace-scoped — any drift re-asks), bounded web searches, research-subagent spawns, and
+  remote READS (machine-wide; per-session budgets still bound all three). Stored in
+  `<state>/grants.json` (strict schema, corrupt = hard error, registry-locked writes) with an
+  append-only `grants.log` audit; loaded VISIBLY at every assembly as a `grants.loaded` event;
+  inspected and revoked via `agent grants [revoke <id>]` and `/grants`. A publish, a migration,
+  an executor spawn, a raw shell command, and every sensitive read remain ineligible — each
+  with its reason written on the closed eligibility set. A failed persist downgrades the
+  recorded scope honestly; `--dangerously-allow-all` can never create one.
+
+### Changed
+
+- The memory system is one documented inventory: six documents, every per-doc cap and the
+  worst-case total injection (86,016 chars) pinned as deliberate contracts in the limits suite.
+- `/status` gains a repairs line (open escalations were previously visible only through a
+  refused `/accept`).
+
 ## [1.6.1] — 2026-08-10
 
 **Consolidation.** No new capability — a full-system review, a limits retune sized for what a v1.6

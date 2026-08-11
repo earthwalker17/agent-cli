@@ -46,6 +46,8 @@ src/
     layout.ts              State-dir resolution + refuse-if-inside-workspace.
     event-log.ts           Append-only JSONL: lock, tail-repair, corruption/version handling.
     snapshots.ts           Content-addressed pre-image blobs; capture/restore with drift refuse.
+    grants.ts              Durable machine grants (S21): strict schema, corrupt = hard error,
+                           registry-locked atomic writes, append-only grants.log audit.
   exec/
     env.ts                 buildChildEnv — env hygiene (secret drops, core floor, proxy pass).
     kill.ts                killTree — verified best-effort tree kill (helper wait BOUNDED, S20.5).
@@ -158,6 +160,8 @@ src/
     load.ts                Session-start load: caps, crash notes from log tails, injection.
     journal.ts             JOURNAL.md rolling policy (2 full + compressed stubs, 24 KiB).
     codebase.ts            CODEBASE.md provenance/staleness (dual digests).
+    lessons.ts             LESSONS.md pure roll/merge (S21): slug-keyed, provenance-stamped.
+    research.ts            RESEARCH.md deterministic fold (S21): perishable, dated, idempotent.
     update.ts              End-of-session narrative (ONE cached-prefix call) + atomic writes.
   plan/
     store.ts               LEGACY markdown plan store — resumed pre-canonical sessions only.
@@ -190,7 +194,8 @@ src/
     repl.ts                runRepl — prompt → runTurn over ONE session; resume honesty notes.
     io.ts                  The ONE persistent readline; mid-turn typed /-lines; EOF fail-closed.
     render.ts              EventLog.onAppend renderer + live command-output preview.
-    commands.ts            Slash commands (/help … /remote); the ONE fold per surface.
+    commands.ts            Slash commands (/help … /grants); the ONE fold per surface.
+    init.ts                /init onboarding (S21): global AGENT.md Q&A + project starter.
     status.ts              The sticky status area — the ONLY cursor-moving code, TTY-only.
     live-tasks.ts          Render-only live task table + the /cancel registry.
     heartbeat.ts           The dim "model working (Ns)" line for always-thinking models.
@@ -219,9 +224,11 @@ passes) → per-project state creation → then `assembleSession`: **sandbox sel
 **git probe** (post-trust — it executes git against the repo) → **orphaned-worktree sweep**
 (registry-driven, path-guarded, never blocks) → **orphaned-preview sweep** (identity-verified
 kills, wall-budgeted) → **ranked map + retrieval index** (any failure falls back to the flat map
-with the reason surfaced) → **project-memory load** → system prompt → start/resume → post-start
+with the reason surfaced) → **project-memory load** (six docs incl. the global AGENT.md, S21) →
+system prompt → start/resume → post-start
 records in a fixed order (trust.verified, config.loaded, sandbox.status, git.context,
-workspace.mapped, memory.loaded) → per-session tool attachment (retrieve, delegate_task with the
+workspace.mapped, memory.loaded, then `grants.loaded` when durable grants apply — S21, loaded and
+validated at every start AND resume) → per-session tool attachment (retrieve, delegate_task with the
 executor bundle + forwarding queue, update_plan, run_check, preview, browser_flow, recover,
 review, apply_task_changes with the changes registry rebuilt from events on resume).
 
@@ -890,18 +897,37 @@ are hard `ConfigError`s. Rules travel on `ToolContext`; provenance is recorded a
 `config.loaded {sources: [{path, sha256}]}`. The `.agent-cli/` directory is write-protected from
 the agent's file tools by the path validator.
 
-## Project memory (`memory/`) — three documents, context not authority
+## Project memory (`memory/`) — six documents, context not authority
 
 Cross-session continuity with hard caps and honest degrades (a broken or oversize doc can NEVER
-block a session — it loads truncated or is skipped with a status recorded in `memory.loaded`):
+block a session — it loads truncated or is skipped with a status recorded in `memory.loaded`).
+The complete inventory, with every bound pinned in `test/limits.test.ts` (S21) and the
+worst-case TOTAL injection — 86,016 chars ≈ ~21k tokens, all riding the cached stable prefix —
+asserted as ONE ceiling a new doc must deliberately trip:
+
+| doc | home | owner / writer | cap (inject) | lifecycle |
+| --- | --- | --- | --- | --- |
+| global `AGENT.md` | `<stateRoot>/` | USER (created by `/init` only) | 16 KiB | machine-wide constitution, injected FIRST; project AGENT.md overrides on conflict |
+| `AGENT.md` | workspace root | USER | 24 KiB | project constitution; also injected into every subagent (the global one deliberately is NOT) |
+| `JOURNAL.md` | `<projectDir>/memory/` | harness+model | 12 KiB (24 on disk) | rolling session entries, newest first |
+| `CODEBASE.md` | `<projectDir>/memory/` | model body, harness stamps | 16 KiB | full-replacement architecture summary, dual-digest staleness |
+| `LESSONS.md` | `<projectDir>/memory/` | model proposes ≤3/session, harness merges | 8 KiB (16 on disk, ≤30 entries) | durable pitfalls/failure patterns, slug-keyed |
+| `RESEARCH.md` | `<projectDir>/memory/` | harness (deterministic fold) | 8 KiB (16 on disk, ≤50 entries) | PERISHABLE findings with sources; 30-day staleness horizon |
 
 - **`AGENT.md`** (workspace root, USER-owned, never harness-written; cap 24 KiB): the project
   constitution, injected into every session's system prompt — and every subagent's — as a labeled
   section. Read post-trust only.
+- **Global `AGENT.md`** (S21; `<stateRoot>/AGENT.md`, USER-owned; `/init` creates it, only ever
+  hand-edited after): the machine-wide user constitution, injected BEFORE the project AGENT.md
+  with a heading stating its scope and that the project constitution overrides it on conflict —
+  the ecosystem's local-wins layering. `memory.loaded` records it with the additive
+  `scope: 'user'` field. Deliberately smaller (16 KiB) and deliberately NOT given to subagents
+  (children execute briefs; injected chars multiply across fan-outs).
 - **`<projectDir>/memory/JOURNAL.md`** (harness-managed, rolling; inject cap 12 KiB): one
   `## Session <id>` entry per productive session, newest first. Each couples model-written
   Summary/Decisions/Open-issues/Next-steps (explicitly labeled "model-written") with a
-  deterministic **Evidence** section derived from the event log via `buildReport`, and a
+  deterministic **Evidence** section derived from the event log via `buildReport` (S21 adds the
+  research line — findings previously vanished from cross-session memory entirely), and a
   deterministic **Handoff** block (acceptance state incl. staleness, the LIVE unfinished list,
   the `agent resume <id>` pointer when work remains). The delivery line names the ref the
   ACCEPTANCE consumed, never the newest creation event (a phantom could hold that). Rolling
@@ -913,6 +939,23 @@ block a session — it loads truncated or is skipped with a status recorded in `
   HEAD. Stamps are DUAL — legacy `map-digest` plus additive `inventory-digest`; staleness compares
   inventory digests when both sides have one (immune to map-format changes). Known soft spot: a
   ranked→flat map-mode transition over-marks stale for a session or two — the safe direction.
+  S21 fixed the one truncation-marker gap: an oversize CODEBASE.md was silently head-cut.
+- **`<projectDir>/memory/LESSONS.md`** (S21, harness-managed): durable project lessons —
+  pitfalls, failure patterns, debugging knowledge. The model proposes up to 3 in the existing
+  end-of-session narrative response (an OPTIONAL zod key: a missed key costs the lessons, never
+  the journal — there is no tool and no mid-session write path); the harness merges by slug
+  (reuse = update, entry moves to front), stamps `*(session <id>, <date>)*` provenance, defuses
+  heading-shaped body lines (a proposal cannot fabricate an entry boundary), and rolls under
+  30 entries / 16 KiB with a leading drop marker. Untouched entries — user edits included —
+  survive byte-verbatim.
+- **`<projectDir>/memory/RESEARCH.md`** (S21, harness-managed; the durable surface S19 deferred):
+  a DETERMINISTIC fold over the session's recorded `research.findings` notes — no model call, so
+  it succeeds even when the narrative failed. Entries keyed by noteId (idempotent across resume
+  re-folds), newest-first by harness-stamped retrieval date, each carrying claim, sources,
+  corroboration, confidence. PERISHABLE by design: entries older than 30 days drop at the next
+  write with an honest leading count; a hand-edited entry whose heading lost its date is never
+  age-dropped (user content errs toward preservation) but stays inside the 50-entry cap. The
+  perishability warning lives in the doc preamble AND the injection fence header.
 
 **Injection safety:** every injected memory doc passes through `neutralizeHarnessDelimiters`.
 AGENT.md is workspace bytes a cloned repo controls, and JOURNAL/CODEBASE carry model-authored
@@ -1150,7 +1193,10 @@ from; absent, or older than the kernel-owned `REMOTE_OBSERVATION_MAX_AGE_MS`, is
 "understand the remote before you change it" is enforced by the engine rather than requested in a
 prompt. The bound lives in `src/types.ts`, not in the pack, so a workflow pack cannot widen its own
 leash. Observations and the gh identity are **in memory only** and do not survive a resume, while
-the read/write spend IS rebuilt from events — authority is not durable, spending is.
+the read/write spend IS rebuilt from events — authority is not durable, spending is. (S21 adds
+the ONE explicit exception: user-recorded durable machine grants, loaded visibly as
+`grants.loaded` at every assembly and revocable at any time — see "Durable machine grants"
+under the policy model. Remote WRITES remain ineligible; a publish still asks every single time.)
 
 **Looking never writes.** The only network verb is `git ls-remote`: no fetch, no remote-tracking
 refs, no FETCH_HEAD. The cost is honest — a commit the remote holds and this repository has never
@@ -1416,8 +1462,17 @@ different hypothesis, and budget it has not spent.
   reasons no model effort can clear, so a transient blip does not cost a plan amendment plus a
   human re-approval; R10's ceiling still bounds it.
 - **Acceptance:** an open escalation or an unproven repair is honest unfinished work. An escalation
-  resolves BY EVIDENCE when its plan task completes with a satisfied gate. A `session`-targeted
-  escalation clears only via a proven attempt; `/accept confirm` remains the user's override.
+  resolves BY EVIDENCE when its plan task completes with a satisfied gate — or by the USER's
+  recorded dismissal (S21): `/repair dismiss <n> <reason>` appends `repair.dismissed` joined on
+  the escalation event's own seq (sharing a signature can never clear a neighbor), the fold
+  requires `source: 'user'` (a forged or model-sourced record is inert; the recover tool has no
+  dismiss action), and the dismissal closes the BLOCKER while ALWAYS remaining an acceptance
+  caveat — dismissed is not resolved. `repair.dismissed` is a `WORK_EVENT_TYPES` member, so a
+  prior PARTIAL acceptance goes stale and a re-accept is meaningful. This is the closure path
+  the S20.5 live E2E demonstrated was missing: a `session`-targeted escalation of a
+  non-auto-eligible class (timeout-resource) could not clear by any reachable transition and
+  pinned a fully-green session at PARTIAL. `/accept confirm` remains the user's override; plan
+  task id `session` is now refused as reserved (the escalation sentinel).
 
 ## Harness checkpoint lineage
 
@@ -1466,6 +1521,16 @@ parent's judgment annotates but never erases.**
   "run ONE bounded reviewer group" prescribed a call delegate REFUSES — the S16.5 refusable-cure
   class. The cap-spent blocker hands the exits to the USER (amend the plan to waive review and
   re-approve, or `/accept confirm`), and delegate's refusal names the same exits (S16.5b).
+- **A reviewer group refuses while a once-approved plan's approval is invalidated (S21)** —
+  `approvedSha !== null && !approvedAndCurrent` at the delegate gate, cure `/plan approve` (or
+  `/plan discard`). A round started inside an amendment window can only run UNBOUND
+  (`checkDagRules` refuses `plan_task` against a non-current approval) yet still spends the cap
+  — the S20.5 live dead end: both rounds ran unbound, and the spent cap then blocked the bound
+  round the plan's review task needed. The refusal is EX ANTE; the cap itself is untouched, and
+  the recorded decision on `MAX_REVIEW_ROUNDS` says why: unbound rounds in no-plan /
+  never-approved / discarded sessions stay legal and still count — a binding-aware count would
+  be a repetition-bound loosening. (`planApprovalSha` clears on `plan.discarded`, so a discarded
+  plan never trips this.) The gate-read failure path fails closed for reviewer groups too.
 - **Findings are typed at the SOURCE.** `report_finding` is the reviewer child's only findings
   channel: a PER-TASK accumulator+instance the delegate constructs inside the fan-out (parallel
   lenses can never interleave), admitted through the named `childTools` seam. Bounded: 8 findings,
@@ -1553,7 +1618,11 @@ errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as `user-quit` 
 `completed`.
 
 Commands: `/help /status /undo /diff /commit /checkpoint /plan /tasks /cancel /accept /review
-/checks /preview /report /map /provider /model /research /remote /quit`. `/checks` re-probes the
+/repair /checks /preview /report /map /init /grants /provider /model /research /remote /quit`.
+`/repair` (S21) renders the bounded-repair ledger and carries the user-side dismissal;
+`/init` (S21) is the skippable onboarding flow (global AGENT.md + project starter — never
+rewrites an existing file, EOF aborts with nothing written); `/grants` (S21) is the read-only
+view of durable machine grants active in this session. `/checks` re-probes the
 detected project on demand and shows
 the latest EVIDENCE per kind — a check that spawned and never completed reads as "NO VERDICT",
 not as the older passing run. `/diff` carries the report's CHECKED verdict per file through the
@@ -1641,6 +1710,36 @@ over untrusted model text, so a session grant keyed on it would be standing shel
 a label. Grants are not persisted or restored on resume. The approval prompt hides `[s]` whenever
 no grant would actually be stored, and sanitizes every line it prints — summary, detail, AND the
 reason (which embeds untrusted model text for command asks).
+
+**Durable machine grants (S21)** — the one explicit, user-recorded exception to
+"authority is not durable", designed against the studied failure modes of the ecosystem (Codex
+#22181: a vague "don't ask again" that minted a machine-wide program-name allow):
+
+- **Exact identity only.** An `[a]` answer persists either the approved check batch's exact
+  replay keys (body-sha-bound — any script or command drift re-asks structurally; scoped to the
+  workspace via the SAME `trustKey` derivation trust uses) or ONE `(tool, external)` pair from
+  the closed `DURABLE_CLASS_ELIGIBLE` set: `web_search`, the researcher spawn via
+  `delegate_task`, and `remote_status` reads — the three read-only-external consents whose blast
+  radius per-session budgets already bound. Machine-wide for class grants (the point is
+  remembering across projects), with trust as the outer gate. No prefixes, no patterns.
+- **Everything else is ineligible with a stated reason** (written on the set itself): remote
+  write (asks every time, three surfaces), migrate/seed, executor spawns, `run_command`,
+  outside-workspace/secret reads, artifact inspect, preview replay, install replay (deferred).
+- **The offer is structural.** `[a]` renders only from an interactive approver (never
+  non-interactive, never `--dangerously-allow-all` — the dangerous approver answers before any
+  prompt exists and can never persist), never on a forwarded child ask, and only for eligible
+  requests; an unoffered `'a'` parses as a DENY, so scope cannot be upgraded by a typo. The
+  prompt prints the LITERAL stored rule, its scope, and the revoke path before anything writes.
+- **The record never lies.** Persistence runs BEFORE `approval.resolved` is appended; a failed
+  or unavailable persist downgrades the recorded scope to `session` with the reason in `detail`.
+- **Store + visibility.** `<stateRoot>/grants.json` (strict schema, corrupt = hard `ConfigError`,
+  never rewritten — the trust-store discipline) with registry-locked atomic writes and an
+  append-only `grants.log` audit. Assembly loads matching entries at EVERY start and resume,
+  validates class entries against the eligibility set (a hand-edited ineligible rule refuses the
+  session, naming `agent grants revoke <id>`), seeds the in-memory `Grants`, and appends
+  `grants.loaded` — standing authority is visible in the evidence of every session it touches.
+  Revocation (`agent grants revoke`, or read-only `/grants` in-session) applies from the next
+  assembly; a running session keeps its in-memory copy until it ends (documented, not hidden).
 
 ## Sandbox and enforced isolation (`sandbox/`)
 
@@ -1737,19 +1836,19 @@ lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The a
 | Area | Events / additive fields |
 | --- | --- |
 | session/turn | `session.started` (+`lineage`), `session.resumed`, `session.ended` (+`reason`), `turn.aborted {phase}`, `user.message`, `assistant.message` (+cache usage, +`reasoning[]` opaque blocks, +`usage.reasoningTokens`) |
-| consent/config | `trust.verified {source}`, `config.loaded {sources}`, `policy.decision`, `approval.resolved` (+`source: 'task-aborted'`) |
+| consent/config | `trust.verified {source}`, `config.loaded {sources}`, `policy.decision`, `approval.resolved` (+`source: 'task-aborted'`; S21 +scope `'machine'` — recorded only when the persist succeeded — and +`detail` for the honest downgrade), `grants.loaded {entries}` (S21 — standing authority made visible per session) |
 | provider | `provider.changed {from, to, source: 'user-command'\|'resume', keyEnv?, baseUrlHost?, verification}` — env var NAMES and hosts only, never credentials; readers fold newest-wins |
 | tools/files | `tool.requested`, `tool.completed` (+`fullOutputSaved`, `images`), `snapshot.created`, `snapshot.failed`, `file.mutated` (+`linesAdded/Removed`, `postStateUnverified/postStateError`), `undo.applied` |
 | execution | `command.started` (+`sandbox`), `command.ended` (typed termination), `sandbox.status` |
 | git | `git.context`, `git.commit`, `git.checkpoint`, `git.restore`, `git.checkpoint.pruned {kind}`, `harness.checkpoint {kind, ref, oid, callId?}` |
 | context | `context.compacted` (+`newlyImageElidedCallIds`) |
-| memory | `memory.loaded`, `memory.narrative`, `memory.updated` |
+| memory | `memory.loaded` (S21 +`scope: 'user'` on the global-AGENT.md entry), `memory.narrative`, `memory.updated` (S21: `doc` widens with `'lessons'`/`'research'`) |
 | retrieval | `workspace.mapped` (+`inventorySha256`, `indexedFiles`, `indexState`) |
 | tasks | `task.started` (+`planTaskId`, `planTaskSha`), `task.ended` (+`role` and `approvalWaitMs`, S20.5 — a never-started attempt still counts; approval wait is excluded from the wall clock), `task.changes`, `task.applied`, `task.base-checkpoint`, `task.supervision`, `worktree.created`, `worktree.removed` |
 | plans | `plan.route {mode, source}`, `plan.updated` (+`graph`), `plan.approved {sha256}`, `plan.discarded` (+`reason: 'accepted'`) |
 | verification | `check.started` (a REAL spawn — a `WORK_EVENT_TYPES` member), `check.completed` (verdict + named signals + `scopePaths`), both +`projectId` |
 | setup | `setup.started` (a REAL spawn; a `WORK_EVENT_TYPES` member), `setup.completed` (`ok`/`failed`/`error`/`unsupported` — never `pass`, and never readable as verification) |
-| recovery | `repair.attempted` (+`projectId` — a proof must come from the project that failed), `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash) |
+| recovery | `repair.attempted` (+`projectId` — a proof must come from the project that failed), `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash), `repair.dismissed` (S21 — the USER's closure, joined on the escalation seq, `source: 'user'` required by the fold) |
 | preview/browser | `preview.started`, `preview.ready`, `preview.ended`, `preview.swept`, `browser.flow` (+`traceOmittedBytes`, `screenshotsOmitted`) |
 | documents | `artifact.rendered` (validation verdict + `failureCount`; +`absPath` for caveat retirement, S20.5; `embeddedWorkspaceImages` gates inherited inspect consent), `artifact.render-failed` (S20.5 — a charged attempt that produced NO artifact; budget-fold evidence only), `artifact.inspected` (page-image blob pointers) — PRODUCTS, never verification, and never `WORK_EVENT_TYPES` members |
 | review | `review.findings` (an EMPTY list is a recorded clean lens), `review.triage` (deliberately NO `review.completed` — a round is derived from its capture events) |

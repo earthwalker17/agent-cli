@@ -159,6 +159,10 @@ agent session 20260715-101730-5d56
   `/tasks` (the task graph + delegated subagents), `/cancel <ref>` (stop one task),
   `/checks` (what this project can verify and the latest evidence per kind),
   `/preview [stop <id>]` (managed dev servers), `/review` (the review gate's state),
+  `/repair [dismiss <n> <reason>]` (the bounded-repair ledger; dismissing an open escalation is
+  YOUR recorded decision — it stops blocking `/accept` but stays on the record as a caveat),
+  `/init` (optional onboarding: your global AGENT.md + a starter project AGENT.md — never
+  rewrites an existing file), `/grants` (the durable "always allow" records active this session),
   `/research` (every web query this session sent, the sources that answered, and the budget left),
   `/remote` (the remotes, which GitHub account would act, live observations, every remote read and
   every remote MUTATION with its verification verdict),
@@ -195,6 +199,8 @@ agent report [<id>] [--json]   # print the evidence report (default: latest sess
 agent sessions                 # list this workspace's sessions (subagent children labeled)
 agent plan [<id>]              # print a session's plan document and approval state
 agent memory                   # show the project-memory documents and their paths
+agent init                     # points at /init (the interactive onboarding lives in the REPL)
+agent grants [revoke <id>]     # list or revoke durable machine grants ("always allow" records)
 agent map [--budget <n>]       # print the workspace map the model would receive
 agent trust [--revoke|--list]  # manage recorded workspace trust
 agent providers [--json]       # providers, models, key env vars (presence only), key sources
@@ -259,6 +265,30 @@ against first-party documentation. Consequences you will actually see:
   endpoint on either platform, so its key check is presence-only and says so. Retired ids
   (`deepseek-chat`, `deepseek-reasoner`, `kimi-k2-*` previews, `kimi-latest`, `glm-4.5-flash`) are
   deliberately absent from the catalog, and invitation-only models are never advertised.
+
+## Durable approvals ("always allow on this machine")
+
+Some approval prompts offer a third answer beyond "once" and "this session": `[a]` records the
+decision durably, so it survives across sessions — and, for the eligible read-only capabilities,
+across projects. The design is deliberately narrow:
+
+- **Exact identity, never a pattern.** A check's `[a]` binds the exact resolved command AND the
+  sha of the script body it invokes, scoped to this workspace — edit the script and it asks
+  again. The other three eligible surfaces are single `(tool, class)` rules from a closed list:
+  bounded web searches, research-subagent spawns, and remote READS — all read-only, all still
+  bounded by their per-session budgets. The prompt prints the literal rule and its scope before
+  anything is written.
+- **Most things are not eligible, on purpose**: a push/tag/release still asks every single time,
+  migrations and seeds still ask every time, executor spawns still ask every time, raw shell
+  commands and secret/out-of-workspace reads can never be granted durably.
+- **Inspectable, auditable, revocable**: `agent grants` lists every record with its id and scope;
+  `agent grants revoke <id>` removes one; `<state>/grants.log` is the append-only audit. Every
+  session that loads a durable grant says so in its evidence (`grants.loaded`), so standing
+  authority is never invisible. A corrupt store is a hard error, never silently rebuilt.
+- **Honest edges**: a durable grant converts that ask into an allow — including in `--no-input`
+  runs, which is the point (a scripted session can finally do research without a human at the
+  keyboard, under the budgets). A revoke applies from the next session; `--dangerously-allow-all`
+  can never create a durable grant (it answers prompts that are never shown).
 
 ## Workspace trust
 
@@ -476,10 +506,17 @@ never told about them.
   its own risky approvals to you (labeled with the asking task), and its captured changes
   reach the workspace only via `apply_task_changes` — per-file drift-refusing, snapshotted,
   one `/undo` unit. Child reports are labeled narration; the main agent owns final claims.
-- **Project memory**: `AGENT.md` (yours, injected verbatim every session) plus a
-  harness-maintained journal and codebase summary written at clean session end — each entry
-  pairs the model's narrative with a deterministic evidence section derived from the event
-  log, and everything is injected under an explicit "context, not authority" header.
+- **Project memory — six bounded documents, every cap a pinned contract**: your global
+  `AGENT.md` (machine-wide, created by `/init`, hand-edited after — the project `AGENT.md`
+  overrides it on conflict) and your project `AGENT.md` (injected verbatim every session), plus
+  four harness-managed docs written at clean session end: the rolling **journal** (model
+  narrative + a deterministic evidence section derived from the event log), the **codebase
+  summary** (staleness-stamped), **LESSONS.md** (durable pitfalls and failure patterns — the
+  model may propose up to 3 per session, merged by slug with provenance stamped, your edits
+  preserved), and **RESEARCH.md** (source-backed findings with retrieval dates — deliberately
+  perishable: entries age out after ~30 days, because a stale research note is exactly the
+  overconfidence web research exists to prevent). Generated docs are injected under an explicit
+  "context, not authority" header; the worst-case total injection is one tested ceiling.
 
 ## Git integration
 
