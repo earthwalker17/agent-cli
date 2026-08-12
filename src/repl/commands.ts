@@ -13,7 +13,7 @@ import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/a
 import { foldRepairs } from '../recovery/ledger.js';
 import { foldReview, type ReviewState } from '../review/ledger.js';
 import { runInit } from './init.js';
-import { renderUserPlanView, writeUserView } from '../plan/views.js';
+import { renderUserPlanView, userViewState, writeUserView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import { CHECKS_PER_SESSION, describeWorkspace, type CheckCaps, type RunCheckTool } from '../tools/run-check.js';
 import { SETUPS_PER_SESSION, type SetupCaps } from '../tools/project-setup.js';
@@ -23,6 +23,7 @@ import type { RemoteState } from '../tools/remote-state.js';
 import { describeRelation } from '../remote/observe.js';
 import type { SessionEvent } from '../types.js';
 import { loadPreviewRegistry, previewsFile } from '../preview/registry.js';
+import { revokeGrant } from '../store/grants.js';
 import { likelyBrowserAvailable } from '../browser/probe.js';
 import {
   CATALOG_VERIFIED,
@@ -199,25 +200,45 @@ export function gateLabel(t: PlanTaskState): string {
   return ` · checks PENDING: ${v.missing.join(', ')}`;
 }
 
-/** Parse `/commit` arguments: [-m "msg"] [--all] [--no-trailer]. Exported for tests. */
+/** Tokens that END a `-m` subject. Whole-token matches only, so a flag spelled inside a quoted
+ *  subject stays part of the subject. `-m` is a member so a repeated flag is caught as the
+ *  mistake it is instead of being absorbed into the message. */
+const COMMIT_ARG_TERMINATORS = new Set(['--all', '--no-trailer', '-m']);
+
+/** Words `/checkpoint` refuses as labels: each is a real verb somewhere in the product, so
+ *  accepting it as a label is how a user asking to delete refs silently creates one instead. */
+const RESERVED_CHECKPOINT_WORDS = new Set(['prune', 'delete', 'remove', 'rm', 'drop', 'clear', 'clean', 'gc']);
+
+/**
+ * Parse `/commit` arguments: [-m "msg"] [--all] [--no-trailer]. Exported for tests.
+ *
+ * `-m` is deliberately NOT greedy-to-end-of-line (S21.5 audit). It used to join every remaining
+ * token and `break`, so typing exactly what the help line shows — `/commit -m "fix" --all` —
+ * committed the subject `fix" --all` (leading quote stripped by the old `/^"|"$/g`, trailing quote
+ * left because the joined string no longer ended in one) and silently dropped `--all`. The subject
+ * now ends at the first whole-token flag, and parsing continues from there.
+ */
 export function parseCommitArgs(arg: string): { all: boolean; noTrailer: boolean; message?: string; error?: string } {
   let all = false;
   let noTrailer = false;
   let message: string | undefined;
   const tokens = arg.match(/"[^"]*"|\S+/g) ?? [];
+  const usage = 'usage: /commit [-m "msg"] [--all] [--no-trailer]';
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
     if (t === '--all') all = true;
     else if (t === '--no-trailer') noTrailer = true;
     else if (t === '-m') {
-      const rest = tokens
-        .slice(i + 1)
-        .join(' ')
-        .replace(/^"|"$/g, '');
-      if (rest.length === 0) return { all, noTrailer, error: 'usage: /commit [-m "msg"] [--all] [--no-trailer] — -m needs a message' };
-      message = rest;
-      break;
-    } else return { all, noTrailer, error: `unknown /commit argument: ${t}` };
+      if (message !== undefined) return { all, noTrailer, error: `${usage} — -m given twice` };
+      const rest = tokens.slice(i + 1);
+      const flagAt = rest.findIndex((x) => COMMIT_ARG_TERMINATORS.has(x));
+      const msgTokens = flagAt === -1 ? rest : rest.slice(0, flagAt);
+      // A single quoted token is the subject verbatim; unquoted words join as typed.
+      const raw = msgTokens.length === 1 ? msgTokens[0]!.replace(/^"([\s\S]*)"$/, '$1') : msgTokens.join(' ');
+      if (raw.trim().length === 0) return { all, noTrailer, error: `${usage} — -m needs a message` };
+      message = raw.trim();
+      i += msgTokens.length; // the loop's own i++ then lands on the flag that ended the subject
+    } else return { all, noTrailer, error: `unknown /commit argument: ${t} (${usage})` };
   }
   return { all, noTrailer, ...(message !== undefined ? { message } : {}) };
 }
@@ -583,9 +604,18 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             `  content sha: ${doc.contentSha ?? 'unreadable'} · ${doc.bytes} bytes`,
           ].join('\n'),
         );
-        // The full review view goes to the model-text stream (like /report, /diff); regenerate
-        // the on-disk view opportunistically so it never lags the canonical file.
-        void (await writeUserView(ctx.layout, ctx.session.id, doc, ctx.session.snapshots));
+        // The full review view goes to the model-text stream (like /report, /diff). The on-disk
+        // view is refreshed only when it is genuinely stale (S21.5): a READ command must not
+        // rewrite the file, and must never archive-and-replace a hand-edited one in silence.
+        const viewState = userViewState(ctx.layout, ctx.session.id, doc);
+        if (viewState === 'stale' || viewState === 'missing') {
+          void (await writeUserView(ctx.layout, ctx.session.id, doc, ctx.session.snapshots));
+        } else if (viewState === 'hand-edited') {
+          ctx.renderer.chromeLine(
+            '  note: the .md beside the plan has been hand-edited and is NOT what the harness reads —' +
+              ' the canonical JSON above is truth. Edits there are not picked up; left untouched.',
+          );
+        }
         ctx.modelOut.write(renderUserPlanView(doc).split('\n').map(sanitizeLine).join('\n') + '\n');
         return 'continue';
       }
@@ -632,7 +662,19 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'undo': {
-      const target = arg.trim().toLowerCase() === 'all' ? 'all' : 'last';
+      // The argument is VALIDATED, not coerced (S21.5 audit). It used to be a bare ternary against
+      // the literal 'all', so `/undo --all` — the spelling the CLI teaches three sections later in
+      // the README — silently reverted only the most recent tool call and reported success. Silent
+      // misinterpretation of a destructive verb is the one place a forgiving parser is wrong.
+      const sub = arg.trim().toLowerCase();
+      if (sub !== '' && sub !== 'all') {
+        ctx.renderer.chromeLine(
+          `usage: /undo [all] — '${sanitizeLine(arg.trim())}' is not a valid argument` +
+            `${/^--?all$/.test(sub) ? ' (in the session it is `/undo all`, without dashes; `--all` is the CLI spelling)' : ''}`,
+        );
+        return 'continue';
+      }
+      const target = sub === 'all' ? 'all' : 'last';
       const outcome = applyUndo(ctx.session.log.events, ctx.session.snapshots, target);
       // The append renders the restored/refused lines via the log observer.
       ctx.session.log.append({ type: 'undo.applied', target: outcome.target, restored: outcome.restored, refused: outcome.refused });
@@ -700,6 +742,29 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'checkpoint': {
+      // Argument validation FIRST, before the repository precondition: "there is no `prune`
+      // subcommand" is true regardless of repo state and is the more useful answer. Anything
+      // unrecognized used to fall through to the create branch and become the LABEL of a brand-new
+      // checkpoint (S21.5 audit) — `/checkpoint prune` created one subjected "prune".
+      const ckptArg = arg.trim();
+      const ckptWord = ckptArg.split(/\s+/)[0] ?? '';
+      const ckptSub = ckptWord.toLowerCase();
+      if (ckptSub !== '' && ckptSub !== 'list' && !/^restore\b/i.test(ckptArg)) {
+        if (RESERVED_CHECKPOINT_WORDS.has(ckptSub)) {
+          ctx.renderer.chromeLine(
+            `  /checkpoint has no '${sanitizeLine(ckptSub)}' subcommand — that would have created a checkpoint LABELLED '${sanitizeLine(ckptSub)}'.\n` +
+              '  in the session: /checkpoint [label | list | restore <n>] · deleting refs lives on the CLI: agent checkpoint prune [--all] [--yes]',
+          );
+          return 'continue';
+        }
+        if (ckptWord.startsWith('-')) {
+          ctx.renderer.chromeLine(
+            `  /checkpoint takes a label, not flags — '${sanitizeLine(ckptWord)}' would have become the label.\n` +
+              '  usage: /checkpoint [label | list | restore <n>]',
+          );
+          return 'continue';
+        }
+      }
       const g = ctx.session.gitFacts;
       if (!g?.isRepo || g.gitPath === null || g.repoRoot === null) {
         ctx.renderer.chromeLine('  /checkpoint needs a git repository (this workspace is not inside one)');
@@ -774,6 +839,13 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       const notes = findings.flatMap((f) => f.notes);
 
       const out: string[] = ['# Web research (this session)'];
+      // S21.5: `ctx.researchUnavailable` was declared on CommandContext and NEVER read, so a
+      // session with no credential rendered an ordinary empty record — "(none)" queries, "(none)"
+      // findings — which reads as "nothing was searched" rather than "searching was impossible".
+      // The sibling /remote surface has always said so; this one now says it in the same shape.
+      if (ctx.researchUnavailable !== undefined) {
+        out.push('', `unavailable: ${sanitizeLine(ctx.researchUnavailable)}`);
+      }
       const spent = ctx.researchBudget?.spent;
       out.push(
         '',
@@ -989,9 +1061,32 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'grants': {
+      // S21.5: `/grants revoke <id>` used to be a SILENT NO-OP — the case never read its argument,
+      // so a user following the surface's own "list / revoke: agent grants [revoke <id>]" line
+      // half-way got the ordinary listing and no error. Authority could be minted in-session by
+      // `[a]` and withdrawn only from another process. Revocation now works where it is offered.
+      const grantWords = rest.filter((s) => s !== '');
+      if (grantWords.length > 0) {
+        if (grantWords[0]!.toLowerCase() !== 'revoke' || grantWords.length !== 2) {
+          ctx.renderer.chromeLine('usage: /grants [revoke <id>]   (/grants lists the ids)');
+          return 'continue';
+        }
+        const id = grantWords[1]!;
+        const removed = await revokeGrant(ctx.layout.stateRoot, id, ctx.session.clock.iso());
+        if (removed === null) {
+          ctx.renderer.chromeLine(`no durable grant with id ${sanitizeLine(id)} — /grants lists what exists`);
+          return 'continue';
+        }
+        // The honest scope, in the same words the CLI uses: the store is what changed, not this
+        // session's in-memory authority. Saying otherwise would be the surface overclaiming.
+        ctx.renderer.chromeLine(
+          `revoked ${sanitizeLine(removed.id)} — ${sanitizeLine(removed.label)}\n` +
+            '  takes effect at the NEXT session assembly; THIS session keeps its in-memory copy until it ends.',
+        );
+        return 'continue';
+      }
       // Read-only view of standing authority IN THIS SESSION (the newest grants.loaded — a
-      // resumed life re-loads and re-records). Mutation lives in `agent grants`, deliberately
-      // outside the conversation: revoking authority should not require a session.
+      // resumed life re-loads and re-records).
       const loaded = ctx.session.log.events.filter((e) => e.type === 'grants.loaded').at(-1);
       const lines: string[] = [];
       if (loaded === undefined || loaded.type !== 'grants.loaded') {
@@ -1007,7 +1102,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       if (minted > 0) {
         lines.push(`plus ${minted} durable grant answer(s) recorded by [a] DURING this session — active now; \`agent grants\` lists the stored entries.`);
       }
-      lines.push('list / revoke: agent grants [revoke <id>] — a revoke applies from the NEXT session assembly.');
+      lines.push('revoke one: /grants revoke <id> (or `agent grants revoke <id>`) — a revoke applies from the NEXT session assembly.');
       ctx.renderer.chromeLine(lines.join('\n'));
       return 'continue';
     }

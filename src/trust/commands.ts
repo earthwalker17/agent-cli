@@ -43,8 +43,10 @@ export async function cmdTrust(values: TrustCommandValues, stateRoot: string, wo
   if (process.stdin.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
     try {
-      const answer = (await askConsent(rl, trustPrompt(workspaceReal))).trim().toLowerCase();
-      if (answer !== 't' && answer !== 'y') {
+      // One grammar, and it is the one printed (S21.5 audit): the block no longer offers `[o]`
+      // here, because this command cannot proceed-once, and `y` is no longer a silent synonym.
+      const answer = (await askConsent(rl, trustPrompt(workspaceReal, { offerOnce: false }))).trim().toLowerCase();
+      if (answer !== 't') {
         process.stdout.write('not trusted (declined)\n');
         return 1;
       }

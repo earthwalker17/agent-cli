@@ -197,6 +197,33 @@ export function renderAgentPlanView(doc: CanonicalPlanDoc, graphState?: GraphSta
 }
 
 /**
+ * Whether the on-disk user view already matches what `doc` would render.
+ *
+ * Session 21.5: `/plan show` used to call `writeUserView` unconditionally, so a READ command
+ * rewrote the very file the help text told the user they could "edit directly" — and a hand-edited
+ * view was archived to an opaque blob and replaced without a word. Read paths now consult this
+ * first and write only when the view is genuinely stale or missing; the state-changing paths
+ * (approve / discard / amend) still regenerate unconditionally, which is what they are for.
+ *
+ * `hand-edited` is reported separately from `stale` so a read path can say so instead of
+ * destroying it.
+ */
+export function userViewState(
+  layout: ProjectLayout,
+  planId: string,
+  doc: CanonicalPlanDoc,
+): 'match' | 'stale' | 'hand-edited' | 'missing' {
+  let prior: string;
+  try {
+    prior = fs.readFileSync(layout.planFile(planId), 'utf8');
+  } catch {
+    return 'missing';
+  }
+  if (!prior.startsWith(GENERATED_VIEW_MARKER)) return 'hand-edited';
+  return prior === renderUserPlanView(doc) ? 'match' : 'stale';
+}
+
+/**
  * Regenerate the user-view markdown file beside the canonical plan. If the existing `<id>.md`
  * is NOT a generated view (a legacy user-authored plan from a resumed pre-Session-11 session),
  * its bytes are blob-archived before the overwrite — user-authored content is never silently

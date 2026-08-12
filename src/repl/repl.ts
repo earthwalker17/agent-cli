@@ -172,13 +172,19 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
 
   const pendingNotes: string[] = [];
   const researchUnavailable = assembled.researchUnavailable;
+  // S21.5: the command-level prompt seam now derives from SessionMode, exactly as the approver
+  // does (cli/context.ts:113). Before this, `--no-input` auto-denied every TOOL approval while
+  // `/commit`, `/checkpoint`, `/accept` and `/init` still stopped and asked a human — the flag
+  // said "non-interactive" and half the product disagreed. Absent `question` is already the
+  // documented "no one can be asked" contract every consumer handles (it fails closed).
+  const canAsk = ctx.mode === 'interactive';
   const commandCtx: CommandContext = {
     session,
     layout,
     renderer,
     modelOut: streams.modelOut,
     pendingNotes,
-    question: (q) => question(q),
+    ...(canAsk ? { question: (q: string) => question(q) } : {}),
     retrieval: assembled.retrieval,
     checkTool: assembled.checkTool,
     checkCaps: assembled.checkCaps,

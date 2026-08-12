@@ -29,7 +29,15 @@ export interface TrustGateOptions {
   question?: (q: string) => Promise<string>;
 }
 
-export function trustPrompt(workspaceReal: string): string {
+/**
+ * The consent text. `offerOnce` exists because the same block is shown by two callers that can do
+ * different things (S21.5 audit): the session GATE can genuinely proceed once without recording,
+ * while `agent trust` exists only to RECORD — it has nothing to proceed with. The command used to
+ * print `[o] proceed once` and then reject it as a decline, while accepting an unadvertised `y`.
+ * The options line is now derived from what the caller can actually honour.
+ */
+export function trustPrompt(workspaceReal: string, opts: { offerOnce?: boolean } = {}): string {
+  const offerOnce = opts.offerOnce !== false;
   return [
     '',
     'This folder is not yet trusted by Agent CLI:',
@@ -46,7 +54,9 @@ export function trustPrompt(workspaceReal: string): string {
     '',
     'Trust is recorded consent, NOT a sandbox. There is no OS-level isolation.',
     '',
-    '  [t] trust and remember   [o] proceed once (not recorded)   [anything else] quit',
+    offerOnce
+      ? '  [t] trust and remember   [o] proceed once (not recorded)   [anything else] quit'
+      : '  [t] trust and remember   [anything else] cancel',
     '  > ',
   ].join('\n');
 }

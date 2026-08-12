@@ -393,7 +393,20 @@ function cmdDiff(values: CliValues, id?: string): number {
     return 1;
   }
   const { events } = EventLog.readLenient(layout.sessionFile(sessionId));
-  const files = buildSessionDiff(events, new SnapshotStore(layout.objectsDir), ws);
+  // S21.5: the secret-name patterns are loaded here too. `/diff` has always passed
+  // `session.rules.secretPatterns` and withheld matching file BODIES (printing only the +n/-m
+  // shape); `agent diff` passed nothing, so the same file in the same session printed in full
+  // through the CLI. Two spellings of one surface must not disagree about what is redacted.
+  // A config that cannot be parsed must not silently degrade to "no redaction" — the failure is
+  // reported and the command refuses, matching loadConfig's hard-error contract everywhere else.
+  let secretPatterns: string[] | undefined;
+  try {
+    secretPatterns = loadConfig(resolveStateRoot(), ws).rules.secretPatterns;
+  } catch (e) {
+    process.stderr.write(`config rejected, refusing to print a diff that may not be redacted: ${(e as Error).message}\n`);
+    return 1;
+  }
+  const files = buildSessionDiff(events, new SnapshotStore(layout.objectsDir), ws, secretPatterns);
   // Diff lines are workspace bytes — untrusted content headed for a terminal; sanitize each line.
   process.stdout.write(renderSessionDiff(files).split('\n').map(sanitizeLine).join('\n') + '\n');
   return 0;
@@ -812,8 +825,20 @@ function cmdMap(values: CliValues): number {
   return 0;
 }
 
-function cmdUndo(values: CliValues): number {
+/**
+ * `agent undo` — trust-gated since S21.5. It was grouped with the read-only commands and was not,
+ * in fact, read-only: it restores file contents INTO the workspace and appends an `undo.applied`
+ * event. README promised "before the harness reads a single byte of a folder … the folder must be
+ * trusted", and this one wrote to it ungated. Reverting a change is exactly as consequential as
+ * making it.
+ */
+async function cmdUndo(values: CliValues): Promise<number> {
   const ws = workspaceRoot(values);
+  const trust = await checkTrust(values, ws);
+  if (!trust.trusted) {
+    process.stderr.write(`not trusted: ${trust.reason}\n`);
+    return 3;
+  }
   const layout = resolveLayout(ws);
   const id = values.session ?? latestSessionId(layout);
   if (!id) {
