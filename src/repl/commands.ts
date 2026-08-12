@@ -1,5 +1,5 @@
 import { applyUndo } from '../runtime/undo.js';
-import { buildReport } from '../report/report.js';
+import { buildReport, isReportSection, REPORT_SECTIONS, reportSection, type ReportSection } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
 import { createCheckpoint, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
@@ -241,6 +241,28 @@ export function parseCommitArgs(arg: string): { all: boolean; noTrailer: boolean
     } else return { all, noTrailer, error: `unknown /commit argument: ${t} (${usage})` };
   }
   return { all, noTrailer, ...(message !== undefined ? { message } : {}) };
+}
+
+/**
+ * Render the evidence report, or one named section of it (Session 21.5).
+ *
+ * ONE projection, sliced — not six. The audit found `/checks`, `/review`, `/repair`, `/research`,
+ * `/remote` and `/preview` each hand-rolling a fold over the same event log that `buildReport`
+ * already renders, and the comments inside those very cases describe repeatedly fixing "two
+ * surfaces, one log, opposite answers" bugs. Where a command adds genuinely LIVE state the report
+ * cannot have (a re-probed project, a re-probed process), it keeps that and appends this.
+ */
+export function renderReport(ctx: CommandContext, section: ReportSection | null): string {
+  ctx.renderer.flush();
+  const { md } = buildReport({
+    events: ctx.session.log.events,
+    approvedGraph: approvedCurrentGraph(readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events)),
+  });
+  if (section === null) return md;
+  return (
+    reportSection(md, section) ??
+    `## ${section}\n(nothing of this kind is recorded in this session)`
+  );
 }
 
 /**
@@ -1061,12 +1083,14 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'report': {
-      const { md } = buildReport({
-        events: ctx.session.log.events,
-        approvedGraph: approvedCurrentGraph(readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events)),
-      });
-      ctx.renderer.flush();
-      ctx.modelOut.write(md + '\n');
+      // S21.5: the record is navigable. `/report <section>` slices the ONE rendered report rather
+      // than adding a seventh parallel fold over the same log.
+      const wanted = arg.trim().toLowerCase();
+      if (wanted !== '' && !isReportSection(wanted)) {
+        ctx.renderer.chromeLine(`usage: /report [${REPORT_SECTIONS.join(' | ')}]`);
+        return 'continue';
+      }
+      ctx.modelOut.write(renderReport(ctx, wanted === '' ? null : wanted) + '\n');
       return 'continue';
     }
 

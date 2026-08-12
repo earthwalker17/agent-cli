@@ -297,3 +297,32 @@ describe('/research unavailability (S21.5)', () => {
     expect(modelText).not.toContain('unavailable:');
   });
 });
+
+// ── /report [section] — one projection, sliced (S21.5) ───────────────────────────────────────
+
+describe('/report sections (S21.5)', () => {
+  it('the bare form still prints the whole record', async () => {
+    await dispatchSlash('/report', ctx());
+    expect(modelText).toContain('# Agent CLI session report');
+    expect(modelText).toContain('## Actions');
+  });
+
+  it('a named section prints only that section', async () => {
+    await dispatchSlash('/report files', ctx());
+    expect(modelText).toContain('## Files changed');
+    expect(modelText).not.toContain('# Agent CLI session report');
+    expect(modelText).not.toContain('## Actions');
+  });
+
+  it('an absent section says so rather than printing nothing', async () => {
+    await dispatchSlash('/report research', ctx());
+    expect(modelText).toContain('nothing of this kind is recorded');
+  });
+
+  it('an unknown section prints the list of real ones', async () => {
+    await dispatchSlash('/report nonsense', ctx());
+    expect(chromeText()).toContain('usage: /report [');
+    expect(chromeText()).toContain('checks');
+    expect(chromeText()).toContain('inspections');
+  });
+});

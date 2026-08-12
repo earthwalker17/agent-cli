@@ -1748,3 +1748,84 @@ function renderMarkdown(r: ReportJson): string {
   }
   return L.join('\n');
 }
+
+/**
+ * Slice a rendered report into ONE named section (Session 21.5).
+ *
+ * The S21.5 interaction audit found six read-only slash commands — /checks /review /repair
+ * /research /remote /preview — each hand-rolling a fold over the same event log that `buildReport`
+ * already renders, roughly 400 lines of parallel projection. The code comments in those very cases
+ * describe repeatedly fixing "two surfaces, one log, opposite answers" incidents; the duplication
+ * is the mechanism that keeps producing them.
+ *
+ * Rather than six renderers agreeing by discipline, the record is now navigable: `/report
+ * <section>` slices the ONE rendered report. Where a slash command adds genuinely LIVE state the
+ * report cannot have — /checks re-probes the project, /preview re-probes process liveness — it
+ * keeps that part and appends this slice for the recorded half.
+ *
+ * Matching is on the heading's leading words, case-insensitively, so the prose in a heading can be
+ * improved without breaking a user's muscle memory.
+ */
+export const REPORT_SECTIONS = [
+  'plan',
+  'completion',
+  'files',
+  'commands',
+  'checks',
+  'review',
+  'inspections',
+  'research',
+  'remote',
+  'repairs',
+  'previews',
+  'tasks',
+  'approvals',
+  'commits',
+  'checkpoints',
+] as const;
+export type ReportSection = (typeof REPORT_SECTIONS)[number];
+
+/** The heading prefix each section name selects. */
+const SECTION_HEADINGS: Record<ReportSection, string> = {
+  plan: '## Plan',
+  completion: '## Completion',
+  files: '## Files changed',
+  commands: '## Commands run',
+  checks: '## Verification',
+  review: '## Adversarial review',
+  inspections: '## Inspections',
+  research: '## Web research',
+  remote: '## Remote delivery',
+  repairs: '## Recovery',
+  previews: '## Preview processes',
+  tasks: '## Delegated tasks',
+  approvals: '## Approvals',
+  commits: '## Commits',
+  checkpoints: '## Checkpoints',
+};
+
+export function isReportSection(s: string): s is ReportSection {
+  return (REPORT_SECTIONS as readonly string[]).includes(s.toLowerCase());
+}
+
+/**
+ * Return the named section of a rendered report, or null when the report does not contain it
+ * (which is itself information: an absent section means nothing of that kind was recorded).
+ */
+export function reportSection(md: string, section: ReportSection): string | null {
+  const want = SECTION_HEADINGS[section].toLowerCase();
+  const lines = md.split('\n');
+  const start = lines.findIndex((l) => l.toLowerCase().startsWith(want));
+  if (start === -1) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (lines[i]!.startsWith('## ')) {
+      end = i;
+      break;
+    }
+  }
+  return lines
+    .slice(start, end)
+    .join('\n')
+    .replace(/\n+$/, '');
+}
