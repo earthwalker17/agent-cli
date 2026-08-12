@@ -22,6 +22,7 @@ import { createTaskTable } from './live-tasks.js';
 import { detectStyle } from './format.js';
 import { completionLine, dispatchSlash, sessionAcceptance, type CommandContext } from './commands.js';
 import { createConsentAsker, planReapprovalNeeded } from './consent.js';
+import { routeSigil } from './sigils.js';
 
 /**
  * The interactive REPL: a loop of `prompt → runTurn` over ONE session and ONE event log, sharing
@@ -263,57 +264,20 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         continue;
       }
 
-      // @plan / @direct — explicit routing sigils (Session 11): the user forces the path, the
-      // harness records the routing decision as evidence, and the note makes the contract
-      // explicit to the model. The sigil itself is routing, never message content.
-      if (/^@plan\b/i.test(line)) {
-        const rest = line.replace(/^@plan\b/i, '').trim();
-        if (rest.length === 0) {
-          renderer.chromeLine('usage: @plan <request> — investigate and produce a plan without executing');
+      // `@` routing — explicit invocation of a specialist discipline. The sigil itself is routing,
+      // never message content: it is stripped, the decision is recorded as evidence, and the note
+      // makes the contract explicit to the model. Table lives in ./sigils.ts.
+      {
+        const routed = routeSigil(line, { researchUnavailable });
+        if (routed.kind === 'usage' || routed.kind === 'unavailable' || routed.kind === 'unknown') {
+          renderer.chromeLine(routed.message);
           continue;
         }
-        line = rest;
-        session.log.append({ type: 'plan.route', mode: 'plan', source: 'user-sigil' });
-        pendingNotes.push(
-          'the user explicitly invoked PLAN MODE for this request: investigate as needed (read-only; delegate explorer tasks where useful), write or update the plan with update_plan, and present it — do NOT begin implementation or any mutating work until the user approves the plan (/plan approve)',
-        );
-      } else if (/^@direct\b/i.test(line)) {
-        const rest = line.replace(/^@direct\b/i, '').trim();
-        if (rest.length === 0) {
-          renderer.chromeLine('usage: @direct <request> — skip plan ceremony and do the work directly');
-          continue;
+        if (routed.kind === 'routed') {
+          line = routed.text;
+          session.log.append(routed.event);
+          pendingNotes.push(routed.note);
         }
-        line = rest;
-        session.log.append({ type: 'plan.route', mode: 'direct', source: 'user-sigil' });
-        pendingNotes.push(
-          'the user explicitly chose the DIRECT path for this request: skip the plan document and do the work with your own tools, keeping it bounded. If it genuinely requires multi-step mutating orchestration, SAY SO instead of silently planning. Executor delegation still requires an approved plan.',
-        );
-      } else if (/^@(research|search)\b/i.test(line)) {
-        // Session 19: the same sigil shape, for the other axis of routing. @research and @search
-        // differ in SIZE, not in permission — neither grants anything the policy gate would not
-        // have asked for anyway; they tell the model the user wants the web consulted and how
-        // much ceremony to spend on it.
-        const deep = /^@research\b/i.test(line);
-        const rest = line.replace(/^@(research|search)\b/i, '').trim();
-        if (rest.length === 0) {
-          renderer.chromeLine(
-            deep
-              ? 'usage: @research <question> — delegate a read-only research subagent and answer from sources'
-              : 'usage: @search <question> — one bounded web lookup, answered from snippets',
-          );
-          continue;
-        }
-        if (researchUnavailable !== undefined) {
-          renderer.chromeLine(`web research is unavailable: ${researchUnavailable}`);
-          continue;
-        }
-        line = rest;
-        session.log.append({ type: 'research.route', mode: deep ? 'research' : 'search', source: 'user-sigil' });
-        pendingNotes.push(
-          deep
-            ? 'the user explicitly requested WEB RESEARCH for this request: delegate a `researcher` task with the question and the concrete claims it must settle, then answer from its RECORDED findings, citing the sources. Verify anything load-bearing yourself before acting on it, and say plainly what could not be established.'
-            : 'the user explicitly requested a WEB LOOKUP for this request: run ONE bounded web_search and answer from the snippets with their URLs. Do not spawn a researcher subagent for this; if one lookup genuinely cannot settle it, say so and offer @research.',
-        );
       }
 
       // Standing plan note: while a plan document exists (and is not discarded), every turn

@@ -576,14 +576,38 @@ describe('REPL: plan mode (Session 11 — canonical structured plans)', () => {
     expect(r.events.find((e) => e.type === 'plan.route')).toMatchObject({ mode: 'plan', source: 'user-sigil' });
   });
 
-  it('@direct routes into the direct path with a user-sigil route event', async () => {
-    const r = await drive([{ say: 'doing it directly' }], ['@direct fix the typo\n', '/quit\n']);
+  it('@direct is gone (S21.5) and now reads as an unknown sigil, not as prose', async () => {
+    // It forced the path the system prompt already routes to by default, and never appeared in
+    // /help. Removing it makes `@` mean "specialist discipline" rather than "mode switch".
+    const r = await drive([{ say: 'unused' }], ['@direct fix the typo\n', '/quit\n']);
+    expect(r.chromeOut).toContain('unknown routing sigil: @direct');
+    expect(r.chromeOut).toContain('@plan, @search, @research');
+    // Refused, not silently sent: no turn ran and no routing was recorded.
+    expect(r.events.some((e) => e.type === 'user.message')).toBe(false);
+    expect(r.events.some((e) => e.type === 'plan.route')).toBe(false);
+  });
+
+  it('an unknown sigil is refused by name instead of vanishing into prose', async () => {
+    const r = await drive([{ say: 'unused' }], ['@web what is the latest node?\n', '/quit\n']);
+    expect(r.chromeOut).toContain('unknown routing sigil: @web');
+    expect(r.events.some((e) => e.type === 'user.message')).toBe(false);
+  });
+
+  it('a word that merely STARTS with a sigil name is ordinary prose (the \\b trap)', async () => {
+    // `/^@plan\b/i` matched `@plan.md` — the boundary sits between `n` and `.` — so the sigil was
+    // stripped and the model received `.md is stale` with a plan-mode routing note attached.
+    const r = await drive([{ say: 'ack' }], ['@plan.md is stale\n', '/quit\n']);
     const msg = r.events.find((e) => e.type === 'user.message');
     const text = msg?.type === 'user.message' ? msg.text : '';
-    expect(text).toContain('DIRECT path');
-    expect(text).toContain('fix the typo');
-    expect(text).not.toContain('@direct');
-    expect(r.events.find((e) => e.type === 'plan.route')).toMatchObject({ mode: 'direct', source: 'user-sigil' });
+    expect(text).toContain('@plan.md is stale');
+    expect(text).not.toContain('PLAN MODE');
+    expect(r.events.some((e) => e.type === 'plan.route')).toBe(false);
+  });
+
+  it('a bare sigil prints usage and sends nothing', async () => {
+    const r = await drive([{ say: 'unused' }], ['@plan\n', '/quit\n']);
+    expect(r.chromeOut).toContain('usage: @plan <request>');
+    expect(r.events.some((e) => e.type === 'user.message')).toBe(false);
   });
 
   /**
