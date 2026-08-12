@@ -278,7 +278,7 @@ d('CLI end-to-end via the built binary', () => {
   });
 
   it('--no-input with --interactive is a hard contradiction', () => {
-    const res = run(['--no-input', '--interactive', 'task']);
+    const res = run(['--no-input', '--interactive', 'do the task']);
     expect(res.code).toBe(1);
     expect(res.stderr).toMatch(/contradictory/);
   });
@@ -288,7 +288,7 @@ d('CLI end-to-end via the built binary', () => {
     fs.mkdirSync(other);
     const script = path.join(tmp, 'script.json');
     fs.writeFileSync(script, JSON.stringify([{ say: 'never reached' }]));
-    const r = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+    const r = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'do the task'], {
       cwd: other,
       env: { ...process.env, AGENT_CLI_STATE_DIR: state },
       encoding: 'utf8',
@@ -308,12 +308,12 @@ d('CLI end-to-end via the built binary', () => {
     fs.writeFileSync(script, JSON.stringify([{ say: 'ran once' }]));
     const once = spawnSync(
       process.execPath,
-      [CLI, '--provider', 'mock', '--script', script, '--no-input', '--trust-this-workspace', 'task'],
+      [CLI, '--provider', 'mock', '--script', script, '--no-input', '--trust-this-workspace', 'do the task'],
       { cwd: other, env: { ...process.env, AGENT_CLI_STATE_DIR: state }, encoding: 'utf8' },
     );
     expect(once.status).toBe(0);
     // Not persisted: the same run WITHOUT the flag refuses again.
-    const r2 = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+    const r2 = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'do the task'], {
       cwd: other,
       env: { ...process.env, AGENT_CLI_STATE_DIR: state },
       encoding: 'utf8',
@@ -334,7 +334,7 @@ d('CLI end-to-end via the built binary', () => {
 
     const script = path.join(tmp, 'script.json');
     fs.writeFileSync(script, JSON.stringify([{ say: 'hello from trusted ws' }]));
-    const r = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+    const r = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'do the task'], {
       cwd: other,
       env,
       encoding: 'utf8',
@@ -343,7 +343,7 @@ d('CLI end-to-end via the built binary', () => {
 
     const revoke = spawnSync(process.execPath, [CLI, 'trust', '--revoke'], { cwd: other, env, encoding: 'utf8' });
     expect(revoke.status).toBe(0);
-    const r2 = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'task'], {
+    const r2 = spawnSync(process.execPath, [CLI, '--provider', 'mock', '--script', script, '--no-input', 'do the task'], {
       cwd: other,
       env,
       encoding: 'utf8',
