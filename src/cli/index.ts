@@ -92,8 +92,10 @@ Options:
   --version                Print the version and exit
   -h, --help               Show this help
 
-Exit codes: 0 ok · 1 error · 2 denials or stopped (one-shot only; the REPL reports denials
-inline and exits 0 on a clean quit) · 3 workspace not trusted.
+Exit codes: 0 ok · 1 error · 2 a one-shot that hit denials or the step budget, and also commit when
+nothing was committed, checkpoint prune when cancelled or non-interactive without --yes, and
+checkpoint restore when not performed (the REPL reports denials inline and exits 0 on a clean
+quit) · 3 workspace not trusted · 130 a second Ctrl+C during a one-shot turn (force-quit).
 
 Security: command authorization is automatic. On Windows a demonstrably read-only command may
 auto-run inside an OS sandbox at Low integrity (writes to the workspace/system/state are OS-denied
