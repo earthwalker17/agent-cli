@@ -188,9 +188,14 @@ describe('the system prompt', () => {
 });
 
 describe('help', () => {
+  // S21.5 rewrote HELP around the five interaction tiers, so the sigil wording moved into the
+  // "ask a specialist" block. The property being pinned is unchanged: both research sigils are
+  // discoverable from inside the session, and /research is still listed.
   it('documents /research and both sigils', () => {
     expect(HELP).toContain('/research');
-    expect(HELP).toContain('@search <question> forces one bounded web lookup');
-    expect(HELP).toContain('@research <question> delegates a research subagent');
+    expect(HELP).toContain('@search <question>');
+    expect(HELP).toContain('one bounded web lookup');
+    expect(HELP).toContain('@research <question>');
+    expect(HELP).toContain('research subagent');
   });
 });

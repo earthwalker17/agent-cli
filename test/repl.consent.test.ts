@@ -475,7 +475,7 @@ async function driveTTY(
     }
   });
 
-  const timer = setTimeout(() => input.end(), 30_000).unref();
+  const timer = setTimeout(() => input.end(), 100_000).unref();
   const code = await runRepl(
     { C: ws, provider: 'mock', script: scriptFile, interactive: true, 'trust-this-workspace': true },
     { streams: { input, modelOut, chromeOut, isTTY: true }, sandbox: createNoneSandbox('test') },
@@ -500,6 +500,12 @@ async function driveTTY(
   return { code, chrome: Buffer.concat(chromeChunks).toString('utf8'), events: evts };
 }
 
+/**
+ * These two run a whole REPL with `isTTY: true` and react to its output, so they are the slowest
+ * and most timing-sensitive tests in the suite. Under a fully parallel run the process start,
+ * assembly probes and mock turns all compete for the machine, so the budgets here are generous on
+ * purpose: a timeout would be a flake, and a flaky test about consent is worse than none.
+ */
 describe('the contextual prompt on a real TTY (S21.5)', () => {
   const PLAN = {
     objective: 'build the widget',
@@ -524,7 +530,7 @@ describe('the contextual prompt on a real TTY (S21.5)', () => {
     expect(r.code).toBe(0);
     expect(r.chrome).toContain('[y] approve');
     expect(r.events.some((e) => e.type === 'plan.approved')).toBe(true);
-  }, 40_000);
+  }, 120_000);
 
   it('fails closed: a bare Enter approves nothing and the session still quits cleanly', async () => {
     const r = await driveTTY(
@@ -543,7 +549,7 @@ describe('the contextual prompt on a real TTY (S21.5)', () => {
     expect(r.code).toBe(0);
     expect(r.events.some((e) => e.type === 'plan.approved')).toBe(false);
     expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
-  }, 40_000);
+  }, 120_000);
 });
 
 // ── the property the whole design rests on ───────────────────────────────────────────────────

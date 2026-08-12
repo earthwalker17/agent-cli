@@ -6,6 +6,98 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 21.5 (2026-08-12) — Command and interaction surface simplification (v1.8.0)
+
+**Objective.** Make Agent CLI operable by talking to it and answering questions it asks at the
+right moment, without weakening authority, evidence, recovery or the advanced escape hatches.
+
+### The audit that framed it
+
+The session opened with a code-traced inventory of every user-reachable surface, published as an
+artifact and as `Desktop/Agent-CLI-Interaction-Surface-Map-S21.5.md`. Nine parallel readers traced
+each surface to its registration/parsing/dispatch site; a tenth audited the result against a fresh
+enumeration of every `case` label, `parseArgs` option and sigil regex. Findings were then verified
+by hand, and four were reproduced against the built binary.
+
+Counts: **24 slash cases** (23 names; `/exit` undocumented), **4 sigils** (`@direct` in README but
+not `/help`), **17 CLI subcommands** (`agent run` documented nowhere), **23 flags in one flat
+namespace**, **13 prompt families**, **4 incompatible answer grammars**, **41 doc/code conflicts**.
+
+### What changed
+
+- **Contextual consent** (`repl/consent.ts`, `repl/prompt-choice.ts`). Four decisions are asked at
+  the turn boundary. The design note that matters: `planApprovalReminder` existed *because* the
+  harness could only tell the model about a gate only the user could clear — its own comment says
+  the human "found out ten minutes later when /accept refused". A line is a broadcast with no
+  channel; a question has an answer.
+- **`@review` and the `inspector` role.** A real specialist, not an alias for the review gate.
+- **`@` becomes specialist routing**: one table, a real unknown-sigil branch, the `\b` trap fixed,
+  `@direct` removed.
+- **The typo guard**: `agent stauts` no longer starts a paid session.
+- **Ten audit defects fixed**, each with a regression test.
+- **`/report [section]`**, and `/help` rewritten around the five tiers.
+
+### Decisions, with why
+
+1. **Contextual prompts are TTY-gated.** Off a TTY, `io.question` ignores its `fresh` flag
+   (`io.ts:126`) and consumes the driver's next queued line — every piped test and every
+   `agent-cli-s*-live/` driver would break, and `driver.mjs` anchors approvals on `/\n {2}> $/`,
+   which a leaked prompt would match. This is why `/accept` and `/plan approve` were DEMOTED rather
+   than removed: they are the automation path, not legacy.
+2. **`@review` is its own role.** On `reviewer` it would have been able to make a green session
+   unacceptable (findings block `/accept` regardless of requirement, and never expire) and to burn
+   both `MAX_REVIEW_ROUNDS` before the gate was reached. Enforced structurally: the caps counter
+   matches `role === 'reviewer'` and the ledger mints rounds only from that or `review.findings`.
+3. **One new answer grammar, not a fifth.** `prompt-choice.ts` tokenizes identically to
+   `parseAnswer` but does not reuse it — those keys denote permission *scope*, and sharing `a`
+   would be durable authority won by muscle memory.
+4. **The decline is not persisted.** Anti-nag state is derived-keyed and in-memory; a
+   `consent.declined` event would write a non-decision into the evidence log for `/report`, the
+   journal and `computeAcceptance` to interpret.
+5. **Model-facing Git was deferred to Session 21.6.** A `git_commit` tool would break the pinned
+   invariant *"the model cannot publish content a human did not commit"* (`ARCHITECTURE.md`,
+   `remote-push.ts:37-40`, pinned at `test/remote.surfaces.test.ts:197-205`). The user chose to
+   keep the invariant verbatim.
+
+### An honest correction to the audit
+
+The audit's headline structural claim — six read-only commands re-implementing ~400 lines of
+`/report`'s folding — **is an overestimate**, and acting on it proved so. `/checks` re-probes the
+project, `/preview` re-probes process liveness, `/remote` carries memory-only identities and
+observations, `/research` carries live budget spend: none are pure folds, because the report is a
+fold over *events* and structurally cannot hold live state. `/repair`'s numbering is the affordance
+its dismiss action indexes into. Only `/review` was a pure fold — and replacing it with the report
+slice immediately failed two existing tests by making it *worse* (the report's review section is
+conditional, so a no-plan session lost "not required (no approved plan with executor tasks)"). It
+was reverted. The real consolidation is `/report [section]`; the six keep their tailored views and
+leave the primary help list.
+
+### Verification
+
+- Typecheck clean; suite **2147 → 2254** (+107 across `repl.args`, `cli.surface`, `repl.consent`,
+  `roles.inspector`, and additions to `repl`, `limits` and `research.surfaces`).
+- First dispatch coverage for `/diff /checkpoint /checks /preview /grants /map /exit /commit
+  /cancel`, which had none.
+- The property the consent design rests on is pinned by running one fixture twice — typed vs
+  answered — and asserting equal event arrays and equal model notes.
+- A **new reactive TTY harness** (`repl.consent.test.ts`), the first test to drive `runRepl` with
+  `isTTY: true` end to end. It must be reactive: `io.ts` installs its `pending` resolver *after*
+  writing the prompt, so an instantly-written answer lands in type-ahead where a `fresh` question
+  never consumes it.
+- Live-verified against the built binary: `agent stauts` refused with no session created; the
+  approval prompt rendered and recorded `plan.approved` on a real TTY.
+
+### Open / next
+
+- **Session 21.6**: the model-facing Git pack (`git_checkpoint` as approved, commit still
+  harness-owned), its own policy fact and fail-closed branch, on the S20 remote-pack pattern.
+- **Session 22**: arrow-key selection, deliberately deferred — readline owns stdin exclusively and
+  `status.ts` is the only cursor-moving code, so raw mode is a TUI-session decision.
+- Not done this session: a full live E2E of the new prompts under a real provider; the interactive
+  proof was hand-driven against the mock provider.
+
+---
+
 ## Session 21 (2026-08-11) — Bounded memory and global initialization (v1.7.0)
 
 ### Objective

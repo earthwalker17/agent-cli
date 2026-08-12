@@ -168,7 +168,34 @@ constitutions injected → `[a]` minting → unattended consumption under `--no-
 escalate/dismiss/accept-with-caveat → cross-session check replay → the Fix B refusal, all on the
 persisted record. Details: `ROADMAP.md` Session 21, CHANGELOG 1.7.0, `agent-cli-s21-live/`.
 
-### Session 22 — Terminal UX Consolidation  ← **NEXT**
+### Session 21.5 — Command and Interaction Surface Simplification — **DONE (v1.8.0)**
+
+A code-traced audit of every user-reachable surface, then action on it. Contextual consent replaces
+remembered lifecycle commands for the four decisions that matter (TTY-gated — off a TTY a prompt
+would eat a driver's next line, which is why `/accept` and `/plan approve` were demoted rather than
+removed, and why answering records byte-identical evidence by calling the same extracted body).
+`@review` arrives as a real `inspector` role whose observations are advisory by construction, so a
+mid-session look cannot block acceptance or spend an adversarial round. `@` becomes specialist
+routing (`@direct` removed, the `\b` trap fixed, unknown sigils refused by name). A typo at the
+shell no longer starts a billed session. Ten audit defects fixed with regression tests; suite 2147
+→ 2270. Honest correction recorded in ROADMAP: the "six duplicate renderers" claim was an
+overestimate — only `/review` was a pure fold, and consolidating it made the surface worse.
+
+### Session 21.6 — The Git Capability Pack  ← **NEXT**
+
+Deferred deliberately from S21.5. Natural-language Git intent should reach the existing safe
+machinery, which is already UI-agnostic (`runCommitFlow`, `createCheckpoint`, `runRestoreFlow` all
+take injected `{info, question, assumeYes}` seams — no logic needs duplicating).
+
+The constraint that shapes it: a model-facing `git_commit` would break the pinned invariant *"the
+model cannot publish content a human did not commit"* (`test/remote.surfaces.test.ts:197-205`,
+`test/policy.test.ts:182-195`). So the pack is **checkpoint-first**: a model-facing
+`git_checkpoint` (hidden refs, pure recovery state, no history touched) with its own policy fact
+and fail-closed engine branch on the S20 remote-pack pattern, while commit stays harness-owned and
+is reached by a contextual offer at natural boundaries. Any widening of that invariant must be an
+explicit, argued decision with the documentation and both pins rewritten in the same change.
+
+### Session 22 — Terminal UX Consolidation
 
 Polish the terminal surface after the new states are real. Explore bounded folding and expansion of
 long outputs, clearer color and hierarchy, compact provider/model/task/check/research/remote status,

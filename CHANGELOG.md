@@ -7,6 +7,80 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.8.0] — 2026-08-12
+
+**Command and interaction surface simplification** (Session 21.5). The session began with a
+code-traced audit of every user-reachable surface — 24 slash cases, 4 sigils, 17 CLI subcommands,
+23 flags, 13 prompt families and 4 incompatible answer grammars — and then acted on it.
+
+### Added
+
+- **Contextual consent.** The harness now ASKS when a decision is actually needed, instead of
+  requiring a remembered lifecycle command: a plan awaiting its first approval, an approval
+  invalidated by an amendment, an open repair escalation, and a session that would accept cleanly.
+  One keystroke, at most one prompt per turn boundary, at most once per state. Answering records
+  exactly the same evidence as typing the command — structurally, because both call one extracted
+  body. **TTY-only**: on piped stdin a prompt would consume the next scripted line, so `--no-input`
+  and expect-style drivers keep using the commands.
+- **`@review [focus]` — a Review Agent.** A new read-only `inspector` role that inspects the
+  CURRENT codebase for bugs, regression risks, architectural problems, fragile spots and debug
+  leads, records typed observations through `report_observation`, and hands them to the main agent
+  to act on. Its observations are **advisory**: they block no gate and consume no adversarial
+  review round, enforced by construction rather than convention (a `reviewer` finding blocks
+  `/accept` regardless of requirement and every round spends one of only two).
+- **`/report [section]`** slices the one rendered evidence report into any of fifteen named
+  sections, so the record is navigable without another parallel fold. `/report inspections` is
+  where `@review` output lands.
+- **`agent run "<task>"`** is now documented — the explicit one-shot form, and the escape hatch
+  for a task that looks like a command.
+- **`/grants revoke <id>`** works in-session. Authority could previously be minted by `[a]` and
+  withdrawn only from another process.
+
+### Changed
+
+- **BREAKING: `@direct` was removed.** The system prompt already instructs the complexity routing
+  it forced ("a SIMPLE request … is done DIRECTLY … no plan document, no delegation ceremony"), it
+  never appeared in `/help`, and treating `@` as "invoke a specialist" rather than "flip a mode" is
+  what makes the surface teachable. The `plan.route` event keeps its `direct` member so historical
+  logs still replay.
+- `/help` rewritten around what a user needs and when: conversation first, then the specialists,
+  then see/undo, deliver, and the manual controls. `/accept` and `/plan approve` are demoted to the
+  "drive it yourself" group — still fully supported, no longer the taught path.
+- `agent trust` prints the grammar it accepts. It advertised `[o] proceed once`, rejected it as a
+  decline, and accepted an unadvertised `y`; the options line is now derived from what the caller
+  can actually honour, and only `t` is accepted.
+- `--no-input` means it. The flag auto-denied every tool approval while `/commit`, `/checkpoint`,
+  `/accept` and `/init` still stopped and asked a human.
+
+### Fixed
+
+- **A typo no longer starts a billed session.** `agent <anything-not-known>` fell through to a real
+  one-shot run with the typo as the task — verified before the fix: `agent stauts` ran and charged.
+  A single bare word that is an in-session command, or is a short edit distance from one, is now
+  refused with a did-you-mean before any session, state directory or provider call exists.
+- `/undo` validates its argument instead of coercing it. `/undo --all` — the spelling the README
+  teaches for the CLI — silently reverted only the most recent tool call and reported success.
+- `/commit -m` no longer swallows the flags after it. Typing exactly what the help printed,
+  `/commit -m "fix" --all`, committed the subject `fix" --all` and dropped `--all`.
+- `/checkpoint` refuses reserved verbs and flag-shaped arguments instead of turning them into
+  labels; `/checkpoint prune` used to create a checkpoint subjected "prune".
+- `@plan.md is stale` is prose again. The `\b` guard matched it, stripped the sigil, and sent
+  `.md is stale` to the model with a full plan-mode routing note attached. Unknown `@word`s are now
+  refused by name rather than vanishing into prose.
+- `agent undo` is trust-gated. It was grouped with the read-only commands and is not read-only.
+- `agent diff` honours `secretPatterns`, matching `/diff`; a config that cannot be parsed refuses
+  the diff rather than degrading to no redaction.
+- `/research` says when research was unavailable instead of rendering an empty record.
+- `/plan show` no longer rewrites the plan view — a READ command was regenerating the file the help
+  text said you could edit, archiving hand edits to an opaque blob without a word.
+
+### Documentation
+
+- README, ARCHITECTURE and the in-app help brought back into exact agreement with the code,
+  including the previously undocumented `/exit`, the provider name aliases, `--session`'s six
+  commands, `--yes`'s four, exit code `130`, the non-one-shot exit-2 cases, and the deliberate
+  trust exception for `agent map` / `agent diff`.
+
 ## [1.7.0] — 2026-08-11
 
 **Bounded memory and global initialization** (Session 21), plus the two runtime defects the

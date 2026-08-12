@@ -155,31 +155,61 @@ agent session 20260715-101730-5d56
   [y] allow once  [n] deny  [q] deny & stop
 ```
 
+**You mostly just talk.** When a decision is genuinely required, the harness asks — inline, one
+keystroke, at that moment:
+
+```
+  plan ready: build the importer and wire it into the CLI
+  6 task(s), 3 isolated executor task(s) that CANNOT run until you approve.
+  [y] approve   [v] show the plan first   [n] not now   (Enter = not now)
+  > y
+  plan approved (content sha 4f2a91c3…) — recorded as consent evidence
+```
+
+There are four such prompts — a plan awaiting its first approval, an approval invalidated by an
+amendment, an open repair escalation, and a session that would accept cleanly. Each fires at most
+once per state, and answering one records exactly the same evidence as typing the equivalent
+command. **They need a real terminal**: on piped stdin a prompt would consume the next scripted
+line, so `--no-input` and expect-style drivers keep using the commands below.
+
 - **Ctrl+C** interrupts the running turn (pending tool calls are skipped and recorded as
   interrupted); at the idle prompt press it twice to quit. **Ctrl+D** on an empty line quits.
-- **Slash commands:** `/help`, `/status`, `/undo [all]` (in-session undo; the model is told via
-  a delimited harness note), `/diff` (what this session changed, with each file's CHECKED
-  verdict), `/commit [-m "msg"] [--all]` (deliver session changes — preview + confirmation),
-  `/checkpoint [label | list | restore <n>]` (recovery points in hidden git refs),
-  `/plan [show | approve | discard]` (the plan document and its approval gate),
-  `/tasks` (the task graph + delegated subagents), `/cancel <ref>` (stop one task),
-  `/checks` (what this project can verify and the latest evidence per kind),
-  `/preview [stop <id>]` (managed dev servers), `/review` (the review gate's state),
-  `/repair [dismiss <n> <reason>]` (the bounded-repair ledger; dismissing an open escalation is
-  YOUR recorded decision — it stops blocking `/accept` but stays on the record as a caveat),
-  `/init` (optional onboarding: your global AGENT.md + a starter project AGENT.md — never
-  rewrites an existing file), `/grants` (the durable "always allow" records active this session),
-  `/research` (every web query this session sent, the sources that answered, and the budget left),
-  `/remote` (the remotes, which GitHub account would act, live observations, every remote read and
-  every remote MUTATION with its verification verdict),
-  `/provider [name [model]]` and `/model [id]` (list or switch provider/model mid-session —
-  recorded, credential-free), `/accept [confirm]` (the completion boundary), `/report`, `/map`,
-  `/quit`.
-- **`@plan <request>`** forces plan mode: the model investigates read-only, writes a
-  persistent plan document, and waits — executor tasks stay blocked until `/plan approve`.
-  **`@direct <request>`** forces the direct path for a request that needs no ceremony.
-- **`@search <question>`** forces one bounded web lookup; **`@research <question>`** delegates a
+  Both need a terminal — under `--interactive` over pipes there is no SIGINT channel.
+- **`@` invokes a specialist:** **`@plan <request>`** investigates read-only, writes a persistent
+  plan document and waits — executor tasks stay blocked until you approve.
+  **`@review [focus]`** runs the Review Agent over the current codebase (see below).
+  **`@search <question>`** forces one bounded web lookup; **`@research <question>`** delegates a
   read-only research subagent that reads pages in its own context and returns sourced claims.
+  An unknown `@word` is refused by name rather than silently sent as prose.
+- **Everyday commands:** `/diff` (what this session changed, with each file's CHECKED verdict),
+  `/undo [all]` (in-session undo; the model is told via a delimited harness note),
+  `/report [section]` (the evidence record, sliceable: `checks`, `review`, `inspections`,
+  `research`, `remote`, `repairs`, `previews`, `tasks`, `plan`, `completion`, …), `/status`,
+  `/commit [-m "msg"] [--all] [--no-trailer]` (preview + confirmation),
+  `/checkpoint [label | list | restore <n>]` (recovery points in hidden git refs), `/help`,
+  `/quit` (or `/exit`, or Ctrl+D).
+- **Driving it yourself:** `/plan [show | approve | discard]`, `/accept [confirm]`,
+  `/repair [dismiss <n> <reason>]` (a dismissal is YOUR recorded decision — it stops blocking
+  `/accept` but stays on the record as a caveat), `/provider [name [model]]` and `/model [id]`,
+  `/grants [revoke <id>]`, `/init`.
+- **Inspection views:** `/checks`, `/review`, `/research`, `/remote`, `/preview [stop <id>]`,
+  `/tasks`, `/map`, and `/cancel <ref>` — mid-turn on a TTY — to stop ONE delegated task while the
+  rest of the turn continues.
+
+### The Review Agent (`@review`)
+
+`@review [focus]` delegates an `inspector` subagent: read-only, pointed at the **current
+codebase** rather than a diff, looking for bugs, regression risks, architectural problems, fragile
+spots and concrete debug leads. It records typed observations — kind, severity, affected paths,
+the evidence it actually inspected, the concrete failure scenario, and what you should do about it
+— and the main agent then drives the fixes.
+
+It is deliberately **not** the end-of-session adversarial review gate, and the separation is
+structural rather than a convention. A `reviewer` finding blocks `/accept` whether or not a review
+was ever required, never expires, and every round spends one of only two. So `@review` gets its
+own role writing to its own advisory channel: its observations **block nothing and consume no
+review round**, which is what makes it safe to reach for at any point. They appear in
+`/report inspections` under a heading that says so.
 - A running `run_command` IS interruptible: Ctrl+C tree-kills it (best effort, verified) and the
   kill is recorded as evidence — a killed command never reads as a passing check.
 - stdout carries only model text and requested artifacts; all status chrome goes to stderr, so
@@ -191,6 +221,9 @@ agent session 20260715-101730-5d56
 
 ```sh
 agent "<task>"                 # run a one-shot task in the current directory
+agent run "<task>"             # the same, said explicitly — use it when the task is a single
+                               #   word or looks like a command (a bare `agent status` is REFUSED
+                               #   with a did-you-mean rather than becoming a billed session)
 agent --continue "<task>"      # resume the latest session with a follow-up
 agent resume <id> "<task>"     # resume a specific session
 agent undo [--all]             # undo the last file change (or all) of a session
@@ -212,16 +245,28 @@ agent trust [--revoke|--list]  # manage recorded workspace trust
 agent providers [--json]       # providers, models, key env vars (presence only), key sources
 ```
 
-Key flags: `-C <dir>` (workspace root), `--provider anthropic|openai|deepseek|kimi|glm|mock`,
-`--script <file>` (scripted turns for `mock`), `--model <id>`, `--no-input` (non-interactive;
-auto-detected off a TTY), `--interactive` (force interactive mode over piped stdio, e.g.
-expect-style drivers), `--max-steps <n>` (model steps per turn; `--max-turns` is the legacy alias
-for the same limit), `--trust-this-workspace` (one invocation, never recorded),
-`--dangerously-allow-all`, `--version`. `agent version`, `agent help` and `agent providers` print
-and exit — they never start a session.
+Key flags: `-C <dir>` (workspace root), `--provider anthropic|openai|deepseek|kimi|glm|mock`
+(case-insensitive; `moonshot`→kimi and `zhipu`/`zai`/`z.ai`→glm are accepted aliases),
+`--script <file>` (scripted turns for `mock`), `--model <id>`, `--no-input` (non-interactive:
+tool approvals auto-deny AND the command-level prompts are withheld; auto-detected off a TTY),
+`--interactive` (force interactive mode over piped stdio, e.g. expect-style drivers — note this
+does NOT enable the trust prompt, which requires a real TTY), `--max-steps <n>` (model steps per
+turn; `--max-turns` is the legacy alias, and giving both conflicting values is a hard refusal),
+`--session <id>` (targets `report`, `diff`, `plan`, `commit`, `checkpoint` and `undo`),
+`--yes` (non-interactive confirmation for `commit`, `checkpoint prune`, `checkpoint restore`, and
+the large-untracked sweep), `--trust-this-workspace` (one invocation, never recorded),
+`--dangerously-allow-all` (bypasses TOOL approvals only — it never auto-approves a plan or accepts
+a session), `--version`. `agent version`, `agent help` and `agent providers` print and exit — they
+never start a session.
 
-Exit codes: `0` ok · `1` error · `2` one-shot completed with denials or hit the step budget
-(the REPL reports these inline and exits 0 on a clean quit) · `3` workspace not trusted.
+Exit codes: `0` ok · `1` error · `2` a one-shot that completed with denials or hit the step budget,
+and also `agent commit` when nothing was committed, `agent checkpoint prune` when cancelled or run
+non-interactively without `--yes`, and `agent checkpoint restore` when the restore was not
+performed (the REPL reports denials inline and exits 0 on a clean quit) · `3` workspace not trusted
+· `130` a second Ctrl+C during a one-shot turn (force-quit).
+
+Trust note: `agent map` and `agent diff` read workspace bytes without the trust gate (they send
+nothing to a model and start no session); `agent undo` is trust-gated because it *writes*.
 
 ## Providers and models
 
@@ -498,12 +543,14 @@ never told about them.
 
 ## Plan mode, agent teams, and project memory
 
-- **Plan mode** (`@plan …`, `/plan`): plans are persistent markdown documents (one per
-  session, in the harness state dir), not disposable narration. The model writes the plan
-  only through a policy-gated tool and can never change its status; only you approve or
-  discard, and approval records the exact bytes (sha-bound). The plan is injected each turn
-  as labeled **context, not authority** — and if it diverges after approval, every surface
-  says so, including the executor spawn prompt at the moment you approve the spawn.
+- **Plan mode** (`@plan …`, `/plan`, and the approval prompt): the plan is a structured JSON
+  document (one per session, in the harness state dir) with a generated markdown view beside it,
+  not disposable narration. The model writes it only through a policy-gated tool and can never
+  change its status; only you approve or discard, and approval binds the exact **content sha**, so
+  a status flip does not invalidate it but a semantic change does. The plan is injected each turn
+  as labeled **context, not authority** — and if it diverges after approval, every surface says
+  so, including the executor spawn prompt at the moment you approve the spawn. Edit the
+  `.plan.json`; the `.md` next to it is a generated view.
 - **Delegated tasks** (`delegate_task`, `/tasks`): one call spawns 1–3 parallel subagents,
   each a bounded child session with its own evidence log, a harness-fixed budget, and
   inherited-or-narrower authority. Read-only roles (explorer/planner/reviewer) auto-run;

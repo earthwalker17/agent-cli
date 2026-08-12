@@ -2463,9 +2463,13 @@ export type EventBody =
   | {
       /**
        * How this turn's complexity was routed (Session 11, additive): into plan mode or the
-       * direct path, by the model's judgment or a user sigil (@plan / @direct). Observability
-       * for proportionate routing — absence of any plan events IS the evidence of a direct
-       * turn, so this is recorded when planning begins or a sigil forces a path.
+       * direct path, by the model's judgment or the `@plan` sigil. Observability for
+       * proportionate routing — absence of any plan events IS the evidence of a direct turn, so
+       * this is recorded when planning begins or a sigil forces a path.
+       *
+       * `mode: 'direct'` is now only ever the MODEL's judgment: the `@direct` sigil was removed in
+       * S21.5 (the system prompt already instructs that routing, so the sigil forced the default).
+       * The member stays so historical logs replay unchanged.
        */
       type: 'plan.route';
       mode: 'plan' | 'direct';

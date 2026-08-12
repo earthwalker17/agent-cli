@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI **v1.6.x** is actually built. This describes the implemented system — its modules,
+How Agent CLI **v1.8.x** is actually built. This describes the implemented system — its modules,
 contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
 deferred; this file avoids session narration except where a decision's *reason* is the contract.
 
@@ -983,7 +983,8 @@ The main agent keeps user interaction, authority, coordination, integration, and
 delegated task is a bounded, attributable unit beneath it.
 
 - **Roles, split by layer.** `types.ts` `SUBAGENT_ROLES` is the POLICY fact table — explorer /
-  planner / reviewer are `read-only`, executor is `mutating-worktree`; `decide()` consults only
+  planner / reviewer / **inspector** are `read-only`, researcher is `read-only-external`, executor
+  is `mutating-worktree`; `decide()` consults only
   this and fails closed on anything else. `runtime/roles.ts` `ROLE_CONTRACTS` is the RUNTIME
   contract per role: tool registry (a subset of TOOLS; never the delegate/update_plan/apply tools
   ⇒ depth 1 and no self-integration, structurally), role prompt builder, harness-fixed budget,
@@ -995,7 +996,21 @@ delegated task is a bounded, attributable unit beneath it.
   forwarded-approval wait** (S20.5 — an away human used to kill the executor mid-work and spend
   an R10 attempt; the runner re-arms a real-time deadline on effective elapsed, and the wait is
   recorded on `task.ended.approvalWaitMs`).
-- **Named admission seams.** `retrieve` and `report_finding` exist only as per-session instances
+- **The `inspector` role (S21.5) — `@review`.** Read-only, tools = the read-only set +
+  `report_observation`, budget 24 steps / 12 min (the reviewer's numbers: the same interleaved
+  read → confirm → record shape), approvals `auto-deny`. It exists as its own role rather than a
+  second use of `reviewer` for three structural reasons, all in `review/ledger.ts`: a reviewer's
+  recorded critical/high findings block `/accept` **regardless of requirement or waiver**, findings
+  never expire, and every round spends one of only two `MAX_REVIEW_ROUNDS` — including a round run
+  before any work, which cannot qualify but still counts. A casual mid-session "have a look at
+  this" must not be able to do any of that. The separation is enforced by construction:
+  `delegateCapsFromEvents` counts only `role === 'reviewer'`, and the ledger mints a round only
+  from that or from a `review.findings` event, so an inspector emitting `inspection.recorded`
+  cannot reach either. Pinned by `test/roles.inspector.test.ts` (a critical observation yields zero
+  rounds, zero blockers, gate satisfied). Observations surface in `/report inspections` and in
+  `ReportJson.inspections` — a sibling of `review`, never merged into it.
+- **Named admission seams.** `retrieve`, `report_finding` and `report_observation` exist only as
+  per-session instances
   and reach children ONLY through named `SubagentDeps` fields; `childTools()` admits one iff the
   role contract names it AND the instance is structurally free of command/delegates/planDoc facts
   (fail closed by dropping). Deliberately not a generic extra-tools list, so depth-1 stays a
@@ -1257,7 +1272,7 @@ would make a green gate an authorization, the exact inversion this capability ex
 and a push transmits committed refs only. Together: *the model cannot publish content a human did
 not commit.*
 
-## Planning lifecycle (`plan/`, `tools/update-plan.ts`, `/plan`, `@plan`/`@direct`)
+## Planning lifecycle (`plan/`, `tools/update-plan.ts`, `/plan`, `@plan`, the approval prompt)
 
 One CANONICAL structured plan per session at `<projectDir>/plans/<sessionId>.plan.json` —
 `{version, planId, status, updated, plan}` wrapping a schema-validated task graph — with two
@@ -1306,7 +1321,8 @@ requirement — three call sites previously spelled the same triple predicate in
   `contentSha` null → gated. `plan.approved {sha256}` is the consent record; `approvedAndCurrent`
   is THE executor precondition — divergence BLOCKS.
 - **Routing** (`plan.route`, additive): model-judged per prompt rules, forced by `@plan` /
-  `@direct` sigils (recorded `source: 'user-sigil'`). Absence of plan events is the honest
+  `@plan` sigil (recorded `source: 'user-sigil'`; `@direct` was removed in S21.5 — the event type
+  survives so historical logs replay). Absence of plan events is the honest
   evidence of a direct turn. No harness classifier — the hard floor stays structural (executor
   gates), not linguistic.
 - **Injection:** the standing per-turn note carries the AGENT view when the content sha is new to
@@ -1617,8 +1633,44 @@ the model learns of it via a delimited `[[harness note: …]]` in the next `user
 errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as `user-quit` — never
 `completed`.
 
+**Contextual consent (S21.5, `repl/consent.ts` + `repl/prompt-choice.ts`).** Four decisions are
+ASKED at the turn boundary instead of requiring a remembered command: a plan awaiting its first
+approval, an approval invalidated by an amendment, an open repair escalation, and a session that
+would accept cleanly. All four are pure folds over (plan bytes, event log); precedence is
+B > A > D > C with at most one prompt per boundary, and a condition whose key was already asked
+falls through to the next rather than masking it. Three properties are load-bearing:
+
+- **TTY-gated** (`streams.isTTY && ctx.mode === 'interactive'`). Off a TTY `io.question` ignores
+  its `fresh` flag and would consume a driver's next queued line — which is why S21.5 demoted
+  `/accept` and `/plan approve` rather than removing them, and why a piped test asserts no prompt
+  appears. `--dangerously-allow-all` leaves prompts ON: it bypasses TOOL approvals, never consent
+  about the work.
+- **Fires after the turn's `finally`**, not at the end of the `try`: there the mid-turn handler is
+  still installed and the status region still drawn, so a line typed before the question displays
+  would be eaten as a mid-turn command.
+- **Zero appends of its own.** Every affirmative answer calls the same extracted body the slash
+  command calls (`acceptSession`, `approvePlanCanonical`, `dismissEscalation`), so evidence is
+  byte-identical either way — pinned by running one fixture twice and comparing event arrays.
+
+`prompt-choice.ts` is the ONE new answer grammar: it tokenizes exactly as `parseAnswer` does (trim
+→ lowercase → first char) so the two agree on what a keystroke *is*, and deliberately does not
+reuse it, because those keys denote permission scope (`a` mints durable authority). Empty,
+unrecognized and EOF all mean DO NOTHING; there is no affirmative default. Anti-nag state is an
+in-memory `Set` keyed on derived state (content sha / last work seq / escalation seq) — a decline
+appends nothing, and a `consent.declined` event would write a non-decision into the record that
+`/report` and `computeAcceptance` would then have to interpret.
+
+**Sigils (`repl/sigils.ts`, S21.5).** One table, not four inlined branches: `@plan`, `@review`,
+`@search`, `@research`. The head guard is `^@word(?=\s|$)` — `\b` matched `@plan.md is stale` and
+routed it. An unknown `@word` is refused by name instead of falling through as prose. `@direct` was
+removed: the system prompt already instructs the complexity routing it forced.
+
 Commands: `/help /status /undo /diff /commit /checkpoint /plan /tasks /cancel /accept /review
-/repair /checks /preview /report /map /init /grants /provider /model /research /remote /quit`.
+/repair /checks /preview /report /map /init /grants /provider /model /research /remote /quit`
+(`/exit` is an alias). `/report [section]` slices the one rendered report into any of fifteen named
+sections; the six inspection views keep their own rendering because each carries live state the
+report structurally cannot (a re-probed project, re-probed process liveness, memory-only remote
+identities, live research spend) or an action affordance (`/repair`'s numbered list).
 `/repair` (S21) renders the bounded-repair ledger and carries the user-side dismissal;
 `/init` (S21) is the skippable onboarding flow (global AGENT.md + project starter — never
 rewrites an existing file; each file writes atomically or not at all, and an abort after the
