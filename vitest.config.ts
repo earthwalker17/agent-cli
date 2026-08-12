@@ -13,6 +13,12 @@ export default defineConfig({
     // up to six spawns in one test; on a loaded Windows machine a single Node spawn can take
     // multiple seconds, so the 5s default produced spurious timeouts. This is a hang backstop,
     // not an expected duration — in-process tests still finish in milliseconds.
-    testTimeout: 60_000,
+    //
+    // 60s → 120s in S21.5. That session added two more process-heavy suites (`cli.surface`
+    // spawns the binary ~15 times; `repl.consent` runs two entire REPLs with `isTTY: true`), and
+    // the extra concurrent load pushed `cli.smoke` past the old backstop in roughly one clean run
+    // in three — always a TIMEOUT, never an assertion, and never the same test twice. Diagnosed
+    // rather than assumed: the failing test was measured at 75s of real work under load.
+    testTimeout: 120_000,
   },
 });
