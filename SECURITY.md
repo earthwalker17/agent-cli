@@ -14,13 +14,15 @@ open-source project, not a staffed product, so please calibrate expectations acc
 
 | Version | Supported |
 | --- | --- |
-| 1.6.x | ✅ (current: 1.6.1) |
-| 1.5.x | ⚠️ security fixes only |
+| 1.8.x | ✅ (current: 1.8.0) |
+| 1.7.x | ⚠️ security fixes only |
+| 1.6.x | ⚠️ security fixes only |
+| 1.5.x | ❌ |
 | 1.4.x | ❌ |
 | 1.3.x | ❌ |
 | 1.2.x | ❌ |
 | 1.1.x | ❌ |
-| 1.0.x | ⚠️ security fixes only |
+| 1.0.x | ❌ |
 | < 1.0 | ❌ (pre-release development versions) |
 
 ## What Agent CLI does and does not defend against
