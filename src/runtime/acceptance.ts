@@ -98,6 +98,24 @@ export function workSince(events: readonly SessionEvent[], seq: number): boolean
   );
 }
 
+/**
+ * The seq of the newest work-shaped event, or 0. Lives here, beside `workSince`, so it reuses the
+ * SAME `WORK_EVENT_TYPES` set — two derivations of "what counts as work" is exactly the defect
+ * that set's comment block exists to prevent.
+ *
+ * S21.5: the contextual completion prompt keys its once-per-state memory on this, so the prompt
+ * re-arms when — and only when — something work-shaped has actually happened since it was declined.
+ */
+export function lastWorkSeq(events: readonly SessionEvent[]): number {
+  let max = 0;
+  for (const e of events) {
+    if (WORK_EVENT_TYPES.has(e.type) && !(e.type === 'plan.discarded' && e.reason === 'accepted') && e.seq > max) {
+      max = e.seq;
+    }
+  }
+  return max;
+}
+
 export function computeAcceptance(
   planState: PlanState,
   graphState: GraphState | null,

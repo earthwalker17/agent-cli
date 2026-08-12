@@ -21,6 +21,7 @@ import { createWorkingHeartbeat } from './heartbeat.js';
 import { createTaskTable } from './live-tasks.js';
 import { detectStyle } from './format.js';
 import { completionLine, dispatchSlash, sessionAcceptance, type CommandContext } from './commands.js';
+import { createConsentAsker, planReapprovalNeeded } from './consent.js';
 
 /**
  * The interactive REPL: a loop of `prompt → runTurn` over ONE session and ONE event log, sharing
@@ -226,7 +227,16 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   // turn to END means the user's first post-resume instruction runs with every executor spawn
   // silently refused (S16.5b review). Same narrow guard as the per-turn call: it prints only
   // when an approval EXISTED and no longer covers the plan.
-  if (opts.resumeId !== undefined) planApprovalReminder(commandCtx);
+  // S21.5: contextual consent. On a TTY the resume case ASKS instead of printing the line — the
+  // kill may have landed between the amendment and the re-approval, and the user must learn that
+  // before their first post-resume instruction runs with every executor spawn silently refused.
+  // Both gates are required: `--no-input` in a real terminal is isTTY yet non-interactive.
+  const consent = createConsentAsker();
+  const consentEnabled = streams.isTTY && ctx.mode === 'interactive';
+  if (opts.resumeId !== undefined) {
+    if (consentEnabled) await consent.maybeAsk(commandCtx, { enabled: true, turnOk: true, aborted: false });
+    else planApprovalReminder(commandCtx);
+  }
 
   let exitCode = 0;
   let consecutiveInterrupts = 0;
@@ -372,6 +382,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         }
         return false;
       });
+      let turnOk = true;
       try {
         const result = await runTurn(session, userText, { signal: controller.signal });
         renderer.endTurn(result, ctx.maxSteps);
@@ -382,8 +393,11 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         // tool result and again in the standing note each turn — to the model, which cannot type
         // `/plan approve`. The human watched it quietly do all the parallel work serially in the
         // parent instead, and only found out ten minutes later when /accept refused.
-        planApprovalReminder(commandCtx);
+        // S21.5: on a TTY the contextual prompt asks this instead (see below); off-TTY the line
+        // remains the only channel, and stays byte-identical for the piped drivers.
+        if (!consentEnabled) planApprovalReminder(commandCtx);
       } catch (err) {
+        turnOk = false;
         // Keep the session alive: answer any dangling tool_use so the next request stays valid.
         repairDanglingToolUses(session);
         renderer.turnError(err as Error);
@@ -391,13 +405,24 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         // the approved plan and then dies on a thrown provider error (rate-limit exhaustion is
         // the live case) otherwise ends with no re-approval line — and the next turn quietly
         // does the parallel work serially, the exact incident 8f35fbd was written to prevent.
-        planApprovalReminder(commandCtx);
+        if (!consentEnabled) planApprovalReminder(commandCtx);
       } finally {
         io.setMidTurnHandler(null);
         statusArea.clear(); // readline owns the bottom line at the idle prompt
         io.unmute();
         offInterrupt();
       }
+
+      // Contextual consent fires HERE — after the finally, not before it. At the end of the try
+      // the mid-turn handler is still installed and the status area is still drawn, so a line
+      // typed in the window before the question displays would be eaten as a mid-turn command.
+      // Here the conditions are byte-identical to the idle prompt: handler null, region cleared,
+      // readline unmuted, interrupt handler detached.
+      await consent.maybeAsk(commandCtx, {
+        enabled: consentEnabled,
+        turnOk,
+        aborted: controller.signal.aborted,
+      });
     }
   } catch (err) {
     // Even the fatal path stops this session's previews (best-effort, bounded): a crashed REPL
@@ -482,6 +507,8 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
 export function planApprovalReminder(ctx: CommandContext): void {
   const need = planReapprovalNeeded(ctx);
   if (need === null) return;
+  // On a TTY the contextual prompt asks this instead; printing the line AND asking the same
+  // question is itself a new grammar of noise.
   // Deliberately NOT dimmed, unlike the rest of the end-of-turn chrome: this is the one line
   // whose whole purpose is to be read.
   ctx.renderer.chromeLine(
@@ -490,48 +517,6 @@ export function planApprovalReminder(ctx: CommandContext): void {
   );
 }
 
-/**
- * The predicate behind the reminder, split out in S21.5 so the off-TTY LINE and the on-TTY PROMPT
- * are driven by one derivation rather than two that agree today. Returns null when there is
- * nothing to re-approve.
- *
- * Never throws: a plan problem must not be able to end a turn.
- */
-export function planReapprovalNeeded(ctx: CommandContext): { why: string; waiting: string[] } | null {
-  try {
-    const state = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
-    if (state.kind !== 'canonical' || state.approvedAndCurrent) return null;
-    if (state.status === 'superseded') return null;
-    // A plan that was NEVER approved is the ordinary post-planning state: the model has just
-    // written it and is presenting it for approval in the same breath. Warning there is noise,
-    // and noise at the idle prompt is how real warnings stop being read (observed immediately:
-    // the line fired at the end of the planning turn in the very next take).
-    //
-    // The dangerous state is narrower — an approval EXISTED and no longer covers the plan. That
-    // is the one a user cannot see coming, because nothing about the screen changed when it
-    // happened.
-    //
-    // S21.5: the never-approved case is now covered by the contextual APPROVAL prompt, which is
-    // not noise for the same reason — it has an answer, it fires once per plan content sha, and
-    // it completes the beat the model just opened by presenting the plan.
-    if (state.approvedSha === null) return null;
-    const graph = state.canonical?.graph ?? null;
-    if (graph === null) return null;
-    const executors = graph.tasks.filter((t) => t.role === 'executor');
-    if (executors.length === 0) return null;
-    const fold = foldGraphState(graph, ctx.session.log.events);
-    const waiting = executors.filter((t) => fold.byId.get(t.id)?.state !== 'completed').map((t) => t.id);
-    if (waiting.length === 0) return null;
-    return {
-      why: state.diverged
-        ? 'the plan changed after you approved it, so the approval no longer covers it'
-        : `the plan is ${state.status}`,
-      waiting,
-    };
-  } catch {
-    return null;
-  }
-}
 
 export function buildPlanNote(
   layout: ProjectLayout,

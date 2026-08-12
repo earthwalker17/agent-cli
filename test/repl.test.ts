@@ -586,6 +586,32 @@ describe('REPL: plan mode (Session 11 — canonical structured plans)', () => {
     expect(r.events.find((e) => e.type === 'plan.route')).toMatchObject({ mode: 'direct', source: 'user-sigil' });
   });
 
+  /**
+   * S21.5 — the regression guard for every piped driver, including agent-cli-s*-live/driver.mjs.
+   *
+   * Contextual consent prompts are TTY-gated because `io.question` ignores its `fresh` flag on
+   * non-TTY input (io.ts) and would consume the driver's next scripted line. If a prompt ever
+   * leaks into piped mode, `/quit` below is eaten as its answer, the session never ends cleanly,
+   * and the live drivers desynchronize on their `\n  > ` approval anchor.
+   */
+  it('a plan awaiting approval prompts NOTHING on piped input, and /quit still reaches the idle prompt', async () => {
+    const r = await drive(
+      [
+        { say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN_GRAPH } }] },
+        { say: 'plan written — awaiting approval' },
+      ],
+      ['build the widget\n', '/quit\n'],
+    );
+    expect(r.code).toBe(0);
+    // No contextual prompt was rendered…
+    expect(r.chromeOut).not.toContain('[y] approve');
+    expect(r.chromeOut).not.toContain('(Enter = not now)');
+    // …and nothing was consented to on the user's behalf.
+    expect(r.events.some((e) => e.type === 'plan.approved')).toBe(false);
+    // The session ended as a clean user quit, proving /quit was consumed by the idle prompt.
+    expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
+  });
+
   it('an amendment INVALIDATES the approval; discard stops injection; a new write starts a fresh draft', async () => {
     const r = await drive(
       [
