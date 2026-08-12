@@ -10,7 +10,7 @@ import { readPlan, setPlanStatus } from '../plan/store.js';
 import { approvedCurrentGraph, readCanonicalPlan, readPlanState, setCanonicalStatus } from '../plan/canonical.js';
 import { completionGateState, foldGraphState, integrationGateState, type PlanTaskState } from '../plan/graph-state.js';
 import { computeAcceptance, workSince, type AcceptanceState } from '../runtime/acceptance.js';
-import { foldRepairs } from '../recovery/ledger.js';
+import { foldRepairs, type RepairLedger } from '../recovery/ledger.js';
 import { foldReview, type ReviewState } from '../review/ledger.js';
 import { runInit } from './init.js';
 import { renderUserPlanView, userViewState, writeUserView } from '../plan/views.js';
@@ -169,7 +169,7 @@ export function sessionReview(ctx: Pick<CommandContext, 'session' | 'layout'>): 
  * /repair and /status previously folded without it, so an escalation acceptance had already
  * released still displayed OPEN — two surfaces, one log, opposite answers).
  */
-function resolvedRepairTargets(ctx: Pick<CommandContext, 'session' | 'layout'>): Set<string> {
+export function resolvedRepairTargets(ctx: Pick<CommandContext, 'session' | 'layout'>): Set<string> {
   const events = ctx.session.log.events;
   const state = readPlanState(ctx.layout, ctx.session.id, events);
   const g = state.canonical?.graph ?? null;
@@ -241,6 +241,223 @@ export function parseCommitArgs(arg: string): { all: boolean; noTrailer: boolean
     } else return { all, noTrailer, error: `unknown /commit argument: ${t} (${usage})` };
   }
   return { all, noTrailer, ...(message !== undefined ? { message } : {}) };
+}
+
+/**
+ * Close one OPEN repair escalation as the USER's decision. Extracted in S21.5 so the typed
+ * `/repair dismiss` and the contextual escalation prompt are one code path.
+ *
+ * `source: 'user'` is load-bearing — `foldRepairs` ignores any other source, which is what keeps
+ * a dismissal a human act rather than something the recover tool could mint for itself. The
+ * confirmation deliberately under-promises: a dismissal clears the ESCALATION blocker only, and
+ * an unproven repair attempt for the same failure keeps its own until its regression checks pass.
+ */
+export function dismissEscalation(
+  ctx: CommandContext,
+  esc: RepairLedger['escalations'][number],
+  reason: string,
+  ledger: RepairLedger,
+): void {
+  ctx.session.log.append({
+    type: 'repair.dismissed',
+    escalationSeq: esc.seq,
+    target: esc.target,
+    failureClass: esc.failureClass,
+    signature: esc.signature,
+    reason: sanitizeLine(reason),
+    source: 'user',
+  });
+  const remainingAttempts = ledger.attempts.filter(
+    (a) => a.signature === esc.signature && a.outcome === 'open' && a.pendingChecks.length > 0,
+  ).length;
+  ctx.renderer.chromeLine(
+    `escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) dismissed — recorded as evidence. The escalation no longer blocks /accept` +
+      `${remainingAttempts > 0 ? `; NOTE: ${remainingAttempts} unproven repair attempt(s) for the same failure still block until their regression checks pass` : ''}` +
+      ' and it will appear as an acceptance caveat, not as a resolution.',
+  );
+  ctx.pendingNotes.push(
+    `the user DISMISSED the open repair escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) with reason: ${sanitizeLine(reason)}. ` +
+      'It no longer blocks acceptance and is recorded as a caveat. Do not re-escalate the same failure without new evidence.',
+  );
+}
+
+/**
+ * Approve the CANONICAL plan. Extracted in S21.5 so the typed `/plan approve` and the contextual
+ * approval prompt are one code path. The consent record binds the CONTENT sha, so status and
+ * timestamp flips are sha-neutral by construction and the approval survives exactly until the next
+ * semantic change.
+ *
+ * Legacy (pre-Session-11) markdown plans keep their own branch in `case 'plan'` and are
+ * deliberately NOT reachable from the prompt: they bind raw file bytes, not a content sha, and a
+ * resumed pre-S11 session is not the place to introduce a new consent surface.
+ */
+export async function approvePlanCanonical(ctx: CommandContext, state: ReturnType<typeof readPlanState>): Promise<void> {
+  if (state.kind === 'none') {
+    ctx.renderer.chromeLine('no plan document to approve');
+    return;
+  }
+  if (state.approvedAndCurrent) {
+    ctx.renderer.chromeLine('plan is already approved (the approval matches the current content)');
+    return;
+  }
+  const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'approved', ctx.session.snapshots, ctx.session.clock);
+  if ('error' in w) {
+    ctx.renderer.chromeLine(`cannot approve: ${sanitizeLine(w.error)}`);
+    return;
+  }
+  ctx.session.log.append({ type: 'plan.approved', planId: ctx.session.id, sha256: w.contentSha });
+  void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
+  ctx.pendingNotes.push(`the user APPROVED the plan (content sha ${w.contentSha.slice(0, 12)}); planned execution may begin`);
+  ctx.renderer.chromeLine(`plan approved (content sha ${w.contentSha.slice(0, 12)}…) — recorded as consent evidence`);
+}
+
+/**
+ * The acceptance body. Extracted in S21.5 so the typed `/accept` and the contextual completion
+ * prompt are the SAME code, not two implementations that agree today. What it does is load-
+ * bearing and easy to reimplement wrongly: idempotence, the crash-limbo plan retirement, the
+ * delivery checkpoint (with its own untracked-sweep question and its event-before-ref seam), the
+ * consent event, the harness-ref prune, and the plan retirement. A second copy would silently
+ * drop one of them.
+ *
+ * `confirm` is the `/accept confirm` override: it records a PARTIAL acceptance when work is
+ * unfinished. The prompt never passes it — it only fires when acceptance is already clean.
+ */
+export async function acceptSession(ctx: CommandContext, opts: { confirm: boolean }): Promise<void> {
+  const { state, acc } = sessionAcceptance(ctx);
+
+  // Idempotence: re-accepting with no work since the last acceptance is a no-op, never a
+  // duplicate consent event (the accept's own retirement is excluded from workSince).
+  if (acc.accepted !== null && !workSince(ctx.session.log.events, acc.accepted.seq)) {
+    // Crash-limbo repair (review F2): a kill between the accepted event and the plan
+    // retirement leaves an approved-but-accepted plan that a re-typed /accept would
+    // otherwise no-op past forever. Finish the interrupted cleanup now, idempotently.
+    if (acc.accepted.complete && state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent) {
+      const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
+      if (!('error' in w)) {
+        ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id, reason: 'accepted' });
+        void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
+        ctx.renderer.chromeLine('  completing the interrupted acceptance cleanup: plan retired (accepted → superseded)');
+      }
+    }
+    ctx.renderer.chromeLine(
+      `session already accepted (${acc.accepted.complete ? 'complete' : 'partial'}); nothing has changed since`,
+    );
+    return;
+  }
+
+  if (!acc.complete && !opts.confirm) {
+    ctx.renderer.chromeLine(
+      [
+        'cannot accept as complete — unfinished work:',
+        ...acc.unfinished.map((u) => `  - ${sanitizeLine(u)}`),
+        'finish the work, or type "/accept confirm" to record a PARTIAL acceptance (the list above becomes the handoff).',
+      ].join('\n'),
+    );
+    return;
+  }
+
+  // Delivery checkpoint (Session 14) — COMPLETE path, git repo only: capture the exact
+  // accepted state as a hidden ref BEFORE the consent event, so the acceptance references
+  // it. The ref SURVIVES the session (the durable audit anchor — the owed-prune fold keeps
+  // the latest delivery ref by construction; a later acceptance supersedes it). Best-effort
+  // by contract: a failure or declined untracked sweep becomes an honest chrome line and
+  // the acceptance still records — a git hiccup must never hold user consent hostage.
+  let delivery: { ref: string; oid: string } | null = null;
+  if (acc.complete) {
+    const g = ctx.session.gitFacts;
+    if (g?.isRepo === true && g.gitPath !== null && g.repoRoot !== null) {
+      const cctx: CheckpointContext = { gitPath: g.gitPath, repoRoot: g.repoRoot, workspaceRoot: ctx.session.workspaceRoot, stateDir: ctx.session.stateDir };
+      // Crash-window idempotence: a kill between a prior delivery checkpoint and its
+      // session.accepted leaves the checkpoint recorded but unconsumed. Reuse it when
+      // nothing work-shaped happened since AND the ref genuinely exists (a phantom whose
+      // update-ref failed must not be referenced) — never stack a second delivery ref.
+      const prior = [...ctx.session.log.events].reverse().find((e) => e.type === 'harness.checkpoint' && e.kind === 'delivery');
+      const priorReusable =
+        prior !== undefined && prior.type === 'harness.checkpoint' && !workSince(ctx.session.log.events, prior.seq)
+          ? (await listCheckpoints(cctx, ctx.session.id)).some((c) => c.ref === prior.ref)
+          : false;
+      if (prior !== undefined && prior.type === 'harness.checkpoint' && priorReusable) {
+        delivery = { ref: prior.ref, oid: prior.oid };
+        ctx.renderer.chromeLine(`  delivery checkpoint reused (interrupted acceptance repair): ${prior.ref}`);
+      } else {
+        const r = await createCheckpoint(cctx, ctx.session.id, {
+          label: 'delivery (accepted)',
+          onRefReady: (ref, oid) => ctx.session.log.append({ type: 'harness.checkpoint', kind: 'delivery', ref, oid }),
+          confirmLargeUntracked: async (count) => {
+            if (!ctx.question) return false;
+            const a = await ctx.question(`  capture ${count} untracked files in the delivery checkpoint too? [y/N] `);
+            return a !== null && /^y(es)?$/i.test(a.trim());
+          },
+        });
+        for (const note of r.notes ?? []) ctx.renderer.chromeLine(`  note: ${sanitizeLine(note)}`);
+        if (r.ok && r.ref !== undefined && r.oid !== undefined) delivery = { ref: r.ref, oid: r.oid };
+        else {
+          ctx.renderer.chromeLine(
+            `  delivery checkpoint not captured: ${sanitizeLine(r.error ?? 'unknown error')} (acceptance proceeds; /checkpoint is the manual path)`,
+          );
+        }
+      }
+    } else {
+      ctx.renderer.chromeLine('  delivery checkpoint: not a git repository — skipped (the event log remains the audit record)');
+    }
+  }
+
+  // The recorded consent. complete=false only through the explicit confirm path.
+  ctx.session.log.append({
+    type: 'session.accepted',
+    complete: acc.complete,
+    summary: acc.summary,
+    ...(acc.unfinished.length > 0 ? { unfinished: acc.unfinished } : {}),
+    ...(delivery !== null ? { deliveryRef: delivery.ref, deliveryOid: delivery.oid } : {}),
+  });
+  ctx.pendingNotes.push(
+    acc.complete
+      ? 'the user ACCEPTED the session result as COMPLETE (/accept). Treat the delivered work as accepted; do not re-run plan tasks.'
+      : `the user recorded a PARTIAL acceptance (/accept confirm) with ${acc.unfinished.length} known unfinished item(s). Do not silently resume that work — ask before continuing it.`,
+  );
+
+  // Cleanup (a): prune this session's owed harness refs now (idempotent; the quit path's
+  // re-fold then finds nothing owed — the latest delivery ref survives by construction).
+  if (ctx.pruneHarnessRefs !== undefined) {
+    try {
+      const pruneLine = await ctx.pruneHarnessRefs();
+      if (pruneLine !== null) ctx.renderer.chromeLine(`  checkpoints: ${pruneLine}`);
+    } catch (e) {
+      // Best-effort hygiene — acceptance itself is already recorded — but a swallowed
+      // throw left ZERO trace that a prune was ever attempted (the only silent catch on
+      // this surface, found by the S14.5 pre-scan). The quit path retries; the CLI backstop
+      // is always available.
+      ctx.renderer.chromeLine(
+        `  checkpoints: prune FAILED (${sanitizeLine((e as Error).message)}) — this session's refs remain under refs/agent-cli (retried at quit; agent checkpoint prune is the backstop)`,
+      );
+    }
+  }
+
+  // Cleanup (b): a COMPLETE acceptance retires the fully-executed approved plan via the
+  // existing discard flow (status → superseded; the file stays on disk as the audit
+  // trail; approval clears via the plan.discarded event). Partial accepts retire nothing.
+  if (acc.complete && state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent) {
+    const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
+    if ('error' in w) {
+      ctx.renderer.chromeLine(`  plan not retired: ${sanitizeLine(w.error)} (acceptance itself is recorded)`);
+    } else {
+      ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id, reason: 'accepted' });
+      void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
+      ctx.pendingNotes.push('the fully-executed plan was RETIRED (superseded) as part of the acceptance; a new update_plan write starts a fresh draft');
+      ctx.renderer.chromeLine('  plan retired (accepted → superseded; the file remains on disk for reference)');
+    }
+  }
+
+  ctx.renderer.chromeLine(`session accepted (${acc.complete ? 'complete' : 'partial'}) — ${sanitizeLine(acc.summary)}`);
+  if (acc.complete) {
+    // The delivery boundary suggestion (Session 14): commits stay user-typed and are never
+    // a side effect — this is one line of guidance, not automation.
+    ctx.renderer.chromeLine(
+      delivery !== null
+        ? `  delivery: checkpoint ${delivery.oid.slice(0, 12)} survives as the audit anchor (agent checkpoint list) — /commit turns the accepted work into a user-visible commit (optional)`
+        : '  delivery: /commit turns the accepted work into a user-visible commit (optional)',
+    );
+  }
 }
 
 export async function dispatchSlash(line: string, ctx: CommandContext): Promise<SlashOutcome> {
@@ -323,141 +540,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         ctx.renderer.chromeLine('usage: /accept [confirm]');
         return 'continue';
       }
-      const { state, acc } = sessionAcceptance(ctx);
-
-      // Idempotence: re-accepting with no work since the last acceptance is a no-op, never a
-      // duplicate consent event (the accept's own retirement is excluded from workSince).
-      if (acc.accepted !== null && !workSince(ctx.session.log.events, acc.accepted.seq)) {
-        // Crash-limbo repair (review F2): a kill between the accepted event and the plan
-        // retirement leaves an approved-but-accepted plan that a re-typed /accept would
-        // otherwise no-op past forever. Finish the interrupted cleanup now, idempotently.
-        if (acc.accepted.complete && state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent) {
-          const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
-          if (!('error' in w)) {
-            ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id, reason: 'accepted' });
-            void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
-            ctx.renderer.chromeLine('  completing the interrupted acceptance cleanup: plan retired (accepted → superseded)');
-          }
-        }
-        ctx.renderer.chromeLine(
-          `session already accepted (${acc.accepted.complete ? 'complete' : 'partial'}); nothing has changed since`,
-        );
-        return 'continue';
-      }
-
-      if (!acc.complete && sub !== 'confirm') {
-        ctx.renderer.chromeLine(
-          [
-            'cannot accept as complete — unfinished work:',
-            ...acc.unfinished.map((u) => `  - ${sanitizeLine(u)}`),
-            'finish the work, or type "/accept confirm" to record a PARTIAL acceptance (the list above becomes the handoff).',
-          ].join('\n'),
-        );
-        return 'continue';
-      }
-
-      // Delivery checkpoint (Session 14) — COMPLETE path, git repo only: capture the exact
-      // accepted state as a hidden ref BEFORE the consent event, so the acceptance references
-      // it. The ref SURVIVES the session (the durable audit anchor — the owed-prune fold keeps
-      // the latest delivery ref by construction; a later acceptance supersedes it). Best-effort
-      // by contract: a failure or declined untracked sweep becomes an honest chrome line and
-      // the acceptance still records — a git hiccup must never hold user consent hostage.
-      let delivery: { ref: string; oid: string } | null = null;
-      if (acc.complete) {
-        const g = ctx.session.gitFacts;
-        if (g?.isRepo === true && g.gitPath !== null && g.repoRoot !== null) {
-          const cctx: CheckpointContext = { gitPath: g.gitPath, repoRoot: g.repoRoot, workspaceRoot: ctx.session.workspaceRoot, stateDir: ctx.session.stateDir };
-          // Crash-window idempotence: a kill between a prior delivery checkpoint and its
-          // session.accepted leaves the checkpoint recorded but unconsumed. Reuse it when
-          // nothing work-shaped happened since AND the ref genuinely exists (a phantom whose
-          // update-ref failed must not be referenced) — never stack a second delivery ref.
-          const prior = [...ctx.session.log.events].reverse().find((e) => e.type === 'harness.checkpoint' && e.kind === 'delivery');
-          const priorReusable =
-            prior !== undefined && prior.type === 'harness.checkpoint' && !workSince(ctx.session.log.events, prior.seq)
-              ? (await listCheckpoints(cctx, ctx.session.id)).some((c) => c.ref === prior.ref)
-              : false;
-          if (prior !== undefined && prior.type === 'harness.checkpoint' && priorReusable) {
-            delivery = { ref: prior.ref, oid: prior.oid };
-            ctx.renderer.chromeLine(`  delivery checkpoint reused (interrupted acceptance repair): ${prior.ref}`);
-          } else {
-            const r = await createCheckpoint(cctx, ctx.session.id, {
-              label: 'delivery (accepted)',
-              onRefReady: (ref, oid) => ctx.session.log.append({ type: 'harness.checkpoint', kind: 'delivery', ref, oid }),
-              confirmLargeUntracked: async (count) => {
-                if (!ctx.question) return false;
-                const a = await ctx.question(`  capture ${count} untracked files in the delivery checkpoint too? [y/N] `);
-                return a !== null && /^y(es)?$/i.test(a.trim());
-              },
-            });
-            for (const note of r.notes ?? []) ctx.renderer.chromeLine(`  note: ${sanitizeLine(note)}`);
-            if (r.ok && r.ref !== undefined && r.oid !== undefined) delivery = { ref: r.ref, oid: r.oid };
-            else {
-              ctx.renderer.chromeLine(
-                `  delivery checkpoint not captured: ${sanitizeLine(r.error ?? 'unknown error')} (acceptance proceeds; /checkpoint is the manual path)`,
-              );
-            }
-          }
-        } else {
-          ctx.renderer.chromeLine('  delivery checkpoint: not a git repository — skipped (the event log remains the audit record)');
-        }
-      }
-
-      // The recorded consent. complete=false only through the explicit confirm path.
-      ctx.session.log.append({
-        type: 'session.accepted',
-        complete: acc.complete,
-        summary: acc.summary,
-        ...(acc.unfinished.length > 0 ? { unfinished: acc.unfinished } : {}),
-        ...(delivery !== null ? { deliveryRef: delivery.ref, deliveryOid: delivery.oid } : {}),
-      });
-      ctx.pendingNotes.push(
-        acc.complete
-          ? 'the user ACCEPTED the session result as COMPLETE (/accept). Treat the delivered work as accepted; do not re-run plan tasks.'
-          : `the user recorded a PARTIAL acceptance (/accept confirm) with ${acc.unfinished.length} known unfinished item(s). Do not silently resume that work — ask before continuing it.`,
-      );
-
-      // Cleanup (a): prune this session's owed harness refs now (idempotent; the quit path's
-      // re-fold then finds nothing owed — the latest delivery ref survives by construction).
-      if (ctx.pruneHarnessRefs !== undefined) {
-        try {
-          const pruneLine = await ctx.pruneHarnessRefs();
-          if (pruneLine !== null) ctx.renderer.chromeLine(`  checkpoints: ${pruneLine}`);
-        } catch (e) {
-          // Best-effort hygiene — acceptance itself is already recorded — but a swallowed
-          // throw left ZERO trace that a prune was ever attempted (the only silent catch on
-          // this surface, found by the S14.5 pre-scan). The quit path retries; the CLI backstop
-          // is always available.
-          ctx.renderer.chromeLine(
-            `  checkpoints: prune FAILED (${sanitizeLine((e as Error).message)}) — this session's refs remain under refs/agent-cli (retried at quit; agent checkpoint prune is the backstop)`,
-          );
-        }
-      }
-
-      // Cleanup (b): a COMPLETE acceptance retires the fully-executed approved plan via the
-      // existing discard flow (status → superseded; the file stays on disk as the audit
-      // trail; approval clears via the plan.discarded event). Partial accepts retire nothing.
-      if (acc.complete && state.kind === 'canonical' && state.status === 'approved' && state.approvedAndCurrent) {
-        const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'superseded', ctx.session.snapshots, ctx.session.clock);
-        if ('error' in w) {
-          ctx.renderer.chromeLine(`  plan not retired: ${sanitizeLine(w.error)} (acceptance itself is recorded)`);
-        } else {
-          ctx.session.log.append({ type: 'plan.discarded', planId: ctx.session.id, reason: 'accepted' });
-          void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
-          ctx.pendingNotes.push('the fully-executed plan was RETIRED (superseded) as part of the acceptance; a new update_plan write starts a fresh draft');
-          ctx.renderer.chromeLine('  plan retired (accepted → superseded; the file remains on disk for reference)');
-        }
-      }
-
-      ctx.renderer.chromeLine(`session accepted (${acc.complete ? 'complete' : 'partial'}) — ${sanitizeLine(acc.summary)}`);
-      if (acc.complete) {
-        // The delivery boundary suggestion (Session 14): commits stay user-typed and are never
-        // a side effect — this is one line of guidance, not automation.
-        ctx.renderer.chromeLine(
-          delivery !== null
-            ? `  delivery: checkpoint ${delivery.oid.slice(0, 12)} survives as the audit anchor (agent checkpoint list) — /commit turns the accepted work into a user-visible commit (optional)`
-            : '  delivery: /commit turns the accepted work into a user-visible commit (optional)',
-        );
-      }
+      await acceptSession(ctx, { confirm: sub === 'confirm' });
       return 'continue';
     }
 
@@ -620,25 +703,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         return 'continue';
       }
       if (sub === 'approve') {
-        if (state.kind === 'none') {
-          ctx.renderer.chromeLine('no plan document to approve');
-          return 'continue';
-        }
-        if (state.approvedAndCurrent) {
-          ctx.renderer.chromeLine('plan is already approved (the approval matches the current content)');
-          return 'continue';
-        }
-        const w = await setCanonicalStatus(ctx.layout, ctx.session.id, 'approved', ctx.session.snapshots, ctx.session.clock);
-        if ('error' in w) {
-          ctx.renderer.chromeLine(`cannot approve: ${sanitizeLine(w.error)}`);
-          return 'continue';
-        }
-        // The consent record binds the CONTENT sha — status/timestamp flips are sha-neutral by
-        // construction, so this approval survives exactly until the next semantic change.
-        ctx.session.log.append({ type: 'plan.approved', planId: ctx.session.id, sha256: w.contentSha });
-        void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
-        ctx.pendingNotes.push(`the user APPROVED the plan (content sha ${w.contentSha.slice(0, 12)}); planned execution may begin`);
-        ctx.renderer.chromeLine(`plan approved (content sha ${w.contentSha.slice(0, 12)}…) — recorded as consent evidence`);
+        await approvePlanCanonical(ctx, state);
         return 'continue';
       }
       if (sub === 'discard') {
@@ -1135,31 +1200,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
           );
           return 'continue';
         }
-        const esc = openEscalations[n - 1]!;
-        ctx.session.log.append({
-          type: 'repair.dismissed',
-          escalationSeq: esc.seq,
-          target: esc.target,
-          failureClass: esc.failureClass,
-          signature: esc.signature,
-          reason: sanitizeLine(reason),
-          source: 'user',
-        });
-        // Honest scope (S21 review): the DISMISSAL clears the escalation blocker only — an
-        // unproven repair ATTEMPT for the same failure keeps its own blocker until its declared
-        // regression checks pass, and the confirmation must not promise /accept more than that.
-        const remainingAttempts = ledger.attempts.filter(
-          (a) => a.signature === esc.signature && a.outcome === 'open' && a.pendingChecks.length > 0,
-        ).length;
-        ctx.renderer.chromeLine(
-          `escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) dismissed — recorded as evidence. The escalation no longer blocks /accept` +
-            `${remainingAttempts > 0 ? `; NOTE: ${remainingAttempts} unproven repair attempt(s) for the same failure still block until their regression checks pass` : ''}` +
-            ' and it will appear as an acceptance caveat, not as a resolution.',
-        );
-        ctx.pendingNotes.push(
-          `the user DISMISSED the open repair escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) with reason: ${sanitizeLine(reason)}. ` +
-            'It no longer blocks acceptance and is recorded as a caveat. Do not re-escalate the same failure without new evidence.',
-        );
+        dismissEscalation(ctx, openEscalations[n - 1]!, reason, ledger);
         return 'continue';
       }
       const lines: string[] = [];

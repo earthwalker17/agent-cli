@@ -480,10 +480,28 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
  * (a plan problem must not be able to end a turn).
  */
 export function planApprovalReminder(ctx: CommandContext): void {
+  const need = planReapprovalNeeded(ctx);
+  if (need === null) return;
+  // Deliberately NOT dimmed, unlike the rest of the end-of-turn chrome: this is the one line
+  // whose whole purpose is to be read.
+  ctx.renderer.chromeLine(
+    `  plan: ${need.why} — isolated executor task(s) ${need.waiting.join(', ')} CANNOT run until you re-approve. ` +
+      'Type /plan approve (or /plan to read it first). Only you can clear this; meanwhile the agent will keep working in the main session.',
+  );
+}
+
+/**
+ * The predicate behind the reminder, split out in S21.5 so the off-TTY LINE and the on-TTY PROMPT
+ * are driven by one derivation rather than two that agree today. Returns null when there is
+ * nothing to re-approve.
+ *
+ * Never throws: a plan problem must not be able to end a turn.
+ */
+export function planReapprovalNeeded(ctx: CommandContext): { why: string; waiting: string[] } | null {
   try {
     const state = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
-    if (state.kind !== 'canonical' || state.approvedAndCurrent) return;
-    if (state.status === 'superseded') return;
+    if (state.kind !== 'canonical' || state.approvedAndCurrent) return null;
+    if (state.status === 'superseded') return null;
     // A plan that was NEVER approved is the ordinary post-planning state: the model has just
     // written it and is presenting it for approval in the same breath. Warning there is noise,
     // and noise at the idle prompt is how real warnings stop being read (observed immediately:
@@ -492,26 +510,26 @@ export function planApprovalReminder(ctx: CommandContext): void {
     // The dangerous state is narrower — an approval EXISTED and no longer covers the plan. That
     // is the one a user cannot see coming, because nothing about the screen changed when it
     // happened.
-    if (state.approvedSha === null) return;
+    //
+    // S21.5: the never-approved case is now covered by the contextual APPROVAL prompt, which is
+    // not noise for the same reason — it has an answer, it fires once per plan content sha, and
+    // it completes the beat the model just opened by presenting the plan.
+    if (state.approvedSha === null) return null;
     const graph = state.canonical?.graph ?? null;
-    if (graph === null) return;
+    if (graph === null) return null;
     const executors = graph.tasks.filter((t) => t.role === 'executor');
-    if (executors.length === 0) return;
+    if (executors.length === 0) return null;
     const fold = foldGraphState(graph, ctx.session.log.events);
     const waiting = executors.filter((t) => fold.byId.get(t.id)?.state !== 'completed').map((t) => t.id);
-    if (waiting.length === 0) return;
-    const why =
-      state.diverged
+    if (waiting.length === 0) return null;
+    return {
+      why: state.diverged
         ? 'the plan changed after you approved it, so the approval no longer covers it'
-        : `the plan is ${state.status}`;
-    // Deliberately NOT dimmed, unlike the rest of the end-of-turn chrome: this is the one line
-    // whose whole purpose is to be read.
-    ctx.renderer.chromeLine(
-      `  plan: ${why} — isolated executor task(s) ${waiting.join(', ')} CANNOT run until you re-approve. ` +
-        'Type /plan approve (or /plan to read it first). Only you can clear this; meanwhile the agent will keep working in the main session.',
-    );
+        : `the plan is ${state.status}`,
+      waiting,
+    };
   } catch {
-    /* a plan problem must never end a turn */
+    return null;
   }
 }
 
