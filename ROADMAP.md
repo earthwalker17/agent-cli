@@ -84,8 +84,27 @@ leave the primary help list.
   `isTTY: true` end to end. It must be reactive: `io.ts` installs its `pending` resolver *after*
   writing the prompt, so an instantly-written answer lands in type-ahead where a `fresh` question
   never consumes it.
-- Live-verified against the built binary: `agent stauts` refused with no session created; the
-  approval prompt rendered and recorded `plan.approved` on a real TTY.
+- **Live-verified against a real provider** (Kimi `kimi-k2.7-code`; Anthropic was attempted first
+  and refused with `credit balance is too low`, which itself exercised the turn-error path — the
+  session stayed alive at the prompt). 11/11 driver steps, **16/16 post-hoc checks read from the
+  persisted log**, 6/6 CLI-binary checks. Evidence: `agent-cli-s215-live/DEMO.md`.
+  - The **contextual approval prompt fired on a real model-authored plan** ("2 task(s), 2 isolated
+    executor task(s) that CANNOT run until you approve"), `y` recorded
+    `plan.approved (content sha bd2ea676b996…)`, and the validator asserts **no `/plan approve` was
+    ever typed** — the approval came from the prompt.
+  - **`@review` found the seeded defect as its first observation** ("Trailing separator silently
+    drops final empty field") plus three real ones it found on its own, and the role's bounds held
+    from the child's own policy decisions: `read_file` allowed, its one `run_command` attempt
+    **asked → auto-denied** (a child has no human attached), `report_observation` × 4 allowed.
+  - **The separation property held live**: 4 observations recorded, and **zero** `review.findings`,
+    **zero** adversarial rounds consumed, no blockers, gate still satisfied.
+  - `@direct` refused by name with no `user.message` at all; `@plan.md is stale` reached the model
+    as ordinary prose; `/undo --all` and `/checkpoint prune` recorded nothing; `agent stauts`
+    refused with **0 state directories created**.
+- Two defects were found in the live DRIVER (not the product) and fixed for the artifact: it
+  watched only the chrome stream while `/report` writes to stdout, and it matched patterns against
+  the cumulative transcript, so a repeated end-of-turn line matched stale output and raced ahead
+  while `@review` was still running.
 
 ### Open / next
 
@@ -93,8 +112,11 @@ leave the primary help list.
   harness-owned), its own policy fact and fail-closed branch, on the S20 remote-pack pattern.
 - **Session 22**: arrow-key selection, deliberately deferred — readline owns stdin exclusively and
   `status.ts` is the only cursor-moving code, so raw mode is a TUI-session decision.
-- Not done this session: a full live E2E of the new prompts under a real provider; the interactive
-  proof was hand-driven against the mock provider.
+- Not done this session, and deliberately: a full-chain zero-to-delivery E2E and a demo recording.
+  The live pass verified the S21.5 surface specifically; it did not re-prove the whole loop.
+- The live plan was approved but its executor tasks were not run to completion — the session ended
+  at `4 unfinished — plan 0/2 completed · not accepted`, which is the honest state for a
+  verification run that stopped once the prompt had been proved.
 
 ---
 

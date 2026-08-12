@@ -178,8 +178,11 @@ removed, and why answering records byte-identical evidence by calling the same e
 mid-session look cannot block acceptance or spend an adversarial round. `@` becomes specialist
 routing (`@direct` removed, the `\b` trap fixed, unknown sigils refused by name). A typo at the
 shell no longer starts a billed session. Ten audit defects fixed with regression tests; suite 2147
-→ 2270. Honest correction recorded in ROADMAP: the "six duplicate renderers" claim was an
-overestimate — only `/review` was a pure fold, and consolidating it made the surface worse.
+→ 2254. **Live-verified on Kimi**: the approval prompt fired on a real model-authored plan and
+recorded the consent with no command typed, and `@review` found a seeded defect first while
+consuming zero adversarial review rounds (16/16 post-hoc checks, `agent-cli-s215-live/DEMO.md`).
+Honest correction recorded in ROADMAP: the "six duplicate renderers" claim was an overestimate —
+only `/review` was a pure fold, and consolidating it made the surface worse.
 
 ### Session 21.6 — The Git Capability Pack  ← **NEXT**
 
