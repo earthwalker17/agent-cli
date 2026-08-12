@@ -47,6 +47,8 @@ const USAGE = `Agent CLI v${VERSION} — a bounded local agent harness.
 Usage:
   agent                          Start an interactive session (REPL) in the current directory
   agent "<task>"                 Run a one-shot task in the current directory
+  agent run "<task>"             The same, said explicitly (use it when the task is one word,
+                                 or looks like a subcommand)
   agent --continue ["<task>"]    Resume the latest session (REPL without a task, one-shot with)
   agent resume <id> ["<task>"]   Resume a specific session (REPL without a task, one-shot with)
   agent undo [--all]             Undo the last file change (or all changes) of a session
@@ -104,6 +106,58 @@ recorded consent, not isolation. See README "Security model & honest limitations
 // one-shot model session, so before they were named here, `agent version` silently started a
 // paid agent run with the literal task string "version".
 const KNOWN = new Set(['run', 'resume', 'undo', 'diff', 'commit', 'checkpoint', 'report', 'plan', 'sessions', 'map', 'memory', 'trust', 'providers', 'grants', 'init', 'version', 'help']);
+
+/**
+ * In-session slash commands that are NOT process-level subcommands. Typed at the shell they used
+ * to fall through to a real, BILLED model session with the word itself as the task (S21.5 audit:
+ * `agent status` started a paid run). They are refused by name and pointed at the REPL.
+ */
+const REPL_ONLY = new Set([
+  'status', 'accept', 'tasks', 'cancel', 'checks', 'review', 'repair', 'preview', 'research', 'remote', 'provider', 'model', 'quit', 'exit',
+]);
+
+/** Ordinary Levenshtein, bounded by the short words involved. */
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length]!;
+}
+
+/**
+ * Why a bare positional must NOT become a one-shot session.
+ *
+ * The fall-through at the bottom of `main` sends any unrecognized first positional to `runTask`,
+ * which starts a real model session and bills for it. `KNOWN` exists because `agent version` once
+ * did exactly that — the class of bug was patched one word at a time, never removed. This closes
+ * it for the whole shape: a SINGLE bare word that is nearly a subcommand, or is a slash command
+ * from the REPL, is a mistake far more often than it is a task. Multi-word strings are untouched,
+ * so `agent "fix the parser"` still works, and `agent run "<task>"` forces any string through.
+ */
+export function misdispatchGuard(cmd: string): string | null {
+  if (/\s/.test(cmd)) return null; // a sentence is a task, never a mistyped verb
+  const word = cmd.toLowerCase();
+  const force = `if you really meant it as a task, say so explicitly: agent run "${cmd}"`;
+  const spell = (name: string): string => (REPL_ONLY.has(name) ? `/${name} (in the session)` : `agent ${name}`);
+
+  if (REPL_ONLY.has(word)) {
+    return `'${cmd}' is an in-session command, not a subcommand — start the agent with \`agent\` and type /${word} there.\n${force}`;
+  }
+  // Near-misses are checked against BOTH vocabularies: a typo of a slash command (`agent stauts`)
+  // is exactly as much a mistake as a typo of a subcommand, and used to be exactly as expensive.
+  const near = [...KNOWN, ...REPL_ONLY]
+    .filter((k) => k !== 'run' && editDistance(word, k) <= (k.length <= 4 ? 1 : 2))
+    .sort();
+  if (near.length > 0) {
+    return `unknown command '${cmd}' — did you mean ${near.map((n) => `\`${spell(n)}\``).join(' or ')}?\n${force}`;
+  }
+  return null;
+}
 
 interface Args {
   values: CliValues;
@@ -958,7 +1012,15 @@ export async function main(argv: string[]): Promise<number> {
       }
       return await runTask(values, cmd, { resumeId: id });
     }
-    if (cmd && !KNOWN.has(cmd)) return await runTask(values, cmd, {});
+    if (cmd && !KNOWN.has(cmd)) {
+      // A typo must never cost money. Refused BEFORE any session, state directory or provider call.
+      const misdispatch = misdispatchGuard(cmd);
+      if (misdispatch !== null) {
+        process.stderr.write(`${misdispatch}\n`);
+        return 1;
+      }
+      return await runTask(values, cmd, {});
+    }
     if (!cmd && (process.stdin.isTTY || values.interactive)) {
       return await runRepl(values, {});
     }

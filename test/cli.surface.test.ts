@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { grantTrust } from '../src/trust/store.js';
 import { trustPrompt } from '../src/trust/gate.js';
+import { misdispatchGuard } from '../src/cli/index.js';
 
 /**
  * Session 21.5 — the process-level surface fixes from the interaction audit.
@@ -72,6 +73,62 @@ describe('trustPrompt options line (S21.5)', () => {
     for (const p of [trustPrompt('C:\\demo'), trustPrompt('C:\\demo', { offerOnce: false })]) {
       expect(p).toContain('Trust is recorded consent, NOT a sandbox.');
     }
+  });
+});
+
+describe('misdispatchGuard — a typo must not cost money (S21.5)', () => {
+  it('refuses a slash command typed at the shell and points at the REPL', () => {
+    for (const w of ['status', 'accept', 'checks', 'review', 'repair', 'preview', 'tasks', 'remote']) {
+      const msg = misdispatchGuard(w);
+      expect(msg, w).toContain('is an in-session command');
+      expect(msg, w).toContain(`/${w}`);
+      expect(msg, w).toContain(`agent run "${w}"`);
+    }
+  });
+
+  it('refuses a near-miss of a real subcommand', () => {
+    expect(misdispatchGuard('reprot')).toContain('agent report');
+    expect(misdispatchGuard('sesions')).toContain('agent sessions');
+    expect(misdispatchGuard('comit')).toContain('agent commit');
+  });
+
+  it('refuses a near-miss of a SLASH command too — the case that used to bill', () => {
+    // `agent stauts` started a real, paid one-shot session with the task string "stauts".
+    expect(misdispatchGuard('stauts')).toContain('/status');
+    expect(misdispatchGuard('accpet')).toContain('/accept');
+  });
+
+  it('leaves genuine tasks alone', () => {
+    expect(misdispatchGuard('fix the parser')).toBeNull();
+    expect(misdispatchGuard('refactor')).toBeNull();
+    expect(misdispatchGuard('add a --json flag to the exporter')).toBeNull();
+    // Multi-word wins even when it starts with a command name.
+    expect(misdispatchGuard('status of the build is broken')).toBeNull();
+  });
+});
+
+d('the typo guard end to end (S21.5)', () => {
+  it('creates NO session and exits non-zero', () => {
+    const other = path.join(tmp, 'typo-ws');
+    fs.mkdirSync(other);
+    const script = scriptWriting('x.txt', 'x\n');
+    const r = spawnSync(
+      process.execPath,
+      [CLI, '--provider', 'mock', '--script', script, '--no-input', '--trust-this-workspace', 'stauts'],
+      { cwd: other, env: { ...process.env, AGENT_CLI_STATE_DIR: state }, encoding: 'utf8' },
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/did you mean/);
+    const projects = path.join(state, 'projects');
+    const slugs = fs.existsSync(projects) ? fs.readdirSync(projects) : [];
+    expect(slugs.some((s) => s.startsWith('typo-ws'))).toBe(false);
+  });
+
+  it('agent run forces the same string through as a task', () => {
+    const script = scriptWriting('forced.txt', 'forced\n');
+    const r = run(['--provider', 'mock', '--script', script, '--no-input', 'run', 'stauts']);
+    expect(r.code).toBe(0);
+    expect(fs.existsSync(path.join(ws, 'forced.txt'))).toBe(true);
   });
 });
 
