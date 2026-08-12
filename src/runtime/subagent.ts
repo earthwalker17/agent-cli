@@ -102,6 +102,8 @@ export interface NamedChildTools {
   retrieve?: Tool;
   /** Session 14: the reviewer's only findings channel. */
   reportFinding?: Tool;
+  /** Session 21.5: the @review inspector's only channel — advisory, read by no gate. */
+  reportObservation?: Tool;
   /** Session 19: the researcher's three instances, built per task by the research factory. */
   webSearch?: Tool;
   webExtract?: Tool;
@@ -119,7 +121,7 @@ export function childTools(toolNames: readonly string[], named: NamedChildTools 
   const tools: Tool[] = TOOLS.filter((t) => toolNames.includes(t.name));
   const admissible = (t: Tool | undefined): t is Tool =>
     t !== undefined && toolNames.includes(t.name) && FACT_KINDS.every((k) => CHILD_ADMISSIBLE_FACTS[k] || t[k] === undefined);
-  for (const t of [named.retrieve, named.reportFinding, named.webSearch, named.webExtract, named.recordSource]) {
+  for (const t of [named.retrieve, named.reportFinding, named.reportObservation, named.webSearch, named.webExtract, named.recordSource]) {
     if (admissible(t)) tools.push(t);
   }
   return tools;
@@ -190,6 +192,8 @@ export interface SubagentDeps {
    * instance passes the same structural fact check as retrieve.
    */
   reportFindingTool?: Tool;
+  /** Session 21.5: the inspector's per-task report_observation instance (same discipline). */
+  reportObservationTool?: Tool;
   /**
    * Session 19: the PER-TASK research instances for a researcher child. A FACTORY, not finished
    * instances, because these three cannot be built where `createReportFindingTool(acc)` can:
@@ -387,6 +391,7 @@ export async function runSubagentTask(deps: SubagentDeps, spec: SubagentSpec, pa
   const tools = childTools(contract.toolNames, {
     ...(deps.retrieveTool !== undefined ? { retrieve: deps.retrieveTool } : {}),
     ...(deps.reportFindingTool !== undefined ? { reportFinding: deps.reportFindingTool } : {}),
+    ...(deps.reportObservationTool !== undefined ? { reportObservation: deps.reportObservationTool } : {}),
     ...(researchTools !== undefined
       ? { webSearch: researchTools.webSearch, webExtract: researchTools.webExtract, recordSource: researchTools.recordSource }
       : {}),

@@ -105,7 +105,7 @@ export const SESSION_TOOL_NAMES = [
 ] as const;
 
 /** Tool names that exist only inside a CHILD session's registry, never the parent's. */
-export const CHILD_ONLY_TOOL_NAMES = ['report_finding', 'web_extract', 'record_source'] as const;
+export const CHILD_ONLY_TOOL_NAMES = ['report_finding', 'report_observation', 'web_extract', 'record_source'] as const;
 
 export interface AssembleDeps {
   /** Structural proof the trust gate ran and PASSED — assembly is impossible untrusted. */

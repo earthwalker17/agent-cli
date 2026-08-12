@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { caseFold } from '../shared/pathutil.js';
-import type { CommandTermination, ResearchNote, SessionEvent } from '../types.js';
+import type { CommandTermination, ResearchNote, SessionEvent, InspectionObservation } from '../types.js';
 import type { PlanGraph } from '../plan/schema.js';
 import { foldRepairs } from '../recovery/ledger.js';
 import { foldReview } from '../review/ledger.js';
@@ -288,6 +288,12 @@ export interface ReportJson {
   /** The structural review gate's recorded evidence (Session 14, additive): rounds, findings
    *  with DERIVED triage status, caveats. Statuses come from the same fold acceptance reads. */
   review?: ReportReview;
+  /**
+   * Session 21.5 (additive): `@review` inspector observations. Kept OUT of `review` on purpose —
+   * these gated nothing and consumed no adversarial round, and a machine consumer that merged
+   * them would be reading advice as if it were the review record.
+   */
+  inspections?: { childSessionId: string; focus?: string; observations: InspectionObservation[] }[];
   /** Delegated subagent tasks (V0.6). Child usage lives here and in the child's own log — it is
    *  NOT included in this session's usage totals. status null = never completed (crash/abort). */
   tasksDelegated: {
@@ -1183,6 +1189,18 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
     ...(browserFlows.length > 0 ? { browserFlows } : {}),
     ...(harnessCheckpoints.length > 0 ? { harnessCheckpoints } : {}),
     ...(review.rounds.length > 0 || review.findings.length > 0 ? { review } : {}),
+    // S21.5: a pure fold over the advisory channel. Deliberately not merged into `review`.
+    ...((): Record<string, never> | { inspections: NonNullable<ReportJson['inspections']> } => {
+      const inspections = events
+        .filter((e) => e.type === 'inspection.recorded')
+        .map((e) =>
+          e.type === 'inspection.recorded'
+            ? { childSessionId: e.childSessionId, ...(e.focus !== undefined ? { focus: e.focus } : {}), observations: e.observations }
+            : null,
+        )
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+      return inspections.length > 0 ? { inspections } : {};
+    })(),
     taskChanges,
     taskApplies,
     integrity: {
@@ -1525,6 +1543,31 @@ function renderMarkdown(r: ReportJson): string {
       'Recorded findings are the review gate\'s only input; reviewer prose is narration. Triage is model judgment: a refutation is an UNVERIFIED model claim, rendered here verbatim for audit — an address counts only when its cited refs exist in this log.',
     );
     L.push('');
+  }
+
+  // Session 21.5 — @review inspections. A SEPARATE section from the adversarial review above,
+  // and the heading says advisory, because the difference is the whole point: nothing here gated
+  // anything, and a later reader must not mistake an inspection for a review round.
+  {
+    const inspections = r.inspections ?? [];
+    if (inspections.length > 0) {
+      L.push('## Inspections (@review — advisory, gated nothing)');
+      for (const ins of inspections) {
+        L.push(`- inspector ${ins.childSessionId}${ins.focus !== undefined ? ` · focus: ${ins.focus}` : ''} — ${ins.observations.length} observation(s)`);
+        for (const o of ins.observations) {
+          L.push(`  - ${o.observationId} [${o.kind}, ${o.severity}, confidence ${o.confidence}] '${o.title}'`);
+          L.push(`    paths: ${o.paths.join(', ')}`);
+          L.push(`    scenario: ${o.scenario}`);
+          L.push(`    inspector evidence: ${o.evidence}`);
+          if (o.suggestion !== undefined) L.push(`    suggested: ${o.suggestion}`);
+        }
+      }
+      L.push('');
+      L.push(
+        'Observations are ADVICE recorded by a read-only inspector the user invoked with @review. They block no gate, consumed no adversarial review round, and were not verified by the harness — treat any that were acted on as the main agent\'s judgement, not as confirmed defects.',
+      );
+      L.push('');
+    }
   }
 
   L.push(`## Actions`);

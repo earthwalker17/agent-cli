@@ -53,6 +53,12 @@ export const SIGILS: readonly Sigil[] = [
     note: 'the user explicitly invoked PLAN MODE for this request: investigate as needed (read-only; delegate explorer tasks where useful), write or update the plan with update_plan, and present it — do NOT begin implementation or any mutating work until the user approves the plan (/plan approve)',
   },
   {
+    word: 'review',
+    usage: 'usage: @review [focus] — inspect the codebase for bugs, weak points and regressions (advisory; blocks nothing)',
+    event: () => ({ type: 'inspection.route', source: 'user-sigil' }),
+    note: 'the user explicitly invoked the REVIEW AGENT: delegate one `inspector` task (two or three only if the focus genuinely splits into independent areas), giving it the concrete focus and the questions it must answer. Then read its RECORDED observations and drive the work: confirm anything load-bearing yourself against the real code, tell the user plainly what you agree with and what you do not, and propose or make the fixes that are warranted. Its observations are ADVICE — they block no gate and consume no adversarial review round, so do not treat them as verified defects and do not treat this as the end-of-session review.',
+  },
+  {
     word: 'search',
     usage: 'usage: @search <question> — one bounded web lookup, answered from snippets',
     event: () => ({ type: 'research.route', mode: 'search', source: 'user-sigil' }),

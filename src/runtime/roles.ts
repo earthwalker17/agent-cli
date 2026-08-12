@@ -4,6 +4,7 @@ import {
   buildExplorerSystemPrompt,
   buildPlannerSystemPrompt,
   buildResearcherSystemPrompt,
+  buildInspectorSystemPrompt,
   buildReviewerSystemPrompt,
 } from '../workspace/system-prompt.js';
 import type { WorkspaceMap } from '../workspace/map.js';
@@ -75,6 +76,13 @@ const REVIEWER_TOOLS = [...READ_ONLY_TOOLS, 'report_finding'] as const;
  * pins produces generic answers. The point is to compare the two.
  */
 const RESEARCHER_TOOLS = [...READ_ONLY_TOOLS, 'web_search', 'web_extract', 'record_source'] as const;
+/**
+ * 'report_observation' (Session 21.5) follows the same named-instance discipline: ONLY the
+ * inspector contract names it. It is the `@review` child's only channel to the parent, and it is
+ * deliberately NOT `report_finding` — that one feeds the adversarial review gate, whose findings
+ * block acceptance and whose rounds are capped at two.
+ */
+const INSPECTOR_TOOLS = [...READ_ONLY_TOOLS, 'report_observation'] as const;
 const EXECUTOR_TOOLS = ['read_file', 'list_files', 'search', 'run_command', 'write_file', 'edit_file'] as const;
 const READ_ONLY_BUDGET: TaskBudget = { maxSteps: 15, timeoutMs: 300_000, maxOutputTokens: 30_000 };
 /**
@@ -100,6 +108,14 @@ const REVIEWER_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 720_000, maxOutpu
  * the PARENT, not the child, so a child cannot pace itself — the bounds have to do that for it.
  */
 const RESEARCHER_BUDGET: TaskBudget = { maxSteps: 20, timeoutMs: 600_000, maxOutputTokens: 30_000 };
+/**
+ * Session 21.5: the inspector's work has the same interleaved shape the reviewer budget was raised
+ * for — read, confirm, record, read on — so it inherits those numbers rather than the starved
+ * 15-step read-only default that made diligent lenses die on `budget-steps`. It is invoked
+ * interactively, so the wall clock matters to a waiting human; 12 minutes is the same ceiling the
+ * reviewer got after two of three kimi lenses hit the old 8-minute wall.
+ */
+const INSPECTOR_BUDGET: TaskBudget = { maxSteps: 24, timeoutMs: 720_000, maxOutputTokens: 30_000 };
 
 /**
  * Executor budget is larger: mutating work takes more steps. Since S20.5 the wall clock EXCLUDES
@@ -152,6 +168,20 @@ export const ROLE_CONTRACTS: Record<SubagentRoleName, RoleContract> = {
     budget: RESEARCHER_BUDGET,
     approvals: 'auto-deny',
     buildPrompt: (a) => buildResearcherSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve, a.webExtract),
+  },
+  /**
+   * Session 21.5 — the `@review` Review Agent. Read-only in the workspace and read-only to the
+   * gates: its `report_observation` records advice, never a blocker. Separate from `reviewer`
+   * because sharing that role would let a mid-session "have a look at this" make a green session
+   * unacceptable and burn one of the two adversarial rounds before the gate is reached.
+   */
+  inspector: {
+    name: 'inspector',
+    access: 'read-only',
+    toolNames: INSPECTOR_TOOLS,
+    budget: INSPECTOR_BUDGET,
+    approvals: 'auto-deny',
+    buildPrompt: (a) => buildInspectorSystemPrompt(a.workspaceRoot, a.map, a.sandbox, a.git, a.agentMd, a.retrieve),
   },
   executor: {
     name: 'executor',

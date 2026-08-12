@@ -598,6 +598,29 @@ export type ReviewConfidence = 'high' | 'medium' | 'low';
  * ids), and deliberately NOT content-derived — two findings sharing a title are two findings,
  * and merging them would be judgment, not derivation.
  */
+/**
+ * What an `@review` inspector records (Session 21.5). Shaped like a ReviewFinding on purpose —
+ * the same discipline of "what did you actually inspect" and "what concretely goes wrong" — but a
+ * DIFFERENT type, carried on a different event, read by no gate. It is advice for the parent and
+ * the human, never a blocker: the adversarial review gate keeps `ReviewFinding` to itself.
+ */
+export interface InspectionObservation {
+  observationId: string;
+  severity: ReviewSeverity;
+  /** What kind of problem this is — the axis a user asks @review about. */
+  kind: 'bug' | 'regression-risk' | 'architecture' | 'weak-spot' | 'debug-lead';
+  title: string;
+  /** Workspace-relative path prefixes the observation affects (validated at recording). */
+  paths: string[];
+  /** What was actually inspected — file:line references, the code read, the state observed. */
+  evidence: string;
+  /** The concrete failure or risk: inputs/state → wrong outcome, or why this will bite later. */
+  scenario: string;
+  confidence: ReviewConfidence;
+  /** What the PARENT should do to confirm or fix it — @review advises, the parent acts. */
+  suggestion?: string;
+}
+
 export interface ReviewFinding {
   findingId: string;
   severity: ReviewSeverity;
@@ -635,7 +658,7 @@ export type ReviewEvidence = {
  * this in `runtime/roles.ts`. `decide()` consults THIS table and fails closed on any role that
  * is not in it; 'mutating-worktree' roles additionally require worktree isolation to exist.
  */
-export type SubagentRoleName = 'explorer' | 'planner' | 'reviewer' | 'executor' | 'researcher';
+export type SubagentRoleName = 'explorer' | 'planner' | 'reviewer' | 'executor' | 'researcher' | 'inspector';
 /**
  * What a role may REACH. 'read-only' and 'mutating-worktree' are the workspace axis;
  * 'read-only-external' (Session 19) adds the network axis to a role that is still read-only in
@@ -650,6 +673,18 @@ export const SUBAGENT_ROLES: Record<SubagentRoleName, { access: SubagentRoleAcce
   reviewer: { access: 'read-only' },
   executor: { access: 'mutating-worktree' },
   researcher: { access: 'read-only-external' },
+  /**
+   * Session 21.5 — the `@review` Review Agent. Read-only, like the reviewer, and deliberately a
+   * SEPARATE role rather than a second use of it: the reviewer's recorded findings block `/accept`
+   * regardless of whether a review was ever required, never expire, and each round it runs spends
+   * one of only two MAX_REVIEW_ROUNDS. A user asking "have a look at this" mid-session must not be
+   * able to make a green session unacceptable, and must not be able to exhaust the adversarial
+   * gate's budget before the gate is reached. The separation is structural, not conventional: the
+   * caps counter matches `role === 'reviewer'` and the review ledger derives rounds only from that
+   * or from a `review.findings` event, so a differently-named role emitting `inspection.recorded`
+   * cannot touch either.
+   */
+  inspector: { access: 'read-only' },
 };
 /** Access class for a role name, or undefined when the role is unknown (⇒ deny, fail closed). */
 export function subagentRoleAccess(role: string): SubagentRoleAccess | undefined {
@@ -812,6 +847,19 @@ export type TaskEvidence =
       /** A short sanitized label of the lens (from the task text) for report/render surfaces. */
       lens?: string;
       findings: ReviewFinding[];
+    }
+  | {
+      /**
+       * An `@review` inspector child's recorded observations (Session 21.5). Deliberately a
+       * separate kind from 'review-findings': the review ledger mints a round from ANY
+       * `review.findings` event, so reusing that channel would have let a casual @review consume
+       * the adversarial gate's two-round budget and block acceptance. Advisory by construction.
+       */
+      kind: 'inspection';
+      childSessionId: string;
+      /** A short sanitized label of the focus (from the task text) for report/render surfaces. */
+      focus?: string;
+      observations: InspectionObservation[];
     };
 
 /**
@@ -1855,6 +1903,20 @@ export type EventBody =
       lens?: string;
       findings: ReviewFinding[];
     }
+  /**
+   * Session 21.5 — an `@review` inspector's recorded observations. Named `inspection.recorded`
+   * and NOT `review.findings` for a load-bearing reason: `review/ledger.ts` derives a review round
+   * from any `review.findings` event's callId, so an advisory inspection emitted on that channel
+   * would silently spend one of the two adversarial rounds and its critical/high items would block
+   * `/accept`. No gate reads this event.
+   */
+  | {
+      type: 'inspection.recorded';
+      callId: string;
+      childSessionId: string;
+      focus?: string;
+      observations: InspectionObservation[];
+    }
   | {
       type: 'review.triage';
       callId: string;
@@ -2419,6 +2481,16 @@ export type EventBody =
   | {
       type: 'research.route';
       mode: 'research' | 'search';
+      source: 'user-sigil';
+    }
+  /**
+   * The user invoked the Review Agent (Session 21.5, `@review`). Recorded for the same reason
+   * `plan.route` and `research.route` are: a routing decision the USER made frames the turn, and
+   * "the human asked for an inspection" must stay distinguishable from the model deciding to look
+   * around on its own. It grants nothing.
+   */
+  | {
+      type: 'inspection.route';
       source: 'user-sigil';
     }
   | {

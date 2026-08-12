@@ -581,10 +581,23 @@ describe('REPL: plan mode (Session 11 — canonical structured plans)', () => {
     // /help. Removing it makes `@` mean "specialist discipline" rather than "mode switch".
     const r = await drive([{ say: 'unused' }], ['@direct fix the typo\n', '/quit\n']);
     expect(r.chromeOut).toContain('unknown routing sigil: @direct');
-    expect(r.chromeOut).toContain('@plan, @search, @research');
+    expect(r.chromeOut).toContain('@plan, @review, @search, @research');
     // Refused, not silently sent: no turn ran and no routing was recorded.
     expect(r.events.some((e) => e.type === 'user.message')).toBe(false);
     expect(r.events.some((e) => e.type === 'plan.route')).toBe(false);
+  });
+
+  it('@review routes to the Review Agent with an inspection.route event', async () => {
+    const r = await drive([{ say: 'inspecting' }], ['@review the transport layer\n', '/quit\n']);
+    const msg = r.events.find((e) => e.type === 'user.message');
+    const text = msg?.type === 'user.message' ? msg.text : '';
+    expect(text).toContain('REVIEW AGENT');
+    expect(text).toContain('inspector');
+    expect(text).toContain('the transport layer');
+    expect(text).not.toContain('@review');
+    // The note must say plainly that this is not the acceptance gate.
+    expect(text).toContain('block no gate');
+    expect(r.events.find((e) => e.type === 'inspection.route')).toMatchObject({ source: 'user-sigil' });
   });
 
   it('an unknown sigil is refused by name instead of vanishing into prose', async () => {

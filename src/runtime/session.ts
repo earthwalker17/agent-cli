@@ -995,6 +995,19 @@ export function recordTaskEvidence(session: Session, callId: string, e: TaskEvid
         findings: e.findings,
       });
       return;
+    // Session 21.5: the @review inspector's advisory channel. A DIFFERENT event type from
+    // review.findings on purpose — `review/ledger.ts` mints an adversarial round from any
+    // review.findings callId, so emitting inspections there would spend the gate's two-round
+    // budget and let advice block acceptance.
+    case 'inspection':
+      session.log.append({
+        type: 'inspection.recorded',
+        callId,
+        childSessionId: e.childSessionId,
+        ...(e.focus !== undefined ? { focus: e.focus } : {}),
+        observations: e.observations,
+      });
+      return;
   }
 }
 

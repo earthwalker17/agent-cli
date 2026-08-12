@@ -97,6 +97,10 @@ describe('scale bounds (S16 raised these; S20.5 retuned them for the v1.6 shape)
     // Session 19. 600s, not 420s: the live run showed a researcher timing out mid-reading with
     // nothing recorded; the ceiling landed with the per-task page cap and the extract timeout.
     expect(ROLE_CONTRACTS.researcher.budget).toEqual({ maxSteps: 20, timeoutMs: 600_000, maxOutputTokens: 30_000 });
+    // Session 21.5. The @review inspector inherits the reviewer's numbers, not the 15-step
+    // read-only default: its work has the same interleaved read → confirm → record → read shape
+    // that starved the diligent lenses at 15.
+    expect(ROLE_CONTRACTS.inspector.budget).toEqual({ maxSteps: 24, timeoutMs: 720_000, maxOutputTokens: 30_000 });
     // The worktree sweep's live-pid age hatch is COUPLED to the executor clock (S20.5): with
     // approval wait excluded, a live task can legitimately be hours old.
     expect(SWEEP_LIVE_MAX_AGE_MS).toBe(8 * 60 * 60 * 1000);

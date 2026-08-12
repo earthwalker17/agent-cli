@@ -1,8 +1,9 @@
 import path from 'node:path';
 import { z } from 'zod';
-import { REVIEW_SEVERITIES, type ReviewFinding, type SessionEvent, type SubagentRoleName, type TaskChangeFile, type Tool, type ToolContext, type ToolResult } from '../types.js';
+import { REVIEW_SEVERITIES, type InspectionObservation, type ReviewFinding, type SessionEvent, type SubagentRoleName, type TaskChangeFile, type Tool, type ToolContext, type ToolResult } from '../types.js';
 import { createNoteAccumulator } from './record-source.js';
 import { createFindingAccumulator, createReportFindingTool } from './report-finding.js';
+import { createObservationAccumulator, createReportObservationTool } from './report-observation.js';
 import { MAX_REVIEW_ROUNDS } from '../review/ledger.js';
 import { sanitizeLine } from '../shared/text.js';
 import { sha256 } from '../shared/hash.js';
@@ -51,9 +52,13 @@ import type { SnapshotStore } from '../store/snapshots.js';
 const TaskSpec = z
   .object({
     role: z
-      .enum(['explorer', 'planner', 'reviewer', 'executor', 'researcher'])
+      .enum(['explorer', 'planner', 'reviewer', 'executor', 'researcher', 'inspector'])
       .describe(
-        'explorer: read-only survey/search. planner: read-only plan drafting. reviewer: read-only adversarial diff review. ' +
+        'explorer: read-only survey/search. planner: read-only plan drafting. reviewer: read-only adversarial diff review — ' +
+          'its findings feed the acceptance gate and its rounds are capped, so use it for the end-of-session review, not for browsing. ' +
+          'inspector: read-only diagnostic inspection of the CURRENT codebase for bugs, regression risks, architectural problems and ' +
+          'debug leads (this is what @review invokes); its observations are ADVICE — they block nothing and consume no review round, ' +
+          'so it is the right role whenever the user asks "look at this" mid-session. ' +
           'researcher: read-only WEB research — searches, corroborates and records source-backed findings, and returns claims with ' +
           'their provenance instead of raw pages (requires your approval to spawn; spends a shared session research budget). ' +
           'executor: implements changes in an ISOLATED git worktree (requires your approval to spawn; its approvals forward to the user).',
@@ -843,6 +848,40 @@ export function createDelegateTool(
                 : []),
             ];
             return { result, notes, capturedPaths: [], findings };
+          }
+          if (spec.role === 'inspector') {
+            // Session 21.5 — the reviewer branch's shape, on a channel no gate reads. One
+            // accumulator per task; capture is unconditional for any child that existed, so an
+            // empty list is a recorded "I looked and found nothing", which is a real answer.
+            const acc = createObservationAccumulator();
+            const result = await runSubagentTask(
+              { ...taskDeps, reportObservationTool: createReportObservationTool(acc) },
+              spec,
+              ctx.signal,
+            );
+            let observations: InspectionObservation[] = [];
+            const captureLanded = result.childSessionId !== '' && ctx.reportTask !== undefined;
+            if (result.childSessionId !== '') {
+              observations = acc.items.map((it, i) => ({ ...it, observationId: `${result.childSessionId}#${i + 1}` }));
+              ctx.reportTask?.({
+                kind: 'inspection',
+                childSessionId: result.childSessionId,
+                focus: sanitizeLine(t.task).slice(0, 60),
+                observations,
+              });
+            }
+            const byKind = new Map<string, number>();
+            for (const o of observations) byKind.set(o.kind, (byKind.get(o.kind) ?? 0) + 1);
+            const counts = [...byKind.entries()].map(([k, n]) => `${n} ${k}`).join(', ');
+            const notes: string[] = [
+              !captureLanded && observations.length > 0
+                ? `[harness] WIRING ERROR: ${observations.length} observation(s) could NOT be recorded (evidence channel missing)`
+                : observations.length > 0
+                  ? `[harness] ${observations.length} observation(s) RECORDED via report_observation (${counts}): ${observations.map((o) => `${o.observationId} (${o.severity}) ${o.title}`).join(' · ')}`
+                  : '[harness] ZERO observations recorded — the inspector read the code and raised nothing',
+              '[harness] these are ADVISORY: they block no gate and consumed no adversarial review round. Decide what to act on, and verify anything load-bearing yourself before changing code on the strength of it.',
+            ];
+            return { result, notes, capturedPaths: [], findings: [] };
           }
           if (spec.role === 'researcher') {
             // One accumulator + one instance bundle PER task (parallel researchers must never
