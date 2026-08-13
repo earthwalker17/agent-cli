@@ -132,7 +132,8 @@ export type SetupAction = (typeof SETUP_ACTIONS)[number];
  * end. That inheritance is the reason a model may take them freely: twelve whole-tree refs per
  * session would otherwise accumulate in the user's repository forever.
  */
-export type HarnessRefKind = 'task-base' | 'pre-integration' | 'delivery' | 'agent';
+export const HARNESS_REF_KINDS = ['task-base', 'pre-integration', 'delivery', 'agent'] as const;
+export type HarnessRefKind = (typeof HARNESS_REF_KINDS)[number];
 
 /**
  * Declaration order is the canonical order everywhere (schemas, views, reports, prompts) —
@@ -1207,8 +1208,9 @@ export interface RemoteTargetFact {
  *
  * Everything a reviewer needs in order to check the branch's central claim: the command is
  * harness-composed (`argvPreview` is the literal argv, and the tool takes no ref, path, author or
- * format input, so no model text reaches it), it is scoped to the workspace subtree, and it returns
- * no file bytes. That last one matters because the branch allows before `readsPaths` is ever
+ * format input, so no model text reaches it), and it returns no file bytes. (Scope is per view and
+ * stated by the view itself: `changes` and `log` are workspace-subtree-scoped; `summary` reports
+ * the repository.) The no-bytes property matters because the branch allows before `readsPaths` is ever
  * evaluated — the secret-name and containment checks do NOT run for this tool, and the only thing
  * making that safe is that nothing it can emit is file content.
  */

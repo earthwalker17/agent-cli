@@ -1870,8 +1870,12 @@ work-discarding forms (`restore`, `checkout --`, `reset --hard`, `clean`, `stash
 and `harness.checkpoint` for harness- and model-created refs);
 (c) `GitClient` is reachable from the model ONLY through the two tools below, whose facts the
 engine gates and whose argv the harness composes — never as a general git surface;
-(d) **the model may read repository state and capture recovery state to hidden refs; it may never
-move a ref, index, HEAD, branch, tag or remote the user can see.**
+(d) **the model has no UNILATERAL path to any ref, index, HEAD, branch, tag or remote the user can
+see.** The model-facing tools cannot reach them at all; the only routes are the harness-owned flows
+the user drives, and `run_command`, which asks per call and never auto-runs a git mutation
+(`command-review.ts` proves only read-only subcommands safe). "Never" would be an overclaim: a
+human who approves `git commit` at the prompt has moved HEAD, and that is consent working, not a
+hole.
 
 Condition (c) is a deliberate widening of the Session 20 wording ("structurally unreachable"),
 argued and pinned in the same change. What it does NOT widen is the compound invariant, restated
@@ -1883,11 +1887,12 @@ publish content a human did not commit.**
 Two facts, `gitRead` and `gitCheckpoint`, each with a fail-closed branch — the S20
 `remoteRead`/`remoteWrite` shape, so the conflicting-contract rule refuses a tool that could both
 read and write and "the read tool writes nothing" is verified by finding no second fact. Both
-branches open with the same guards in the same order: conflicting contract → **lineage deny** (an
-executor child works in a detached worktree, so its checkpoint ref would land in the user's real
-repo under the CHILD's session id, where the parent's owed-prune fold never sees it) → **mutation
-plan must be empty** (a non-empty one would sail past the branch that validates write targets and
-captures snapshots) → the tool's own `blocked` reason.
+branches open with the same guards in the same order (`gitGuards`, mirroring `remoteGuards`):
+conflicting contract → **mutation plan must be empty** (a non-empty one would sail past the branch
+that validates write targets and captures snapshots; a throwing `mutates()` denies as an invalid
+contract) → **lineage deny** (an executor child works in a detached worktree, so its checkpoint ref
+would land in the user's real repo under the CHILD's session id, where the parent's owed-prune fold
+never sees it) → the tool's own `blocked` reason.
 
 - **`git_status`** (`gitRead` → `observe`/**allow**, rule `git.read`) — views `summary` (a LIVE
   `detectGitFacts` re-probe, worded so it cannot be confused with the session-start photograph),

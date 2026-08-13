@@ -40,6 +40,41 @@ export interface PromptAnswer<K extends string> {
   reason: 'chosen' | 'declined' | 'eof' | 'unrecognized';
 }
 
+/**
+ * Words that mean NO, resolved before the first character is (Session 21.6).
+ *
+ * First-character resolution is this family's inherited hazard, and the header above already names
+ * it. It became load-bearing the moment an affirmative key started with the same letter as a
+ * common refusal: on the completion prompt, `[c] commit … then accept` sits one keystroke away
+ * from someone typing `cancel` to back out, and the parse would have read that as consent to
+ * record an acceptance and open a commit flow.
+ *
+ * The list can only ever turn a would-be key into a DECLINE — never the reverse — so it cannot
+ * make any prompt more permissive, and "anything unrecognized does nothing" was already the
+ * module's stated rule. Exact words only: no prefix matching, because `never mind` and `nothing`
+ * are refusals while a future `n`-keyed affirmative would not be.
+ */
+const NEGATIVE_WORDS: ReadonlySet<string> = new Set([
+  'no',
+  'nope',
+  'nah',
+  'never',
+  'never mind',
+  'nevermind',
+  'nothing',
+  'cancel',
+  'quit',
+  'exit',
+  'stop',
+  'abort',
+  'back',
+  'skip',
+  'later',
+  'wait',
+  'not now',
+  'not yet',
+]);
+
 /** Pure. `answer === null` is EOF/Ctrl+C. Empty is a DECLINE, never a default-yes. */
 export function parseChoice<K extends string>(
   answer: string | null,
@@ -48,7 +83,13 @@ export function parseChoice<K extends string>(
   if (answer === null) return { key: null, raw: null, reason: 'eof' };
   const trimmed = answer.trim();
   if (trimmed.length === 0) return { key: null, raw: answer, reason: 'declined' };
-  const first = trimmed.toLowerCase()[0];
+  const lower = trimmed.toLowerCase();
+  // Keys are single characters and every word above is at least two, so this can never shadow a
+  // key the user typed exactly. `no` on a prompt with an `[n] not now` key resolves to `declined`
+  // rather than to that key, which is the same outcome by construction: the decline-shaped key IS
+  // the decline, and every caller treats a null key as do-nothing.
+  if (NEGATIVE_WORDS.has(lower)) return { key: null, raw: answer, reason: 'declined' };
+  const first = lower[0];
   const hit = choices.find((c) => c.key === first);
   return hit !== undefined
     ? { key: hit.key, raw: answer, reason: 'chosen' }

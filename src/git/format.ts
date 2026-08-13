@@ -62,7 +62,16 @@ export function fence(lines: readonly string[]): string[] {
 export function renderGitSummary(f: GitFacts): string {
   const lines: string[] = [h('Local repository state, read right now (not the session-start snapshot):')];
   if (!f.isRepo) return [...lines, h(f.detail)].join('\n');
-  lines.push(h(`- repository root: ${f.repoRoot ?? '(unknown)'}${f.workspaceIsRepoRoot ? '' : '  (the workspace is a SUBDIRECTORY of it; every view below is scoped to the workspace subtree)'}`));
+  // Scope honesty: `detectGitFacts` probes `status --porcelain=v2 -b -z` with NO pathspec, so the
+  // counts below are REPOSITORY-wide. `changes` and `log` really are subtree-scoped (`-- .` with
+  // cwd=workspaceRoot). Saying "every view is scoped" would have been the single sentence that
+  // made two views contradict each other in a monorepo, with the model reporting both.
+  lines.push(
+    h(
+      `- repository root: ${f.repoRoot ?? '(unknown)'}` +
+        (f.workspaceIsRepoRoot ? '' : '  (the workspace is a SUBDIRECTORY of it: the counts below are REPOSITORY-wide, while the changes and log views are scoped to the workspace subtree)'),
+    ),
+  );
   lines.push(...fence([f.detached ? `- HEAD: detached @ ${f.head ?? '(unknown)'}` : `- branch: ${f.branch ?? '(unknown)'}${f.unborn ? ' (unborn — no commits yet)' : ` @ ${f.head ?? '(unknown)'}`}`]));
   if (f.upstream !== null) {
     lines.push(h(`- upstream: ${sanitizeLine(f.upstream)}${f.ahead !== null && f.behind !== null ? ` (${f.ahead} ahead, ${f.behind} behind)` : ''}`));
@@ -129,7 +138,7 @@ export function renderGitChanges(preview: CommitPreview, stats: DiffStat, cap: n
   }
   lines.push(
     h(
-      'You cannot commit. Committing is the user\'s decision and runs through their own preview and confirmation; ' +
+      'You have no way to commit on your own initiative. Committing is the user\'s decision and runs through their own preview and confirmation; ' +
         'the harness offers it at the acceptance boundary, and the user can type /commit at any time. Say what you changed and why — do not propose committing everything in the workspace.',
     ),
   );

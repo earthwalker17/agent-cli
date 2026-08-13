@@ -158,6 +158,24 @@ describe('parseChoice — one grammar, no affirmative default (S21.5)', () => {
     expect(parseChoice(null, CHOICES)).toMatchObject({ key: null, reason: 'eof' });
   });
 
+  it('S21.6: a word that means NO is a DECLINE, even when it starts with an affirmative key', () => {
+    // `[c] commit … then accept` sits one keystroke away from someone typing `cancel` to back out,
+    // and first-character resolution would have read that as consent to record an acceptance.
+    const withC = [{ key: 'y', label: 'accept' }, { key: 'c', label: 'commit, then accept' }, { key: 'n', label: 'not yet' }] as const;
+    for (const word of ['cancel', 'CANCEL', ' cancel ', 'quit', 'stop', 'abort', 'never mind', 'not yet', 'later', 'skip']) {
+      expect(parseChoice(word, withC), word).toMatchObject({ key: null, reason: 'declined' });
+    }
+    // The key itself, and ordinary affirmative words, are untouched.
+    expect(parseChoice('c', withC).key).toBe('c');
+    expect(parseChoice('commit', withC).key).toBe('c');
+    expect(parseChoice('yes', withC).key).toBe('y');
+    // `no` on a prompt with an [n] key resolves to `declined` rather than to that key — the same
+    // outcome by construction, since the decline-shaped key IS the decline and every caller
+    // treats a null key as do-nothing. Keys are single characters, so nothing can be shadowed.
+    expect(parseChoice('no', [{ key: 'n', label: 'no' }] as const)).toMatchObject({ key: null, reason: 'declined' });
+    expect(parseChoice('n', [{ key: 'n', label: 'no' }] as const)).toMatchObject({ key: 'n', reason: 'chosen' });
+  });
+
   it('does not honour a key the prompt never offered', () => {
     // `a` mints durable authority in the APPROVAL grammar. It must mean nothing here.
     expect(parseChoice('a', CHOICES)).toMatchObject({ key: null, reason: 'unrecognized' });
@@ -577,15 +595,15 @@ describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-a
       [{ say: 'writing', calls: [{ name: 'write_file', input: { path: 'note.txt', content: 'hello\n' } }] }, { say: 'done' }],
       [
         { awaitChrome: /\/help for commands/, send: 'write a note' },
-        { awaitChrome: /\[c\] accept, then commit the 1 file\(s\)/, send: 'c' },
+        { awaitChrome: /\[c\] commit the 1 file\(s\)/, send: 'c' },
         { awaitChrome: /commit message \[/, send: '' },
         { awaitChrome: /commit 1 file\(s\) as/, send: 'y' },
-        { awaitChrome: /committed /, send: '/quit' },
+        { awaitChrome: /session accepted \(complete\)/, send: '/quit' },
       ],
     );
 
     expect(r.code).toBe(0);
-    expect(r.chrome).toContain('[c] accept, then commit');
+    expect(r.chrome).toContain('[c] commit the 1 file(s)');
     // Both halves recorded, and the commit event is the one the slash body appends — no second
     // path, no second shape.
     expect(r.events.some((e) => e.type === 'session.accepted' && e.complete)).toBe(true);
@@ -616,7 +634,7 @@ describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-a
       // The acceptance question still fires; only the commit half is withheld, because offering an
       // action that refuses the moment it is chosen is worse than not offering it.
       expect(r.chrome).toContain('[y] accept the session');
-      expect(r.chrome).not.toContain('[c] accept, then commit');
+      expect(r.chrome).not.toContain('[c] commit the');
       expect(r.events.some((e) => e.type === 'git.commit')).toBe(false);
     } finally {
       if (saved.g === undefined) delete process.env['GIT_CONFIG_GLOBAL'];

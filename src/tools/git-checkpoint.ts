@@ -76,6 +76,40 @@ export function gitCheckpointCapsFromEvents(events: readonly SessionEvent[]): Gi
   return { taken };
 }
 
+/**
+ * What a capture would ADD, judged from a status listing — extracted so the guard is testable
+ * without a repository large enough to truncate git's output.
+ *
+ * Two refusal shapes, both fail-closed. A listing that could not be read at all, and a listing
+ * that came back PARTIAL: the exec substrate keeps the head and tail and drops the MIDDLE while
+ * git still exits 0, so a secret-named path in the elided middle would simply not exist as far as
+ * a scan is concerned. `remote/observe.ts` treats a truncated ls-remote the same way.
+ *
+ * Scope note: tracked-and-unmodified secrets do not appear in this listing and are not the
+ * concern — they are already in history. The question is only what this capture would ADD.
+ */
+export function inspectCaptureSet(
+  status: { ok: boolean; stdout: string; stderr: string; termination: string; captureTruncated?: boolean },
+  secretPatterns?: readonly string[],
+): { refusal: string } | { secretPaths: string[] } {
+  if (!status.ok) {
+    const first = status.stderr.split(/\r?\n/).find((l) => l.trim().length > 0) ?? status.termination;
+    return { refusal: `refused: could not determine what the checkpoint would capture (git status failed: ${first}); nothing was written` };
+  }
+  if (status.captureTruncated === true) {
+    return {
+      refusal:
+        'refused: the list of files this capture would sweep in was too large to read in full, so it could not be checked for secret-named files; nothing was written. ' +
+        'Gitignore whatever is producing that many paths, or ask the user to take the checkpoint with /checkpoint.',
+    };
+  }
+  return {
+    secretPaths: parsePorcelainV2(status.stdout)
+      .entries.filter((e) => e.kind !== 'ignored' && isSecretName(e.path, secretPatterns))
+      .map((e) => e.path),
+  };
+}
+
 export interface GitCheckpointDeps {
   /** Null when the workspace is not inside a git repository — the fact then blocks by name. */
   git: { gitPath: string; repoRoot: string; workspaceRoot: string } | null;
@@ -113,7 +147,7 @@ export function createGitCheckpointTool(deps: GitCheckpointDeps): Tool<GitCheckp
     name: 'git_checkpoint',
     description:
       'Capture the current workspace as a recovery point before risky work (a large refactor, a migration, anything you might need to walk back). ' +
-      'It writes a hidden git ref only: HEAD, the index, branches and the working tree are untouched, and no history is created. ' +
+      'It writes a commit object plus one hidden ref under refs/agent-cli/checkpoints/: HEAD, the index, your branches and tags are untouched and it is on no branch, though `git log --all` will show it. ' +
       'The user restores one with /checkpoint restore <n>. This is the ONLY git write you can make — you cannot commit, restore, reset, branch or push. ' +
       'It refuses if capturing would sweep in secret-named files that .gitignore does not already exclude.',
     schema: CheckpointInput,
@@ -171,14 +205,9 @@ export function createGitCheckpointTool(deps: GitCheckpointDeps): Tool<GitCheckp
         timeoutMs: CHECKPOINT_TIMEOUT_MS,
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       });
-      if (!status.ok) {
-        // Fail closed: unable to see what would be captured is not permission to capture it.
-        const first = status.stderr.split(/\r?\n/).find((l) => l.trim().length > 0) ?? status.termination;
-        return done(false, '', `refused: could not determine what the checkpoint would capture (git status failed: ${first}); nothing was written`);
-      }
-      const secretPaths = parsePorcelainV2(status.stdout)
-        .entries.filter((e) => e.kind !== 'ignored' && isSecretName(e.path, deps.secretPatterns))
-        .map((e) => e.path);
+      const inspected = inspectCaptureSet(status, deps.secretPatterns);
+      if ('refusal' in inspected) return done(false, '', inspected.refusal);
+      const { secretPaths } = inspected;
       if (secretPaths.length > 0) {
         const named = secretPaths.slice(0, MAX_NAMED_SECRETS).map((p) => sanitizeLine(p)).join(', ');
         return done(
@@ -221,7 +250,7 @@ export function createGitCheckpointTool(deps: GitCheckpointDeps): Tool<GitCheckp
       return done(
         true,
         `Recovery point captured at ${r.oid.slice(0, 12)} (${r.filesChanged ?? 0} file(s) differ from HEAD). ` +
-          `It is a hidden ref — no commit, no branch, no history change — and the user can walk the workspace back to it with /checkpoint restore. ` +
+          `It is reachable only from that hidden ref — on no branch, and your branches, tags, index and HEAD are unchanged (\`git log --all\` does show it; \`agent checkpoint prune\` releases it). The user can walk the workspace back to it with /checkpoint restore. ` +
           `${String(remaining())} of ${String(AGENT_CHECKPOINTS_PER_SESSION)} checkpoint(s) remain this session.${notes}`,
       );
     },

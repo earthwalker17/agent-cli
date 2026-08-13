@@ -157,10 +157,23 @@ export function createGitStatusTool(deps: GitStatusDeps): Tool<GitStatusInputT> 
           // performCommit, a separate export) — and its `diff --cached` does not opportunistically
           // refresh the user's index only because runGit sets GIT_OPTIONAL_LOCKS=0 on every call.
           const preview = await prepareCommit(
-            { gitPath: git.gitPath, repoRoot: git.repoRoot, workspaceRoot: git.workspaceRoot, messageDir: deps.stateDir },
+            {
+              gitPath: git.gitPath,
+              repoRoot: git.repoRoot,
+              workspaceRoot: git.workspaceRoot,
+              messageDir: deps.stateDir,
+              timeoutMs: GIT_READ_TIMEOUT_MS,
+              ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+            },
             deps.events(),
             'session',
           );
+          // An unreadable listing is NOT an empty one. Without this the view renders "the
+          // workspace has no uncommitted changes" with ok:true over a probe that never answered,
+          // and the model reports a clean tree it never saw.
+          if (preview.statusFailed !== undefined) {
+            return done(false, '', `could not read the working tree: ${preview.statusFailed} — nothing about the change set is known`);
+          }
           let stats: DiffStat = new Map();
           const numstat = await g(['diff', '--numstat', '-z', 'HEAD', '--', '.'], git.workspaceRoot);
           // An unborn branch has no HEAD to diff against; the status listing above still stands,

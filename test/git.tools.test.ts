@@ -6,11 +6,11 @@ import { findGitOnPath, runGit } from '../src/git/client.js';
 import { listCheckpoints, isDeliverySubject, DELIVERY_LABEL, type CheckpointContext } from '../src/git/checkpoint.js';
 import { parseNumstat } from '../src/git/format.js';
 import { createGitStatusTool } from '../src/tools/git-status.js';
-import { AGENT_CHECKPOINTS_PER_SESSION, createGitCheckpointTool, gitCheckpointCapsFromEvents } from '../src/tools/git-checkpoint.js';
+import { AGENT_CHECKPOINTS_PER_SESSION, createGitCheckpointTool, gitCheckpointCapsFromEvents, inspectCaptureSet } from '../src/tools/git-checkpoint.js';
 import { TOOLS } from '../src/tools/index.js';
 import { childTools } from '../src/runtime/subagent.js';
 import { ROLE_CONTRACTS } from '../src/runtime/roles.js';
-import { SESSION_TOOL_NAMES } from '../src/cli/assemble.js';
+import { SESSION_TOOL_NAMES, pruneHarnessCheckpointRefs } from '../src/cli/assemble.js';
 import { sha256 } from '../src/shared/hash.js';
 import type { GitEvidence, SessionEvent, ToolContext } from '../src/types.js';
 
@@ -304,7 +304,7 @@ describe.skipIf(!hasGit)('git_status', () => {
     expect(r.output).not.toContain('SENSITIVE-BODY-TEXT');
     // And it never teaches the model the human's cure.
     expect(r.output).not.toContain('--all');
-    expect(r.output).toMatch(/You cannot commit/);
+    expect(r.output).toMatch(/no way to commit on your own initiative/);
   }, 60_000);
 
   it('changes names the blockers a commit would hit, in the model\'s terms', async () => {
@@ -335,6 +335,20 @@ describe.skipIf(!hasGit)('git_status', () => {
     expect(r.output).not.toContain('t@e.c');
   }, 60_000);
 
+  it('changes REFUSES when the status probe fails — an unreadable tree is not a clean tree', async () => {
+    await initRepo();
+    // Point the tool at a directory that is not a repository: `git status` exits non-zero, so
+    // prepareCommit returns entries:[] AND statusFailed. Without the guard the view would render
+    // "the workspace has no uncommitted changes" with ok:true over a probe that never answered.
+    const outside = path.join(tmp, 'not-a-repo');
+    fs.mkdirSync(outside);
+    const tool = createGitStatusTool({ git: { gitPath: REAL_GIT!, repoRoot: outside, workspaceRoot: outside }, stateDir, sessionId: 's1', events: () => [] });
+    const r = await tool.execute({ view: 'changes' }, toolCtx());
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/could not read the working tree/);
+    expect(r.output).not.toMatch(/no uncommitted changes/);
+  }, 60_000);
+
   it('log on an unborn branch is "no commits yet", not a failure', async () => {
     await initRepo();
     const r = await (await statusTool()).execute({ view: 'log' }, toolCtx());
@@ -354,6 +368,58 @@ describe.skipIf(!hasGit)('git_status', () => {
     expect(r.output).toContain('mine');
     expect(r.output).not.toContain('someone elses');
   }, 60_000);
+});
+
+describe.skipIf(!hasGit)('the session-end prune actually reclaims an agent ref (S21.6 review)', () => {
+  it('deletes the ref and records it — the claim that pays for auto-allow', async () => {
+    // The fold owed the ref correctly while the prune loop iterated a hard-coded list of three
+    // kinds, so every model checkpoint stayed pinned in the user's repository forever and the
+    // announced line claimed a prune that deleted nothing. The loop is driven by the kind union
+    // now; this is the end-to-end proof, not just the fold's.
+    await initRepo();
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+    await commitAll('init');
+    const r = await createGitCheckpointTool({ git: gitDeps(), stateDir, sessionId: 's1', caps: { taken: 0 } }).execute({ label: 'before' }, toolCtx());
+    expect(r.ok, r.error).toBe(true);
+    const before = await listCheckpoints(cctx(), 's1');
+    expect(before).toHaveLength(1);
+
+    const appended: { type: string; kind?: string; refs?: string[] }[] = [];
+    const out = await pruneHarnessCheckpointRefs(REAL_GIT!, repo, [{ ref: before[0]!.ref, kind: 'agent' }], {
+      append: (b) => appended.push(b as { type: string; kind?: string; refs?: string[] }),
+    });
+    expect(out?.line).toContain('1 agent');
+    expect(appended).toEqual([{ type: 'git.checkpoint.pruned', kind: 'agent', refs: [before[0]!.ref], failed: [] }]);
+    expect(await listCheckpoints(cctx(), 's1')).toHaveLength(0);
+  }, 60_000);
+});
+
+describe('the secret guard fails CLOSED on a listing it could not read (S21.6 review)', () => {
+  const ok = (stdout: string, extra = {}) => ({ ok: true, stdout, stderr: '', termination: 'exited', ...extra });
+
+  it('a TRUNCATED listing refuses — the middle is dropped while git still exits 0', () => {
+    // This is the one that fails open silently: CappedCapture keeps head+tail and drops the
+    // middle, exitCode stays 0, and a secret in the elided middle simply is not in `stdout`.
+    const r = inspectCaptureSet(ok('', { captureTruncated: true }));
+    expect('refusal' in r && /too large to read in full/.test(r.refusal)).toBe(true);
+  });
+
+  it('a FAILED probe refuses, naming why', () => {
+    const r = inspectCaptureSet({ ok: false, stdout: '', stderr: 'fatal: not a git repository\n', termination: 'exited' });
+    expect('refusal' in r && /not a git repository/.test(r.refusal)).toBe(true);
+  });
+
+  it('a readable listing yields the secret-named paths it actually contains', () => {
+    // porcelain v2: `? <path>` for untracked, `1 <xy> ... <path>` for changed.
+    const stdout = ['? .env', '? src/app.js', '1 .M N... 100644 100644 100644 aaa bbb config/prod.pem'].join('\0') + '\0';
+    const r = inspectCaptureSet(ok(stdout));
+    expect('secretPaths' in r && r.secretPaths.sort()).toEqual(['.env', 'config/prod.pem']);
+  });
+
+  it('honours the workspace\'s configured extra secret patterns', () => {
+    const r = inspectCaptureSet(ok('? deploy/company-token.txt\0'), ['token']);
+    expect('secretPaths' in r && r.secretPaths).toEqual(['deploy/company-token.txt']);
+  });
 });
 
 describe('parseNumstat', () => {

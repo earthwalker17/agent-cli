@@ -307,6 +307,7 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   // or a crash replay would name only the last child and orphan the other survivors' evidence.
   const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>[]>();
   const taskChangesBy = new Set<string>();
+  const checkpointBy = new Map<string, Extract<SessionEvent, { type: 'harness.checkpoint' }>>();
   for (const e of events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
     else if (e.type === 'file.mutated') (mutatedBy.get(e.callId) ?? mutatedBy.set(e.callId, []).get(e.callId)!).push(e);
@@ -316,6 +317,11 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
     else if (e.type === 'setup.started') setupStartedBy.set(e.callId, { action: e.action, projectId: e.projectId });
     else if (e.type === 'task.started') (taskStartedBy.get(e.callId) ?? taskStartedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'task.changes') taskChangesBy.add(e.callId);
+    // S21.6: an agent checkpoint's ONLY per-call evidence is this event — unlike every other
+    // shape above it writes no workspace file and takes no snapshot, so without this branch the
+    // replay falls through to "interrupted by session crash" over a capture the log can see
+    // landed, and the model spends a second of twelve re-taking it.
+    else if (e.type === 'harness.checkpoint' && e.kind === 'agent' && e.callId !== undefined) checkpointBy.set(e.callId, e);
   }
 
   const orphanedCallIds: string[] = [];
@@ -336,6 +342,17 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
     if (snapBy.has(id)) {
       unknownPostStateCallIds.push(id);
       return toolResultBlock(id, 'interrupted after snapshot but before writing; disk state unverified', true);
+    }
+    // A recorded agent checkpoint is POSITIVE evidence, not an orphan: the event is appended from
+    // the onRefReady seam, so reaching it means the capture got to its final step, and the budget
+    // was already charged. Not an error result, and deliberately not in `orphanedCallIds`.
+    const ckpt = checkpointBy.get(id);
+    if (ckpt !== undefined) {
+      return toolResultBlock(
+        id,
+        `interrupted after the recovery point was recorded (${ckpt.oid.slice(0, 12)}, ref ${ckpt.ref}); the session allowance was charged. Verify with git_status view=checkpoints — do not re-take it.`,
+        false,
+      );
     }
     orphanedCallIds.push(id);
     const tasks = taskStartedBy.get(id);

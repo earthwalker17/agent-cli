@@ -62,6 +62,7 @@ import { trustKey } from '../trust/store.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { ResolvedConfig } from '../config/config.js';
 import type { TrustDecision } from '../trust/gate.js';
+import { HARNESS_REF_KINDS } from '../types.js';
 import type { EventBody, HarnessRefKind, SessionEvent, Tool } from '../types.js';
 import type { RunContext } from './context.js';
 
@@ -1086,7 +1087,13 @@ export async function pruneHarnessCheckpointRefs(
   }
   const parts: string[] = [];
   const failed: string[] = [];
-  for (const kind of ['task-base', 'pre-integration', 'delivery'] as const) {
+  // Driven by HARNESS_REF_KINDS, never a literal list (S21.6): this loop hard-coded three kinds
+  // while `owedHarnessRefsFromEvents` correctly owed a fourth, so 'agent' refs were collected and
+  // then silently skipped — every model checkpoint would have stayed pinned in the user's
+  // repository forever, and the announced line would have claimed a prune that deleted nothing.
+  // The claim that pays for auto-allowing `git_checkpoint` without a prompt is exactly this
+  // reclaim, so the list has to come from the union the type declares.
+  for (const kind of HARNESS_REF_KINDS) {
     const refs = byKind.get(kind);
     if (refs === undefined) continue;
     const r = await deleteCheckpointRefs(gitPath, repoRoot, refs);

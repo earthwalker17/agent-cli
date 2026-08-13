@@ -36,6 +36,10 @@ export interface CommitContext {
   workspaceRoot: string;
   /** Directory for the temporary commit-message file (the project state dir). */
   messageDir: string;
+  /** Turn cancellation, when a tool drives the read-only half of this flow (S21.6). */
+  signal?: AbortSignal;
+  /** Per-invocation timeout override; the 15 s client default is thin for a cold large repo. */
+  timeoutMs?: number;
 }
 
 export interface CommitPreviewEntry {
@@ -59,6 +63,12 @@ export interface CommitPreview {
   warnings: string[];
   /** Non-empty ⇒ the commit must not proceed. */
   blockers: string[];
+  /**
+   * Set when the status probe itself failed or came back truncated (S21.6). `entries: []` then
+   * means "unknown", NOT "clean" — a reader that cannot tell those apart reports an unverified
+   * negative as an observation.
+   */
+  statusFailed?: string;
 }
 
 const STAGE_BATCH = 100;
@@ -92,10 +102,23 @@ export async function prepareCommit(
 
   // --untracked-files=all: without it a brand-new directory collapses to one `dir/` entry and
   // files the session created inside it could never match the attribution set.
-  const status = await runGit({ gitPath: cctx.gitPath, argv: ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--', '.'], cwd: cctx.workspaceRoot });
-  if (!status.ok) {
-    blockers.push(`git status failed: ${status.stderr.split(/\r?\n/)[0] ?? status.termination}`);
-    return { scope, entries: [], stagePaths: scope === 'session' ? [] : null, proposedSubject: proposeSubject(events), warnings, blockers };
+  const status = await runGit({
+    gitPath: cctx.gitPath,
+    argv: ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--', '.'],
+    cwd: cctx.workspaceRoot,
+    ...(cctx.timeoutMs !== undefined ? { timeoutMs: cctx.timeoutMs } : {}),
+    ...(cctx.signal !== undefined ? { signal: cctx.signal } : {}),
+  });
+  // S21.6: `statusFailed` is a FIELD, not just a blocker sentence. An empty `entries` list reads
+  // as "the working tree is clean" to every downstream renderer, so a failed or truncated probe
+  // would present an unverified negative as an observation — and a truncated listing (head+tail
+  // kept, middle dropped, git still exits 0) does not even look like a failure.
+  if (!status.ok || status.captureTruncated === true) {
+    const why = !status.ok
+      ? `git status failed: ${status.stderr.split(/\r?\n/).find((l) => l.trim().length > 0) ?? status.termination}`
+      : 'git status output was too large to read in full, so the change listing is incomplete';
+    blockers.push(why);
+    return { scope, entries: [], stagePaths: scope === 'session' ? [] : null, proposedSubject: proposeSubject(events), warnings, blockers, statusFailed: why };
   }
 
   // Attribution: recorded absolute paths → case-folded lookup; drift = disk differs from the

@@ -1243,7 +1243,7 @@ export function decide<I>(
       'observe',
       'allow',
       'git.read',
-      `reads local repository state (${fact.view}) by running ${fact.argvPreview} — harness-composed argv, scoped to the workspace subtree. ` +
+      `reads local repository state (${fact.view}) by running ${fact.argvPreview} — harness-composed argv, no model-supplied ref, path or format. ` +
         `Nothing is written, nothing leaves this machine, and the result carries no file contents (only paths, counts and commit metadata)`,
     );
   }

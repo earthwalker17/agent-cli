@@ -353,7 +353,7 @@ export function createConsentAsker(): ConsentAsker {
           ].join('\n'),
           [
             { key: 'y', label: 'accept the session' },
-            ...(offer !== null ? [{ key: 'c' as const, label: `accept, then commit the ${String(offer.files)} file(s) this session changed` }] : []),
+            ...(offer !== null ? [{ key: 'c' as const, label: `commit the ${String(offer.files)} file(s) this session changed, then accept` }] : []),
             { key: 'd', label: 'show what changed' },
             { key: 'n', label: 'not yet' },
           ] as readonly PromptChoice<'y' | 'c' | 'd' | 'n'>[],
@@ -361,11 +361,19 @@ export function createConsentAsker(): ConsentAsker {
           { d: '/diff' },
         );
         if (picked === 'y' || picked === 'c') {
-          await acceptSession(ctx, { confirm: false });
-          // The commit runs through the SAME slash body a user would type, which is what keeps
-          // the recorded evidence byte-identical either way — and it keeps its own preview and
+          // COMMIT FIRST, then accept — the order is the fix for a real defect, not a preference.
+          // `git.commit` is a member of `WORK_EVENT_TYPES`, so accepting and then committing makes
+          // the acceptance stale the instant the harness's own recommended answer completes: the
+          // prompt re-arms, `/status` reports "work has happened since", and the journal writes
+          // that sentence into durable cross-session memory about a session whose only post-accept
+          // event was the delivery it just performed. Recording the acceptance LAST keeps it the
+          // final word, and the delivery checkpoint then captures the committed tree.
+          //
+          // The commit runs through the SAME slash body a user would type, which is what keeps the
+          // recorded evidence byte-identical either way — and it keeps its own preview and
           // confirmation, so this answer routes to the decision rather than replacing it.
           if (picked === 'c') await dispatchSlash('/commit', ctx);
+          await acceptSession(ctx, { confirm: false });
         }
       }
     },
