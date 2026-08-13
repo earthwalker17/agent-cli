@@ -14,6 +14,7 @@ import { MockProvider } from '../src/provider/mock.js';
 import { autoDenyApprover } from '../src/runtime/approvals.js';
 import { runRepl } from '../src/repl/repl.js';
 import { EventLog } from '../src/store/event-log.js';
+import { findGitOnPath, runGit } from '../src/git/client.js';
 import { createNoneSandbox } from '../src/sandbox/none.js';
 import type { ScriptTurn } from '../src/provider/mock.js';
 import type { Renderer } from '../src/repl/render.js';
@@ -549,6 +550,80 @@ describe('the contextual prompt on a real TTY (S21.5)', () => {
     expect(r.code).toBe(0);
     expect(r.events.some((e) => e.type === 'plan.approved')).toBe(false);
     expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
+  }, 120_000);
+});
+
+/**
+ * Session 21.6 — the commit as a CHOICE at the acceptance boundary.
+ *
+ * The commit is the one delivery action the model has no path to, and until now the boundary
+ * announced it as a printed line. Folding it into the completion prompt (rather than asking after
+ * `acceptSession`) is what keeps rule 2 intact: `acceptSession` is called from inside this very
+ * branch, so a second question there would be the wizard the rule forbids.
+ */
+describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-and-commit on a real TTY (S21.6)', () => {
+  async function git(...argv: string[]) {
+    return runGit({ gitPath: findGitOnPath(process.env, process.platform)!, argv, cwd: ws });
+  }
+
+  it('offers [c], and the commit runs through the same body /commit runs', async () => {
+    expect((await git('init', '-q', '-b', 'main')).ok).toBe(true);
+    // Repo-local identity: prepareCommit BLOCKS without one, and the offer is deliberately not
+    // rendered when the commit it promises would refuse.
+    expect((await git('config', 'user.name', 'T')).ok).toBe(true);
+    expect((await git('config', 'user.email', 't@e.c')).ok).toBe(true);
+
+    const r = await driveTTY(
+      [{ say: 'writing', calls: [{ name: 'write_file', input: { path: 'note.txt', content: 'hello\n' } }] }, { say: 'done' }],
+      [
+        { awaitChrome: /\/help for commands/, send: 'write a note' },
+        { awaitChrome: /\[c\] accept, then commit the 1 file\(s\)/, send: 'c' },
+        { awaitChrome: /commit message \[/, send: '' },
+        { awaitChrome: /commit 1 file\(s\) as/, send: 'y' },
+        { awaitChrome: /committed /, send: '/quit' },
+      ],
+    );
+
+    expect(r.code).toBe(0);
+    expect(r.chrome).toContain('[c] accept, then commit');
+    // Both halves recorded, and the commit event is the one the slash body appends — no second
+    // path, no second shape.
+    expect(r.events.some((e) => e.type === 'session.accepted' && e.complete)).toBe(true);
+    const commit = r.events.find((e) => e.type === 'git.commit');
+    expect(commit).toMatchObject({ scope: 'session', trailer: true });
+    expect(commit?.type === 'git.commit' ? commit.files : []).toEqual(['note.txt']);
+  }, 120_000);
+
+  it('does NOT offer [c] when a commit would be blocked — here, no git identity', async () => {
+    expect((await git('init', '-q', '-b', 'main')).ok).toBe(true);
+    // No identity at all: point the repo's config lookup at an empty file so a host-global
+    // user.name cannot satisfy the blocker and make this test machine-dependent.
+    const emptyCfg = path.join(tmp, 'empty-gitconfig');
+    fs.writeFileSync(emptyCfg, '');
+    const saved = { g: process.env['GIT_CONFIG_GLOBAL'], s: process.env['GIT_CONFIG_SYSTEM'] };
+    process.env['GIT_CONFIG_GLOBAL'] = emptyCfg;
+    process.env['GIT_CONFIG_SYSTEM'] = emptyCfg;
+    try {
+      const r = await driveTTY(
+        [{ say: 'writing', calls: [{ name: 'write_file', input: { path: 'note.txt', content: 'hello\n' } }] }, { say: 'done' }],
+        [
+          { awaitChrome: /\/help for commands/, send: 'write a note' },
+          { awaitChrome: /\[y\] accept the session/, send: 'y' },
+          { awaitChrome: /session accepted \(complete\)/, send: '/quit' },
+        ],
+      );
+      expect(r.code).toBe(0);
+      // The acceptance question still fires; only the commit half is withheld, because offering an
+      // action that refuses the moment it is chosen is worse than not offering it.
+      expect(r.chrome).toContain('[y] accept the session');
+      expect(r.chrome).not.toContain('[c] accept, then commit');
+      expect(r.events.some((e) => e.type === 'git.commit')).toBe(false);
+    } finally {
+      if (saved.g === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = saved.g;
+      if (saved.s === undefined) delete process.env['GIT_CONFIG_SYSTEM'];
+      else process.env['GIT_CONFIG_SYSTEM'] = saved.s;
+    }
   }, 120_000);
 });
 

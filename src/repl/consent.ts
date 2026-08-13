@@ -1,3 +1,4 @@
+import { prepareCommit } from '../git/commit.js';
 import { readPlanState } from '../plan/canonical.js';
 import { foldGraphState } from '../plan/graph-state.js';
 import { foldRepairs, type RepairLedger } from '../recovery/ledger.js';
@@ -168,6 +169,39 @@ export function openEscalation(
   }
 }
 
+/**
+ * Whether an "accept and commit" is worth offering, and for how many files (Session 21.6).
+ *
+ * The commit is the one delivery action a human genuinely owns — the model has no path to it, by
+ * an invariant this session deliberately did not widen — and until now the acceptance boundary
+ * announced it as a printed line. That is the same broadcast-with-no-channel `planApprovalReminder`
+ * was, one surface over.
+ *
+ * It is folded INTO the completion prompt rather than asked after it. `acceptSession` is called
+ * from inside condition C's own affirmative branch, so a prompt appended there would be two
+ * consecutive consent questions — exactly the wizard rule 2 forbids. One prompt, one answer.
+ *
+ * Offered only when a commit would actually succeed: a repository, attributable paths, and no
+ * blockers. Offering an action that refuses the moment it is chosen is worse than not offering it.
+ * Never throws — a git problem must not cost the user the acceptance question.
+ */
+async function commitOffer(ctx: CommandContext): Promise<{ files: number } | null> {
+  try {
+    const g = ctx.session.gitFacts;
+    if (g?.isRepo !== true || g.gitPath === null || g.repoRoot === null) return null;
+    const preview = await prepareCommit(
+      { gitPath: g.gitPath, repoRoot: g.repoRoot, workspaceRoot: ctx.session.workspaceRoot, messageDir: ctx.session.stateDir },
+      ctx.session.log.events,
+      'session',
+    );
+    if (preview.blockers.length > 0) return null;
+    const files = preview.stagePaths?.length ?? 0;
+    return files > 0 ? { files } : null;
+  } catch {
+    return null;
+  }
+}
+
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export function createConsentAsker(): ConsentAsker {
@@ -305,6 +339,7 @@ export function createConsentAsker(): ConsentAsker {
       const done = completionReady(ctx);
       if (done !== null && !asked.has(done.key)) {
         asked.add(done.key);
+        const offer = await commitOffer(ctx);
         const picked = await askOnce(
           ctx,
           [
@@ -318,13 +353,20 @@ export function createConsentAsker(): ConsentAsker {
           ].join('\n'),
           [
             { key: 'y', label: 'accept the session' },
+            ...(offer !== null ? [{ key: 'c' as const, label: `accept, then commit the ${String(offer.files)} file(s) this session changed` }] : []),
             { key: 'd', label: 'show what changed' },
             { key: 'n', label: 'not yet' },
-          ] as const,
+          ] as readonly PromptChoice<'y' | 'c' | 'd' | 'n'>[],
           'not yet',
           { d: '/diff' },
         );
-        if (picked === 'y') await acceptSession(ctx, { confirm: false });
+        if (picked === 'y' || picked === 'c') {
+          await acceptSession(ctx, { confirm: false });
+          // The commit runs through the SAME slash body a user would type, which is what keeps
+          // the recorded evidence byte-identical either way — and it keeps its own preview and
+          // confirmation, so this answer routes to the decision rather than replacing it.
+          if (picked === 'c') await dispatchSlash('/commit', ctx);
+        }
       }
     },
   };
