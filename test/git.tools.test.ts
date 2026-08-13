@@ -281,6 +281,7 @@ describe.skipIf(!hasGit)('git_status', () => {
     // "session-changed, then externally modified" state rather than a plain session file.
     const events: SessionEvent[] = [
       {
+        v: 1,
         seq: 1,
         ts: '',
         type: 'file.mutated',
