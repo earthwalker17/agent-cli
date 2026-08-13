@@ -48,6 +48,28 @@ describe('system prompt git context', () => {
       expect(p).not.toContain('inside a git repository');
     }
   });
+
+  it('S21.6: with the git tools registered, the prompt names them instead of the shell', () => {
+    const p = buildSystemPrompt('C:\\ws', MAP, undefined, facts(), undefined, undefined, undefined, undefined, true);
+    expect(p).toContain('Read it with `git_status`');
+    expect(p).toContain('git_checkpoint');
+    // The sentence the tools replace must be GONE: a prompt telling the model to shell out while a
+    // structured tool exists is two surfaces disagreeing about the same job.
+    expect(p).not.toContain('Read-only git commands (status/log/diff/show) are the right way');
+    // The boundary is stated plainly, because it is the one thing the model must not try.
+    expect(p).toContain('You CANNOT commit');
+    expect(p).toContain('the harness offers it to them at the acceptance boundary');
+    expect(p).toContain('Never stage, commit, or otherwise modify version-control state');
+  });
+
+  it('S21.6: without the tools (no addressable repo), the shell sentence stays and nothing is promised', () => {
+    const p = buildSystemPrompt('C:\\ws', MAP, undefined, facts());
+    expect(p).toContain('Read-only git commands (status/log/diff/show) are the right way');
+    expect(p).not.toContain('git_status');
+    expect(p).not.toContain('git_checkpoint');
+    // The no-commit boundary is NOT conditional on the tools — it was always true.
+    expect(p).toContain('You CANNOT commit');
+  });
 });
 
 describe('report git context', () => {

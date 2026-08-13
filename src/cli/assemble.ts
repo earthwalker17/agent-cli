@@ -366,6 +366,15 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
         ? 'no git remote is configured for this repository, so there is nowhere to publish (`git remote add …` first)'
         : 'the workspace is not inside a git repository, so there is no remote to deliver to'
       : undefined;
+  // The addressable-repository triple, shared by the remote pack and the local git pack (S21.6).
+  // The null rule is deliberately gitPath+repoRoot rather than `isRepo`: a status probe that
+  // degraded still leaves a real repository we can address, and both packs re-read live anyway.
+  // Built BEFORE the prompt for the S19 reason the remote block states: the git-tools paragraph is
+  // conditional on exactly this value, so the model is never told about a tool its registry lacks.
+  const repoGitDeps =
+    gitFacts.gitPath !== null && gitFacts.repoRoot !== null
+      ? { gitPath: gitFacts.gitPath, repoRoot: gitFacts.repoRoot, workspaceRoot: ctx.ws }
+      : null;
   const system = buildSystemPrompt(
     ctx.ws,
     map,
@@ -375,6 +384,7 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     detectedWorkspace,
     researchClient !== null,
     remoteUnavailable === undefined ? { defaultRemote: remoteContext.defaultRemote, ghAvailable: ghRunner !== null } : undefined,
+    repoGitDeps !== null,
   );
 
   const common = {
@@ -728,18 +738,6 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     context: remoteContext,
     initialSpend: remoteSpendFromEvents(session.log.events),
   });
-  // The addressable-repository triple, shared by the remote pack and the local git pack (S21.6).
-  // The null rule is deliberately gitPath+repoRoot rather than `isRepo`: a status probe that
-  // degraded still leaves a real repository we can address, and both packs re-read live anyway.
-  const repoGitDeps =
-    gitFacts.gitPath !== null && gitFacts.repoRoot !== null
-      ? { gitPath: gitFacts.gitPath, repoRoot: gitFacts.repoRoot, workspaceRoot: ctx.ws }
-      : null;
-  // git_status / git_checkpoint (Session 21.6): registered only inside a git repository, on the
-  // remote pack's precedent — a model told about a tool its registry does not contain will reach
-  // for it, be told it does not exist, and reach again. Parent-only: `CHILD_ADMISSIBLE_FACTS`
-  // refuses both facts and the engine denies them under any lineage, so "no subagent checkpoints
-  // into the user's repo from a worktree" is a property of the registry, not a hope.
   const gitCheckpointCaps = gitCheckpointCapsFromEvents(session.log.events);
 
   // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the

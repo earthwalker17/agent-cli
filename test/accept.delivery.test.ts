@@ -365,6 +365,10 @@ describe('harness.checkpoint is NOT work-shaped (the F4 pin)', () => {
       ev(1, { type: 'session.accepted', complete: true, summary: 's' }),
       ev(2, { type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/x', oid: 'a'.repeat(40) }),
       ev(3, { type: 'git.checkpoint.pruned', kind: 'delivery', refs: [], failed: [] }),
+      // S21.6: an AGENT checkpoint is the same kind of non-work. The model taking a recovery
+      // point changes nothing in the workspace, so it must never make a recorded acceptance
+      // stale — the model would otherwise be able to un-accept a session by protecting it.
+      ev(4, { type: 'harness.checkpoint', kind: 'agent', ref: 'refs/y', oid: 'b'.repeat(40), callId: 'c1' }),
     ];
     expect(workSince(events, 1)).toBe(false);
   });

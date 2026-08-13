@@ -304,6 +304,19 @@ describe('owedHarnessRefsFromEvents (Session 11.5 fold, kind-aware + seq-aware S
     ]);
   });
 
+  it('an AGENT checkpoint is owed like the other session-scoped kinds (S21.6)', () => {
+    // This is the whole reason a model checkpoint rides `harness.checkpoint` with a fourth kind
+    // instead of getting an event type of its own: it inherits the prune lifecycle for free, so
+    // twelve whole-tree refs per session cannot accumulate in the user's repository. The
+    // accepted delivery anchor next to it still survives.
+    const events = [
+      ev({ type: 'harness.checkpoint', kind: 'agent', ref: 'refs/h/agent1', oid: 'a'.repeat(40), callId: 'c1', label: 'before the refactor' }),
+      ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'b'.repeat(40) }),
+      ev({ type: 'session.accepted', complete: true, summary: 's', deliveryRef: 'refs/h/del1', deliveryOid: 'b'.repeat(40) }),
+    ];
+    expect(owedHarnessRefsFromEvents(events)).toEqual([{ ref: 'refs/h/agent1', kind: 'agent' }]);
+  });
+
   it('the accepted delivery ref is never owed (the durable audit anchor)', () => {
     const events = [
       ev({ type: 'harness.checkpoint', kind: 'delivery', ref: 'refs/h/del1', oid: 'a'.repeat(40) }),

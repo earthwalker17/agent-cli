@@ -40,7 +40,7 @@ src/
   policy/
     paths.ts               validatePath — Windows-first boundary/hard-reject gate.
     engine.ts              classify + decide + Grants. Pure. The single policy choke point:
-                           nine fail-closed fact branches ahead of command/mutation/read.
+                           eleven fail-closed fact branches ahead of command/mutation/read.
     command-review.ts      analyzeCommand — deterministic positive-proof auto-run gate.
   store/
     layout.ts              State-dir resolution + refuse-if-inside-workspace.
@@ -101,6 +101,7 @@ src/
     facts.ts               detectGitFacts — session-start probe; explicit nulls on every degrade.
     porcelain.ts           Pure `status --porcelain=v2 -z` parser.
     commit.ts              The deliberate-commit flow (preview → confirm → perform).
+    format.ts              Model-facing rendering: untrusted-repo fence, never file content.
     checkpoint.ts          Hidden-ref checkpoints: create/list/prune + restore flows.
     worktree.ts            Detached task worktrees: version gate, add, EOL pin, honest removal.
   sandbox/                 (imported from outside ONLY via index.ts — test-pinned)
@@ -129,6 +130,8 @@ src/
     remote-push.ts         remote_push — observation-bound branch/tag publish.
     remote-release.ts      remote_release — a Release for a tag ALREADY on the remote.
     remote-state.ts        Remote spend/observations/identity state + event folds.
+    git-status.ts          git_status — local repository views; no free-text argv, no file bytes.
+    git-checkpoint.ts      git_checkpoint — create-only hidden-ref capture + the secret guard.
     recover.ts             recover — the bounded repair ledger tool (parent-only).
     report-finding.ts      report_finding — the reviewer child's ONLY findings channel.
     review.ts              review — parent triage over recorded findings.
@@ -1505,10 +1508,12 @@ of running Agent CLI.
   truth, the owed fold is latest-creation-per-ref-wins, and a throwing callback aborts as
   `ok:false` BEFORE the ref exists. The user-commanded CLI/REPL checkpoint path is deliberately NOT
   reordered: its ref-scan-based backstop converges without event coupling.
-- **Three kinds, one lifecycle rule** (`HarnessRefKind`): `task-base` (per executor group) and
-  `pre-integration` are session-scoped recovery points pruned at clean end; `delivery` survives as
-  the durable audit anchor. `harness.checkpoint` is a NEW event type on purpose — widening
-  `task.base-checkpoint` would make an old reader's owed fold prune the delivery anchor.
+- **Four kinds, one lifecycle rule** (`HarnessRefKind`): `task-base` (per executor group),
+  `pre-integration`, and `agent` (S21.6 — a recovery point the model asked for) are session-scoped
+  and pruned at clean end; `delivery` survives as the durable audit anchor. `harness.checkpoint` is
+  a NEW event type on purpose — widening `task.base-checkpoint` would make an old reader's owed
+  fold prune the delivery anchor — and `agent` rides it rather than getting a type of its own
+  precisely so it inherits this lifecycle for free.
 - **`owedHarnessRefsFromEvents`** is seq- and kind-aware, re-folded from LIVE events at prune time.
   Delivery survival keys on the ref the latest acceptance actually CONSUMED
   (`session.accepted.deliveryRef`) — NOT on the newest creation event, which a phantom could hold;
@@ -1744,6 +1749,11 @@ protectedPath }`; the engine decides.
 - **Declared write** → validate each target; out-of-workspace or protected (`.git`, the state dir,
   any `.agent-cli` segment, config `protectedPaths`) → `deny`; else `reversible` / `allow` with
   `requiresSnapshot`.
+- **Local git read / agent checkpoint** (`tool.gitRead` / `tool.gitCheckpoint`, S21.6) → two
+  branches after the remote pair and before the command branch, both fail-closed. A read allows as
+  `observe` with a rule that names the argv instead of "read-only workspace access"; a checkpoint
+  allows as `reversible` + `noUndo` and is the ONE model-reachable write inside `.git`, which the
+  declared-write branch below refuses as a protected place. Full contract: "The local git pack".
 - **Reads** → out-of-workspace → `sensitive` / `ask`; secret-named → `sensitive` / `ask` + redaction.
   Secret classification runs on BOTH the raw request and the RESOLVED path, so a symlink or a
   Windows 8.3 alias of `.env` cannot evade it.
@@ -1831,20 +1841,93 @@ never assumes enforcement from the platform name.
   `run_command` applies `ctx.sandbox.wrap` unconditionally and records the actual boundary in
   `command.started.sandbox`.
 
-## GitOps (`git/`) — a harness capability, never a model tool
+## GitOps (`git/`) — two halves, split by what the user can see
 
-Git serves review, delivery, recovery, and context — it does not replace the snapshot system, and
-the model cannot reach it. **Why it must not be a tool:** `decide()` classifies a tool with no
-`command()`, a null `mutates()`, and no reads as `observe`/auto-allow — a "git_commit" tool of
-that shape would commit with NO approval (pinned by a policy regression test + a TOOLS registry
-guard). The model keeps `run_command`: read-only git auto-runs inside the sandbox, mutations ask,
-and work-discarding forms (`restore`, `checkout --`, `reset --hard`, `clean`, `stash drop|clear`,
+Git serves review, delivery, recovery, and context, and it does not replace the snapshot system.
+Since Session 21.6 the capability has two halves, and the line between them is **whether the user
+can see the result in their own git state**:
+
+- **Harness-owned** — everything that moves a ref, index, HEAD, branch, tag or remote the user
+  sees: commits (`/commit`, `agent commit`), checkpoint restores, prunes, the delivery anchor. The
+  model has no path to any of it.
+- **Model-facing** (the local git pack, below) — reading repository state, and capturing a
+  recovery point to a hidden ref. Both go through harness-composed argv; neither changes anything
+  the user's own `git status` would show.
+
+**Why a git tool needs a policy branch at all:** `decide()` classifies a tool with no `command()`,
+a null `mutates()`, and no reads as `observe`/auto-allow with the recorded reason "read-only
+workspace access" — so a "git_commit" tool of that shape would commit with NO approval. That is
+pinned verbatim by a policy regression test (`hypothetical_git_commit`) plus a TOOLS registry
+guard, and it is why the two model-facing tools declare explicit facts rather than falling through.
+The model also keeps `run_command`: read-only git auto-runs inside the sandbox, mutations ask, and
+work-discarding forms (`restore`, `checkout --`, `reset --hard`, `clean`, `stash drop|clear`,
 `push --force*`) are labeled destructive.
 
-**Consent contract** (explicit): user-typed commands ARE the consent, under three conditions —
+**Consent contract** (explicit), now four conditions:
+
 (a) every mutating flow previews and interactively confirms (non-interactive requires `--yes`);
-(b) every operation appends a provenance event (`git.commit` / `git.checkpoint` / `git.restore`);
-(c) `GitClient` is structurally unreachable from the model.
+(b) every operation appends a provenance event (`git.commit` / `git.checkpoint` / `git.restore`,
+and `harness.checkpoint` for harness- and model-created refs);
+(c) `GitClient` is reachable from the model ONLY through the two tools below, whose facts the
+engine gates and whose argv the harness composes — never as a general git surface;
+(d) **the model may read repository state and capture recovery state to hidden refs; it may never
+move a ref, index, HEAD, branch, tag or remote the user can see.**
+
+Condition (c) is a deliberate widening of the Session 20 wording ("structurally unreachable"),
+argued and pinned in the same change. What it does NOT widen is the compound invariant, restated
+verbatim: **the model cannot commit and a push transmits committed refs only, so the model cannot
+publish content a human did not commit.**
+
+### The local git pack (`tools/git-status.ts`, `tools/git-checkpoint.ts`, `git/format.ts`)
+
+Two facts, `gitRead` and `gitCheckpoint`, each with a fail-closed branch — the S20
+`remoteRead`/`remoteWrite` shape, so the conflicting-contract rule refuses a tool that could both
+read and write and "the read tool writes nothing" is verified by finding no second fact. Both
+branches open with the same guards in the same order: conflicting contract → **lineage deny** (an
+executor child works in a detached worktree, so its checkpoint ref would land in the user's real
+repo under the CHILD's session id, where the parent's owed-prune fold never sees it) → **mutation
+plan must be empty** (a non-empty one would sail past the branch that validates write targets and
+captures snapshots) → the tool's own `blocked` reason.
+
+- **`git_status`** (`gitRead` → `observe`/**allow**, rule `git.read`) — views `summary` (a LIVE
+  `detectGitFacts` re-probe, worded so it cannot be confused with the session-start photograph),
+  `changes` (**`prepareCommit`**, the same function that builds the human's `/commit` preview, so
+  the model's answer and the user's screen cannot drift — rendered for a model reader, because the
+  human's warnings say "use `--all`" and "run `git config --global`"), `log`, `checkpoints`
+  (scoped to this session). **It takes no ref, path, author or format parameter** — only a view
+  name and a bounded integer. That is the entire argument for allowing these reads on machines
+  with no enforced sandbox, where the equivalent `run_command git log` asks today: the model names
+  a VIEW, the harness names the command. **Nothing it returns is file content** (no `-p`, no
+  `--patch`, no `-U`), which is what makes the branch honest about allowing before `readsPaths` is
+  evaluated — the secret-name and containment checks never run for this tool.
+- **`git_checkpoint`** (`gitCheckpoint` → `reversible`/**allow**/`noUndo`, rule `git.checkpoint`)
+  — `{ label? }` and nothing else; the schema cannot express a restore, reset, commit or push. It
+  auto-allows because a hidden ref built against a temporary index is the most reversible write in
+  the system and the harness already takes task-base/pre-integration/delivery checkpoints unasked.
+  Bounds replace the prompt: `AGENT_CHECKPOINTS_PER_SESSION = 12` (events-rebuilt, surfaced as a
+  fact-level DENY so exhaustion is recorded as a decision); a **secret guard** that refuses to
+  capture secret-named files `.gitignore` does not already exclude (`git add -A` excludes exactly
+  what gitignore excludes and nothing else, and a git blob cannot be redacted — the
+  `artifact.inspect-secret-name` precedent); a **label guard**, because a label is display and
+  never identity; and the existing untracked-sweep guard, whose decline becomes a refusal naming
+  `/checkpoint` rather than a claim that somebody declined.
+- **Provenance and lifecycle.** The ref rides `harness.checkpoint` with a fourth `HarnessRefKind`,
+  `'agent'` — not a new event type, and deliberately not `git.checkpoint` (which stays
+  user-commanded consent provenance). That inheritance is load-bearing: the owed-prune fold
+  reclaims the ref at clean session end, so twelve whole-tree refs per session cannot accumulate;
+  the pre-integration covered-change rule counts it as coverage; and `WORK_EVENT_TYPES` excludes
+  it, so a recovery point can never stale an acceptance. Creation goes through the
+  `onRefReady` seam (event before ref) via `ToolContext.reportGit`, and the runtime sanitizes and
+  caps the label at the emit site.
+- **Output discipline** (`git/format.ts`, mirroring `remote/format.ts`): repository-authored text —
+  commit subjects, author names, branch and tag names, paths — is `scrubSecrets` →
+  `neutralizeHarnessDelimiters` → `sanitizeLine` inside a labelled UNTRUSTED fence; harness
+  sentences sit outside it; everything passes `truncateForModel`. A cloned repository can carry
+  "ignore previous instructions" in a commit message exactly as a stranger's pull request can.
+- **The delivery anchor is no longer identified by substring.** `agent checkpoint prune` matched
+  `subject.includes(': delivery (accepted)')`, and `createCheckpoint` interpolates the caller's
+  label into that same subject — so once a model could choose a label, it could mint a ref prune
+  would refuse to reclaim. `isDeliverySubject` now anchors on the whole harness-composed subject.
 
 **Hardening on every invocation**: git resolved to an ABSOLUTE path by scanning PATH directly — a
 bare name resolves against the child cwd on Windows, so a `git.exe` planted in a workspace must

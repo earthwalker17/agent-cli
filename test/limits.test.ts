@@ -31,6 +31,7 @@ import { MAX_TASK_CHANGE_FILES, MAX_TASK_CHANGE_FILE_BYTES } from '../src/runtim
 import { CHECKS_PER_SESSION } from '../src/tools/run-check.js';
 import { INSTALL_TIMEOUT_MS } from '../src/setup/intents.js';
 import { SETUPS_PER_SESSION } from '../src/tools/project-setup.js';
+import { AGENT_CHECKPOINTS_PER_SESSION } from '../src/tools/git-checkpoint.js';
 import { MAX_CONCURRENT_PREVIEWS, PREVIEWS_PER_SESSION } from '../src/tools/preview.js';
 import { runCommandTool } from '../src/tools/run-command.js';
 import { DEFAULT_PREVIEW_TTL_MS } from '../src/preview/process.js';
@@ -175,6 +176,14 @@ describe('scale bounds (S16 raised these; S20.5 retuned them for the v1.6 shape)
     expect(CHECKS_PER_SESSION).toBe(160);
     expect(SETUPS_PER_SESSION).toBe(12);
     expect(INSTALL_TIMEOUT_MS).toBe(900_000);
+  });
+
+  it('agent checkpoints (S21.6)', () => {
+    // The bound that replaces an approval prompt. `git_checkpoint` auto-allows because a hidden
+    // ref is the most reversible thing this system writes; what keeps that honest is that it
+    // cannot be done without limit. Small on purpose: a recovery point belongs at a real boundary
+    // (before a refactor, before a migration), not once per edit.
+    expect(AGENT_CHECKPOINTS_PER_SESSION).toBe(12);
   });
 
   it('browser flow wall clock', () => {
