@@ -3,6 +3,8 @@ import { REMOTE_OBSERVATION_MAX_AGE_MS, SETUP_ACTIONS, subagentRoleAccess } from
 import type {
   ActionClass,
   ArtifactFact,
+  GitCheckpointFact,
+  GitReadFact,
   MutationPlan,
   PolicyDecision,
   RemoteBlockKind,
@@ -67,6 +69,11 @@ export const FACT_KINDS = [
   // being gated by whichever half of an `if` happened to run first.
   'remoteRead',
   'remoteWrite',
+  // Session 21.6. Two again, on the same argument: reading the local repository and writing a
+  // recovery ref into `.git` are different consequences. Declaration order is the branch order
+  // below — a reader checks the table against the sequence at a glance.
+  'gitRead',
+  'gitCheckpoint',
 ] as const;
 export type FactKind = (typeof FACT_KINDS)[number];
 
@@ -81,6 +88,8 @@ const FACT_LABELS: Record<FactKind, string> = {
   research: 'a bounded external read',
   remoteRead: 'a remote-state read',
   remoteWrite: 'a remote mutation',
+  gitRead: 'a local repository read',
+  gitCheckpoint: 'a recovery checkpoint',
 };
 
 /** The facts this tool declares OTHER than `self`. Non-empty means a conflicting contract. */
@@ -371,6 +380,58 @@ function remoteGuards<I>(
       'remote.blocked-host',
       `'${host}' is under '${blockedHit}', which this workspace's configuration forbids remote delivery from reaching`,
     );
+  }
+  return undefined;
+}
+
+/**
+ * The checks both LOCAL-git branches share (Session 21.6), in the order that fails closed.
+ *
+ * Deliberately the same shape as `remoteGuards`, and for the same reason: two branches that must
+ * agree about who may ask and about what an empty mutation plan means should not each carry their
+ * own copy of the answer.
+ */
+function gitGuards<I>(
+  tool: Tool<I>,
+  input: I,
+  ctx: ToolContext,
+  self: 'gitRead' | 'gitCheckpoint',
+  blocked: string | undefined,
+): PolicyDecision | undefined {
+  const label = self === 'gitRead' ? 'read' : 'checkpoint';
+  const conflicts = otherFacts(tool, self);
+  if (conflicts.length > 0) {
+    return decision('sensitive', 'deny', `git.${label}-conflicting-contract`, conflictReason(self, conflicts));
+  }
+  // Neither of these tools writes a WORKSPACE file. A read writes nothing at all, and a checkpoint
+  // writes only inside `.git` — which is exactly why a non-empty plan here is a contract that does
+  // not describe itself: it would sail past the declared-write branch that validates targets and
+  // captures snapshots, taking the whole path-containment layer with it.
+  let plan: MutationPlan | null;
+  try {
+    plan = tool.mutates(input, ctx);
+  } catch (e) {
+    return decision('sensitive', 'deny', `git.${label}-invalid-contract`, `mutates() threw: ${(e as Error).message}`);
+  }
+  if (plan === null || plan.paths.length > 0) {
+    return decision('sensitive', 'deny', `git.${label}-mutating-contract`, 'a local-git tool must declare an empty workspace mutation plan');
+  }
+  // The registry already withholds both tools from every child role (`CHILD_ADMISSIBLE_FACTS`);
+  // this is the second lock, on the remote pack's precedent. It is not theoretical here: an
+  // executor child works in a detached WORKTREE of the same repository, so a checkpoint taken
+  // there would write a ref into the user's real repo under the CHILD's session id — where the
+  // parent's owed-prune fold, which only ever sees the parent's log, could never reclaim it. WHO
+  // is asking outranks what the tool reports about itself.
+  if (ctx.lineage !== undefined) {
+    return decision(
+      'sensitive',
+      'deny',
+      'git.delegated-role',
+      `a ${ctx.lineage.role} subagent may not reach the local git capability; it works in a different tree, and its refs would outlive every fold that could clean them up`,
+    );
+  }
+  if (blocked !== undefined && blocked.trim() !== '') {
+    return decision('sensitive', 'deny', `git.${label}-refused`, blocked);
   }
   return undefined;
 }
@@ -1145,6 +1206,80 @@ export function decide<I>(
         ? `OVERWRITES ${where}. Remote history that other people may already have is discarded. `
         : `PUBLISHES to ${where}. This changes state on a third party under your credential, and nothing in this harness can undo it. `) +
         `${bound}${local}`,
+      { noUndo: true },
+    );
+  }
+
+  // 0j. LOCAL git READ (Session 21.6) → explicit fail-closed branch, before the command branch.
+  //
+  //     Why it cannot ride the fall-through: a command-less, mutation-less read tool auto-allows
+  //     as `observe` with the reason "read-only workspace access" — and `test/policy.test.ts`'s
+  //     `hypothetical_git_commit` regression exists precisely to say that git must never sit
+  //     behind that shape. The verdict here is the same word the fall-through would have reached,
+  //     which is the point: the branch does not buy permission, it buys a decision record that
+  //     names the argv and can fail closed on anything outside the closed view set.
+  //
+  //     The authority delta, stated rather than buried: `git status/log/diff` are ALREADY
+  //     auto-runnable via run_command — but only inside an enforced OS boundary, so on every
+  //     platform without one they ask today and stop asking now. What pays for that is the check
+  //     fact's inversion: the model names a VIEW and the harness names the command. It holds only
+  //     while the tool takes no ref, path or format parameter, so a widening there is a policy
+  //     change, not a schema tweak.
+  //
+  //     Note what this branch SKIPS by returning early: `readsPaths` is never evaluated, so the
+  //     secret-name and out-of-workspace read checks do not run for this tool at all. The only
+  //     thing that makes that honest is that nothing it can emit is file content — asserted in
+  //     the reason, and pinned by a test.
+  if (tool.gitRead !== undefined) {
+    let fact: GitReadFact;
+    try {
+      fact = tool.gitRead(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'git.read-invalid-contract', `gitRead() threw: ${(e as Error).message}`);
+    }
+    const guard = gitGuards(tool, input, ctx, 'gitRead', fact.blocked);
+    if (guard !== undefined) return guard;
+    return decision(
+      'observe',
+      'allow',
+      'git.read',
+      `reads local repository state (${fact.view}) by running ${fact.argvPreview} — harness-composed argv, scoped to the workspace subtree. ` +
+        `Nothing is written, nothing leaves this machine, and the result carries no file contents (only paths, counts and commit metadata)`,
+    );
+  }
+
+  // 0k. AGENT CHECKPOINT (Session 21.6) → explicit fail-closed branch. The only model-reachable
+  //     capability in this harness that writes inside `.git`.
+  //
+  //     It auto-allows, which is a deliberate decision and not an oversight. A checkpoint is the
+  //     most reversible act the system has — a commit object plus a hidden ref, built against a
+  //     TEMPORARY index so HEAD, the real index, branches, tags and the working tree are
+  //     byte-identical before and after — and the harness already takes task-base,
+  //     pre-integration and delivery checkpoints without asking. A prompt per capture would
+  //     simply train the model out of protecting the user's work.
+  //
+  //     What replaces the prompt is bounds, and they are load-bearing: an events-rebuilt session
+  //     allowance arrives here as `blocked` so exhaustion is recorded as a decision; the tool
+  //     refuses to sweep in secret-named files that `.gitignore` does not already exclude,
+  //     because a git blob cannot be redacted (the `artifact.inspect-secret-name` precedent);
+  //     and the ref lands under a harness kind, so the owed-prune fold reclaims it at clean end.
+  if (tool.gitCheckpoint !== undefined) {
+    let fact: GitCheckpointFact;
+    try {
+      fact = tool.gitCheckpoint(input);
+    } catch (e) {
+      return decision('sensitive', 'deny', 'git.checkpoint-invalid-contract', `gitCheckpoint() threw: ${(e as Error).message}`);
+    }
+    const guard = gitGuards(tool, input, ctx, 'gitCheckpoint', fact.blocked);
+    if (guard !== undefined) return guard;
+    return decision(
+      'reversible',
+      'allow',
+      'git.checkpoint',
+      `captures the current workspace as a recovery point: ${fact.argvPreview}, writing a commit object and one hidden ref under ${fact.refRoot}. ` +
+        `HEAD, the index, branches, tags and the working tree are UNTOUCHED — this is the one path allowed to write inside .git, which an ordinary ` +
+        `declared write refuses as a protected place. The capture respects .gitignore and nothing else, so secret-named files that are not ignored ` +
+        `are refused rather than stored. Session allowance: ${fact.budgetRemaining}`,
       { noUndo: true },
     );
   }

@@ -14,6 +14,7 @@ import type {
   PreviewEvidence,
   Provider,
   ProviderRequest,
+  GitEvidence,
   RemoteEvidence,
   RemoteReadFact,
   RemoteWriteFact,
@@ -1301,6 +1302,29 @@ function recordRemoteEvidence(session: Session, callId: string, e: RemoteEvidenc
   });
 }
 
+/**
+ * Persist a tool-reported AGENT checkpoint under the runtime-bound callId (Session 21.6).
+ *
+ * It lands as `harness.checkpoint {kind:'agent'}` rather than as a type of its own, so it inherits
+ * three folds already written and already pinned: the owed-prune fold reclaims the ref at clean
+ * session end, the pre-integration covered-change rule counts it as coverage, and
+ * `WORK_EVENT_TYPES` excludes it so a recovery point can never stale an acceptance.
+ *
+ * The label is the one field carrying model-authored text, so it is sanitized and capped here —
+ * the emit site, not the tool — for the same append-only-log reason `recordRemoteEvidence` scrubs.
+ */
+function recordGitEvidence(session: Session, callId: string, e: GitEvidence): void {
+  const label = e.label === undefined ? undefined : sanitizeLine(e.label).slice(0, 120);
+  session.log.append({
+    type: 'harness.checkpoint',
+    kind: 'agent',
+    ref: e.ref,
+    oid: e.oid,
+    callId,
+    ...(label !== undefined && label.trim() !== '' ? { label } : {}),
+  });
+}
+
 /** Persist a tool-reported preview lifecycle fact under the runtime-bound callId (Session 13). */
 function recordPreviewEvidence(session: Session, callId: string, e: PreviewEvidence): void {
   if (e.kind === 'started') {
@@ -1702,6 +1726,7 @@ async function runExecution<I>(
     reportArtifact: (e) => recordArtifactEvidence(session, callId, e),
     reportResearch: (e) => recordResearchEvidence(session, callId, e),
     reportRemote: (e) => recordRemoteEvidence(session, callId, e),
+    reportGit: (e) => recordGitEvidence(session, callId, e),
     // Session 19: the child's own lineage, so the policy engine can tell a researcher subagent's
     // call from a parent's. Runtime state stamped at startSession — never tool state, never model
     // input, absent entirely for a parent session.

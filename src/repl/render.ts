@@ -433,6 +433,15 @@ export function createRenderer(opts: {
           break;
         }
         case 'harness.checkpoint': {
+          // The 'agent' line is deliberately NOT dim: the other two are harness plumbing at
+          // moments the user already initiated, while this one is the model writing into the
+          // user's repository on its own judgement. Evidence nobody notices is not evidence.
+          if (e.kind === 'agent') {
+            chromeLine(
+              `  ${style.green(g.ok)} checkpoint ${e.oid.slice(0, 12)}${e.label ? ` (${sanitizeLine(e.label)})` : ''} — recovery point taken by the agent; hidden ref, no history touched (/checkpoint restore)`,
+            );
+            break;
+          }
           chromeLine(
             style.dim(
               e.kind === 'delivery'

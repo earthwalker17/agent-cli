@@ -125,8 +125,14 @@ export type SetupAction = (typeof SETUP_ACTIONS)[number];
  * as the durable audit anchor and is pruned only when superseded by a newer delivery
  * checkpoint. All live under refs/agent-cli/checkpoints/<sessionId>/<n> — user-visible and
  * prunable via `agent checkpoint list|prune`, never the user's branch history.
+ *
+ * Session 21.6 adds 'agent': a recovery point the MODEL asked for through `git_checkpoint`. It is
+ * a harness ref rather than a `git.checkpoint` (which `types.ts` reserves for user-commanded
+ * consent provenance) precisely so it inherits this lifecycle — session-scoped, pruned at clean
+ * end. That inheritance is the reason a model may take them freely: twelve whole-tree refs per
+ * session would otherwise accumulate in the user's repository forever.
  */
-export type HarnessRefKind = 'task-base' | 'pre-integration' | 'delivery';
+export type HarnessRefKind = 'task-base' | 'pre-integration' | 'delivery' | 'agent';
 
 /**
  * Declaration order is the canonical order everywhere (schemas, views, reports, prompts) —
@@ -523,6 +529,29 @@ export type RemoteEvidence =
     };
 
 /**
+ * Structured facts about LOCAL git operations the model performed (Session 21.6), reported through
+ * `ToolContext.reportGit`. Same callId-binding contract as every other channel.
+ *
+ * One kind, deliberately. A local READ spends no allowance, contacts nobody and changes nothing,
+ * so `tool.requested` (which carries the view verbatim) plus `tool.completed` already record it
+ * exactly as they record `read_file` — a domain event would be duplication dressed as evidence.
+ * The remote pack needed one because a remote read authenticates and spends a counter; this does
+ * neither.
+ *
+ * A checkpoint is different: it writes into the user's repository, and the ref it creates outlives
+ * the call. It is reported through the createCheckpoint `onRefReady` seam — BEFORE update-ref, the
+ * event-before-ref contract every harness ref obeys — and the runtime turns it into the
+ * `harness.checkpoint {kind:'agent'}` event that the owed-prune fold already understands.
+ */
+export type GitEvidence = {
+  kind: 'checkpoint';
+  ref: string;
+  oid: string;
+  /** The model's stated reason. Sanitized and capped by the runtime before it is persisted. */
+  label?: string;
+};
+
+/**
  * Typed failure classes (Session 12) — the vocabulary the recovery catalogue, the repair ledger,
  * the DAG gate, and the report all key on. Classification happens BEFORE any repair is planned;
  * `unknown` is a first-class member and a stopping condition, never a shrug that lets a loop
@@ -910,6 +939,8 @@ export interface ToolContext {
   reportResearch?: (e: ResearchEvidence) => void;
   /** Evidence channel for remote Git/GitHub facts (Session 20); persisted under this call's id. */
   reportRemote?: (e: RemoteEvidence) => void;
+  /** Evidence channel for LOCAL git reads and agent checkpoints (Session 21.6); persisted under this call's id. */
+  reportGit?: (e: GitEvidence) => void;
   /**
    * Present only for SUBAGENT child sessions (Session 19): the runtime's own record of who spawned
    * this session and as what role. Set by `startSession` from `StartOptions.lineage`, the same
@@ -1171,6 +1202,48 @@ export interface RemoteTargetFact {
  * MUST be pure: target and argv come from input plus the session's in-memory remote context; the
  * budget fields come from an in-memory counter (never the filesystem, never a probe).
  */
+/**
+ * The policy-visible shape of one LOCAL git read (Session 21.6).
+ *
+ * Everything a reviewer needs in order to check the branch's central claim: the command is
+ * harness-composed (`argvPreview` is the literal argv, and the tool takes no ref, path, author or
+ * format input, so no model text reaches it), it is scoped to the workspace subtree, and it returns
+ * no file bytes. That last one matters because the branch allows before `readsPaths` is ever
+ * evaluated — the secret-name and containment checks do NOT run for this tool, and the only thing
+ * making that safe is that nothing it can emit is file content.
+ */
+export interface GitReadFact {
+  /** `summary` | `changes` | `log` | `checkpoints`. */
+  view: string;
+  /** The exact command(s) that will run. What the record shows is what executes. */
+  argvPreview: string;
+  /** Why this call cannot be admitted (no repository, malformed request) — the engine denies. */
+  blocked?: string;
+}
+
+/**
+ * The policy-visible shape of one AGENT checkpoint (Session 21.6).
+ *
+ * The one model-reachable capability that writes inside `.git` — a directory the declared-write
+ * branch refuses as protected, and which `run_command` refuses as a PLACE. It is admitted here,
+ * and only here, because the write is provably additive: a commit object plus a ref under
+ * `refs/agent-cli/checkpoints/`, with HEAD, the index, branches, tags and the working tree
+ * untouched (`git/checkpoint.ts` builds it against a temporary index file).
+ *
+ * `budgetRemaining` states the session allowance and `blocked` carries a spent one, so exhaustion
+ * lands in `policy.decision` as evidence rather than as a string the model reads and forgets.
+ */
+export interface GitCheckpointFact {
+  /** The ref namespace the capture will write into. Fixed by the harness, shown for the record. */
+  refRoot: string;
+  /** The exact command(s) that will run. */
+  argvPreview: string;
+  /** Remaining session allowance, rendered into the recorded reason. */
+  budgetRemaining: string;
+  /** Why this call cannot be admitted (no repository, budget spent) — the engine denies. */
+  blocked?: string;
+}
+
 export interface RemoteReadFact {
   /** `auth` | `repository` | `refs` | `pulls` | `issues` | `runs` | `run`. */
   operation: string;
@@ -1381,6 +1454,42 @@ export interface Tool<I = unknown> {
    * what WILL happen, and between the claim and the act a human was reading a prompt.
    */
   remoteWrite?(input: I): RemoteWriteFact;
+  /**
+   * Declares a LOCAL GIT READ (Session 21.6) — repository state through harness-composed argv.
+   *
+   * Its own branch for the S6-trap reason every fact above it documents, and for one this
+   * capability owns: `test/policy.test.ts`'s `hypothetical_git_commit` regression exists to say
+   * that git must never sit behind the observe fall-through, whose recorded reason would be
+   * "read-only workspace access". A branch that names the argv and asserts no file bytes are
+   * returned is the difference between a decision record and a guess.
+   *
+   * There is a real authority delta here worth stating: `git status/log/diff` are already
+   * auto-runnable through `run_command`, but only inside an ENFORCED sandbox — so on a machine
+   * with no enforcement (every non-Windows platform today) they ask. This branch allows them
+   * everywhere. What buys that is the inversion the `check` fact made first: the model names a
+   * VIEW, the harness names the command. It holds only while the tool takes no ref, path or
+   * format parameter.
+   *
+   * MUST be pure. Never combinable with any other fact; a throw is a deny.
+   */
+  gitRead?(input: I): GitReadFact;
+  /**
+   * Declares an AGENT CHECKPOINT (Session 21.6) — an additive recovery capture to a hidden ref.
+   *
+   * Separate from `gitRead` as a `FactKind`, on the S20 remoteRead/remoteWrite argument: reading
+   * the repository and writing into `.git` are different consequences, and two facts let the
+   * engine's conflicting-contract rule refuse a tool that could do both, so "the read tool writes
+   * nothing" is a property a reviewer verifies by finding no second fact.
+   *
+   * This is the one fact whose branch ALLOWS a write the declared-mutation branch would deny, so
+   * the honesty burden sits on the tool: it must refuse to capture secret-named files that
+   * `.gitignore` does not already exclude (a git blob cannot be redacted — the
+   * `artifact.inspect-secret-name` precedent), and it must not be able to forge a delivery anchor
+   * through its label.
+   *
+   * MUST be pure: the allowance comes from an in-memory counter rebuilt from events, never a probe.
+   */
+  gitCheckpoint?(input: I): GitCheckpointFact;
   /**
    * Optional DISPLAY-ONLY context lines for the approval prompt (V0.7.1) — e.g. plan-approval
    * state at an executor spawn. Folded into the request's `detail`, so the lines inherit the
@@ -2381,13 +2490,21 @@ export type EventBody =
        * prune because a missing ref counts as deleted. Deliberately a NEW type: widening
        * task.base-checkpoint would make an old reader's owed-prune fold delete the durable
        * delivery anchor at quit.
+       *
+       * Session 21.6 adds 'agent' — a recovery point the model asked for through
+       * `git_checkpoint`. It rides THIS type rather than `git.checkpoint` for two reasons: that
+       * type is user-commanded consent provenance and must not be misattributed, and only a
+       * harness ref inherits the owed-prune lifecycle that keeps model checkpoints from
+       * accumulating in the user's repository.
        */
       type: 'harness.checkpoint';
-      kind: 'pre-integration' | 'delivery';
+      kind: 'pre-integration' | 'delivery' | 'agent';
       ref: string;
       oid: string;
-      /** Bound by the runtime when a tool call created it (pre-integration); absent for the /accept delivery path. */
+      /** Bound by the runtime when a tool call created it (pre-integration, agent); absent for the /accept delivery path. */
       callId?: string;
+      /** The model's own words for why it took the point (kind 'agent' only) — sanitized and capped by the runtime. */
+      label?: string;
     }
   | {
       /** A delegated subagent task finished (V0.6). Usage is the CHILD's spend, recorded once

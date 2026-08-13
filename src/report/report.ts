@@ -284,7 +284,7 @@ export interface ReportJson {
   /** Harness workflow-transition checkpoints (Session 14, additive): pre-integration +
    *  delivery. The ref scan (`agent checkpoint list`) is live truth — a recorded creation
    *  whose ref is absent was pruned, superseded, or never landed (a phantom). */
-  harnessCheckpoints?: { kind: 'pre-integration' | 'delivery'; ref: string; oid: string; pruned?: boolean }[];
+  harnessCheckpoints?: { kind: 'pre-integration' | 'delivery' | 'agent'; ref: string; oid: string; label?: string; pruned?: boolean }[];
   /** The structural review gate's recorded evidence (Session 14, additive): rounds, findings
    *  with DERIVED triage status, caveats. Statuses come from the same fold acceptance reads. */
   review?: ReportReview;
@@ -684,7 +684,13 @@ export function buildReport(input: ReportInput): { json: ReportJson; md: string 
   }
   const harnessCheckpoints = events
     .filter((e): e is Extract<SessionEvent, { type: 'harness.checkpoint' }> => e.type === 'harness.checkpoint')
-    .map((e) => ({ kind: e.kind, ref: e.ref, oid: e.oid, ...((prunedRefSeqs.get(e.ref) ?? 0) > e.seq ? { pruned: true } : {}) }));
+    .map((e) => ({
+      kind: e.kind,
+      ref: e.ref,
+      oid: e.oid,
+      ...(e.label !== undefined ? { label: e.label } : {}),
+      ...((prunedRefSeqs.get(e.ref) ?? 0) > e.seq ? { pruned: true } : {}),
+    }));
 
   // The structural review gate (Session 14): the same fold acceptance reads. The graph comes
   // from the CALLER when it has one (S14.5) — the report never reads the plan file itself —
@@ -1611,11 +1617,13 @@ function renderMarkdown(r: ReportJson): string {
     L.push(`## Git recovery and audit state (hidden refs, harness-created)`);
     for (const c of r.harnessCheckpoints) {
       const prunedSuffix = c.pruned === true ? ' [later pruned/superseded in this log]' : '';
-      L.push(
+      const what =
         c.kind === 'delivery'
-          ? `- ${c.oid.slice(0, 12)} ${c.ref} — DELIVERY (the accepted state; intended to survive the session)${prunedSuffix}`
-          : `- ${c.oid.slice(0, 12)} ${c.ref} — pre-integration (whole-workspace point before an apply; pruned at clean session end)${prunedSuffix}`,
-      );
+          ? 'DELIVERY (the accepted state; intended to survive the session)'
+          : c.kind === 'agent'
+            ? `AGENT-requested${c.label !== undefined && c.label !== '' ? ` "${c.label}"` : ''} (the model took a recovery point; pruned at clean session end)`
+            : 'pre-integration (whole-workspace point before an apply; pruned at clean session end)';
+      L.push(`- ${c.oid.slice(0, 12)} ${c.ref} — ${what}${prunedSuffix}`);
     }
     L.push('');
     L.push(

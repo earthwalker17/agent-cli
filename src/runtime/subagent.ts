@@ -77,6 +77,15 @@ const CHILD_ADMISSIBLE_FACTS = {
   // refuses a remote fact under any lineage as a second lock; this table is the first.
   remoteRead: false,
   remoteWrite: false,
+  // Session 21.6. Both false. A read would describe the wrong tree — an executor works in a
+  // detached worktree materialized WITHOUT gitignored files, so "3 uncommitted files" there is a
+  // fact about the isolation, not about the user's workspace, and a read-only explorer has the
+  // ranked index for the questions it legitimately has. A checkpoint is worse than useless: it
+  // would write a ref into the user's real repository under the CHILD's session id, which the
+  // parent's owed-prune fold never sees and therefore never reclaims. The engine refuses both
+  // under any lineage as the second lock; this table is the first.
+  gitRead: false,
+  gitCheckpoint: false,
 } satisfies Record<FactKind, boolean>;
 
 /** The three per-task research instances a researcher child receives. */
