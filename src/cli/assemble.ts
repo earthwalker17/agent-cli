@@ -31,6 +31,8 @@ import { createGhRunner } from '../remote/gh.js';
 import type { GhRunner, RemoteContext } from '../remote/types.js';
 import { createRemoteState, remoteSpendFromEvents, type RemoteState } from '../tools/remote-state.js';
 import { createRemoteStatusTool } from '../tools/remote-status.js';
+import { createGitStatusTool } from '../tools/git-status.js';
+import { createGitCheckpointTool, gitCheckpointCapsFromEvents } from '../tools/git-checkpoint.js';
 import { createRemotePushTool } from '../tools/remote-push.js';
 import { createRemoteReleaseTool } from '../tools/remote-release.js';
 import { capsFor, type ProviderName } from '../provider/catalog.js';
@@ -97,6 +99,9 @@ export const SESSION_TOOL_NAMES = [
   'remote_status',
   'remote_push',
   'remote_release',
+  // Session 21.6. Registered only inside a git repository, same precedent as the remote three.
+  'git_status',
+  'git_checkpoint',
   'delegate_task',
   'update_plan',
   'apply_task_changes',
@@ -723,10 +728,19 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     context: remoteContext,
     initialSpend: remoteSpendFromEvents(session.log.events),
   });
-  const remoteGitDeps =
+  // The addressable-repository triple, shared by the remote pack and the local git pack (S21.6).
+  // The null rule is deliberately gitPath+repoRoot rather than `isRepo`: a status probe that
+  // degraded still leaves a real repository we can address, and both packs re-read live anyway.
+  const repoGitDeps =
     gitFacts.gitPath !== null && gitFacts.repoRoot !== null
       ? { gitPath: gitFacts.gitPath, repoRoot: gitFacts.repoRoot, workspaceRoot: ctx.ws }
       : null;
+  // git_status / git_checkpoint (Session 21.6): registered only inside a git repository, on the
+  // remote pack's precedent — a model told about a tool its registry does not contain will reach
+  // for it, be told it does not exist, and reach again. Parent-only: `CHILD_ADMISSIBLE_FACTS`
+  // refuses both facts and the engine denies them under any lineage, so "no subagent checkpoints
+  // into the user's repo from a worktree" is a property of the registry, not a hope.
+  const gitCheckpointCaps = gitCheckpointCapsFromEvents(session.log.events);
 
   // Resume honesty (Session 13): a preview from a PREVIOUS life cannot be re-attached (the
   // handle died with the process's owner); the sweep above already dealt with the process, so
@@ -796,17 +810,34 @@ export async function assembleSession(deps: AssembleDeps): Promise<Assembled> {
     // "no subagent reaches the remote" is a property of the registry, not a hope about behaviour.
     ...(remoteUnavailable === undefined
       ? [
-          createRemoteStatusTool({ state: remoteState, gh: ghRunner, git: remoteGitDeps }) as Tool,
-          createRemotePushTool({ state: remoteState, git: remoteGitDeps, events: () => session.log.events }) as Tool,
+          createRemoteStatusTool({ state: remoteState, gh: ghRunner, git: repoGitDeps }) as Tool,
+          createRemotePushTool({ state: remoteState, git: repoGitDeps, events: () => session.log.events }) as Tool,
           createRemoteReleaseTool({
             state: remoteState,
             gh: ghRunner,
-            git: remoteGitDeps,
+            git: repoGitDeps,
             // The notes file is staged in the PROJECT STATE dir, never the workspace: it is a
             // transient argument to gh, not a workspace artifact, and the workspace is where a
             // path validator would rightly refuse an undeclared write.
             notesDir: layout.projectDir,
             events: () => session.log.events,
+          }) as Tool,
+        ]
+      : []),
+    ...(repoGitDeps !== null
+      ? [
+          createGitStatusTool({
+            git: repoGitDeps,
+            stateDir: layout.projectDir,
+            sessionId: session.id,
+            events: () => session.log.events,
+          }) as Tool,
+          createGitCheckpointTool({
+            git: repoGitDeps,
+            stateDir: layout.projectDir,
+            sessionId: session.id,
+            caps: gitCheckpointCaps,
+            secretPatterns: deps.config.rules.secretPatterns,
           }) as Tool,
         ]
       : []),

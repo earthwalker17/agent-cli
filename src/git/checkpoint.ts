@@ -49,6 +49,36 @@ export interface CheckpointContext {
   workspaceRoot: string;
   /** Project state dir — holds the temporary index file (outside the workspace by contract). */
   stateDir: string;
+  /**
+   * Turn cancellation (Session 21.6). Absent for the user-typed flows, which are not running
+   * inside a turn; supplied by `git_checkpoint`, because `types.ts` requires a long-running tool
+   * to observe the signal and a whole-tree `add -A` is otherwise unkillable by Ctrl+C.
+   */
+  signal?: AbortSignal;
+  /**
+   * Per-invocation timeout override. The client's 15 s default is generous for plumbing and thin
+   * for `add -A` / `write-tree` over a large cold tree; a capture that dies on a timer is not a
+   * safer capture, it is an absent one.
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * The label the /accept delivery path gives its checkpoint, and the ONLY way `agent checkpoint
+ * prune` recognizes a delivery anchor.
+ *
+ * It is matched against the WHOLE subject, anchored (Session 21.6). A substring test was
+ * forgeable: `createCheckpoint` interpolates the caller's label into the same subject, so once a
+ * model could choose a label, `x: delivery (accepted)` produced a ref that prune preserved and
+ * that `agent checkpoint list` presented as an accepted state no acceptance ever produced. A label
+ * is display; it must never be identity.
+ */
+export const DELIVERY_LABEL = 'delivery (accepted)';
+const DELIVERY_SUBJECT_RE = /^agent checkpoint \d+: delivery \(accepted\) \(session .+\)$/;
+
+/** True only for a subject this harness itself composed for a delivery checkpoint. */
+export function isDeliverySubject(subject: string): boolean {
+  return DELIVERY_SUBJECT_RE.test(subject.trim());
 }
 
 export interface CheckpointInfo {
@@ -99,7 +129,14 @@ export async function createCheckpoint(
   opts: CreateCheckpointOptions = {},
 ): Promise<CreateCheckpointResult> {
   const g = (argv: string[], env?: Record<string, string>, cwd?: string) =>
-    runGit({ gitPath: cctx.gitPath, argv, cwd: cwd ?? cctx.repoRoot, ...(env ? { env } : {}) });
+    runGit({
+      gitPath: cctx.gitPath,
+      argv,
+      cwd: cwd ?? cctx.repoRoot,
+      ...(env ? { env } : {}),
+      ...(cctx.signal !== undefined ? { signal: cctx.signal } : {}),
+      ...(cctx.timeoutMs !== undefined ? { timeoutMs: cctx.timeoutMs } : {}),
+    });
 
   const notes: string[] = [];
   const untracked = await g(['ls-files', '-z', '--others', '--exclude-standard'], undefined, cctx.workspaceRoot);

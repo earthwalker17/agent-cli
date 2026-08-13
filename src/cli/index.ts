@@ -20,7 +20,7 @@ import { renderUserPlanView } from '../plan/views.js';
 import { buildReport, effectiveIdentity } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
-import { createCheckpoint, deleteCheckpointRefs, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
+import { createCheckpoint, deleteCheckpointRefs, isDeliverySubject, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { sanitizeLine } from '../shared/text.js';
 import { DEFAULT_MODEL, buildRunContext, latestSessionId, workspaceRoot, type CliValues } from './context.js';
 import { CATALOG_VERIFIED, modelsFor } from '../provider/catalog.js';
@@ -563,8 +563,10 @@ async function cmdCheckpoint(values: CliValues, sub?: string, subArg?: string): 
     // ref kind session-end cleanup deliberately preserves. This command is recommended as the
     // cleanup backstop, so pruning them by default silently destroyed the anchor every durable
     // surface (report, journal, owed-ref fold) still points at (S14.5 review finding).
-    const isDelivery = (subject: string): boolean => subject.includes(': delivery (accepted)');
-    const refs = values['include-delivery'] === true ? all : all.filter((c) => !isDelivery(c.subject));
+    // S21.6: anchored, not a substring test. A model can choose a checkpoint LABEL, and the label
+    // lands inside this same subject — so `includes()` let a label forge an anchor prune would
+    // then refuse to reclaim.
+    const refs = values['include-delivery'] === true ? all : all.filter((c) => !isDeliverySubject(c.subject));
     const keptDelivery = all.length - refs.length;
     if (refs.length === 0) {
       process.stdout.write(

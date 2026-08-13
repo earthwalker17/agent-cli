@@ -2,7 +2,7 @@ import { applyUndo } from '../runtime/undo.js';
 import { buildReport, isReportSection, REPORT_SECTIONS, reportSection, type ReportSection } from '../report/report.js';
 import { buildSessionDiff, renderSessionDiff } from '../report/diff.js';
 import { runCommitFlow } from '../git/commit.js';
-import { createCheckpoint, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
+import { createCheckpoint, DELIVERY_LABEL, listCheckpoints, runRestoreFlow, type CheckpointContext } from '../git/checkpoint.js';
 import { buildWorkspaceMapAuto } from '../workspace/map.js';
 import { renderRepoMap } from '../retrieval/render.js';
 import type { RetrievalHandle } from '../retrieval/rank.js';
@@ -395,7 +395,7 @@ export async function acceptSession(ctx: CommandContext, opts: { confirm: boolea
         ctx.renderer.chromeLine(`  delivery checkpoint reused (interrupted acceptance repair): ${prior.ref}`);
       } else {
         const r = await createCheckpoint(cctx, ctx.session.id, {
-          label: 'delivery (accepted)',
+          label: DELIVERY_LABEL,
           onRefReady: (ref, oid) => ctx.session.log.append({ type: 'harness.checkpoint', kind: 'delivery', ref, oid }),
           confirmLargeUntracked: async (count) => {
             if (!ctx.question) return false;

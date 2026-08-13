@@ -126,10 +126,11 @@ describe('the exported tool vocabulary matches the registry the model receives',
     const a = await assemble();
     try {
       const attached = new Set(a.session.tools.map((t) => t.name));
-      // `retrieve` needs a git-backed index, `web_search` needs a research credential, and the
-      // three `remote_*` tools need a configured git remote; none is present in this hermetic
+      // `retrieve` needs a git-backed index, `web_search` needs a research credential, the three
+      // `remote_*` tools need a configured git remote, and the two `git_*` tools need the
+      // workspace to be inside a repository at all (S21.6); none is present in this hermetic
       // no-git, no-key assembly. Everything else is unconditional.
-      const conditional = new Set(['retrieve', 'web_search', 'remote_status', 'remote_push', 'remote_release']);
+      const conditional = new Set(['retrieve', 'web_search', 'remote_status', 'remote_push', 'remote_release', 'git_status', 'git_checkpoint']);
       for (const name of SESSION_TOOL_NAMES) {
         if (conditional.has(name)) continue;
         expect(attached.has(name), `declared but never registered: ${name}`).toBe(true);
