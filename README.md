@@ -69,41 +69,35 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.7.0.** 2,147 hermetic tests across 139 files (real-OS sandbox, real-repository
-> git, **a local bare repo standing in as a real remote**, real browser flows, real PDF print +
-> rasterization, hermetic HTTP wire pins, adversarial-review suites) plus opt-in live smokes.
-> Newest live proof (S21, validated **31/31** from persisted evidence alone): a **fresh machine
-> state** onboarded with `/init`, both constitutions injected the next session, a **durable
-> "always allow" grant** minted with one keystroke, **consumed by an unattended `--no-input`
-> run**, then revoked and honestly denied; a live repair escalation dismissed by the user and
-> accepted WITH the caveat; a typed check replaying **across sessions** under its body-bound
-> durable key; and the review-round gate refusing a round that could not bind
-> (`agent-cli-s21-live/DEMO.md`). Before it: **an empty folder to a real
-> GitHub release, one continuous session**. One Kimi K3 session (1,006 events, three lives —
-> the terminal died twice and `agent resume` carried the plan, evidence and spend across a
-> compacted history both times) researched the current Open-Meteo docs through a sandboxed
-> researcher (**8 findings, every one with source URLs and a stamped retrieval date**), got its
-> task graph sha-approved, built `web/` + `api/` + `cli/` through **three parallel worktree
-> executors**, found and fixed **two real test failures live** (Node and Go), drove **five
-> passing browser flows** against its own managed previews, wrote a DOCX/PDF overview and
-> **corrected a visual defect it saw in its own pages**, took one user-typed commit, and
-> published — push, tag, Release, **each under its own approval, each verified by re-reading the
-> remote, with the first release attempt denied by policy for citing a stale observation**.
-> Validated post hoc **62/62** from persisted evidence plus the live remote. The honest
-> asterisk the proof surfaced: acceptance ended **PARTIAL by the documented override**, because
-> a session-targeted escalation has no closure path in this version — a known deferred gap, now
-> live-demonstrated and first in line for S21 (`agent-cli-s205-live/DEMO.md`). Before it:
-> **remote delivery to this project's own repository** — three mutations, three approvals, a
-> first publish denied, and a resumed session that remembered what it had spent while forgetting
-> what it was allowed (`agent-cli-s20-live/DEMO.md`); **web research as a controlled
-> experiment** — the same task with and without the credential, the proof's researcher recording
-> 7 corroborated findings including the exact legacy trap the control could only flag
-> (`agent-cli-s19-live/DEMO.md`); **polyglot verification proven three ways**; **the documents
-> workflow revising its own too-cramped pages**; **the full multi-project workflow in one
-> 84-minute session** validated 38/38 from persisted evidence alone; and **all five providers
-> exercised live through the real bounded tool loop**. No credential appears anywhere in the
-> evidence. This is an open, build-in-public engineering effort — see `PROJECT.md` for the thesis,
-> `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is done, deferred, and next.
+> **Status: v1.9.0.** 2,307 hermetic tests across 145 files (real-OS sandbox,
+> real-repository git, **a local bare repo standing in as a real remote**, real browser flows, real
+> PDF print + rasterization, hermetic HTTP wire pins, adversarial-review suites) plus opt-in live
+> smokes. Newest live proof (S21.6, validated **29/29** from
+> persisted evidence alone): the model read the repository through `git_status` three times with
+> **zero approvals spent on the git tools all session**, every call recorded on its own policy
+> branch rather than the observe fall-through; a recovery capture **refused by name** because a
+> non-gitignored `.env` would have been hashed into the object database; the model, told
+> explicitly to `git commit -am wip`, reached the approval prompt and the scripted human **denied
+> it** — no commit process ever started; the named cure worked and a real recovery point landed;
+> and the commit that did happen came from the user answering *commit the 1 file(s) this session
+> changed, then accept* at the completion prompt. At quit the agent's ref was pruned, the delivery
+> anchor survived, and the credential appeared **neither in the session log nor in any git object**
+> (`agent-cli-s216-live/DEMO.md`). Before it: the **contextual consent** surface, live — an
+> approval prompt firing on a real model-authored plan with `/plan approve` never typed, and
+> `@review` finding a seeded defect while consuming zero adversarial rounds
+> (`agent-cli-s215-live/DEMO.md`); a **fresh machine state** onboarded with `/init`, a durable
+> "always allow" grant minted with one keystroke and **consumed by an unattended `--no-input`
+> run**, then revoked and honestly denied (S21, 31/31); and **an empty folder to a real GitHub
+> release in one continuous session** — 1,006 events, three lives across two terminal deaths,
+> source-backed research, three parallel worktree executors, two real test failures found and
+> fixed live, five passing browser flows, a DOCX/PDF overview whose visual defect the model saw
+> and corrected in its own pages, and a publish whose first release attempt policy **denied** for
+> citing a stale observation (S20.5, 62/62). Earlier proofs cover polyglot verification three
+> ways, web research as a controlled experiment with and without the credential, the full
+> multi-project workflow in one 84-minute session (38/38), and all five providers exercised live
+> through the real bounded tool loop. No credential appears anywhere in the evidence. This is an
+> open, build-in-public engineering effort — see `PROJECT.md` for the thesis, `ARCHITECTURE.md`
+> for how it works, and `ROADMAP.md` for what is done, deferred, and next.
 
 ## Install
 
@@ -384,6 +378,8 @@ per-session tools the main agent (and only the main agent) receives:
 | `project_setup` | Dependency install / migrate / seed — the model names an intent, the harness resolves the command from the lockfile or the project's own script |
 | `preview` | A managed dev-server process with recorded readiness, logs, and teardown |
 | `web_search` | Bounded web search returning source snippets with URLs — the ONE research tool the main agent holds |
+| `git_status` | Read the LOCAL repository: branch/HEAD/dirtiness, what this session changed and whether a commit would be blocked, recent commits, this session's recovery points |
+| `git_checkpoint` | Capture a recovery point to a hidden ref before risky work — create-only, bounded, and refuses to store secret-named files |
 | `remote_status` | Read a git remote / its GitHub repo: identity, permission, ONE ref (producing the observation a publish must cite), pulls, issues, CI runs |
 | `remote_push` | Publish one named branch or tag to one named remote — observation-bound, dry-run compared, verified afterwards |
 | `remote_release` | A GitHub Release for a tag ALREADY on the remote (never creates the tag) |
@@ -573,10 +569,30 @@ never told about them.
 
 ## Git integration
 
-Git is a **user surface, not a model tool**. In a repository, the session banner and system
-prompt carry the probed context (branch, HEAD, dirty count), the model may inspect state with
-read-only git commands, and it is told to never stage/commit/modify VCS state unless you
-explicitly ask. Everything deliberate is yours:
+Git has **two halves, split by whether you can see the result in your own git state.**
+
+The model gets the half that changes nothing you can see — reading, and recovery points:
+
+- **`git_status`** — the repository as structured state: `summary` (branch, HEAD, upstream, how
+  dirty the tree is, read live), `changes` (every uncommitted path in the workspace subtree, which
+  ones *this session* changed, churn counts, and whether a commit would be blocked — built by the
+  same function that builds your `/commit` preview, so the two cannot drift), `log`, and
+  `checkpoints`. It takes a view name and a number and nothing else — no ref, path, author or
+  format argument — which is what lets it run without asking you: the model names a VIEW, the
+  harness names the command. It returns no file contents.
+- **`git_checkpoint`** — a recovery point before risky work, taken without interrupting you. It
+  writes a commit object plus one hidden ref under `refs/agent-cli/checkpoints/`: on no branch,
+  with your index, HEAD, branches and tags untouched (`git log --all` does show it). Bounded at 12
+  per session, reclaimed at clean session end, and it **refuses** to capture secret-named files
+  your `.gitignore` does not already exclude — a git blob cannot be redacted.
+
+The other half is yours, and the model has no unilateral path to any of it. It is told plainly
+that it cannot commit on its own initiative and that committing is your decision; the only route
+to a git mutation is a `run_command` you approve per call.
+
+- **`/commit` is offered as a choice at the acceptance boundary** — when a session finishes with
+  changes it can attribute to itself, the completion prompt's keys include *commit the N file(s)
+  this session changed, then accept*. It runs the same preview and confirmation `/commit` runs.
 
 - **`/diff` · `agent diff`** — exactly what the session's file tools changed, as unified diffs
   from the recorded pre-images (works without git too). Files you edited afterwards are flagged
@@ -595,7 +611,9 @@ explicitly ask. Everything deliberate is yours:
 
 One consent note: git operations you invoke honor the **trusted repository's own config and
 hooks** (that is what makes commits real); the harness disables only the pieces that would run
-code from a repo *implicitly* (fsmonitor) and never lets the model reach these flows.
+code from a repo *implicitly* (fsmonitor). The model reaches the git layer only through the two
+tools above, whose arguments the harness composes — never as a general git surface, and never at
+a commit, restore, reset, branch, tag or push.
 
 ## Remote delivery to GitHub
 

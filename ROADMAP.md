@@ -6,292 +6,154 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
-## Session 21.5 (2026-08-12) — Command and interaction surface simplification (v1.8.0)
+## Session 21.6 (2026-08-13) — The git capability pack (v1.9.0)
 
-**Objective.** Make Agent CLI operable by talking to it and answering questions it asks at the
-right moment, without weakening authority, evidence, recovery or the advanced escape hatches.
+**Objective.** Let natural-language Git intent reach the safe machinery that was already there —
+without widening the one invariant the previous session deliberately kept: *the model cannot
+publish content a human did not commit.*
 
-### The audit that framed it
+### The shape, and why it is this shape
 
-The session opened with a code-traced inventory of every user-reachable surface, published as an
-artifact and as `Desktop/Agent-CLI-Interaction-Surface-Map-S21.5.md`. Nine parallel readers traced
-each surface to its registration/parsing/dispatch site; a tenth audited the result against a fresh
-enumeration of every `case` label, `parseArgs` option and sigil regex. Findings were then verified
-by hand, and four were reproduced against the built binary.
+Checkpoint-first. The model gets the half of git that changes nothing the user can see — reading,
+and additive recovery state — while the commit stays the user's and becomes a **choice at the
+delivery boundary** instead of a printed suggestion. A model-facing `git_commit` would have broken
+the pinned invariant; the user reconfirmed keeping it verbatim, so neither pin was rewritten.
 
-Counts: **24 slash cases** (23 names; `/exit` undocumented), **4 sigils** (`@direct` in README but
-not `/help`), **17 CLI subcommands** (`agent run` documented nowhere), **23 flags in one flat
-namespace**, **13 prompt families**, **4 incompatible answer grammars**, **41 doc/code conflicts**.
+### What shipped
 
-### What changed
-
-- **Contextual consent** (`repl/consent.ts`, `repl/prompt-choice.ts`). Four decisions are asked at
-  the turn boundary. The design note that matters: `planApprovalReminder` existed *because* the
-  harness could only tell the model about a gate only the user could clear — its own comment says
-  the human "found out ten minutes later when /accept refused". A line is a broadcast with no
-  channel; a question has an answer.
-- **`@review` and the `inspector` role.** A real specialist, not an alias for the review gate.
-- **`@` becomes specialist routing**: one table, a real unknown-sigil branch, the `\b` trap fixed,
-  `@direct` removed.
-- **The typo guard**: `agent stauts` no longer starts a paid session.
-- **Ten audit defects fixed**, each with a regression test.
-- **`/report [section]`**, and `/help` rewritten around the five tiers.
-
-### Decisions, with why
-
-1. **Contextual prompts are TTY-gated.** Off a TTY, `io.question` ignores its `fresh` flag
-   (`io.ts:126`) and consumes the driver's next queued line — every piped test and every
-   `agent-cli-s*-live/` driver would break, and `driver.mjs` anchors approvals on `/\n {2}> $/`,
-   which a leaked prompt would match. This is why `/accept` and `/plan approve` were DEMOTED rather
-   than removed: they are the automation path, not legacy.
-2. **`@review` is its own role.** On `reviewer` it would have been able to make a green session
-   unacceptable (findings block `/accept` regardless of requirement, and never expire) and to burn
-   both `MAX_REVIEW_ROUNDS` before the gate was reached. Enforced structurally: the caps counter
-   matches `role === 'reviewer'` and the ledger mints rounds only from that or `review.findings`.
-3. **One new answer grammar, not a fifth.** `prompt-choice.ts` tokenizes identically to
-   `parseAnswer` but does not reuse it — those keys denote permission *scope*, and sharing `a`
-   would be durable authority won by muscle memory.
-4. **The decline is not persisted.** Anti-nag state is derived-keyed and in-memory; a
-   `consent.declined` event would write a non-decision into the evidence log for `/report`, the
-   journal and `computeAcceptance` to interpret.
-5. **Model-facing Git was deferred to Session 21.6.** A `git_commit` tool would break the pinned
-   invariant *"the model cannot publish content a human did not commit"* (`ARCHITECTURE.md`,
-   `remote-push.ts:37-40`, pinned at `test/remote.surfaces.test.ts:197-205`). The user chose to
-   keep the invariant verbatim.
-
-### An honest correction to the audit
-
-The audit's headline structural claim — six read-only commands re-implementing ~400 lines of
-`/report`'s folding — **is an overestimate**, and acting on it proved so. `/checks` re-probes the
-project, `/preview` re-probes process liveness, `/remote` carries memory-only identities and
-observations, `/research` carries live budget spend: none are pure folds, because the report is a
-fold over *events* and structurally cannot hold live state. `/repair`'s numbering is the affordance
-its dismiss action indexes into. Only `/review` was a pure fold — and replacing it with the report
-slice immediately failed two existing tests by making it *worse* (the report's review section is
-conditional, so a no-plan session lost "not required (no approved plan with executor tasks)"). It
-was reverted. The real consolidation is `/report [section]`; the six keep their tailored views and
-leave the primary help list.
-
-### Verification
-
-- Typecheck clean; suite **2147 → 2254** (+107 across `repl.args`, `cli.surface`, `repl.consent`,
-  `roles.inspector`, and additions to `repl`, `limits` and `research.surfaces`).
-- First dispatch coverage for `/diff /checkpoint /checks /preview /grants /map /exit /commit
-  /cancel`, which had none.
-- The property the consent design rests on is pinned by running one fixture twice — typed vs
-  answered — and asserting equal event arrays and equal model notes.
-- A **new reactive TTY harness** (`repl.consent.test.ts`), the first test to drive `runRepl` with
-  `isTTY: true` end to end. It must be reactive: `io.ts` installs its `pending` resolver *after*
-  writing the prompt, so an instantly-written answer lands in type-ahead where a `fresh` question
-  never consumes it.
-- **Live-verified against a real provider** (Kimi `kimi-k2.7-code`; Anthropic was attempted first
-  and refused with `credit balance is too low`, which itself exercised the turn-error path — the
-  session stayed alive at the prompt). 11/11 driver steps, **16/16 post-hoc checks read from the
-  persisted log**, 6/6 CLI-binary checks. Evidence: `agent-cli-s215-live/DEMO.md`.
-  - The **contextual approval prompt fired on a real model-authored plan** ("2 task(s), 2 isolated
-    executor task(s) that CANNOT run until you approve"), `y` recorded
-    `plan.approved (content sha bd2ea676b996…)`, and the validator asserts **no `/plan approve` was
-    ever typed** — the approval came from the prompt.
-  - **`@review` found the seeded defect as its first observation** ("Trailing separator silently
-    drops final empty field") plus three real ones it found on its own, and the role's bounds held
-    from the child's own policy decisions: `read_file` allowed, its one `run_command` attempt
-    **asked → auto-denied** (a child has no human attached), `report_observation` × 4 allowed.
-  - **The separation property held live**: 4 observations recorded, and **zero** `review.findings`,
-    **zero** adversarial rounds consumed, no blockers, gate still satisfied.
-  - `@direct` refused by name with no `user.message` at all; `@plan.md is stale` reached the model
-    as ordinary prose; `/undo --all` and `/checkpoint prune` recorded nothing; `agent stauts`
-    refused with **0 state directories created**.
-- Two defects were found in the live DRIVER (not the product) and fixed for the artifact: it
-  watched only the chrome stream while `/report` writes to stdout, and it matched patterns against
-  the cumulative transcript, so a repeated end-of-turn line matched stale output and raced ahead
-  while `@review` was still running.
-
-### Open / next
-
-- **Session 21.6**: the model-facing Git pack (`git_checkpoint` as approved, commit still
-  harness-owned), its own policy fact and fail-closed branch, on the S20 remote-pack pattern.
-- **Session 22**: arrow-key selection, deliberately deferred — readline owns stdin exclusively and
-  `status.ts` is the only cursor-moving code, so raw mode is a TUI-session decision.
-- Not done this session, and deliberately: a full-chain zero-to-delivery E2E and a demo recording.
-  The live pass verified the S21.5 surface specifically; it did not re-prove the whole loop.
-- The live plan was approved but its executor tasks were not run to completion — the session ended
-  at `4 unfinished — plan 0/2 completed · not accepted`, which is the honest state for a
-  verification run that stopped once the prompt had been proved.
-
----
-
-## Session 21 (2026-08-11) — Bounded memory and global initialization (v1.7.0)
-
-### Objective
-
-Make project memory deliberate, bounded and useful over long-running projects; give the harness
-a user-level global workspace with an optional onboarding flow; design durable machine-level
-approvals as the one explicit exception to "authority is not durable" — and first, close the two
-runtime defects the S20.5 live E2E carried forward, from the runtime's own semantics rather than
-as patches.
-
-### What shipped — the two carried-in fixes
-
-- **A session-targeted repair escalation finally has a user-side closure** (`repair.dismissed`).
-  The live-demonstrated deadlock was a three-part conjunction: the ledger closes an escalation
-  only via a later PROVEN attempt, `evaluateRepair` refuses to record attempts for
-  non-auto-eligible classes, and acceptance's `resolvedTargets` covers plan tasks only — so a
-  fully-green session pinned at PARTIAL. Now: `/repair` renders the ledger; `/repair dismiss <n>
-  <reason>` appends the additive event, joined on the escalation event's OWN seq (a shared
-  signature can never clear a neighbor), `source: 'user'` required by the fold (the recover tool
-  has no dismiss action — consent stays the user's structurally), the blocker closed while an
-  acceptance CAVEAT always remains. `repair.dismissed` joins `WORK_EVENT_TYPES` so a prior
-  PARTIAL acceptance goes stale and re-accepting is meaningful; plan task id `session` is now
-  refused as reserved; `/status` gains the repairs line the surface never had.
-- **A review round can no longer be spent where it could never bind.** While a once-approved
-  plan's approval is invalidated (`approvedSha !== null && !approvedAndCurrent` — an amendment,
-  a diverged hand-edit, a vanished document), a reviewer group refuses EX ANTE naming a cure
-  that works in the named state. The S20.5 dead end — both rounds ran unbound inside an
-  amendment window and the spent cap then blocked the bound round the plan's review task needed
-  — is prevented at the gate; `MAX_REVIEW_ROUNDS` itself is untouched, and the decision that
-  unbound rounds still count (a binding-aware count would be a repetition-bound loosening) is
-  now written on the constant. `planApprovalSha` clears on `plan.discarded`, so discarded plans,
-  never-approved drafts and plan-less sessions keep voluntary rounds.
-
-### What shipped — the memory system (three documents → six, every bound a pinned contract)
-
-- **`LESSONS.md`** — durable project lessons, proposed (≤3) in the existing end-of-session
-  narrative response as an OPTIONAL schema key (a missed or INVALID value costs the lessons,
-  never the journal — enforced by a lenient two-stage parse), merged by slug (reuse = update,
-  entry moves to front), harness-stamped provenance per entry, heading-shaped body lines
-  visibly defused so a proposal cannot fabricate an entry boundary, user edits preserved
-  byte-verbatim. 30 entries / 16 KiB on disk, 8 KiB injected.
-- **`RESEARCH.md`** — the durable surface S19 deferred, PERISHABLE by design: a deterministic
-  fold over recorded `research.findings` (no model call — it succeeds when the narrative fails),
-  idempotent by noteId across resume re-folds, newest-first by harness-stamped retrieval date,
-  entries past 30 days dropped at the next write with an honest leading count. Findings
-  previously vanished from cross-session memory at quit; the journal evidence section gains the
-  missing research line.
-- **Coherence pass:** the one truncation-marker gap fixed (an oversize CODEBASE.md was silently
-  head-cut); every memory cap pinned in `test/limits.test.ts`, including ONE worst-case
-  total-injection ceiling (86,016 chars across all six docs — a new doc must trip a deliberate
-  decision, not quietly grow the cached prefix).
-
-### What shipped — the global workspace and /init
-
-- **The global `AGENT.md`** at the state root: one user constitution for every workspace on this
-  machine, injected FIRST with a heading stating that the project constitution overrides it on
-  conflict (the ecosystem's local-wins convention — Codex/Gemini/goose all layer this way, per
-  the session's primary-doc research). Cap 16 KiB, deliberately smaller than the project's;
-  recorded in `memory.loaded` with additive `scope: 'user'`; deliberately NOT injected into
-  subagents (children execute briefs; injected chars multiply across fan-outs).
-- **`/init`** — skippable onboarding no surveyed CLI agent combines: four questions into the
-  global doc plus a starter project `AGENT.md` offer. Never rewrites an existing file; each file
-  writes atomically or not at all; EOF during the global questions aborts with nothing written;
-  answers sanitized; the model told via a pending note that the docs load NEXT session. A
-  TTY-only one-line tip points at it while no global doc exists. `agent init` joins `KNOWN`
-  (the `agent version` lesson: an unknown positional starts a PAID one-shot).
-
-### What shipped — durable machine approvals
-
-The one explicit, user-recorded exception to "authority is not durable, spending is", designed
-against the ecosystem's studied failure (Codex #22181: a vague "don't ask again" minting a
-machine-wide program-name allow):
-
-- **`[a]` appears on exactly four surfaces**: a typed check's exact resolved commands
-  (replay-sha bound — body drift re-asks structurally; workspace-scoped via the SAME `trustKey`
-  derivation trust uses) and three read-only-external class rules (`web_search`, researcher
-  spawns via `delegate_task`, `remote_status` reads — machine-wide, per-session budgets still
-  bounding). The prompt prints the LITERAL stored rule, its scope, and the revoke path. The
-  closed `DURABLE_CLASS_ELIGIBLE` set carries every exclusion with its reason: remote writes,
-  migrate/seed, executor spawns, `run_command`, sensitive reads, artifact inspect, preview,
-  install (deferred).
-- **Structural offer, honest record**: `[a]` renders only from an interactive approver, never on
-  forwarded child asks; an unoffered `'a'` parses as DENY; dangerous mode answers prompts that
-  never render and can never persist. Persistence runs BEFORE `approval.resolved` is appended —
-  a failed persist downgrades the recorded scope to `session` with the reason in `detail`.
-- **Store + visibility + revocation**: `<state>/grants.json` (strict schema, corrupt = hard
-  error, never rewritten — trust-store discipline) with registry-locked ATOMIC batch writes and
-  an append-only `grants.log`; loaded at every assembly (resume identical), class entries
-  validated against the eligibility set (an ineligible hand-edit refuses the session naming the
-  revoke cure), replay entries seeded into a SEPARATE Grants set only the pure-check branch
-  consults (a hand-minted install/preview-shaped key is dead weight); `grants.loaded` recorded
-  whenever any entry applies. `agent grants [revoke <id>]` mutates; `/grants` is the in-session
-  read-only view.
+- **Two policy facts, `gitRead` and `gitCheckpoint`, each with a fail-closed branch.** Two rather
+  than one with a mode, on the S20 `remoteRead`/`remoteWrite` argument: the conflicting-contract
+  rule then refuses a tool that could both read and write, so "the read tool writes nothing" is a
+  property verified by finding no second fact. They need branches *at all* for the reason
+  `test/policy.test.ts`'s `hypothetical_git_commit` regression states — a command-less,
+  mutation-less git tool falls through to `observe`/auto-allow with the reason "read-only workspace
+  access", and that test exists to say git must never sit behind that shape. The branches buy a
+  decision record, not permission. Shared guards, in the order that fails closed: conflicting
+  contract → empty mutation plan (a non-empty one would sail past the branch that validates write
+  targets and captures snapshots) → **lineage deny** (an executor child works in a detached
+  worktree, so its checkpoint ref would land in the user's real repo under the CHILD's session id,
+  where the parent's owed-prune fold never sees it) → the tool's own blocker.
+- **`git_status`** — views `summary` (a live `detectGitFacts` re-probe), `changes`, `log`,
+  `checkpoints`. `changes` reuses **`prepareCommit`**, the same function that builds the human's
+  `/commit` preview, so the model's answer and the user's screen cannot drift — rendered for a
+  model reader, because the human's warnings say "use `--all`" and "run `git config --global`", and
+  handed to a model the first trains it to sweep the user's unrelated edits under this session's
+  name. **It takes a view name and a bounded integer and nothing else.** That is the whole argument
+  for allowing these reads on machines with no enforced sandbox, where the equivalent
+  `run_command git log` asks today: the model names a VIEW, the harness names the command — and it
+  holds only while no ref, path or format parameter exists, so widening the schema would be a
+  policy change wearing a schema's clothes. Nothing it returns is file content, which is what makes
+  the branch honest about allowing before `readsPaths` is ever evaluated.
+- **`git_checkpoint`** — `{ label? }` and nothing else; the schema cannot express a restore, reset,
+  commit or push. Auto-allowed, deliberately: a hidden ref built against a temporary index is the
+  most reversible write in the system, and the harness already takes task-base, pre-integration and
+  delivery checkpoints unasked, so a prompt per capture would only train the model out of
+  protecting the user's work. Bounds replace the prompt — `AGENT_CHECKPOINTS_PER_SESSION = 12` as a
+  fact-level deny so exhaustion is recorded as a decision; a **secret guard** refusing to capture
+  secret-named files `.gitignore` does not already exclude (`git add -A` excludes exactly what
+  gitignore excludes and nothing else, and a git blob cannot be redacted — the
+  `artifact.inspect-secret-name` precedent); a **label guard**, because a label is display and
+  never identity.
+- **A fourth `HarnessRefKind`, `agent`,** rather than a new event type. That inheritance is
+  load-bearing, not tidiness: the owed-prune fold reclaims the ref at clean session end (which is
+  what makes taking them freely safe), the pre-integration covered-change rule counts it as
+  coverage, and `WORK_EVENT_TYPES` excludes it so a recovery point can never stale an acceptance.
+  `git.checkpoint` stays what `types.ts` says it is — user-commanded consent provenance — and is
+  not widened. Creation rides the existing event-before-ref seam through a new `ctx.reportGit`
+  channel, with the label sanitized and capped at the emit site.
+- **The commit as a key on the completion prompt.** Folded INTO condition C rather than asked after
+  `acceptSession`, and that placement is the design: `acceptSession` is called from inside
+  condition C's own affirmative branch, so appending a prompt there would be two consecutive
+  consent questions — exactly the wizard S21.5's rule 2 forbids. It renders only when a commit
+  would actually succeed (a repository, attributable paths, no blockers), and it runs the same
+  `/commit` body, so the recorded evidence is byte-identical to typing it.
+- **The delivery anchor stopped being forgeable.** `agent checkpoint prune` identified anchors by
+  `subject.includes(': delivery (accepted)')` while `createCheckpoint` interpolates the caller's
+  label into that same subject — so the moment a model could choose a label, it could mint a ref
+  prune would refuse to reclaim. Anchored on the whole harness-composed subject now.
 
 ### Verification
 
-`npm run typecheck` clean. Observed runs, stated exactly: one full parallel run at the
-mid-session state ran **2,140 tests (2,126 pass, 11 skip, 3 contention flakes — different files
-each run, the S20.5 documented class; every flaked file green in isolation)**; the FINAL tree
-(review fixes + the outputPreview fix included; 139 test files, 7 tests added after that full
-run) was verified in two sequential halves — half B fully green (69 files), half A green with
-one browser flake that passed in isolation. **Adversarial review:
-one bounded workflow, four differentiated lenses (consent/authority; memory injection
-provenance; fold/event correctness incl. resume; prompt/docs honesty) — 14 findings, every one
-hand-verified REAL and fixed with regression pins.** The sharpest: a research CLAIM shaped like
-an entry heading forged a RESEARCH.md entry with a model-chosen retrieval date that evaded the
-staleness horizon (HIGH — the lessons defuse, missed one document over); durable replay keys
-seeded into the shared set would have let a hand-edited grants.json key unlock INSTALL replay;
-and the reviewer-gate refusal for a missing plan document named two cures that both refuse in
-that state — the S16.5 refusable-cure class, reintroduced and caught by the review.
+`npm run typecheck` clean. Suite **2254 → 2307** (new `test/policy.git.test.ts` and
+`test/git.tools.test.ts`, plus additions to `limits`, `assemble.projects`, `repl.consent`,
+`git.context`, `cli.assemble` and `accept.delivery`). Observed exactly: the final full run was
+**2,295 pass · 1 fail · 11 skip across 145 files**, and the one failure is the documented
+contention class — `browser.flow.test.ts`'s preview-dies-mid-flow case timed out at 180 s in a
+file that took 474 s under full parallelism, and the same file is **10/10 green in isolation in
+63 s**.
 
-**The live E2E (`agent-cli-s21-live/`, Kimi K3 + Tavily, fresh state root, piped driver — no
-recording, per the session's scope): five legs, post-hoc validator 31/31 over persisted
-evidence alone (`VALIDATION.txt`).** Its product yield beyond the S21 surfaces: the validator's
-one initial FAIL exposed a PRE-EXISTING runtime honesty gap — `tool.completed.outputPreview`
-recorded `output` alone, so a refusal carrying its message only in `error` (every delegate-gate
-refusal) persisted as an EMPTY preview, and a resumed conversation lost why the call failed.
-Fixed (error-led wire composition now persisted, resume-fidelity pinned) and proven by
-re-running the leg against the fixed build. Leg 1: `/init` created both constitutions from a genuinely fresh machine
-state (trust via the non-TTY `agent trust` consent path). Leg 2: the next session's banner
-showed BOTH constitutions loading; a researcher spawn ask rendered `[a]` with the literal rule;
-one keystroke minted the durable grant (verified in `grants.json` + `grants.log` + the
-`scope: 'machine'` approval event); the researcher recorded source-backed findings and quit
-wrote JOURNAL + RESEARCH.md. Leg 3: a `--no-input` one-shot CONSUMED the grant with nobody at
-the keyboard (researcher spawned, zero user approvals, `grants.loaded` on the record), then
-`agent grants revoke` removed it and the same shape auto-denied. Leg 4: a deliberately failing
-check (its `[a]` minting durable replay), a live `recover escalate target:session`, `/accept`
-refusing, `/repair dismiss`, and `/accept` COMPLETE with the caveat — the S20.5 deadlock,
-closed on camera-less record. Leg 5: the check REPLAYED across sessions under the durable key
-with no ask, and a plan approve → amend → reviewer-spawn attempt drew the Fix B refusal live.
+**Adversarial review: one bounded workflow, four differentiated lenses over the session diff —
+12 findings, every one hand-verified REAL and fixed.** The three that mattered:
+
+1. **The session-end prune skipped agent refs.** `owedHarnessRefsFromEvents` owed them correctly
+   while `pruneHarnessCheckpointRefs` iterated a hard-coded list of three kinds, so the map's
+   `agent` key was collected and silently skipped: every model checkpoint would have stayed pinned
+   in the user's repository forever, while the harness announced a prune that deleted nothing. That
+   reclaim is *exactly* the claim that pays for auto-allowing the capability, so the whole consent
+   argument rested on a loop that did not run. Now driven by `HARNESS_REF_KINDS`.
+2. **The secret guard failed open on a truncated listing.** The exec substrate keeps the head and
+   tail and drops the MIDDLE while git still exits 0, so a secret-named path in the elided middle
+   was invisible to the scan — and that guard is the only thing between the model and an
+   unredactable blob. Truncation refuses now, the rule the remote pack already applies to a partial
+   `ls-remote`; extracted as `inspectCaptureSet` so the fail-closed path is testable without a
+   repository large enough to truncate git.
+3. **An unreadable working tree reported as a clean one.** `prepareCommit` answers a failed status
+   probe with `entries: []`, which every renderer reads as "nothing is uncommitted" — an unverified
+   negative shipped as an observation with `ok: true`. `CommitPreview` gained `statusFailed` and
+   the view refuses.
+
+Plus: accept-then-commit staled the acceptance it had just recorded (`git.commit` is work-shaped),
+so the order became commit-then-accept; `cancel` typed at the completion prompt resolved to the new
+`[c]` key under first-character parsing, so an exact-word negative list declines first; and four
+honesty fixes (the `summary` view is repository-wide and no longer claims subtree scope; "no
+history is created" replaced by what the capture really writes; consent condition (d) says "no
+UNILATERAL path" rather than an absolute an approved `run_command` can satisfy; the documented
+guard order matches `gitGuards`).
+
+**Live E2E** (`agent-cli-s216-live/`, Kimi `kimi-k2.7-code`, injected-TTY driver, no recording):
+11/11 driver steps, **29/29 post-hoc checks from the persisted record alone**. Three `git_status`
+calls recorded as `git.read`/allow — never `observe.in-workspace` — with **zero approvals spent on
+the git tools all session**; a capture **refused by name** for a non-gitignored `.env`; the model
+told to `git commit -am wip` through `run_command`, the harness asking, and the scripted human
+**denying** (no `command.started`, no commit); the named cure working and a real recovery point
+landing; the completion prompt offering `[c] commit the 1 file(s) …, then accept`, producing commit
+`8e90e58` and only then the acceptance (`commit@50 accept@52`, nothing work-shaped after it); the
+agent ref pruned at quit while the delivery anchor survived; and the credential appearing **neither
+in the session log nor in any git object in the repository**.
 
 ### Decisions (and why)
 
-- **Exact identity or no durable grant at all.** Claude Code documents its own Bash prefix-rule
-  fragility; Codex's #22181 minted a machine-wide program-name allow from a vague prompt;
-  Gemini closed "persist always-allow" as not-planned. The design answer: a durable grant is a
-  body-bound replay sha or one (tool, class) pair from a closed set — no prefixes, no patterns,
-  the literal rule printed before anything persists.
-- **Class grants are machine-wide; replay grants are workspace-scoped.** The brief asks for
-  decisions remembered across projects; trust remains the outer gate (grants apply only inside
-  workspaces separately trusted), and the three eligible class rules are read-only-external
-  with per-session budgets. Replay keys are project-relative by construction.
-- **Lessons ride the narrative; research rides events.** No new tool, no mid-session memory
-  writes, no second engine: the model's judgment enters through the one existing model call
-  (optional, lenient), and the perishable surface is a pure fold that works even when that call
-  fails.
-- **Startup stays small by construction, not hope**: per-doc caps plus ONE pinned total ceiling;
-  the global doc deliberately smaller than the project's; subagents excluded.
-- **Ex-ante prevention over cap arithmetic** for the review-round trap: refusing the unbindable
-  round keeps `MAX_REVIEW_ROUNDS` a repetition bound nobody loosened.
+- **Auto-allow the checkpoint, bound it instead of prompting.** A prompt to protect the user's work
+  is backwards, and the harness already takes three kinds of checkpoint unasked. What makes it
+  honest is that every replacement bound is real: a session allowance, a secret guard, a label
+  guard, and a prune that actually runs.
+- **Reads get a branch that reaches the same verdict the fall-through would.** The branch is not
+  permission; it is a decision record that names the argv, can fail closed on anything outside the
+  view set, and keeps git out of the shape the `hypothetical_git_commit` pin forbids.
+- **The widening is documented where it is, not where it is comfortable.** ARCHITECTURE's GitOps
+  section was headed "never a model tool" and its condition (c) read "structurally unreachable";
+  both were rewritten in the same change, with the compound invariant restated verbatim.
+- **No budget is ever rebuilt from `tool.requested`.** That event is appended before schema
+  validation and for skipped calls, so it charges for calls that never ran.
 
 ### Open issues / boundaries
 
-- The `[a]`/durable-grant surfaces are live-proven for the research class grant and the check
-  replay; the `remote_status` class grant is unit-tested only (no remote in the E2E workspace).
-- `/init`'s TTY tip line and the real-TTY trust prompt are untestable through the piped driver
-  (unit-tested); the piped `--interactive` driver IS the documented deliberate-opt-in path that
-  makes `[a]` offerable there.
-- Durable-grant revocation applies from the next assembly; a running session keeps its
-  in-memory copy until it ends (documented on every surface).
-- LESSONS.md quality depends on the model's judgment under the ≤3/session bound; the live E2E
-  exercised the mechanism (skip evidence recorded honestly) — a long-horizon quality read needs
-  real project mileage.
-- The cross-process memory-doc lock stays deferred (last-writer-wins seconds window at
-  simultaneous quits), as do SQLite/topic retrieval, trust.json write locking, `/init` rewrite
-  flows, and install-replay durability (each recorded in the deferred pool).
+- The live proof is one provider, one repository, one platform. The monorepo scoping of `changes`,
+  the truncated-listing refusal and the crash-replay branch are unit-tested only.
+- `git_status view=checkpoints` was not exercised live.
+- In a **plan-less** session the completion prompt is reachable after any mutating turn, so the
+  `[c]` key can appear more often than at a single delivery boundary. That is S21.5 behaviour this
+  session inherited rather than introduced, and it is worth a look in S22's UX pass.
+- The `summary` view re-probes live and is repository-wide while `changes`/`log` are
+  subtree-scoped; the wording says so, but a monorepo user sees two different numbers.
+- `prepareCommit` reads whole attributed files to compute drift, so a multi-gigabyte attributed
+  file means a multi-gigabyte allocation on a model-triggered call.
 
 ### Recommended next step
 
-v1.7.0 publishes on explicit user approval (push + tag + Release). Then Session 22 per
-BLUEPRINT: terminal UX consolidation — the new states (repair ledger, grants, six memory docs)
-put real pressure on the flat chrome, which is exactly the evidence that session needs.
+v1.9.0 publishes on explicit user approval (push + tag + Release). Then Session 22 per BLUEPRINT:
+terminal UX consolidation — the new states (agent checkpoints in the chrome, the widened completion
+prompt, the repair ledger, grants, six memory docs) are exactly the pressure that session needs.
 
 ---
 
@@ -299,6 +161,109 @@ put real pressure on the flat chrome, which is exactly the evidence that session
 
 Contract detail lives in `ARCHITECTURE.md`; entries keep the objective, lasting decisions, the
 evidence, and what stayed open.
+
+### Session 21.5 (2026-08-12) — Command and interaction surface simplification
+
+Made the harness operable by talking to it and answering questions it asks at the right moment,
+without weakening authority, evidence or recovery — v1.8.0 (suite 2147 → 2254). It opened with a
+code-traced inventory of every user-reachable surface (24 slash cases, 4 sigils, 17 CLI
+subcommands, 23 flags in one flat namespace, 13 prompt families, 4 incompatible answer grammars,
+41 doc/code conflicts), published as an artifact, then acted on it.
+
+**Lasting decisions.** **Contextual consent** replaces remembered lifecycle commands for the four
+decisions that matter (a plan awaiting first approval, an approval invalidated by an amendment, an
+open repair escalation, a session that would accept cleanly). The design note that carries it:
+`planApprovalReminder` existed *because* the harness could only tell the MODEL about a gate only
+the user could clear — "a line is a broadcast with no channel; a question has an answer". Prompts
+are **TTY-gated**, because off a TTY `io.question` ignores its `fresh` flag (`io.ts:126`) and would
+eat a driver's next scripted line — which is why `/accept` and `/plan approve` were DEMOTED, not
+removed: they are the automation path. At most ONE prompt per turn boundary (two consecutive
+questions is a wizard, and a wizard trains people to press Enter through it), once per DERIVED
+state, and the decline is deliberately not persisted — a `consent.declined` event would write a
+non-decision into the evidence log for `/report`, the journal and `computeAcceptance` to
+interpret. Every affirmative answer calls the same extracted body the slash command calls, so the
+recorded evidence is byte-identical either way. **`@review` became a real `inspector` role**, not
+an alias for the review gate: on `reviewer` its findings would block `/accept` regardless of
+requirement, never expire, and burn one of only two `MAX_REVIEW_ROUNDS` — separation is structural
+(the caps counter matches `role === 'reviewer'`, and the ledger mints rounds only from that or a
+`review.findings` event). `@` became specialist routing with one table, a real unknown-sigil
+branch, the `\b` trap fixed and `@direct` removed; a typo at the shell no longer starts a billed
+session; `/report [section]` slices the one report.
+
+**Evidence.** Ten audit defects fixed with regression pins; first dispatch coverage for nine slash
+commands that had none; the consent property pinned by running one fixture twice (typed vs
+answered) and asserting equal event arrays. A **new reactive TTY harness** drives `runRepl` with
+`isTTY: true` end to end — it must be reactive, because `io.ts` installs its `pending` resolver
+AFTER writing the prompt, so an instantly-written answer lands in type-ahead a `fresh` question
+never consumes. **Live-verified on Kimi** (`agent-cli-s215-live/DEMO.md`, 16/16 post-hoc checks):
+the contextual approval prompt fired on a real model-authored plan and `y` recorded
+`plan.approved` with **no `/plan approve` ever typed**; `@review` found the seeded defect as its
+first observation while consuming **zero** adversarial rounds.
+
+**An honest correction recorded at the time.** The audit's headline claim — six read-only commands
+re-implementing ~400 lines of `/report`'s folding — was an overestimate, and acting on it proved
+so. `/checks`, `/preview`, `/remote` and `/research` carry live state a fold over events
+structurally cannot have; `/repair`'s numbering is the affordance its dismiss action indexes into.
+Only `/review` was a pure fold, and replacing it made the surface worse (a no-plan session lost its
+"not required" line). Reverted.
+
+### Session 21 (2026-08-11) — Bounded memory, global initialization, durable approvals
+
+Made project memory deliberate and bounded, gave the harness a user-level global workspace, and
+designed durable machine-level approvals as the one explicit exception to "authority is not
+durable" — v1.7.0 (suite → 2147). It first closed the two runtime defects the S20.5 live E2E
+carried forward, from the runtime's own semantics rather than as patches: **`repair.dismissed`**
+gives a session-targeted escalation a user-side closure (joined on the escalation event's OWN seq
+so a shared signature can never clear a neighbour, `source: 'user'` required by the fold because
+the recover tool has no dismiss action, the blocker closed while an acceptance CAVEAT always
+remains); and a **reviewer round can no longer be spent where it could never bind** — while a
+once-approved plan's approval is invalidated, a reviewer group refuses EX ANTE naming a cure that
+works in the named state, leaving `MAX_REVIEW_ROUNDS` untouched as a repetition bound.
+
+**Lasting decisions — memory (three documents → six).** `LESSONS.md` rides the existing
+end-of-session narrative as an OPTIONAL, leniently-parsed key (a missed or invalid value costs the
+lessons, never the journal), merged by slug, provenance-stamped, with heading-shaped body lines
+visibly defused so a proposal cannot fabricate an entry boundary. `RESEARCH.md` is the durable
+surface S19 deferred and is **PERISHABLE by design**: a deterministic fold over recorded
+`research.findings` with no model call (so it succeeds when the narrative fails), idempotent by
+noteId across resume, entries past 30 days dropped with an honest leading count. The global
+`AGENT.md` at the state root is injected FIRST with a heading stating that the project constitution
+overrides it on conflict (the ecosystem's local-wins convention), is deliberately smaller than the
+project's, and is deliberately NOT injected into subagents. Every cap is pinned, including ONE
+worst-case total-injection ceiling — a new document must trip a deliberate decision rather than
+quietly grow the cached prefix. **`/init`** is skippable onboarding that never rewrites an existing
+file, writes atomically or not at all, and aborts with nothing written on EOF.
+
+**Lasting decisions — durable grants,** designed against the ecosystem's studied failure (Codex
+#22181: a vague "don't ask again" minting a machine-wide program-name allow). **Exact identity or
+no durable grant at all**: `[a]` persists either an approved check batch's exact body-sha-bound
+replay keys (workspace-scoped via the same `trustKey` derivation trust uses) or ONE `(tool, class)`
+pair from a closed eligible set — the three read-only-external consents whose blast radius
+per-session budgets already bound. No prefixes, no patterns; the prompt prints the LITERAL stored
+rule and the revoke path before anything writes. The offer is structural (interactive approvers
+only, never a forwarded child ask; an unoffered `'a'` parses as DENY), persistence runs BEFORE
+`approval.resolved` so a failed persist downgrades the recorded scope to `session` with the reason
+in `detail`, and the store is trust-store discipline: strict schema, corrupt = hard error, never
+rewritten, registry-locked atomic writes plus an append-only audit log, `grants.loaded` recorded
+whenever any entry applies.
+
+**Evidence.** Four-lens review: 14 findings, every one hand-verified and fixed — the sharpest being
+a research CLAIM shaped like an entry heading forging a RESEARCH.md entry with a model-chosen
+retrieval date that evaded the staleness horizon. **Live E2E on a fresh state root** (Kimi K3 +
+Tavily, five legs, post-hoc validator **31/31** over persisted evidence alone): `/init` from a
+genuinely fresh machine state → both constitutions loading the next session → `[a]` minting a
+durable grant with one keystroke → a `--no-input` one-shot CONSUMING it with nobody at the keyboard
+→ revocation and an honest auto-deny → a live escalate/dismiss/accept-with-caveat closing the
+S20.5 deadlock → a check REPLAYING across sessions under its body-bound durable key. Its own
+product yield: the validator's one initial FAIL exposed a pre-existing honesty gap —
+`tool.completed.outputPreview` recorded `output` alone, so every delegate-gate refusal (whose
+message lives in `error`) persisted as an EMPTY preview and a resumed conversation lost why the
+call failed. Fixed, pinned, and re-proven against the fixed build.
+
+**Still open from it.** The `remote_status` class grant is unit-tested only; `/init`'s TTY tip and
+the real-TTY trust prompt are untestable through a piped driver; durable-grant revocation applies
+from the next assembly (a running session keeps its in-memory copy); LESSONS.md quality under the
+≤3/session bound needs real project mileage.
 
 ### Session 20.5 (2026-08-09/10) — Full-system review, limits retune, and a zero-to-remote proof
 
@@ -839,6 +804,18 @@ reviewed `/init` rewrite path for existing AGENT.md files; a one-shot `agent ini
 workspace-scoping the class grants if machine-wide proves too broad in practice; `/review
 dismiss` (the review-finding analog of `/repair dismiss` — design agreed since S14.5, still
 pooled); LESSONS.md quality metrics once real project mileage accumulates.
+
+**Local git pack (new, S21.6):** a `diff` view returning hunks is deliberately ABSENT — it would be
+an ungated file-content read through a branch that never evaluates `readsPaths`, so if it is ever
+wanted it needs the secret-name and containment checks wired in explicitly, not a new flag.
+`git_status view=summary` re-probes repository-wide while `changes`/`log` are subtree-scoped (the
+wording says so; a scoped `detectGitFacts` option would make the numbers agree). `prepareCommit`
+reads whole attributed files to compute drift, so a huge attributed file means a huge allocation on
+a model-triggered call — streaming or a size cap is the fix. Checkpoint `n` numbering is shared
+across all kinds, so `/checkpoint restore <n>` can address an agent or task-base ref; the subject
+labels distinguish them, a kind column in `/checkpoint list` would do it better. And the completion
+prompt's reachability in a plan-less session (any mutating turn, not only a delivery boundary) is
+an S21.5 behaviour this session inherited — flagged for S22's UX pass.
 
 **Tasks/memory/git/sandbox:** task resume/continue; deeper scanning of child reports for
 instruction-shaped content (v1 ships delimiters + provenance labels); the stale-displayed-

@@ -184,21 +184,28 @@ consuming zero adversarial review rounds (16/16 post-hoc checks, `agent-cli-s215
 Honest correction recorded in ROADMAP: the "six duplicate renderers" claim was an overestimate —
 only `/review` was a pure fold, and consolidating it made the surface worse.
 
-### Session 21.6 — The Git Capability Pack  ← **NEXT**
+### Session 21.6 — The Git Capability Pack — **DONE (v1.9.0)**
 
-Deferred deliberately from S21.5. Natural-language Git intent should reach the existing safe
-machinery, which is already UI-agnostic (`runCommitFlow`, `createCheckpoint`, `runRestoreFlow` all
-take injected `{info, question, assumeYes}` seams — no logic needs duplicating).
+Delivered as planned, checkpoint-first, with the invariant kept verbatim and neither pin rewritten:
+**two** policy facts (`gitRead`, `gitCheckpoint`) each with a fail-closed branch on the S20
+remote-pack pattern; `git_status` reading the local repository through argv the harness composes
+(a view name and a bounded integer, *nothing else* — that constraint IS the argument for allowing
+it unprompted where the equivalent shell command asks); `git_checkpoint` as create-only additive
+recovery state, auto-allowed but bounded by a session allowance, a secret guard and a label guard;
+and the commit reaching the model's world only as a **key on the completion prompt** that runs the
+same `/commit` body. The ref rides a fourth `HarnessRefKind` so it inherits the prune lifecycle,
+the covered-change rule and the acceptance exclusion for free.
 
-The constraint that shapes it: a model-facing `git_commit` would break the pinned invariant *"the
-model cannot publish content a human did not commit"* (`test/remote.surfaces.test.ts:197-205`,
-`test/policy.test.ts:182-195`). So the pack is **checkpoint-first**: a model-facing
-`git_checkpoint` (hidden refs, pure recovery state, no history touched) with its own policy fact
-and fail-closed engine branch on the S20 remote-pack pattern, while commit stays harness-owned and
-is reached by a contextual offer at natural boundaries. Any widening of that invariant must be an
-explicit, argued decision with the documentation and both pins rewritten in the same change.
+The widening that DID happen was documented where it lives: ARCHITECTURE's GitOps section was
+headed "never a model tool" with a condition reading "structurally unreachable from the model", and
+both were rewritten in the same change into a two-halves contract split by what the user can see.
 
-### Session 22 — Terminal UX Consolidation
+Review: 4 lenses, 12 findings, all hand-verified and fixed — the sharpest being that the
+session-end prune iterated a hard-coded three-kind list, so the reclaim that pays for auto-allowing
+checkpoints never ran. Live-proven on Kimi, 29/29 post-hoc checks (`agent-cli-s216-live/DEMO.md`).
+Details: `ROADMAP.md` Session 21.6, `ARCHITECTURE.md` "GitOps", CHANGELOG 1.9.0.
+
+### Session 22 — Terminal UX Consolidation  ← **NEXT**
 
 Polish the terminal surface after the new states are real. Explore bounded folding and expansion of
 long outputs, clearer color and hierarchy, compact provider/model/task/check/research/remote status,
@@ -207,6 +214,13 @@ and better navigation through evidence without losing the clean non-TTY contract
 UI state must remain a projection of the event-backed runtime, not a second source of truth. Avoid a
 large TUI rewrite unless real usage proves the current rendering architecture cannot support the
 needed interactions cleanly.
+
+Three concrete pressures are already on the record and should shape it: agent checkpoints now print
+their own chrome line mid-turn; the completion prompt has grown a fourth key and, in a **plan-less**
+session, is reachable after any mutating turn (S21.5 behaviour, observed in the S21.6 live run —
+decide whether a delivery boundary or a work boundary is the right trigger); and arrow-key
+selection stays deferred because readline owns stdin exclusively and `status.ts` is the only
+cursor-moving code, so a second input mode is a TUI-session decision, not a prompt tweak.
 
 ## 4. Design Rules for the Next Phase
 

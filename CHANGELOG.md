@@ -7,6 +7,78 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.9.0] — 2026-08-13
+
+**The git capability pack** (Session 21.6). Natural-language Git intent now reaches the safe
+machinery that was already there. The pack is checkpoint-first by design: the model gets reads and
+additive recovery state, while the commit stays the user's and becomes a *choice* at the delivery
+boundary rather than a printed suggestion.
+
+### Added
+
+- **`git_status` — the local repository as structured state.** Views: `summary` (branch, HEAD,
+  upstream, how dirty the tree is, read live), `changes` (every uncommitted path in the workspace
+  subtree, which ones THIS session changed, per-path churn, and whether a commit would be blocked
+  — built by `prepareCommit`, the same function that builds the human's `/commit` preview, so the
+  model's answer and the user's screen cannot drift), `log`, and `checkpoints`. **It takes a view
+  name and a bounded integer and nothing else** — no ref, path, author or format argument. That is
+  the whole argument for running it without an approval on machines with no enforced sandbox,
+  where the equivalent `run_command git log` asks today: the model names a VIEW, the harness names
+  the command. It never returns file contents.
+- **`git_checkpoint` — a recovery point before risky work,** taken without interrupting anyone.
+  `{ label? }` and nothing else; the schema cannot express a restore, reset, commit or push. It
+  writes a commit object plus one hidden ref under `refs/agent-cli/checkpoints/`, on no branch,
+  with the index, HEAD, branches and tags untouched. Bounded at **12 per session**, reclaimed at
+  clean session end, and it **refuses** to capture secret-named files `.gitignore` does not
+  already exclude — `git add -A` excludes exactly what gitignore excludes and nothing else, and a
+  git blob cannot be redacted.
+- **Two new policy facts, `gitRead` and `gitCheckpoint`,** each with its own fail-closed engine
+  branch. Two rather than one with a mode, on the Session 20 `remoteRead`/`remoteWrite` argument:
+  the conflicting-contract rule then refuses a tool that could both read and write, so "the read
+  tool writes nothing" is verified by finding no second fact. Both branches deny a conflicting
+  contract, a non-empty mutation plan, a subagent lineage, and the tool's own stated blocker.
+- **The commit is a key on the completion prompt.** When a session finishes with attributable
+  uncommitted changes, the acceptance question offers *commit the N file(s) this session changed,
+  then accept*. It runs the same `/commit` body, with its own preview and confirmation.
+
+### Changed
+
+- **`HarnessRefKind` gains `agent`.** A model checkpoint rides `harness.checkpoint` rather than
+  getting an event type of its own, so it inherits three folds already written and pinned: the
+  owed-prune reclaim at clean session end (which is what makes taking them freely safe), the
+  pre-integration covered-change rule, and exclusion from `WORK_EVENT_TYPES`. `git.checkpoint`
+  stays what it has always been — user-commanded consent provenance — and is not widened.
+- **The GitOps consent contract is now four conditions, split by what the user can SEE.** The
+  section headed "never a model tool" and its condition "GitClient is structurally unreachable
+  from the model" were true until this release and are rewritten in the same change, with the
+  compound invariant restated verbatim: the model cannot commit, and a push transmits committed
+  refs only, so **the model cannot publish content a human did not commit**.
+- **A word that means no is a decline.** The contextual-prompt parser resolves an answer by its
+  first character, so `cancel` typed at the completion prompt would have selected the new commit
+  key. A small exact-word negative list is checked first; it can only ever turn a key into a
+  decline.
+- `agent checkpoint prune` identifies delivery anchors by an anchored match on the whole
+  harness-composed subject instead of a substring, so a checkpoint LABEL cannot forge one.
+
+### Fixed
+
+- **The session-end prune skipped agent refs.** The owed-refs fold returned them correctly while
+  the prune loop iterated a hard-coded list of three kinds — so model checkpoints would have
+  stayed pinned in the user's repository forever while the harness announced a prune that deleted
+  nothing. The loop is driven by the kind union now.
+- **The secret guard failed open on a truncated listing.** The exec substrate keeps the head and
+  tail and drops the middle while git still exits 0, so a secret-named path in the elided middle
+  was invisible to the scan. Truncation refuses, the rule the remote pack already applies to a
+  partial `ls-remote`.
+- **An unreadable working tree reported as a clean one.** `prepareCommit` answers a failed status
+  probe with an empty entry list, which every renderer reads as "nothing is uncommitted".
+  `CommitPreview` now carries `statusFailed` (also set on truncation, which blocks a commit built
+  from an incomplete listing), and the `changes` view refuses instead of shipping the negative.
+- Accepting and then committing made the acceptance stale the instant it completed, because
+  `git.commit` is work-shaped; the boundary now commits first so the acceptance stays the final
+  word. An interrupted `git_checkpoint` replays from its recorded evidence instead of reading as
+  an orphan and spending a second allowance slot.
+
 ## [1.8.0] — 2026-08-12
 
 **Command and interaction surface simplification** (Session 21.5). The session began with a

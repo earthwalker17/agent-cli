@@ -4,6 +4,23 @@ How Agent CLI **v1.8.x** is actually built. This describes the implemented syste
 contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
 deferred; this file avoids session narration except where a decision's *reason* is the contract.
 
+## Map of this document
+
+**Runtime kernel** — [Shape](#shape) · [Startup order](#startup-order-load-bearing) · [The core loop](#the-core-loop-runtimesessionts) · [Context budget](#context-budget-runtimeelisionts) · [Managed execution](#managed-execution-exec) · [Contracts](#contracts-srctypests) · [Event log](#event-log-storeevent-logts) · [Recovery](#recovery-storesnapshotsts-runtimeundots) · [Resume](#resume-runtimesessionts--reconstruct) · [Providers](#providers-provider) · [Networking](#networking-nettransportts)
+
+**Policy, sandbox and trust** — [Trust](#trust-trust) · [Configuration](#configuration-configconfigts) · [Policy model](#policy-model-policy) · [Sandbox and enforced isolation](#sandbox-and-enforced-isolation-sandbox)
+
+**Understanding a workspace** — [Repository intelligence](#repository-intelligence-retrieval-toolsretrievets) · [Project units](#project-units-checksworkspacets) · [Wire images](#wire-images) · [Project memory](#project-memory-memory--six-documents-context-not-authority)
+
+**Doing the work** — [Tasks, roles, and parallel groups](#tasks-roles-and-parallel-groups-runtimesubagentts-runtimerolests-toolsdelegatets) · [Executor isolation and integration](#executor-isolation-and-integration) · [Planning lifecycle](#planning-lifecycle-plan-toolsupdate-plants-plan-plan-the-approval-prompt) · [The task DAG and the scheduler gate](#the-task-dag-and-the-scheduler-gate) · [Supervision and task-scoped cancellation](#supervision-and-task-scoped-cancellation)
+
+**Verifying it** — [Project setup](#project-setup-setup-toolsproject-setupts--install-migrate-seed) · [Typed verification](#typed-verification-checks-toolsrun-checkts) · [Managed preview processes](#managed-preview-processes-preview-toolspreviewts) · [Browser verification](#browser-verification-browser-toolsbrowser-flowts-toolsview-imagets) · [The verification gate](#the-verification-gate) · [Typed recovery](#typed-recovery-recovery-toolsrecoverts) · [The structural review gate](#the-structural-review-gate-reviewledgerts-reportfinding-review) · [The evidence report](#verification-reportreportts)
+
+**Packs (outside the kernel)** — [The documents workflow pack](#the-documents-workflow-pack-artifacts-toolsartifact-ts) · [The research pack](#the-research-pack-research-toolsweb-ts-toolsrecord-sourcets--session-19) · [The remote-delivery pack](#the-remote-delivery-pack-remote-toolsremote-ts--session-20) · [GitOps](#gitops-git--two-halves-split-by-what-the-user-can-see)
+
+**Delivering and remembering** — [Harness checkpoint lineage](#harness-checkpoint-lineage) · [The acceptance boundary](#the-acceptance-boundary-runtimeacceptancets-accept) · [The REPL](#the-repl-repl)
+
+
 ## Shape
 
 A modular monolith in TypeScript (strict, ESM, Node 22). One runtime function (`runTurn`) drives
