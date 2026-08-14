@@ -55,6 +55,13 @@ export interface SelectWidget {
     choices: readonly SelectRow<K>[];
     /** The entry highlighted first — always the decline/deny-shaped one. */
     initialKey: K;
+    /** Render `[k]` before each label (default true). The `/` menu turns it off: its keys are
+     *  full command names already shown in the label. */
+    showKeys?: boolean;
+    /** Window tall lists around the highlight (default: no window). The overlay's erase math
+     *  counts drawn lines, so a menu taller than the terminal would corrupt the region — long
+     *  menus stay short instead, with honest "… N more" markers. */
+    maxVisible?: number;
   }): Promise<SelectResult<K>>;
 }
 
@@ -73,8 +80,12 @@ export function createSelectWidget(deps: {
       header: string;
       choices: readonly SelectRow<K>[];
       initialKey: K;
+      showKeys?: boolean;
+      maxVisible?: number;
     }): Promise<SelectResult<K>> {
       const { choices } = opts;
+      const showKeys = opts.showKeys !== false;
+      const maxVisible = Math.max(3, opts.maxVisible ?? Number.MAX_SAFE_INTEGER);
       const initialIndex = Math.max(
         0,
         choices.findIndex((c) => c.key === opts.initialKey),
@@ -83,12 +94,21 @@ export function createSelectWidget(deps: {
       let typed: string | null = null;
 
       const menuLines = (): readonly (string | { text: string; role: 'accent' | 'muted' })[] => {
-        const rows: (string | { text: string; role: 'accent' | 'muted' })[] = choices.map((c, i) => {
-          const label = `[${c.key}] ${sanitizeLine(c.label)}`;
+        const all: (string | { text: string; role: 'accent' | 'muted' })[] = choices.map((c, i) => {
+          const label = showKeys ? `[${c.key}] ${sanitizeLine(c.label)}` : sanitizeLine(c.label);
           return i === highlight && typed === null
             ? { text: `${g.pointer}${label}`, role: 'accent' as const }
             : `  ${label}`;
         });
+        let rows = all;
+        if (all.length > maxVisible) {
+          // Window around the highlight, with honest edges.
+          const start = Math.min(Math.max(0, highlight - Math.floor(maxVisible / 2)), all.length - maxVisible);
+          rows = all.slice(start, start + maxVisible);
+          if (start > 0) rows.unshift({ text: `  … ${start} more above`, role: 'muted' as const });
+          const below = all.length - (start + maxVisible);
+          if (below > 0) rows.push({ text: `  … ${below} more below`, role: 'muted' as const });
+        }
         if (typed !== null) rows.push({ text: `  > ${sanitizeLine(typed)}_`, role: 'muted' as const });
         else rows.push({ text: `  (arrows move, Enter confirms the highlight — or type an answer and press Enter)`, role: 'muted' as const });
         return rows;

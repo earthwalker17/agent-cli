@@ -26,6 +26,7 @@ import { completionLine, dispatchSlash, sessionAcceptance, type CommandContext }
 import { createConsentAsker, planReapprovalNeeded } from './consent.js';
 import { createSelectWidget } from './select.js';
 import { askChoice, parseChoice, renderChoiceBlock, type PromptAnswer, type PromptChoice } from './prompt-choice.js';
+import { COMMANDS, completeSlash } from './command-table.js';
 import { routeSigil } from './sigils.js';
 
 /**
@@ -76,7 +77,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   }
   const config = loadConfig(resolveStateRoot(), ws);
 
-  const io = createReplIO({ input: streams.input, output: streams.chromeOut, isTTY: streams.isTTY });
+  const io = createReplIO({ input: streams.input, output: streams.chromeOut, isTTY: streams.isTTY, completer: completeSlash });
   const style = detectStyle({ isTTY: streams.isTTY });
   // The sticky status area (Session 11): TTY-only; every chrome byte routes through it so it
   // can erase/redraw around ordinary output. Non-TTY it is a pure pass-through (zero escapes).
@@ -333,6 +334,33 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       consecutiveInterrupts = 0;
       let line = read.text.trim();
       if (line.length === 0) continue;
+      // S22 — command discovery: a bare `/` on a TTY opens the select menu over the command
+      // table. Typed text answers by exact name/alias or unique prefix; anything else closes
+      // the menu (unknown names get the same line the dispatcher prints). Off-TTY the bare `/`
+      // keeps its old path (dispatch → "unknown command"), so piped transcripts are unchanged.
+      if (line === '/' && selectWidget !== undefined) {
+        const rows = COMMANDS.map((c) => ({
+          key: c.name,
+          label: `/${c.name}${c.args !== undefined ? ` ${c.args}` : ''} — ${c.summary}`,
+        }));
+        const r = await selectWidget.run({
+          header: style.dim('  commands'),
+          choices: rows,
+          initialKey: 'help',
+          showKeys: false,
+          maxVisible: 12,
+        });
+        let picked: string | null = null;
+        if (r.kind === 'picked') picked = r.key;
+        else if (r.kind === 'typed') {
+          const t = r.text.trim().toLowerCase().replace(/^\//, '');
+          const names = COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]);
+          picked = names.includes(t) ? t : (names.filter((n) => n.startsWith(t)).length === 1 && t.length > 0 ? names.find((n) => n.startsWith(t))! : null);
+          if (picked === null && t.length > 0) renderer.chromeLine(`unknown command: /${sanitizeLine(t)} — try /help`);
+        }
+        if (picked === null) continue;
+        line = `/${picked}`;
+      }
       if (line.startsWith('/')) {
         if ((await dispatchSlash(line, commandCtx)) === 'quit') break;
         continue;

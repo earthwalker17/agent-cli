@@ -95,6 +95,9 @@ export interface ReplIOOptions {
   /** Chrome stream (prompts, echo). The REPL binds this to stderr; stdout stays model-text-only. */
   output: NodeJS.WritableStream;
   isTTY: boolean;
+  /** S22 — readline Tab completion (slash commands). Only ever invoked with terminal: true, so
+   *  piped input is untouched by construction. */
+  completer?: (line: string) => [string[], string];
 }
 
 export function createReplIO(opts: ReplIOOptions): ReplIO {
@@ -111,6 +114,7 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
     output: gate,
     terminal: opts.isTTY,
     historySize: opts.isTTY ? 100 : 0,
+    ...(opts.completer !== undefined ? { completer: opts.completer } : {}),
   });
   const rlKeypress = opts.isTTY
     ? emitter.listeners('keypress').find((l) => !keypressBefore.includes(l))
