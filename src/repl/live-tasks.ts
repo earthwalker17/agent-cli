@@ -44,9 +44,15 @@ export interface TaskTable {
   statusLines(caps?: DelegateCaps): string[];
 }
 
-export function createTaskTable(now: () => number = Date.now): TaskTable {
+export function createTaskTable(
+  now: () => number = Date.now,
+  /** Marker glyphs (S22): the REPL passes its Style's table so a legacy ASCII console gets
+   *  readable markers; the default keeps the pre-S22 Unicode literals byte-identical. */
+  glyphs: { agent: string; flag: string; dot: string } = { agent: '▸', flag: '⚑', dot: '·' },
+): TaskTable {
   const rows = new Map<string, LiveTaskRow>();
   const cancels = new Map<string, () => void>();
+  const g = glyphs;
 
   const fmtElapsed = (ms: number): string => {
     const s = Math.max(0, Math.round(ms / 1000));
@@ -114,18 +120,18 @@ export function createTaskTable(now: () => number = Date.now): TaskTable {
       const live = this.live();
       if (live.length === 0) return [];
       const head =
-        `▸ ${live.length} agent(s) running` +
+        `${g.agent} ${live.length} agent(s) running` +
         (caps !== undefined
-          ? ` · tasks ${caps.tasksStarted}/${TASKS_PER_SESSION} · child-out ${fmtTokens(caps.childOutputTokens)}/${fmtTokens(SESSION_CHILD_OUTPUT_TOKEN_CAP)}`
+          ? ` ${g.dot} tasks ${caps.tasksStarted}/${TASKS_PER_SESSION} ${g.dot} child-out ${fmtTokens(caps.childOutputTokens)}/${fmtTokens(SESSION_CHILD_OUTPUT_TOKEN_CAP)}`
           : '') +
-        ' · /tasks · /cancel <id>';
+        ` ${g.dot} /tasks ${g.dot} /cancel <id>`;
       const agentLines = live.map((r) => {
         const activity =
           r.phase === 'approval-wait' ? 'WAITING FOR APPROVAL' : r.lastTool !== undefined ? r.lastTool : 'thinking';
-        const sup = r.supervision.length > 0 ? ` · ⚑ ${r.supervision.join(',')}` : '';
+        const sup = r.supervision.length > 0 ? ` ${g.dot} ${g.flag} ${r.supervision.join(',')}` : '';
         return (
-          `▸ ${r.role}·${r.childSessionId.slice(-4)}${r.planTaskId !== undefined ? ` (${r.planTaskId})` : ''}` +
-          ` · ${activity} · s${r.steps} · ${fmtTokens(r.outTokens)} out · ${fmtElapsed(now() - r.startedAtMs)}${sup}`
+          `${g.agent} ${r.role}${g.dot}${r.childSessionId.slice(-4)}${r.planTaskId !== undefined ? ` (${r.planTaskId})` : ''}` +
+          ` ${g.dot} ${activity} ${g.dot} s${r.steps} ${g.dot} ${fmtTokens(r.outTokens)} out ${g.dot} ${fmtElapsed(now() - r.startedAtMs)}${sup}`
         );
       });
       return [head, ...agentLines];

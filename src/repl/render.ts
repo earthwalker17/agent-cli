@@ -486,7 +486,7 @@ export function createRenderer(opts: {
         case 'task.changes': {
           chromeLine(
             style.dim(
-              `  ± task ${sanitizeLine(e.childSessionId.slice(-4))} captured ${e.files.length} changed file(s)${(e.omittedCount ?? 0) > 0 ? ` (+${e.omittedCount} omitted)` : ''} — integrate with apply_task_changes`,
+              `  ${g.delta} task ${sanitizeLine(e.childSessionId.slice(-4))} captured ${e.files.length} changed file(s)${(e.omittedCount ?? 0) > 0 ? ` (+${e.omittedCount} omitted)` : ''} — integrate with apply_task_changes`,
             ),
           );
           break;

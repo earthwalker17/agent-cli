@@ -38,6 +38,7 @@ import { resolveProviderName, type ProviderRegistry } from '../provider/registry
 import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
+import { NO_STYLE, type Style } from './format.js';
 
 /**
  * Slash commands are thin adapters over existing kernel functions, run against the session's OWN
@@ -78,6 +79,10 @@ export interface CommandContext {
   /** Session 15: the provider registry (env-only key discovery, bounded validation, construction)
    *  — the /provider and /model switching seam. Absent = switching unavailable in this context. */
   registry?: ProviderRegistry;
+  /** S22: semantic chrome styling. Absent = NO_STYLE (identity paints), so every context built
+   *  without one — tests, non-TTY — emits byte-identical pre-S22 output. Paint only, never new
+   *  glyph bytes: piped transcripts must not drift. */
+  style?: Style;
 }
 
 /**
@@ -322,7 +327,7 @@ export async function approvePlanCanonical(ctx: CommandContext, state: ReturnTyp
   ctx.session.log.append({ type: 'plan.approved', planId: ctx.session.id, sha256: w.contentSha });
   void (await writeUserView(ctx.layout, ctx.session.id, readCanonicalPlan(ctx.layout, ctx.session.id), ctx.session.snapshots));
   ctx.pendingNotes.push(`the user APPROVED the plan (content sha ${w.contentSha.slice(0, 12)}); planned execution may begin`);
-  ctx.renderer.chromeLine(`plan approved (content sha ${w.contentSha.slice(0, 12)}…) — recorded as consent evidence`);
+  ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('ok', `plan approved (content sha ${w.contentSha.slice(0, 12)}…) — recorded as consent evidence`));
 }
 
 /**
@@ -360,9 +365,10 @@ export async function acceptSession(ctx: CommandContext, opts: { confirm: boolea
   }
 
   if (!acc.complete && !opts.confirm) {
+    const st = ctx.style ?? NO_STYLE;
     ctx.renderer.chromeLine(
       [
-        'cannot accept as complete — unfinished work:',
+        st.seg('warn', 'cannot accept as complete — unfinished work:'),
         ...acc.unfinished.map((u) => `  - ${sanitizeLine(u)}`),
         'finish the work, or type "/accept confirm" to record a PARTIAL acceptance (the list above becomes the handoff).',
       ].join('\n'),
@@ -462,7 +468,7 @@ export async function acceptSession(ctx: CommandContext, opts: { confirm: boolea
     }
   }
 
-  ctx.renderer.chromeLine(`session accepted (${acc.complete ? 'complete' : 'partial'}) — ${sanitizeLine(acc.summary)}`);
+  ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('ok', `session accepted (${acc.complete ? 'complete' : 'partial'}) — ${sanitizeLine(acc.summary)}`));
   if (acc.complete) {
     // The delivery boundary suggestion (Session 14): commits stay user-typed and are never
     // a side effect — this is one line of guidance, not automation.
@@ -484,6 +490,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       return 'continue';
 
     case 'status': {
+      const st = ctx.style ?? NO_STYLE;
       const s = ctx.session;
       let inTok = 0;
       let outTok = 0;
@@ -505,7 +512,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
       const cache = cacheRead + cacheWrite > 0 ? ` (cache: ${cacheRead} read / ${cacheWrite} written)` : '';
       ctx.renderer.chromeLine(
         [
-          `session ${s.id} (${s.mode})`,
+          st.seg('heading', `session ${s.id} (${s.mode})`),
           `  workspace: ${sanitizeLine(s.workspaceRoot)}`,
           `  model: ${s.model} · provider: ${s.provider.name}`,
           `  user messages: ${turns} · tokens: ${inTok} in / ${outTok} out${reasoning}${cache}`,
@@ -515,9 +522,8 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             const rv = sessionReview(ctx);
             if (rv.requirement.kind === 'none' && rv.rounds.length === 0 && rv.findings.length === 0) return [];
             const blocking = rv.findings.filter((f) => f.blocking).length;
-            return [
-              `  review: ${rv.requirement.kind === 'required' ? `required (${rv.requirement.source})` : rv.requirement.kind} · ${rv.rounds.filter((r) => r.qualifying).length}/${rv.rounds.length} qualifying round(s) · ${rv.findings.length} finding(s)${blocking > 0 ? ` · ${blocking} BLOCKING` : ''} (${rv.satisfied ? 'satisfied' : 'blocking /accept'}; /review)`,
-            ];
+            const reviewLine = `  review: ${rv.requirement.kind === 'required' ? `required (${rv.requirement.source})` : rv.requirement.kind} · ${rv.rounds.filter((r) => r.qualifying).length}/${rv.rounds.length} qualifying round(s) · ${rv.findings.length} finding(s)${blocking > 0 ? ` · ${blocking} BLOCKING` : ''} (${rv.satisfied ? 'satisfied' : 'blocking /accept'}; /review)`;
+            return [rv.satisfied ? reviewLine : st.seg('warn', reviewLine)];
           })(),
           ...((): string[] => {
             // The repair ledger at a glance (S21): open escalations were previously visible only
@@ -529,11 +535,11 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             const openEsc = ledger.escalations.filter((e) => e.open && !resolved.has(e.target)).length;
             const dismissed = ledger.escalations.filter((e) => e.dismissed !== null).length;
             const unproven = ledger.attempts.filter((a) => a.outcome === 'open' && a.pendingChecks.length > 0).length;
-            return [
+            const repairLine =
               `  repairs: ${ledger.total} attempt(s) · ${ledger.escalations.length} escalation(s)` +
-                `${openEsc > 0 ? ` — ${openEsc} OPEN` : ''}${dismissed > 0 ? ` — ${dismissed} dismissed` : ''}` +
-                `${unproven > 0 ? ` · ${unproven} unproven attempt(s)` : ''} (/repair)`,
-            ];
+              `${openEsc > 0 ? ` — ${openEsc} OPEN` : ''}${dismissed > 0 ? ` — ${dismissed} dismissed` : ''}` +
+              `${unproven > 0 ? ` · ${unproven} unproven attempt(s)` : ''} (/repair)`;
+            return [openEsc > 0 ? st.seg('warn', repairLine) : repairLine];
           })(),
           ...((): string[] => {
             const alive = ctx.previewTool?.active().filter((a) => a.handle.isAlive()) ?? [];
@@ -1104,6 +1110,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
     }
 
     case 'review': {
+      const st = ctx.style ?? NO_STYLE;
       const rv = sessionReview(ctx);
       const lines: string[] = [];
       const reqLabel =
@@ -1122,16 +1129,15 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         );
       });
       for (const f of rv.findings) {
-        lines.push(
-          `  ${sanitizeLine(f.finding.findingId)} [${f.finding.severity}] ${sanitizeLine(f.finding.title)} → ${f.status}${f.blocking ? ' (BLOCKING)' : ''}`,
-        );
+        const findingLine = `  ${sanitizeLine(f.finding.findingId)} [${f.finding.severity}] ${sanitizeLine(f.finding.title)} → ${f.status}${f.blocking ? ' (BLOCKING)' : ''}`;
+        lines.push(f.blocking ? st.seg('warn', findingLine) : findingLine);
         for (const t of f.triage) {
           lines.push(`    triage ${t.action}${t.effective ? '' : ' (INEFFECTIVE)'}: ${sanitizeLine(t.evidence).slice(0, 120)}${t.note !== undefined ? ` — ${sanitizeLine(t.note)}` : ''}`);
         }
       }
-      for (const b of rv.openBlockers) lines.push(`  BLOCKER: ${sanitizeLine(b)}`);
+      for (const b of rv.openBlockers) lines.push(st.seg('fail', `  BLOCKER: ${sanitizeLine(b)}`));
       for (const c of rv.caveats) lines.push(`  caveat: ${sanitizeLine(c)}`);
-      lines.push(`  gate: ${rv.satisfied ? 'satisfied' : 'NOT satisfied — /accept will refuse COMPLETE'}`);
+      lines.push(rv.satisfied ? st.seg('ok', '  gate: satisfied') : st.seg('warn', '  gate: NOT satisfied — /accept will refuse COMPLETE'));
       ctx.renderer.chromeLine(lines.join('\n'));
       return 'continue';
     }
@@ -1237,7 +1243,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
             lines.push(`  escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — resolved by EVIDENCE (its plan task completed with a satisfied gate)`);
           } else if (esc.open) {
             n++;
-            lines.push(`  [${n}] OPEN escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — ${sanitizeLine(esc.reason)}`);
+            lines.push((ctx.style ?? NO_STYLE).seg('warn', `  [${n}] OPEN escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — ${sanitizeLine(esc.reason)}`));
           } else if (esc.dismissed !== null) {
             lines.push(`  escalation on '${sanitizeLine(esc.target)}' (${esc.failureClass}) — DISMISSED by you: ${sanitizeLine(esc.dismissed.reason)}`);
           } else {
@@ -1489,7 +1495,7 @@ function performSwitch(
 async function cmdProvider(arg: string, ctx: CommandContext): Promise<SlashOutcome> {
   const tokens = arg.trim().split(/\s+/).filter((s) => s !== '');
   if (tokens.some(looksLikeCredential)) {
-    ctx.renderer.chromeLine('refused: credentials are env-only — never paste a key into the session (set the provider\'s *_API_KEY env var instead)');
+    ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('fail', 'refused: credentials are env-only — never paste a key into the session (set the provider\'s *_API_KEY env var instead)'));
     return 'continue';
   }
   if (ctx.registry === undefined) {
@@ -1548,12 +1554,12 @@ async function cmdProvider(arg: string, ctx: CommandContext): Promise<SlashOutco
   }
   const validation = await registry.validateKey(name);
   if (!validation.ok) {
-    ctx.renderer.chromeLine(`switch refused: ${sanitizeLine(validation.detail)}`);
+    ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('warn', `switch refused: ${sanitizeLine(validation.detail)}`));
     return 'continue';
   }
   if (validation.modelIds !== undefined && !validation.modelIds.includes(model)) {
     if (ctx.question === undefined) {
-      ctx.renderer.chromeLine(`switch refused: model '${sanitizeLine(model)}' is not in the provider's live model list (${validation.modelIds.length} visible)`);
+      ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('warn', `switch refused: model '${sanitizeLine(model)}' is not in the provider's live model list (${validation.modelIds.length} visible)`));
       return 'continue';
     }
     const answer = await ctx.question(`  model '${model}' is not in the provider's live model list — switch anyway? [y/N] `);
@@ -1570,7 +1576,7 @@ async function cmdProvider(arg: string, ctx: CommandContext): Promise<SlashOutco
   try {
     provider = registry.create(name);
   } catch (e) {
-    ctx.renderer.chromeLine(`switch failed: ${sanitizeLine((e as Error).message)}`);
+    ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('warn', `switch failed: ${sanitizeLine((e as Error).message)}`));
     return 'continue';
   }
   performSwitch(
@@ -1588,7 +1594,7 @@ async function cmdProvider(arg: string, ctx: CommandContext): Promise<SlashOutco
 async function cmdModel(arg: string, ctx: CommandContext): Promise<SlashOutcome> {
   const id = arg.trim();
   if (id !== '' && looksLikeCredential(id)) {
-    ctx.renderer.chromeLine('refused: that argument looks like a credential — /model takes a model id only');
+    ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('fail', 'refused: that argument looks like a credential — /model takes a model id only'));
     return 'continue';
   }
   const providerName = ctx.session.provider.name as ProviderName;
@@ -1627,13 +1633,13 @@ async function cmdModel(arg: string, ctx: CommandContext): Promise<SlashOutcome>
     // and a FAILED probe must never be recorded as 'models-list' — that is the strongest of the
     // three verification words standing for the weakest outcome (S15 review finding).
     if (!validation.ok) {
-      ctx.renderer.chromeLine(`switch refused: ${sanitizeLine(validation.detail)}`);
+      ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('warn', `switch refused: ${sanitizeLine(validation.detail)}`));
       return 'continue';
     }
     verification = validation.verification;
     if (validation.modelIds !== undefined && !validation.modelIds.includes(id)) {
       if (ctx.question === undefined) {
-        ctx.renderer.chromeLine(`switch refused: '${sanitizeLine(id)}' is in neither the shipped catalog nor the provider's live model list`);
+        ctx.renderer.chromeLine((ctx.style ?? NO_STYLE).seg('warn', `switch refused: '${sanitizeLine(id)}' is in neither the shipped catalog nor the provider's live model list`));
         return 'continue';
       }
       const answer = await ctx.question(`  '${id}' is in neither the catalog nor the live model list — switch anyway? [y/N] `);

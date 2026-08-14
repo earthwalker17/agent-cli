@@ -35,9 +35,13 @@ export function createWorkingHeartbeat(opts: {
   /** Delay before the line first appears — a fast response should never flash it. */
   graceMs?: number;
   tickMs?: number;
+  /** Leading marker (S22): the REPL passes its Style's dot so a legacy ASCII console gets '.';
+   *  the default keeps the pre-S22 literal byte-identical. */
+  glyph?: string;
 }): WorkingHeartbeat {
   const grace = opts.graceMs ?? 2_000;
   const tick = opts.tickMs ?? 1_000;
+  const dot = opts.glyph ?? '·';
   let timer: NodeJS.Timeout | null = null;
   let visible = false;
   let startedAt = 0;
@@ -65,7 +69,7 @@ export function createWorkingHeartbeat(opts: {
         // ANSI bytes into visible `\u{1b}` text — the first recorded run showed the styled line
         // verbatim on screen (S16.5b, found by the take-4 video). The area's sanitize-and-clip
         // contract is exactly why styling must not be smuggled in through content.
-        opts.area.setLines([`· model working (${String(Math.round(elapsed / 1000))}s)`]);
+        opts.area.setLines([`${dot} model working (${String(Math.round(elapsed / 1000))}s)`]);
       }, tick);
       timer.unref?.();
     },

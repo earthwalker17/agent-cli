@@ -77,12 +77,12 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   // The sticky status area (Session 11): TTY-only; every chrome byte routes through it so it
   // can erase/redraw around ordinary output. Non-TTY it is a pure pass-through (zero escapes).
   const statusArea = createStatusArea({ chromeOut: streams.chromeOut, isTTY: streams.isTTY });
-  const taskTable = createTaskTable();
+  const taskTable = createTaskTable(Date.now, style.glyph);
   const renderer = createRenderer({ modelOut: streams.modelOut, chromeOut: streams.chromeOut, style, chromeSink: statusArea });
   // The "working" heartbeat (S16.5b): dim elapsed-time line while a model request is in flight
   // and no text has streamed yet — an always-thinking model otherwise looks frozen. TTY-only by
   // construction (the status area passes through zero bytes off-TTY).
-  const heartbeat = createWorkingHeartbeat({ area: statusArea });
+  const heartbeat = createWorkingHeartbeat({ area: statusArea, glyph: style.glyph.dot });
 
   // Approval prompts own the screen: the status area is suspended for the question's lifetime.
   const question = async (q: string): Promise<string | null> => {
@@ -186,6 +186,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     renderer,
     modelOut: streams.modelOut,
     pendingNotes,
+    style,
     ...(canAsk ? { question: (q: string) => question(q) } : {}),
     retrieval: assembled.retrieval,
     checkTool: assembled.checkTool,
