@@ -7,6 +7,58 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.10.0] — 2026-08-14
+
+**Terminal UX consolidation** (Session 22). The interactive surface catches up with everything
+the harness has learned to do: prompts become arrow-key menus, long output folds honestly with the
+end kept on screen, `/` discovers the command surface, and the completion question fires at a
+delivery-shaped boundary. Runtime truth is untouched — the UI stays a projection of the events —
+and the piped/non-TTY contract is byte-stable — proven by a v1.9.0-vs-HEAD byte-diff of the same
+scripted session — with ONE deliberate exception: the `task.changes` chrome glyph now follows the
+ASCII table off-TTY (`±` becomes `+-`), aligning the one Unicode straggler with the documented
+piped-ASCII doctrine. A pattern table pinned to `±` must update.
+
+### Added
+
+- **Arrow-key selection on every prompt, over the ONE readline.** A select widget (`select.ts`)
+  drives consent prompts, approval prompts, and the new `/` menu: arrows move, Enter confirms the
+  highlight, letters still work exactly as before (a typed answer goes through the same parser it
+  always did — the widget owns no answer grammar). **The initial highlight is always the
+  decline/deny row, so Enter never grants**; Ctrl+C/EOF keep their fail-closed meanings. Approval
+  menus derive from the same label derivations as the frozen prompt text, cross-pinned so the two
+  cannot drift — and for arrow users the old first-character hazards (`stop` reading as a session
+  grant, `abort` as a durable one) simply vanish.
+- **The fold tail and `/expand`.** Past the 8 KiB live-output cap, lines feed a bounded ring and
+  the command's end prints an honest fold marker plus the last eight lines — the verdict of a long
+  build is on screen the moment it exits, instead of never. `/expand [last | <n> | <call-id>]`
+  reprints a folded output in full from the record (the spill blob when saved, the recorded
+  head+tail otherwise, provenance named either way); **Ctrl+E** on an empty idle prompt is the
+  chord for it.
+- **`/` opens the command menu; Tab completes.** The slash surface is mirrored as data
+  (`command-table.ts`), drift-pinned against the dispatch switch in both directions; the menu is
+  windowed with honest "… N more" edges and typed names still work.
+- **Semantic style roles and one glyph table.** Chrome names what a line IS —
+  ok/fail/warn/muted/heading/agent/user/accent, one 16-color SGR pair each, severity never
+  color-only — and the previously hardcoded Unicode markers (`▸ ⚑ · ±`) join the ASCII fallback
+  table, so legacy consoles stay readable. `NO_COLOR` and `TERM=dumb` still disable paint
+  entirely; piped output never carried color and still does not.
+- **A display-width clip for the status region** (`width.ts`): CJK, emoji and combining marks
+  measure in COLUMNS now — the prerequisite the old code-unit clip itself documented before
+  free-form text (menu labels) could land in status lines.
+
+### Changed
+
+- **The plan-less completion prompt moves to the typed `/quit`.** With no plan, acceptance is
+  "complete" after any mutating turn, so the question re-armed on every one (the recorded S21.6
+  nag). Plan-carrying sessions keep the turn-boundary offer — an approved plan completing IS a
+  delivery boundary; plan-less work is asked once, when the user says they are done. Never at
+  EOF, never at a double-Ctrl+C.
+- **The io liveness fix**: the pending resolver installs before the prompt bytes, so a zero-delay
+  scripted answer can no longer vanish into type-ahead; the fatal path clears the status region
+  before its last line.
+- The prompt glyph carries the user role color and a blank line precedes the idle prompt (both
+  TTY-only): where the human speaks is visually distinct from where the agent answered.
+
 ## [1.9.0] — 2026-08-13
 
 **The git capability pack** (Session 21.6). Natural-language Git intent now reaches the safe

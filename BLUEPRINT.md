@@ -205,22 +205,34 @@ session-end prune iterated a hard-coded three-kind list, so the reclaim that pay
 checkpoints never ran. Live-proven on Kimi, 29/29 post-hoc checks (`agent-cli-s216-live/DEMO.md`).
 Details: `ROADMAP.md` Session 21.6, `ARCHITECTURE.md` "GitOps", CHANGELOG 1.9.0.
 
-### Session 22 — Terminal UX Consolidation  ← **NEXT**
+### Session 22 — Terminal UX Consolidation — **DONE (v1.10.0)**
 
-Polish the terminal surface after the new states are real. Explore bounded folding and expansion of
-long outputs, clearer color and hierarchy, compact provider/model/task/check/research/remote status,
-and better navigation through evidence without losing the clean non-TTY contract.
+Delivered as an incremental upgrade, no TUI framework: an arrow-key select widget behind the ONE
+readline (keypress capture + a status-area overlay channel; `status.ts` stays the only
+cursor-moving code; Enter never grants — the initial highlight is always the decline row; typed
+answers keep the existing parsers, so `cancel` and every scope rule still mean what they meant),
+adopted by the consent prompts, the approval prompts (menu rows cross-pinned against the FROZEN
+`formatApprovalPrompt` strings) and a new bare-`/` command menu with Tab completion over a
+drift-pinned command table; a live-output fold that keeps a long run's END on screen plus
+`/expand`/Ctrl+E reprinting the full bytes from the record; semantic style roles with one glyph
+table (severity never color-only); a display-width clip; the io resolver-before-prompt liveness
+fix; and the recorded S21.6 pressure resolved — the plan-less completion prompt moved to the
+typed `/quit`, while plan-carrying sessions keep the turn boundary. The non-TTY contract was
+proven byte-stable by diffing the same scripted piped session across v1.9.0 and v1.10.0 builds.
+Details: `ROADMAP.md` Session 22, `ARCHITECTURE.md` "The REPL", CHANGELOG 1.10.0.
 
-UI state must remain a projection of the event-backed runtime, not a second source of truth. Avoid a
-large TUI rewrite unless real usage proves the current rendering architecture cannot support the
-needed interactions cleanly.
+### Session 23 — candidates (decide in plan mode, from repository evidence)  ← **NEXT**
 
-Three concrete pressures are already on the record and should shape it: agent checkpoints now print
-their own chrome line mid-turn; the completion prompt has grown a fourth key and, in a **plan-less**
-session, is reachable after any mutating turn (S21.5 behaviour, observed in the S21.6 live run —
-decide whether a delivery boundary or a work boundary is the right trigger); and arrow-key
-selection stays deferred because readline owns stdin exclusively and `status.ts` is the only
-cursor-moving code, so a second input mode is a TUI-session decision, not a prompt tweak.
+Two directions carry the most accumulated pressure; the session should open by picking one:
+
+- **Cross-platform honesty**: the Linux CI job has been advisory-red since 2026-07-28 because ten
+  TESTS encode win32 semantics (the runtime is not known-wrong there); gating or parameterizing
+  those fixtures per platform, plus the deferred `agent accept <id>` (one-shot sessions still
+  cannot reach the acceptance boundary) and `agent gc`, would make the public repository's green
+  mean the same thing on both platforms.
+- **The second non-coding pack (slides)**: documents/PDF proved the contracts generalize once;
+  slides would prove the PATTERN (spec → deterministic render → visual verification loop) rather
+  than the instance, reusing the S17 substrate.
 
 ## 4. Design Rules for the Next Phase
 

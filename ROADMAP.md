@@ -6,154 +6,216 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
-## Session 21.6 (2026-08-13) — The git capability pack (v1.9.0)
+## Session 22 (2026-08-14) — Terminal UX consolidation (v1.10.0)
 
-**Objective.** Let natural-language Git intent reach the safe machinery that was already there —
-without widening the one invariant the previous session deliberately kept: *the model cannot
-publish content a human did not commit.*
+**Objective.** Make the interactive surface match what the harness became — arrow-key prompts,
+honest folding of long output, command discovery, a delivery-shaped completion boundary — without
+changing runtime truth (the UI stays a projection of the events) and without moving a byte of the
+piped/non-TTY contract.
 
 ### The shape, and why it is this shape
 
-Checkpoint-first. The model gets the half of git that changes nothing the user can see — reading,
-and additive recovery state — while the commit stays the user's and becomes a **choice at the
-delivery boundary** instead of a printed suggestion. A model-facing `git_commit` would have broken
-the pinned invariant; the user reconfirmed keeping it verbatim, so neither pin was rewritten.
+**Incremental, no TUI framework, no alternate screen.** The code-traced exploration was decisive:
+every seam was already injectable, `status.ts` was the only cursor-moving code, and colors had one
+emitter with zero test pins. Three primitives were genuinely new, all confined to `repl/`:
+
+- **`io.captureKeys`** — exclusive keypress routing behind the ONE readline, implemented by
+  DETACHING readline's own keypress listener for a capture's lifetime (identified by a
+  construction-time listener diff). Coexisting was the trap: arrow-up is history recall into
+  `rl.line` and Enter emits `'line'` into type-ahead, so a stale buffered command could have
+  answered a security prompt. Detached, the line path is structurally inert while a menu is up.
+  The Node-internals dependence is deliberate and pinned: if a Node upgrade changes the listener
+  shape, `captureKeys` returns null and every caller falls back to the line grammar (the
+  reattach round-trip test breaks loudly in CI, not in a user's terminal).
+- **The status-area overlay channel** — the select menu draws INSTEAD of the base lines;
+  `setLines` during an overlay stores silently, so a forwarded-approval task update cannot
+  clobber a menu; styled lines are painted BY THE AREA after sanitize and clip (the S16.5b
+  lesson kept structural). `status.ts` remains the only cursor code, and its clip now counts
+  DISPLAY COLUMNS (`width.ts`) — the prerequisite its own header had named before free-form
+  menu labels could land there.
+- **`select.ts`** — the widget over the two: capture BEFORE any output (a zero-delay driver
+  cannot lose keys), clamped navigation, menu windowing with honest "… N more" edges (the
+  overlay's erase math counts drawn lines, so a menu taller than the terminal must not exist),
+  and NO answer grammar of its own.
 
 ### What shipped
 
-- **Two policy facts, `gitRead` and `gitCheckpoint`, each with a fail-closed branch.** Two rather
-  than one with a mode, on the S20 `remoteRead`/`remoteWrite` argument: the conflicting-contract
-  rule then refuses a tool that could both read and write, so "the read tool writes nothing" is a
-  property verified by finding no second fact. They need branches *at all* for the reason
-  `test/policy.test.ts`'s `hypothetical_git_commit` regression states — a command-less,
-  mutation-less git tool falls through to `observe`/auto-allow with the reason "read-only workspace
-  access", and that test exists to say git must never sit behind that shape. The branches buy a
-  decision record, not permission. Shared guards, in the order that fails closed: conflicting
-  contract → empty mutation plan (a non-empty one would sail past the branch that validates write
-  targets and captures snapshots) → **lineage deny** (an executor child works in a detached
-  worktree, so its checkpoint ref would land in the user's real repo under the CHILD's session id,
-  where the parent's owed-prune fold never sees it) → the tool's own blocker.
-- **`git_status`** — views `summary` (a live `detectGitFacts` re-probe), `changes`, `log`,
-  `checkpoints`. `changes` reuses **`prepareCommit`**, the same function that builds the human's
-  `/commit` preview, so the model's answer and the user's screen cannot drift — rendered for a
-  model reader, because the human's warnings say "use `--all`" and "run `git config --global`", and
-  handed to a model the first trains it to sweep the user's unrelated edits under this session's
-  name. **It takes a view name and a bounded integer and nothing else.** That is the whole argument
-  for allowing these reads on machines with no enforced sandbox, where the equivalent
-  `run_command git log` asks today: the model names a VIEW, the harness names the command — and it
-  holds only while no ref, path or format parameter exists, so widening the schema would be a
-  policy change wearing a schema's clothes. Nothing it returns is file content, which is what makes
-  the branch honest about allowing before `readsPaths` is ever evaluated.
-- **`git_checkpoint`** — `{ label? }` and nothing else; the schema cannot express a restore, reset,
-  commit or push. Auto-allowed, deliberately: a hidden ref built against a temporary index is the
-  most reversible write in the system, and the harness already takes task-base, pre-integration and
-  delivery checkpoints unasked, so a prompt per capture would only train the model out of
-  protecting the user's work. Bounds replace the prompt — `AGENT_CHECKPOINTS_PER_SESSION = 12` as a
-  fact-level deny so exhaustion is recorded as a decision; a **secret guard** refusing to capture
-  secret-named files `.gitignore` does not already exclude (`git add -A` excludes exactly what
-  gitignore excludes and nothing else, and a git blob cannot be redacted — the
-  `artifact.inspect-secret-name` precedent); a **label guard**, because a label is display and
-  never identity.
-- **A fourth `HarnessRefKind`, `agent`,** rather than a new event type. That inheritance is
-  load-bearing, not tidiness: the owed-prune fold reclaims the ref at clean session end (which is
-  what makes taking them freely safe), the pre-integration covered-change rule counts it as
-  coverage, and `WORK_EVENT_TYPES` excludes it so a recovery point can never stale an acceptance.
-  `git.checkpoint` stays what `types.ts` says it is — user-commanded consent provenance — and is
-  not widened. Creation rides the existing event-before-ref seam through a new `ctx.reportGit`
-  channel, with the label sanitized and capped at the emit site.
-- **The commit as a key on the completion prompt.** Folded INTO condition C rather than asked after
-  `acceptSession`, and that placement is the design: `acceptSession` is called from inside
-  condition C's own affirmative branch, so appending a prompt there would be two consecutive
-  consent questions — exactly the wizard S21.5's rule 2 forbids. It renders only when a commit
-  would actually succeed (a repository, attributable paths, no blockers), and it runs the same
-  `/commit` body, so the recorded evidence is byte-identical to typing it.
-- **The delivery anchor stopped being forgeable.** `agent checkpoint prune` identified anchors by
-  `subject.includes(': delivery (accepted)')` while `createCheckpoint` interpolates the caller's
-  label into that same subject — so the moment a model could choose a label, it could mint a ref
-  prune would refuse to reclaim. Anchored on the whole harness-composed subject now.
+- **Every prompt is a menu; Enter never grants.** The initial highlight is always the
+  decline/deny row (the module's own documented "no affirmative default", now spatial), typed
+  letters open a visible buffer submitted through the CALLER's parser — immediate first-letter
+  action would have reintroduced the exact `cancel`-vs-`[c]` hazard NEGATIVE_WORDS closed —
+  and eof/interrupt keep their fail-closed meanings, with Ctrl+C firing the interrupt handler
+  BEFORE the widget resolves (the 'SIGINT' ordering, preserved). Consent prompts branch on the
+  injected `askSelect`; approval menus derive from `approvalChoices`, which shares
+  `sessionGrantLabel`/`durableGrantLabel` with the FROZEN `formatApprovalPrompt` strings and is
+  cross-pinned by an eleven-request matrix so menu and text cannot drift. `parseAnswer` (now
+  exported) stays the sole owner of approval-answer meaning. Free on the TTY: the `stop`→`[s]`
+  and `abort`→`[a]` first-char hazards vanish for arrow users. Esc is handled but deliberately
+  NOT advertised: Node's keypress decoder holds a bare ESC awaiting a sequence, so the chord is
+  unreliable — and every meta-flagged key is dropped so an Esc-prefixed Enter can never confirm.
+- **The fold tail and `/expand`.** Past the 8 KiB live cap, lines feed a bounded ring; command
+  end prints `… N line(s) folded — tail below` plus the last eight lines (capped means folded,
+  never vanished — the mid-batch remainder joins the ring too). `/expand [last | <n> |
+  <call-id>]` reprints in full from the RECORD — the spill blob when saved, the recorded
+  head+tail otherwise, provenance named either way — to stdout, the requested-artifact channel;
+  renderer memory is never consulted, so it survives resume by construction. Ctrl+E claims
+  exactly the state where readline's own binding is a no-op (empty line, idle PROMPT; a
+  `pendingKind` guard keeps it out of questions, where '/expand' would parse as a deny).
+- **`/` discovers the surface.** `command-table.ts` mirrors the dispatch switch as data,
+  drift-pinned in BOTH directions (every row reaches a real branch; every case label has a row);
+  readline gains the Tab completer (terminal-mode only — piped input untouched by construction);
+  a bare `/` opens the menu, full-name keys, typed names and unique prefixes accepted.
+- **Semantic style roles, one glyph table.** `seg(role, s)` with
+  ok/fail/warn/muted/heading/agent/user/accent (16-color SGR, `accent` inverse video), one
+  open/close pair with no compose API — the dim/bold shared-close-22 hazard closed by shape.
+  The legacy names became role aliases (ninety-odd call sites did not churn); `NO_STYLE` is the
+  default wherever a Style is optional, so every context built without one is byte-identical.
+  The five hardcoded-Unicode marker sites (`▸ ⚑ · ±` in live-tasks, heartbeat, render,
+  approvals' glyphs pending S6 wiring, cli) joined the ASCII fallback table. Severity is never
+  color-only. FORCE_COLOR deliberately not added — piped purity outranks.
+- **The completion boundary matches the session's shape** (the recorded S21.6 pressure). An
+  approved plan completing IS a delivery boundary, so plan-carrying sessions keep the
+  turn-boundary offer; plan-less work — where acceptance is "complete" after any mutating turn,
+  so the old trigger re-armed on every one — is asked once, at the typed `/quit`. Never at EOF,
+  never at double-Ctrl+C: walking away is not a consent moment. B/A/D stay turn-only; one
+  anti-nag set spans both boundaries.
+- **Two liveness/coherence fixes**: the io pending resolver installs BEFORE the prompt bytes (a
+  PassThrough delivers 'data' synchronously, so a zero-delay driver's answer used to land in
+  type-ahead where a `fresh` question never looks — the REPL waited forever; pinned by a
+  same-tick-answer regression that hangs under the old order), and the fatal path clears the
+  status region before its last line. Plus the composer boundary: a painted prompt glyph and one
+  blank chrome line before the idle prompt, both TTY-gated.
 
 ### Verification
 
-`npm run typecheck` clean. Suite **2254 → 2307** (new `test/policy.git.test.ts` and
-`test/git.tools.test.ts`, plus additions to `limits`, `assemble.projects`, `repl.consent`,
-`git.context`, `cli.assemble` and `accept.delivery`). Observed exactly: the final full run was
-**2,295 pass · 1 fail · 11 skip across 145 files**, and the one failure is the documented
-contention class — `browser.flow.test.ts`'s preview-dies-mid-flow case timed out at 180 s in a
-file that took 474 s under full parallelism, and the same file is **10/10 green in isolation in
-63 s**.
+`npm run typecheck` clean at every stage. Suite **2307 → 2368** (new `repl.width`, `repl.format`,
+`repl.select`, `repl.expand`, `repl.commands-table` files; overlay cases in `repl.status`;
+driveTTY gains `sendRaw` and five new end-to-end TTY tests incl. arrow-approving a plan and an
+approval with no letter ever typed). Ten stages, each committed suite-green (`7a0d66e`…`6312422`);
+the S8–S10 combined gate observed **2355 pass · 2 fail**, both fails the documented contention
+class — which this session's runs WIDENED on the record: it now demonstrably includes
+`artifacts.pdf` and `artifacts.inspect` (browser-printing tests, 180s timeouts in files taking
+500s+ under full parallelism), not only `browser.flow`; every failing file was re-run in
+isolation and passed (10/10, 20/20) each time it appeared.
+
+**The changed pins, listed** (the S22 analog of honest test churn): the pre-S22
+"suppress-forever" cap test rewritten to the fold contract; the two S21.6 driveTTY completion
+tests reordered to the quit boundary with a transcript-order assertion; the completion-mechanics
+unit tests ask at the quit boundary; `/ex` completion became ambiguous when `/expand` landed
+(the alias test now pins the ambiguity itself).
+
+**Live E2E** (`agent-cli-s22-live/`, Kimi `kimi-k2.7-code`, injected-TTY driver, no recording;
+the validated run is against the POST-review-fix build, re-run after the fourteen fixes landed):
+**14/14 driver steps, 20/20 post-hoc checks from the persisted record** — an arrow-answered
+approval whose transcript echo is the picked LABEL (`> allow once`, which a typed letter cannot
+produce); the fold (`… 225 line(s) folded`) with the run's end on screen; Ctrl+E reprinting the
+full spill blob; the `/` menu arrow-picking `/status`; and the plan-less completion prompt
+firing ONLY after the typed `/quit`, arrows to `[c]`, commit `TODO.md` at seq 30, acceptance at
+seq 32. **The piped control**: the same scripted mock session driven through the v1.9.0 baseline
+build (a git worktree, `npm ci`-built) and HEAD — stdout AND stderr **byte-identical** after
+normalizing only run-varying values, zero escape bytes on either HEAD stream. Two honest notes
+recorded in `DEMO.md`: take 1 was discarded for a DRIVER cursor-order bug (the S21.6 per-stream
+lesson, one step over), and the validator's own first run had one wrong assertion (counting menu
+rows that legitimately redraw per keypress; the corrected check is positional).
 
 **Adversarial review: one bounded workflow, four differentiated lenses over the session diff —
-12 findings, every one hand-verified REAL and fixed.** The three that mattered:
+16 findings, every one hand-verified against the code; 14 fixed, one accepted-as-designed and
+documented, one coverage gap closed.** (The workflow's first launch died entirely on a subagent
+session limit and was relaunched after the reset — a failed review is not a clean review.) The
+three that mattered:
 
-1. **The session-end prune skipped agent refs.** `owedHarnessRefsFromEvents` owed them correctly
-   while `pruneHarnessCheckpointRefs` iterated a hard-coded list of three kinds, so the map's
-   `agent` key was collected and silently skipped: every model checkpoint would have stayed pinned
-   in the user's repository forever, while the harness announced a prune that deleted nothing. That
-   reclaim is *exactly* the claim that pays for auto-allowing the capability, so the whole consent
-   argument rested on a loop that did not run. Now driven by `HARNESS_REF_KINDS`.
-2. **The secret guard failed open on a truncated listing.** The exec substrate keeps the head and
-   tail and drops the MIDDLE while git still exits 0, so a secret-named path in the elided middle
-   was invisible to the scan — and that guard is the only thing between the model and an
-   unredactable blob. Truncation refuses now, the rule the remote pack already applies to a partial
-   `ls-remote`; extracted as `inspectCaptureSet` so the fail-closed path is testable without a
-   repository large enough to truncate git.
-3. **An unreadable working tree reported as a clean one.** `prepareCommit` answers a failed status
-   probe with `entries: []`, which every renderer reads as "nothing is uncommitted" — an unverified
-   negative shipped as an observation with `ok: true`. `CommitPreview` gained `statusFailed` and
-   the view refuses.
+1. **`captureKeys` split an in-flight typed line.** Mid-turn typing is unechoed; a select
+   engaging mid-line froze the invisible prefix in readline and handed the SUFFIX to the menu,
+   where a fragment like "sts for the parser" answers an approval by its first character — a
+   session grant from an instruction fragment, the exact hazard class the `fresh` flag closes on
+   the line path, reintroduced one layer down. `captureKeys` now DRAINS readline's buffer into
+   the widget's visible typed buffer: the whole line stays one string the user can see, finish,
+   clear or submit — which is also strictly better than the pre-S22 line path, where the same
+   in-flight text was invisible until Enter.
+2. **`/expand` replayed raw unsanitized command output** — recorded bytes straight to the
+   terminal, so untrusted output could move the cursor, clear the screen or retitle the window,
+   violating "untrusted text can never move the cursor". It now sanitizes per line, exactly as
+   `/diff` always has; the true bytes stay in the record.
+3. **The fold's final-partial promise was broken**: `flushCmdOutput(true)` consumed and dropped
+   the buffered unterminated last line — often the verdict line the tail exists to show — before
+   `flushFoldTail` could fold it. The suppressed path now leaves the buffer to the ring, pinned
+   by a FINAL-VERDICT-without-newline regression.
 
-Plus: accept-then-commit staled the acceptance it had just recorded (`git.commit` is work-shaped),
-so the order became commit-then-accept; `cancel` typed at the completion prompt resolved to the new
-`[c]` key under first-character parsing, so an exact-word negative list declines first; and four
-honesty fixes (the `summary` view is repository-wide and no longer claims subtree scope; "no
-history is created" replaced by what the capture really writes; consent condition (d) says "no
-UNILATERAL path" rather than an absolute an approved `run_command` can satisfy; the documented
-guard order matches `gitGuards`).
-
-**Live E2E** (`agent-cli-s216-live/`, Kimi `kimi-k2.7-code`, injected-TTY driver, no recording):
-11/11 driver steps, **29/29 post-hoc checks from the persisted record alone**. Three `git_status`
-calls recorded as `git.read`/allow — never `observe.in-workspace` — with **zero approvals spent on
-the git tools all session**; a capture **refused by name** for a non-gitignored `.env`; the model
-told to `git commit -am wip` through `run_command`, the harness asking, and the scripted human
-**denying** (no `command.started`, no commit); the named cure working and a real recovery point
-landing; the completion prompt offering `[c] commit the 1 file(s) …, then accept`, producing commit
-`8e90e58` and only then the acceptance (`commit@50 accept@52`, nothing work-shaped after it); the
-agent ref pruned at quit while the delivery anchor survived; and the credential appearing **neither
-in the session log nor in any git object in the repository**.
+Plus: the select header no longer prints the line-grammar "(Enter = not now)" clause above a
+menu where Enter confirms the movable highlight (two contradictory instructions on one consent
+surface); approved LEGACY plans keep their turn-boundary completion ask; the `/` menu falls back
+honestly when capture is unavailable, clamps its window to the terminal's rows, requires ≥2
+characters before prefix-resolving typed input (a lone `a` was one keystroke from `/accept`) and
+echoes the resolved command; and five test-integrity repairs — the fold pin gained its
+discriminating `not.toContain('line-3')` (the old assertion was vacuously true), the
+quit-ordering assertion anchored on the banner's own "/quit to leave" and could never fail, the
+approved-plan turn-boundary cell of the boundary matrix had no pin at all (added, on a main-only
+plan fixture), the `/expand` provenance oracle matched a substring of the OPPOSITE message, and
+the drift-scan regex silently exempted any command name containing a digit or hyphen (widened,
+plus set-equality instead of a loose count). **Accepted, not fixed, and documented**: the
+`task.changes` glyph now follows the ASCII table off-TTY (`±` → `+-`) — ONE deliberate piped
+chrome-byte change, aligned with format.ts's own stated ASCII doctrine; external pattern tables
+that pinned `±` must update.
 
 ### Decisions (and why)
 
-- **Auto-allow the checkpoint, bound it instead of prompting.** A prompt to protect the user's work
-  is backwards, and the harness already takes three kinds of checkpoint unasked. What makes it
-  honest is that every replacement bound is real: a session allowance, a secret guard, a label
-  guard, and a prune that actually runs.
-- **Reads get a branch that reaches the same verdict the fall-through would.** The branch is not
-  permission; it is a decision record that names the argv, can fail closed on anything outside the
-  view set, and keeps git out of the shape the `hypothetical_git_commit` pin forbids.
-- **The widening is documented where it is, not where it is comfortable.** ARCHITECTURE's GitOps
-  section was headed "never a model tool" and its condition (c) read "structurally unreachable";
-  both were rewritten in the same change, with the compound invariant restated verbatim.
-- **No budget is ever rebuilt from `tool.requested`.** That event is appended before schema
-  validation and for skipped calls, so it charges for calls that never ran.
+- **The widget owns no answer grammar and no cursor code — both absences are the design.** Menu
+  picks and typed buffers route through the parsers that already existed (`parseChoice`,
+  `parseAnswer`), so every scope rule, negative word and fail-closed default holds without being
+  re-implemented; the status area draws the menu, so "status.ts is the only cursor-moving code"
+  survives S22 literally. Immediate first-letter action was rejected by name: it would have
+  reintroduced the `cancel`-vs-`[c]` hazard at the keypress level.
+- **Enter never affirms, spatially.** The decline/deny row is the initial highlight everywhere,
+  which keeps the letter grammar's "empty is a decline, never a default-yes" true for arrows too
+  — an approval still costs one deliberate keystroke of navigation before Enter can allow.
+- **Detach readline during a capture, never coexist.** History recall and 'line' assembly are the
+  two ways a menu answer could have leaked into the line path; removing readline's keypress
+  listener for the capture's lifetime closes both structurally, and the fallback when the
+  listener diff fails is the line grammar, not a broken menu.
+- **Fold deterministically; expand from the record.** Model-authored summaries were rejected —
+  narration over evidence, and a model call in a render path; the event log + spill blob are
+  already the durable truth the model itself saw, so `/expand` reads THOSE and survives resume.
+- **The completion boundary follows the session's shape** — turn-boundary where an approved plan
+  makes completion a delivery boundary, typed-/quit for plan-less work — because the S21.6 nag
+  was structural: plan-less acceptance is "complete" after every mutating turn, so any
+  turn-boundary trigger re-arms perpetually.
+- **Piped byte-stability is an output property, enforced two ways**: paint is identity off-TTY
+  and every new interaction is TTY-gated (proven by the v1.9.0-vs-HEAD byte-diff); FORCE_COLOR
+  was deliberately NOT added, and the stderr tint in the live preview was CUT rather than risk
+  the flush machinery (the stream parameter stays threaded, unused).
+- **Esc is handled but not advertised.** Node's keypress decoder holds a bare ESC waiting for a
+  sequence continuation, so the chord cannot be reliable; meta-flagged keys are dropped instead,
+  so an Esc-prefixed Enter can never confirm a highlight.
 
 ### Open issues / boundaries
 
-- The live proof is one provider, one repository, one platform. The monorepo scoping of `changes`,
-  the truncated-listing refusal and the crash-replay branch are unit-tested only.
-- `git_status view=checkpoints` was not exercised live.
-- In a **plan-less** session the completion prompt is reachable after any mutating turn, so the
-  `[c]` key can appear more often than at a single delivery boundary. That is S21.5 behaviour this
-  session inherited rather than introduced, and it is worth a look in S22's UX pass.
-- The `summary` view re-probes live and is repository-wide while `changes`/`log` are
-  subtree-scoped; the wording says so, but a monorepo user sees two different numbers.
-- `prepareCommit` reads whole attributed files to compute drift, so a multi-gigabyte attributed
-  file means a multi-gigabyte allocation on a model-triggered call.
+- The PIPED path keeps `parseAnswer`'s first-character grammar untouched — `stop` still reads
+  as `[s]` and `abort` as `[a]` where offered. Deliberate (the 44-pin family binds the frozen
+  prompt text; scripted drivers type exact letters), pooled for a dedicated hardening pass.
+- The approval prompt's `⚠` glyphs and the one-shot CLI's chrome stay hardcoded Unicode — the
+  piped byte-stability constraint outranked the unification for surfaces piped transcripts pin.
+- The live proof is one provider, one platform, one PLAN-LESS session; the plan-carrying
+  turn-boundary completion path is unit- and driveTTY-tested only. `git_status
+  view=checkpoints`-style breadth does not exist here: the / menu, Tab completion and Ctrl+E
+  were each exercised once, live, not across terminals (Windows Terminal ASCII fallback was
+  observed via the heartbeat's `.` dot; legacy conhost was not driven).
+- `captureKeys` rests on readline installing exactly one 'keypress' listener (a
+  construction-time diff); a Node upgrade that changes the shape degrades every menu to the line
+  grammar and fails the reattach round-trip test loudly.
+- The documented full-parallelism contention class WIDENED on this session's record: it now
+  demonstrably includes `artifacts.pdf` and `artifacts.inspect` (browser-printing tests),
+  not only `browser.flow`; each was green in isolation every time it appeared. Related machine
+  lesson: a full-suite run whose shell wrapper is killed leaves child processes that FAIL every
+  subprocess-spawning test bogusly (observed twice); detached suite runs are the cure.
+- Deferred by the plan's cut order: the live-filter dropdown while typing, provider/model
+  pickers on the widget, mid-turn `/expand`, the resize redraw hook, heartbeat/task-table
+  styled overlay roles.
 
 ### Recommended next step
 
-v1.9.0 publishes on explicit user approval (push + tag + Release). Then Session 22 per BLUEPRINT:
-terminal UX consolidation — the new states (agent checkpoints in the chrome, the widened completion
-prompt, the repair ledger, grants, six memory docs) are exactly the pressure that session needs.
+v1.10.0 publishes on explicit user approval (push + tag + Release). Then Session 23 per
+BLUEPRINT: cross-platform honesty (the advisory-red Linux CI, `agent accept <id>`, `agent
+gc`) or the second non-coding pack (slides) — decide in plan mode from repository evidence.
 
 ---
 
@@ -161,6 +223,44 @@ prompt, the repair ledger, grants, six memory docs) are exactly the pressure tha
 
 Contract detail lives in `ARCHITECTURE.md`; entries keep the objective, lasting decisions, the
 evidence, and what stayed open.
+
+### Session 21.6 (2026-08-13) — The git capability pack (v1.9.0)
+
+Let natural-language Git intent reach the safe machinery that was already there, checkpoint-first,
+without widening the pinned invariant: *the model cannot publish content a human did not commit* —
+v1.9.0 (suite 2254 → 2307). The model got the half of git that changes nothing the user can see;
+the commit became a **choice at the acceptance boundary** (a `[c]` key running the same
+`/commit` body, folded INTO condition C because a second question after `acceptSession` would
+be the wizard S21.5's rule 2 forbids).
+
+**Lasting decisions.** Two policy facts (`gitRead`, `gitCheckpoint`), each fail-closed, on the
+S20 remoteRead/remoteWrite argument — the conflicting-contract rule then proves "the read tool
+writes nothing" by finding no second fact; branches exist at all because a command-less git tool
+would auto-allow as `observe` (the `hypothetical_git_commit` pin). `git_status` takes **a
+view name and a bounded integer, nothing else** — that constraint IS the argument for allowing
+reads unprompted, and `changes` reuses `prepareCommit` so model answer and human screen cannot
+drift; it never returns file content. `git_checkpoint` is `{ label? }`, auto-allowed because a
+hidden ref is the most reversible write in the system, bounded instead of prompted: 12/session, a
+**secret guard** (git blobs cannot be redacted; truncated listings REFUSE — fail-closed), a label
+guard. The ref rides a fourth `HarnessRefKind` `agent`, inheriting the owed-prune reclaim (what
+makes free capture safe), the covered-change rule, and `WORK_EVENT_TYPES` exclusion for free.
+
+**Evidence.** Four-lens review: 12 findings, all hand-verified and fixed — the sharpest: the
+session-end prune iterated a hard-coded three-kind list, so the reclaim that pays for auto-allowing
+checkpoints never ran; the secret guard failed open on a truncated listing; an unreadable working
+tree reported as clean (`CommitPreview.statusFailed`). Accept-then-commit staled its own
+acceptance (`git.commit` is work-shaped) → commit-then-accept; `cancel` at the completion
+prompt parsed as `[c]` → the exact-word NEGATIVE_WORDS list. **Live-proven on Kimi** — 11/11
+driver steps, 29/29 post-hoc checks (`agent-cli-s216-live/DEMO.md`): three `git_status` reads
+as `git.read`/allow with zero approvals spent, a capture refused by name for a non-gitignored
+`.env`, a scripted human DENYING the model's `git commit -am wip`, the completion prompt's
+`[c]` producing commit-then-accept, the agent ref pruned at quit while the delivery anchor
+survived, and the credential in neither the log nor any git object.
+
+**Still open from it.** The monorepo scoping of `changes`, the truncated-listing refusal and the
+crash-replay branch are unit-tested only; `git_status view=checkpoints` was not exercised live;
+`prepareCommit` reads whole attributed files (a huge file means a huge allocation on a
+model-triggered call); checkpoint numbering is shared across kinds in `/checkpoint list`.
 
 ### Session 21.5 (2026-08-12) — Command and interaction surface simplification
 
@@ -793,10 +893,20 @@ since a plan of all-`main` tasks cannot declare them; executors cannot self-veri
 `run_check`, because a worktree lacks gitignored deps); more ecosystems as data-shaped recipe rows;
 an incremental check cache keyed by file hashes + tool versions.
 
-**Planning/orchestration:** a width-aware status-area clip before free-form text may land in status
-lines; sibling-task chrome printing over a DISPLAYED forwarded-approval prompt (part of the io
-redesign); plan-file pruning (folded into `agent gc` above); a `/cancel` surface for non-TTY
-sessions; richer wave guidance.
+**Planning/orchestration:** sibling-task chrome over a DISPLAYED forwarded-approval prompt — the
+S22 select path handles it (the overlay pushes the menu below arriving chrome cleanly), but the
+LINE-question fallback keeps the old wart; plan-file pruning (folded into `agent gc` above); a
+`/cancel` surface for non-TTY sessions; richer wave guidance. (The width-aware status clip shipped
+in S22 as `width.ts`.)
+
+**Terminal UX (new, S22):** hardening `parseAnswer`'s piped first-character grammar (`stop`→`[s]`,
+`abort`→`[a]` where offered — the 44-pin prompt-text family binds the wording, so this is its own
+pass); the live-filter dropdown while typing `/` (a per-keystroke redraw inside readline's line —
+a different input mode); provider/model/checkpoint-restore pickers on the select widget; mid-turn
+`/expand`; a `'resize'` redraw hook; the stderr tint in the live preview (the stream parameter is
+threaded and unused); styled overlay roles for the heartbeat and task table; unifying the approval
+prompt's hardcoded `⚠` and the one-shot CLI chrome into the glyph table (piped byte-stability
+outranked it this session).
 
 **Memory/init/grants (new, S21):** install-replay and preview-replay durable grants (each
 excluded from `[a]` deliberately — revisit with real usage pressure, not by default); a
@@ -813,9 +923,9 @@ wording says so; a scoped `detectGitFacts` option would make the numbers agree).
 reads whole attributed files to compute drift, so a huge attributed file means a huge allocation on
 a model-triggered call — streaming or a size cap is the fix. Checkpoint `n` numbering is shared
 across all kinds, so `/checkpoint restore <n>` can address an agent or task-base ref; the subject
-labels distinguish them, a kind column in `/checkpoint list` would do it better. And the completion
-prompt's reachability in a plan-less session (any mutating turn, not only a delivery boundary) is
-an S21.5 behaviour this session inherited — flagged for S22's UX pass.
+labels distinguish them, a kind column in `/checkpoint list` would do it better. (The completion
+prompt's plan-less reachability after any mutating turn was RESOLVED in S22: the question moved to
+the typed `/quit` for plan-less sessions.)
 
 **Tasks/memory/git/sandbox:** task resume/continue; deeper scanning of child reports for
 instruction-shaped content (v1 ships delimiters + provenance labels); the stale-displayed-

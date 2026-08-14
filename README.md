@@ -161,14 +161,25 @@ keystroke, at that moment:
 ```
 
 There are four such prompts — a plan awaiting its first approval, an approval invalidated by an
-amendment, an open repair escalation, and a session that would accept cleanly. Each fires at most
-once per state, and answering one records exactly the same evidence as typing the equivalent
-command. **They need a real terminal**: on piped stdin a prompt would consume the next scripted
-line, so `--no-input` and expect-style drivers keep using the commands below.
+amendment, an open repair escalation, and a session that would accept cleanly (asked at the turn
+boundary when an approved plan completes, and at your typed `/quit` for plan-less work). Each
+fires at most once per state, and answering one records exactly the same evidence as typing the
+equivalent command. **They need a real terminal**: on piped stdin a prompt would consume the next
+scripted line, so `--no-input` and expect-style drivers keep using the commands below.
+
+**On a terminal, every prompt is also a menu** (v1.10): arrow keys move a highlight, Enter
+confirms it, and the highlight always starts on the decline/deny row — Enter never grants
+anything. Typing still works exactly as before (letters, words, `cancel`) and goes through the
+same parser it always did. Approval prompts, the consent prompts above, and the `/` command menu
+all share the one widget; piped runs never see a menu and keep the line grammar byte-for-byte.
 
 - **Ctrl+C** interrupts the running turn (pending tool calls are skipped and recorded as
   interrupted); at the idle prompt press it twice to quit. **Ctrl+D** on an empty line quits.
   Both need a terminal — under `--interactive` over pipes there is no SIGINT channel.
+- **`/` alone opens the command menu; Tab completes a typed `/name`.** **Ctrl+E** on an empty
+  idle prompt reprints the last folded command output in full (`/expand` is the typed form) —
+  long command output shows its head live, then an honest fold marker and the run's final lines,
+  with the full bytes kept in the session record.
 - **`@` invokes a specialist:** **`@plan <request>`** investigates read-only, writes a persistent
   plan document and waits — executor tasks stay blocked until you approve.
   **`@review [focus]`** runs the Review Agent over the current codebase (see below).

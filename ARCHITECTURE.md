@@ -212,14 +212,24 @@ src/
   config/config.ts         Layered narrowing-only config (+ research/remote denylists).
   repl/
     repl.ts                runRepl — prompt → runTurn over ONE session; resume honesty notes.
-    io.ts                  The ONE persistent readline; mid-turn typed /-lines; EOF fail-closed.
-    render.ts              EventLog.onAppend renderer + live command-output preview.
-    commands.ts            Slash commands (/help … /grants); the ONE fold per surface.
+    io.ts                  The ONE persistent readline; mid-turn typed /-lines; EOF fail-closed;
+                           captureKeys (S22 select routing) + the Ctrl+E expand chord.
+    render.ts              EventLog.onAppend renderer + live command-output preview + fold tail.
+    commands.ts            Slash commands (/help … /expand); the ONE fold per surface.
+    command-table.ts       The slash-command surface as DATA (S22): Tab completer + / menu rows,
+                           drift-pinned against the dispatch switch in both directions.
     init.ts                /init onboarding (S21): global AGENT.md Q&A + project starter.
-    status.ts              The sticky status area — the ONLY cursor-moving code, TTY-only.
+    status.ts              The sticky status area — the ONLY cursor-moving code, TTY-only;
+                           S22 adds the overlay channel (select menus) + display-width clipping.
+    select.ts              The arrow-key select widget (S22): captureKeys + overlay, no cursor
+                           code of its own, no answer grammar of its own.
+    width.ts               Display-column measurement + clip (S22) — the status area's clip unit.
     live-tasks.ts          Render-only live task table + the /cancel registry.
     heartbeat.ts           The dim "model working (Ns)" line for always-thinking models.
-    format.ts              Shared chrome formatters (tokens, durations).
+    format.ts              Shared chrome formatters + the S22 style ROLES (seg) and glyph tables.
+    consent.ts             Contextual consent (S21.5); S22 splits boundaries: turn vs typed-/quit.
+    prompt-choice.ts       The ONE consent answer grammar + renderChoiceBlock (S22).
+    sigils.ts              @ routing table (S21.5).
   workspace/
     map.ts                 The FLAT map fallback (git listing via git/ls, else pure walker).
     system-prompt.ts       System-prompt builders (main + per-role) incl. the project block
@@ -1644,23 +1654,63 @@ with the requirement satisfied AND the cap spent. While rounds REMAIN, a re-spaw
 A consumer of the same runtime: one session, `runTurn` per user line. `io.ts` owns the ONE
 persistent readline — idle prompt and approval questions share it; echo is muted during turns
 (Ctrl+C still arrives); typed-ahead lines are buffered; EOF at a pending approval resolves null →
-deny-&-stop. `render.ts` subscribes to `EventLog.onAppend`, so the screen is a live view of the
+deny-&-stop. Since S22 the pending resolver installs BEFORE the prompt bytes go out (a
+PassThrough delivers 'data' synchronously, so a zero-delay driver answering the instant the
+prompt appeared used to re-enter readline early and buffer the answer where a `fresh` question
+never looks — the REPL waited forever); readline gets a Tab `completer` over the command table
+(terminal-mode only, so piped input is untouched by construction); and Ctrl+E on an EMPTY line at
+the idle PROMPT dispatches `/expand` (a `pendingKind` guard keeps the chord out of questions,
+where '/expand' would parse as a deny, and readline's own end-of-line binding wins mid-edit).
+`render.ts` subscribes to `EventLog.onAppend`, so the screen is a live view of the
 persisted evidence. Three render-only incremental channels exist alongside it: `onText` (model
-deltas), the live command-output preview (sanitized dim lines, 100ms cadence, 8 KiB/command cap,
-stateful per-stream UTF-8 decode), and the structured child-status channel; for all three the
-persisted truth remains the events. Stream split: **stdout = model text + requested artifacts
+deltas), the live command-output preview (sanitized dim lines, 100ms cadence, 8 KiB/command head
+cap — past which lines feed a bounded ring and command end prints an honest fold marker plus the
+last eight lines, S22: capped means folded, never vanished), and the structured child-status
+channel; for all three the persisted truth remains the events. `/expand [last | <n> | <call-id
+suffix>]` reprints a folded output IN FULL from the RECORD — the spill blob when one was saved,
+the recorded head+tail otherwise, provenance named either way — to stdout, the
+requested-artifact channel; renderer memory is never consulted, so it survives resume by
+construction. Stream split: **stdout = model text + requested artifacts
 only; stderr = all chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs).
 Slash commands operate on the session's own live log (`/undo` → `applyUndo` on the same open log;
 the model learns of it via a delimited `[[harness note: …]]` in the next `user.message`). Turn
 errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as `user-quit` — never
 `completed`.
 
+**The select surface (S22, `repl/select.ts` + `io.captureKeys` + the status overlay).** Prompts
+on a TTY are arrow-key menus layered OVER the line grammar, never replacing it. The widget owns
+no cursor code (the status area's `overlay` channel draws the menu; `setLines` during an overlay
+stores the base silently, so a forwarded-approval task update cannot clobber it) and no answer
+grammar (menu picks submit their key, typed text opens a visible buffer submitted through the
+CALLER's parser — `parseChoice` for consent, `parseAnswer` for approvals — so NEGATIVE_WORDS and
+every scope rule hold; first-character action at the keypress level would have reintroduced the
+`cancel`/`[c]` hazard). `captureKeys` detaches readline's own keypress listener for the capture's
+lifetime — coexisting was the trap: arrow-up is history recall into `rl.line`, Enter emits
+'line' into type-ahead — making the line path structurally inert while a menu is up; capture
+engages BEFORE any output so a zero-delay driver cannot lose keys; Ctrl+C fires the interrupt
+handler before the widget resolves (the 'SIGINT' ordering); stream close synthesizes an eof key.
+**The initial highlight is always the decline/deny row — Enter never affirms** — and eof keeps
+the exact deny-stop coercion of the line path. Approval menus derive from `approvalChoices`,
+which shares `sessionGrantLabel`/`durableGrantLabel` with the FROZEN `formatApprovalPrompt`
+strings (cross-pinned by test, so menu and text cannot drift); dangerous mode and non-interactive
+answer before any prompt exists, and forwarded asks ride the existing serialized queue. A bare
+`/` opens the same widget over `command-table.ts` (full-name keys, windowed to twelve rows with
+honest "… N more" edges — the overlay's erase math counts drawn lines, so a menu taller than the
+terminal must not exist). Everything is TTY-gated; the widget's unavailable fallback and every
+non-TTY path keep the line grammar byte-for-byte.
+
 **Contextual consent (S21.5, `repl/consent.ts` + `repl/prompt-choice.ts`).** Four decisions are
-ASKED at the turn boundary instead of requiring a remembered command: a plan awaiting its first
+ASKED instead of requiring a remembered command: a plan awaiting its first
 approval, an approval invalidated by an amendment, an open repair escalation, and a session that
 would accept cleanly. All four are pure folds over (plan bytes, event log); precedence is
 B > A > D > C with at most one prompt per boundary, and a condition whose key was already asked
-falls through to the next rather than masking it. Three properties are load-bearing:
+falls through to the next rather than masking it. **S22 split the boundaries by session shape**:
+an APPROVED PLAN completing is a delivery boundary, so plan-carrying sessions keep the
+turn-boundary completion offer; plan-less work — where `computeAcceptance` is complete after any
+mutating turn, so the old trigger re-armed on every one (the recorded S21.6 nag) — is asked once,
+at the typed `/quit`. Never at EOF, never at a double-Ctrl+C: walking away is not a consent
+moment. B, A and D stay turn-only, and one anti-nag set spans both boundaries. Three properties
+are load-bearing:
 
 - **TTY-gated** (`streams.isTTY && ctx.mode === 'interactive'`). Off a TTY `io.question` ignores
   its `fresh` flag and would consume a driver's next queued line — which is why S21.5 demoted
@@ -1688,8 +1738,9 @@ routed it. An unknown `@word` is refused by name instead of falling through as p
 removed: the system prompt already instructs the complexity routing it forced.
 
 Commands: `/help /status /undo /diff /commit /checkpoint /plan /tasks /cancel /accept /review
-/repair /checks /preview /report /map /init /grants /provider /model /research /remote /quit`
-(`/exit` is an alias). `/report [section]` slices the one rendered report into any of fifteen named
+/repair /checks /preview /report /expand /map /init /grants /provider /model /research /remote
+/quit` (`/exit` is an alias); the surface is mirrored as DATA in `command-table.ts` (Tab
+completion + the `/` menu), drift-pinned against the dispatch switch in both directions. `/report [section]` slices the one rendered report into any of fifteen named
 sections; the six inspection views keep their own rendering because each carries live state the
 report structurally cannot (a re-probed project, re-probed process liveness, memory-only remote
 identities, live research spend) or an action affordance (`/repair`'s numbered list).
@@ -1718,8 +1769,16 @@ content renders as visible `\u{1b}` text — the first recorded run proved it on
 **The live task surface.** `status.ts` is the sticky status area — the ONLY cursor-moving code,
 strictly TTY- and stderr-confined: ALL chrome routes through its status-aware writer (erase →
 write → redraw at line boundaries), approval prompts suspend it, every turn's finally clears it,
-content is sanitized + clipped per redraw, and `!isTTY` is a pure pass-through emitting ZERO
-escape bytes (piped transcripts stay byte-identical). Its safety rests on one structural fact: the
+content is sanitized + clipped per redraw — since S22 the clip counts DISPLAY COLUMNS
+(`width.ts`, the prerequisite the old code-unit clip itself named before free-form text could
+land here) — and `!isTTY` is a pure pass-through emitting ZERO
+escape bytes (piped transcripts stay byte-identical). The S22 `overlay` channel draws INSTEAD of
+the base while a select menu is up; styled overlay lines are painted BY THE AREA after sanitize
+and clip (the S16.5b lesson kept structural), and `clear()` drops overlay and base alike. Chrome
+carries semantic style ROLES (`format.ts` `seg`: ok/fail/warn/muted/heading/agent/user/accent,
+one 16-color SGR pair each, identity off-TTY, `NO_STYLE` the default wherever a Style is
+optional) with severity never color-only, and one glyph table covers every marker — the
+previously hardcoded `▸ ⚑ · ±` sites included — so legacy ASCII consoles stay readable. Its safety rests on one structural fact: the
 area is populated only during delegate flight, when the parent is blocked on the tool call — so
 stderr cursor movement can never interleave with stdout model text. `live-tasks.ts` is the
 render-only table behind it. Mid-turn, on a TTY only, `io.ts` offers typed `/`-lines to a handler
