@@ -370,6 +370,45 @@ describe('REPL io: approval prompts vs typed-ahead lines (TTY)', () => {
     expect(await io.question('approve command? ')).toBe('n');
     io.close();
   });
+
+  it('S22: Ctrl+E fires only on an empty idle PROMPT — never mid-edit, never at a question', async () => {
+    const CTRL_E = String.fromCharCode(0x05);
+    const { createReplIO } = await import('../src/repl/io.js');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.on('data', () => {});
+    const io = createReplIO({ input, output, isTTY: true });
+
+    // Empty idle prompt: the chord resolves the read as /expand.
+    const p1 = io.prompt('> ');
+    await tick();
+    input.write(CTRL_E);
+    expect(await p1).toEqual({ kind: 'line', text: '/expand' });
+
+    // Mid-edit: readline's own end-of-line binding wins; the typed line submits untouched.
+    const p2 = io.prompt('> ');
+    await tick();
+    input.write('ab');
+    await tick();
+    input.write(CTRL_E);
+    await tick();
+    input.write('\r');
+    expect(await p2).toEqual({ kind: 'line', text: 'ab' });
+
+    // A question (fresh) is a security prompt: Ctrl+E must not become its answer.
+    let settled = false;
+    const q = io.question('approve? ').then((a) => {
+      settled = true;
+      return a;
+    });
+    await tick();
+    input.write(CTRL_E);
+    await tick();
+    expect(settled).toBe(false);
+    input.write('n\n');
+    expect(await q).toBe('n');
+    io.close();
+  });
 });
 
 describe('approval prompt display safety', () => {
@@ -893,14 +932,31 @@ describe('renderer: live command output unit behavior', () => {
     expect(text()).not.toContain('‮');
   });
 
-  it('caps the live display and suppresses further output', () => {
+  it('caps the live display, folds the middle, and prints the TAIL at command end (S22)', () => {
     const { r, text } = makeRenderer();
     r.onEvent(ev({ type: 'command.started', callId: 'c1', pid: 1, shell: 's', cwd: 'w', timeoutMs: 1000 }));
     for (let i = 0; i < 5; i++) r.onCommandOutput(('line-' + i + '-' + 'x'.repeat(120) + '\n').repeat(24), 'stdout');
     r.onEvent(ev({ type: 'command.ended', callId: 'c1', termination: 'exited', exitCode: 0, durationMs: 5 }));
     const out = text();
     expect(out).toContain('display capped');
-    expect(out.indexOf('line-4')).toBe(-1); // suppressed after the cap
+    // Pre-S22 the cap suppressed everything after it — the END of a long run, where the verdict
+    // lives, was never shown. Now the head stops at the cap and the LAST lines arrive at command
+    // end behind an honest fold marker.
+    expect(out).toContain('line(s) folded — tail below; /expand shows the full output');
+    const capAt = out.indexOf('display capped');
+    expect(out.indexOf('line-4')).toBeGreaterThan(capAt); // tail only — never streamed live
+    expect(out.slice(out.indexOf('folded'))).toContain('line-4'); // the run's end is on screen
+  });
+
+  it('a command that stays under the cap renders no fold chrome at all', () => {
+    const { r, text } = makeRenderer();
+    r.onEvent(ev({ type: 'command.started', callId: 'c1', pid: 1, shell: 's', cwd: 'w', timeoutMs: 1000 }));
+    r.onCommandOutput('short output\n', 'stdout');
+    r.onEvent(ev({ type: 'command.ended', callId: 'c1', termination: 'exited', exitCode: 0, durationMs: 5 }));
+    const out = text();
+    expect(out).toContain('short output');
+    expect(out).not.toContain('folded');
+    expect(out).not.toContain('display capped');
   });
 
   it('a killed command renders the honest termination line', () => {

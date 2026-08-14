@@ -38,7 +38,7 @@ import { resolveProviderName, type ProviderRegistry } from '../provider/registry
 import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
-import { NO_STYLE, type Style } from './format.js';
+import { NO_STYLE, fmtDuration, toolLabel, type Style } from './format.js';
 import type { PromptAnswer, PromptChoice } from './prompt-choice.js';
 
 /**
@@ -123,6 +123,7 @@ export const HELP = [
   '  /undo [all]           revert the last (or every) file-tool change of this session',
   '  /report [section]     the evidence record; a section narrows it (checks, review, inspections,',
   '                        research, remote, repairs, previews, tasks, plan, completion, …)',
+  '  /expand [last | <n>]  reprint a folded command/check output in full (Ctrl+E at the idle prompt)',
   '  /status               session, model, cost, and only the axes that have state',
   '',
   'deliver:',
@@ -1118,6 +1119,61 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         map.text.split('\n').map(sanitizeLine).join('\n') +
           `\n\n(${map.fileCount} files${map.truncated ? ', truncated' : ''})\n`,
       );
+      return 'continue';
+    }
+
+    case 'expand': {
+      // S22 — reprint a folded output in full, from the RECORD (event log + spill blob), never
+      // from renderer memory: the record survives resume, and it is the same truth the model
+      // saw (`outputPreview` is contractually the exact string the model received). The body
+      // goes to modelOut — the established requested-artifact channel, like /diff and /report.
+      const events = ctx.session.log.events;
+      const EXPANDABLE = new Set(['run_command', 'run_check', 'project_setup']);
+      const requestedTools = new Map<string, { tool: string; input: unknown }>();
+      for (const e of events) {
+        if (e.type === 'tool.requested') requestedTools.set(e.callId, { tool: e.tool, input: e.input });
+      }
+      const completed = events.filter(
+        (e): e is Extract<SessionEvent, { type: 'tool.completed' }> =>
+          e.type === 'tool.completed' && EXPANDABLE.has(requestedTools.get(e.callId)?.tool ?? ''),
+      );
+      if (completed.length === 0) {
+        ctx.renderer.chromeLine('nothing to expand: no completed command/check/setup output is on record');
+        return 'continue';
+      }
+      const wanted = arg.trim().toLowerCase();
+      let target: (typeof completed)[number] | undefined;
+      if (wanted === '' || wanted === 'last') target = completed.at(-1);
+      else if (/^\d+$/.test(wanted)) target = completed.at(-Number.parseInt(wanted, 10));
+      else target = [...completed].reverse().find((e) => e.callId.toLowerCase().endsWith(wanted));
+      if (target === undefined) {
+        ctx.renderer.chromeLine(
+          `usage: /expand [last | <n> | <call-id suffix>] — ${completed.length} expandable output(s) on record (1 = most recent)`,
+        );
+        return 'continue';
+      }
+      const req = requestedTools.get(target.callId);
+      const st = ctx.style ?? NO_STYLE;
+      const provenance =
+        target.fullOutputSaved === true
+          ? ` · full output ${String(target.fullOutputSha256).slice(0, 12)}`
+          : target.truncated
+            ? ' · head+tail as recorded (the full output was not retained)'
+            : '';
+      const head =
+        `expand ${toolLabel(req?.tool ?? 'tool', req?.input)} — ${target.ok ? 'ok' : 'FAILED'}` +
+        `${target.exitCode !== undefined ? ` (exit ${String(target.exitCode)})` : ''}, ${fmtDuration(target.durationMs)}${provenance}`;
+      ctx.renderer.chromeLine(st.seg(target.ok ? 'muted' : 'warn', `  ${head}`));
+      let body = target.outputPreview;
+      if (target.fullOutputSaved === true && target.fullOutputSha256 !== undefined) {
+        try {
+          body = ctx.session.snapshots.getBlob(target.fullOutputSha256).toString('utf8');
+        } catch {
+          ctx.renderer.chromeLine('  full-output blob missing — showing the recorded head+tail instead');
+        }
+      }
+      ctx.renderer.flush();
+      ctx.modelOut.write(body.endsWith('\n') ? body : `${body}\n`);
       return 'continue';
     }
 

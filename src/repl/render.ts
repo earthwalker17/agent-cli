@@ -75,10 +75,43 @@ export function createRenderer(opts: {
   const CMD_FLUSH_MS = 100;
   const CMD_DISPLAY_CAP = 8 * 1024;
   const CMD_LINE_CAP = 200;
+  // S22 — the fold tail: past the display cap the head stops, but the LAST lines keep flowing
+  // into a bounded ring so the end of a long build/test run — where the verdict usually lives —
+  // is on screen the moment the process exits, instead of never.
+  const CMD_TAIL_LINES = 8;
   let cmdBuf = '';
   let cmdShown = 0;
   let cmdSuppressed = false;
   let lastCmdFlush = 0;
+  let cmdTail: string[] = [];
+  let cmdFolded = 0;
+
+  const foldLine = (line: string): void => {
+    cmdTail.push(line);
+    cmdFolded++;
+    if (cmdTail.length > CMD_TAIL_LINES) cmdTail.shift();
+  };
+
+  /** Emit the fold marker + tail at command end (no-op unless the head cap ever tripped). */
+  const flushFoldTail = (): void => {
+    if (!cmdSuppressed) return;
+    if (cmdBuf.length > 0) {
+      for (const line of cmdBuf.split('\n')) if (line.length > 0) foldLine(line);
+      cmdBuf = '';
+    }
+    if (cmdTail.length > 0) {
+      const hidden = Math.max(0, cmdFolded - cmdTail.length);
+      chromeOut.write(
+        style.dim(`    … ${hidden} line(s) folded — tail below; /expand shows the full output`) + '\n',
+      );
+      for (const line of cmdTail) {
+        const shown = sanitizeLine(line);
+        chromeOut.write(style.dim(`    ${shown.slice(0, CMD_LINE_CAP)}${shown.length > CMD_LINE_CAP ? '…' : ''}`) + '\n');
+      }
+    }
+    cmdTail = [];
+    cmdFolded = 0;
+  };
 
   const flushCmdOutput = (final: boolean): void => {
     lastCmdFlush = Date.now();
@@ -99,14 +132,18 @@ export function createRenderer(opts: {
       chromeOut.write('\n');
       toolOpen = false;
     }
-    for (const line of text.split('\n')) {
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
       const shown = sanitizeLine(line);
       chromeOut.write(style.dim(`    ${shown.slice(0, CMD_LINE_CAP)}${shown.length > CMD_LINE_CAP ? '…' : ''}`) + '\n');
       cmdShown += line.length;
       if (cmdShown > CMD_DISPLAY_CAP) {
         chromeOut.write(style.dim('    … live output display capped (the full output is in the tool result)') + '\n');
         cmdSuppressed = true;
-        cmdBuf = '';
+        // The rest of this batch joins the fold ring — capped means folded, never vanished —
+        // and the partial line in cmdBuf carries into the suppressed accumulation.
+        for (const rest of lines.slice(i + 1)) if (rest.length > 0) foldLine(rest);
         return;
       }
     }
@@ -142,7 +179,18 @@ export function createRenderer(opts: {
     },
 
     onCommandOutput(chunk) {
-      if (cmdSuppressed || chunk.length === 0) return;
+      if (chunk.length === 0) return;
+      if (cmdSuppressed) {
+        // Head capped: feed the fold ring instead of the screen (complete lines only; the
+        // final partial joins at flushFoldTail).
+        cmdBuf += chunk;
+        const idx = cmdBuf.lastIndexOf('\n');
+        if (idx !== -1) {
+          for (const line of cmdBuf.slice(0, idx).split('\n')) if (line.length > 0) foldLine(line);
+          cmdBuf = cmdBuf.slice(idx + 1);
+        }
+        return;
+      }
       cmdBuf += chunk;
       if (Date.now() - lastCmdFlush >= CMD_FLUSH_MS || cmdBuf.length > 2048) flushCmdOutput(false);
     },
@@ -198,6 +246,8 @@ export function createRenderer(opts: {
           cmdShown = 0;
           cmdSuppressed = false;
           lastCmdFlush = Date.now();
+          cmdTail = [];
+          cmdFolded = 0;
           const box = e.sandbox === 'windows-lowil' ? ', sandboxed' : '';
           // For an asked command the approval line already closed the tool line; give the pid its own line.
           if (toolOpen) chromeOut.write(style.dim(`(pid ${e.pid}${box}) `));
@@ -206,6 +256,7 @@ export function createRenderer(opts: {
         }
         case 'command.ended': {
           flushCmdOutput(true);
+          flushFoldTail();
           if (e.termination === 'timeout' || e.termination === 'aborted') {
             const why = e.termination === 'timeout' ? `timed out after ${fmtDuration(e.durationMs)}` : 'aborted by user';
             chromeLine(style.yellow(`  ${g.warn} command ${why} — process tree force-killed (best effort); no exit code`));
@@ -219,11 +270,14 @@ export function createRenderer(opts: {
           cmdShown = 0;
           cmdSuppressed = false;
           lastCmdFlush = Date.now();
+          cmdTail = [];
+          cmdFolded = 0;
           chromeLine(style.dim(`  ${g.arrow} check ${e.check} — ${sanitizeLine(e.command)}`));
           break;
         }
         case 'check.completed': {
           flushCmdOutput(true);
+          flushFoldTail();
           const mark =
             e.status === 'pass'
               ? style.green(g.ok)
@@ -244,11 +298,14 @@ export function createRenderer(opts: {
           cmdShown = 0;
           cmdSuppressed = false;
           lastCmdFlush = Date.now();
+          cmdTail = [];
+          cmdFolded = 0;
           chromeLine(style.dim(`  ${g.arrow} ${e.action} [${sanitizeLine(e.projectId)}] — ${sanitizeLine(e.command)}`));
           break;
         }
         case 'setup.completed': {
           flushCmdOutput(true);
+          flushFoldTail();
           const mark = e.status === 'ok' ? style.green(g.ok) : e.status === 'unsupported' ? style.yellow(g.warn) : style.red(g.fail);
           chromeLine(`  ${mark} ${sanitizeLine(e.summary)}`);
           break;

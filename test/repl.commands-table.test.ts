@@ -117,7 +117,8 @@ describe('the Tab completer', () => {
     expect(completeSlash('/plan approve')[0]).toEqual([]); // args are not completed
   });
 
-  it('aliases complete too', () => {
-    expect(completeSlash('/ex')[0]).toEqual(['/exit ']);
+  it('aliases complete too, and share the prefix space with real names', () => {
+    expect(completeSlash('/exi')[0]).toEqual(['/exit ']);
+    expect(completeSlash('/ex')[0]).toEqual(['/expand ', '/exit ']); // ambiguous since /expand (S22)
   });
 });

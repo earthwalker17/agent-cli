@@ -123,6 +123,9 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
   let closed = false;
   const typedAhead: string[] = [];
   let pending: ((r: ReplLine) => void) | undefined;
+  /** What the pending read IS (S22): the Ctrl+E chord fires only at the idle PROMPT — resolving
+   *  a security QUESTION with '/expand' would parse as a deny, surprising the user. */
+  let pendingKind: 'prompt' | 'question' | undefined;
   let interruptHandler: (() => void) | undefined;
   let midTurnHandler: ((line: string) => boolean) | null = null;
   let keyCapture: ((k: KeyEvent) => void) | null = null;
@@ -130,8 +133,30 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
   const settle = (r: ReplLine): void => {
     const p = pending;
     pending = undefined;
+    pendingKind = undefined;
     p?.(r);
   };
+
+  // S22 — Ctrl+E at the idle prompt expands the last folded output. This listener OBSERVES the
+  // keypress stream (readline stays attached; a capture detaches readline but not this — the
+  // pendingKind guard keeps it inert during selects and questions alike). Readline's own Ctrl+E
+  // is end-of-line, a no-op on an empty buffer, so the chord claims exactly the state where the
+  // binding does nothing; mid-edit the readline binding wins untouched.
+  if (opts.isTTY) {
+    emitter.on('keypress', (_seq: unknown, key: unknown) => {
+      const k = (key ?? {}) as { name?: string; ctrl?: boolean; meta?: boolean };
+      if (
+        k.ctrl === true &&
+        k.meta !== true &&
+        k.name === 'e' &&
+        pendingKind === 'prompt' &&
+        (rl as unknown as { line?: string }).line === ''
+      ) {
+        opts.output.write('/expand\n'); // echo, so the transcript shows what happened
+        settle({ kind: 'line', text: '/expand' });
+      }
+    });
+  }
 
   rl.on('line', (text) => {
     if (pending) settle({ kind: 'line', text });
@@ -183,6 +208,7 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
       // small answer delays: they may also react to HEADER chrome printed before ask() runs.)
       const settled = new Promise<ReplLine>((resolve) => {
         pending = resolve;
+        pendingKind = o.fresh === true ? 'question' : 'prompt';
       });
       if (opts.isTTY) {
         rl.setPrompt(promptText);
