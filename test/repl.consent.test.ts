@@ -133,6 +133,9 @@ async function seedPlan(status: 'draft' | 'approved' = 'draft'): Promise<string>
 }
 
 const ON = { enabled: true, turnOk: true, aborted: false };
+// S22: in a PLAN-LESS fixture condition C fires at the QUIT boundary, not the turn boundary —
+// the completion-mechanics tests below ask there; the boundary rule itself has its own pins.
+const ON_QUIT = { enabled: true, turnOk: true, aborted: false, boundary: 'quit' as const };
 const events = (): readonly SessionEvent[] => session.log.events;
 const kinds = (): string[] => events().map((e) => e.type);
 
@@ -353,11 +356,11 @@ describe('anti-nag (S21.5)', () => {
     const asker = createConsentAsker();
 
     const a = ctxWith(['n']);
-    await asker.maybeAsk(a.ctx, ON);
+    await asker.maybeAsk(a.ctx, ON_QUIT);
     expect(a.asked).toHaveLength(1);
 
     const b = ctxWith(['y']);
-    await asker.maybeAsk(b.ctx, ON);
+    await asker.maybeAsk(b.ctx, ON_QUIT);
     expect(b.asked).toEqual([]);
 
     session.log.append({
@@ -370,8 +373,36 @@ describe('anti-nag (S21.5)', () => {
       createdDirs: [],
     });
     const c = ctxWith(['y']);
-    await asker.maybeAsk(c.ctx, ON);
+    await asker.maybeAsk(c.ctx, ON_QUIT);
     expect(c.asked).toHaveLength(1);
+    expect(kinds()).toContain('session.accepted');
+  });
+
+  it('S22: plan-less completion asks at the QUIT boundary, never the turn boundary', async () => {
+    session.log.append({
+      type: 'file.mutated',
+      callId: 'c1',
+      path: path.join(ws, 'a.ts'),
+      kind: 'create',
+      beforeSha256: null,
+      afterSha256: 'a'.repeat(64),
+      createdDirs: [],
+    });
+    const asker = createConsentAsker();
+    // The recorded S21.6 pressure: with no plan, every mutating turn re-armed the completion
+    // question. The turn boundary is silent now for plan-less work…
+    const atTurn = ctxWith(['y']);
+    await asker.maybeAsk(atTurn.ctx, ON);
+    expect(atTurn.asked).toEqual([]);
+    expect(kinds()).not.toContain('session.accepted');
+    // …the piped/headless contract holds at the quit boundary too (a driver's /quit is final)…
+    const disabled = ctxWith(['y']);
+    await asker.maybeAsk(disabled.ctx, { enabled: false, turnOk: true, aborted: false, boundary: 'quit' });
+    expect(disabled.asked).toEqual([]);
+    // …and the one honest boundary — the typed /quit on a TTY — asks and records.
+    const atQuit = ctxWith(['y']);
+    await asker.maybeAsk(atQuit.ctx, ON_QUIT);
+    expect(atQuit.asked).toHaveLength(1);
     expect(kinds()).toContain('session.accepted');
   });
 });
@@ -659,15 +690,18 @@ describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-a
       [{ say: 'writing', calls: [{ name: 'write_file', input: { path: 'note.txt', content: 'hello\n' } }] }, { say: 'done' }],
       [
         { awaitChrome: /\/help for commands/, send: 'write a note' },
+        // S22: plan-less, so the turn boundary stays silent; the prompt fires at the typed /quit.
+        { awaitChrome: /1 file\(s\) · /, send: '/quit' },
         { awaitChrome: /\[c\] commit the 1 file\(s\)/, send: 'c' },
         { awaitChrome: /commit message \[/, send: '' },
         { awaitChrome: /commit 1 file\(s\) as/, send: 'y' },
-        { awaitChrome: /session accepted \(complete\)/, send: '/quit' },
       ],
     );
 
     expect(r.code).toBe(0);
     expect(r.chrome).toContain('[c] commit the 1 file(s)');
+    // The boundary rule, visible in the transcript: the offer came only after the typed /quit.
+    expect(r.chrome.indexOf('[c] commit the 1 file(s)')).toBeGreaterThan(r.chrome.indexOf('/quit'));
     // Both halves recorded, and the commit event is the one the slash body appends — no second
     // path, no second shape.
     expect(r.events.some((e) => e.type === 'session.accepted' && e.complete)).toBe(true);
@@ -690,8 +724,9 @@ describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-a
         [{ say: 'writing', calls: [{ name: 'write_file', input: { path: 'note.txt', content: 'hello\n' } }] }, { say: 'done' }],
         [
           { awaitChrome: /\/help for commands/, send: 'write a note' },
+          // S22: the completion question waits for the typed /quit in a plan-less session.
+          { awaitChrome: /1 file\(s\) · /, send: '/quit' },
           { awaitChrome: /\[y\] accept the session/, send: 'y' },
-          { awaitChrome: /session accepted \(complete\)/, send: '/quit' },
         ],
       );
       expect(r.code).toBe(0);
@@ -789,7 +824,7 @@ describe('evidence identity: typed vs answered (S21.5)', () => {
     session = makeSession();
     session.log.append(mutate);
     const answered = ctxWith(['y']);
-    await createConsentAsker().maybeAsk(answered.ctx, ON);
+    await createConsentAsker().maybeAsk(answered.ctx, ON_QUIT);
 
     expect(shape(events())).toEqual(typedShape);
     expect(answered.notes).toEqual(typedNotes);

@@ -52,6 +52,17 @@ export interface ConsentGate {
   turnOk: boolean;
   /** A Ctrl+C'd turn rejects the provider call into the same catch. Never question an abort. */
   aborted: boolean;
+  /**
+   * S22 — which boundary this ask sits on (default 'turn'). Condition C's trigger was the
+   * recorded S21.6 pressure: in a PLAN-LESS session `computeAcceptance` is complete after any
+   * mutating turn, so the completion question re-armed on every one — the exact noise rule 2
+   * exists to prevent. The delivery-shaped boundaries differ by session shape: an APPROVED PLAN
+   * completing is a delivery boundary, so plan-carrying sessions keep the turn-boundary offer;
+   * plan-less work has no such moment, so its one honest boundary is the user saying they are
+   * done — the typed /quit (never EOF, never a double-Ctrl+C: walking away is not a consent
+   * moment). B, A and D stay turn-only — approving a plan while leaving makes no sense.
+   */
+  boundary?: 'turn' | 'quit';
 }
 
 export interface ConsentAsker {
@@ -244,14 +255,16 @@ export function createConsentAsker(): ConsentAsker {
 
     async maybeAsk(ctx: CommandContext, gate: ConsentGate): Promise<void> {
       if (!gate.enabled || gate.aborted || ctx.question === undefined) return;
+      const boundary = gate.boundary ?? 'turn';
 
       // Precedence B > A > D > C, at most ONE prompt per boundary. A condition whose key has
       // already been asked FALLS THROUGH to the next one rather than ending the boundary —
       // otherwise a declined plan prompt would permanently mask the escalation and completion
       // prompts standing behind it, and the user would never be asked about them at all.
+      // At the QUIT boundary only C is evaluated (see the gate's boundary doc).
       //
       // ── B: an approval existed and no longer covers the plan ────────────────────────────────
-      const reapprove = planReapprovalNeeded(ctx);
+      const reapprove = boundary === 'turn' ? planReapprovalNeeded(ctx) : null;
       const reapproveKey = `plan-reapprove:${reapprove?.contentSha ?? 'unreadable'}`;
       if (reapprove !== null && !asked.has(reapproveKey)) {
         asked.add(reapproveKey);
@@ -276,7 +289,7 @@ export function createConsentAsker(): ConsentAsker {
       }
 
       // ── A: a plan is ready and has never been approved ──────────────────────────────────────
-      const ready = planReadyForApproval(ctx);
+      const ready = boundary === 'turn' ? planReadyForApproval(ctx) : null;
       const readyKey = `plan-ready:${ready?.contentSha ?? 'unreadable'}`;
       if (ready !== null && !asked.has(readyKey)) {
         asked.add(readyKey);
@@ -303,7 +316,7 @@ export function createConsentAsker(): ConsentAsker {
       if (!gate.turnOk) return;
 
       // ── D: an open escalation blocks acceptance, and only the user can close it ─────────────
-      const escalated = openEscalation(ctx);
+      const escalated = boundary === 'turn' ? openEscalation(ctx) : null;
       const escalationKey = `escalation:${escalated?.esc.seq ?? 0}`;
       if (escalated !== null && !asked.has(escalationKey)) {
         {
@@ -342,6 +355,16 @@ export function createConsentAsker(): ConsentAsker {
       }
 
       // ── C: the session is finishable ────────────────────────────────────────────────────────
+      // At the TURN boundary, only where an approved plan makes completion a delivery boundary;
+      // plan-less sessions are asked once, at the typed /quit (S22 — the recorded S21.6 nag).
+      if (boundary === 'turn') {
+        try {
+          const st = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
+          if (!(st.kind === 'canonical' && st.status === 'approved')) return;
+        } catch {
+          return; // an unreadable plan state must not become a completion question
+        }
+      }
       const done = completionReady(ctx);
       if (done !== null && !asked.has(done.key)) {
         asked.add(done.key);

@@ -362,7 +362,16 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         line = `/${picked}`;
       }
       if (line.startsWith('/')) {
-        if ((await dispatchSlash(line, commandCtx)) === 'quit') break;
+        if ((await dispatchSlash(line, commandCtx)) === 'quit') {
+          // S22 — the quit boundary: plan-less sessions get their one completion question HERE,
+          // where the user says they are done (typed /quit only — the EOF and double-Ctrl+C
+          // breaks above never ask; walking away is not a consent moment). Plan-carrying
+          // sessions asked at the turn boundary and the shared anti-nag key prevents a re-ask.
+          if (consentEnabled) {
+            await consent.maybeAsk(commandCtx, { enabled: true, turnOk: true, aborted: false, boundary: 'quit' });
+          }
+          break;
+        }
         continue;
       }
 
