@@ -76,7 +76,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   const style = detectStyle({ isTTY: streams.isTTY });
   // The sticky status area (Session 11): TTY-only; every chrome byte routes through it so it
   // can erase/redraw around ordinary output. Non-TTY it is a pure pass-through (zero escapes).
-  const statusArea = createStatusArea({ chromeOut: streams.chromeOut, isTTY: streams.isTTY });
+  const statusArea = createStatusArea({ chromeOut: streams.chromeOut, isTTY: streams.isTTY, style });
   const taskTable = createTaskTable(Date.now, style.glyph);
   const renderer = createRenderer({ modelOut: streams.modelOut, chromeOut: streams.chromeOut, style, chromeSink: statusArea });
   // The "working" heartbeat (S16.5b): dim elapsed-time line while a model request is in flight

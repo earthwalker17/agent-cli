@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { PassThrough } from 'node:stream';
 import { createStatusArea } from '../src/repl/status.js';
 import { createTaskTable } from '../src/repl/live-tasks.js';
+import { detectStyle } from '../src/repl/format.js';
 import { TASKS_PER_SESSION } from '../src/runtime/subagent.js';
 
 /**
@@ -84,6 +85,77 @@ describe('status area on a TTY', () => {
     area.suspend();
     area.resume();
     expect(bytes()).toBe('one\ntwo\n');
+  });
+});
+
+describe('status area overlay (S22): the select-menu channel', () => {
+  it('overlay draws instead of the base; overlay(null) restores the base', () => {
+    const { out, bytes } = fakeTty();
+    const area = createStatusArea({ chromeOut: out, isTTY: true });
+    area.setLines(['base']);
+    area.overlay(['[y] approve', '[n] not now']);
+    expect(bytes()).toBe(`base\n${ESC}[1A${ESC}[0J` + '[y] approve\n[n] not now\n');
+    area.overlay(null);
+    expect(bytes().endsWith(`${ESC}[2A${ESC}[0J` + 'base\n')).toBe(true);
+  });
+
+  it('setLines during an overlay stores the base silently (the forwarded-approval clobber guard)', () => {
+    const { out, bytes } = fakeTty();
+    const area = createStatusArea({ chromeOut: out, isTTY: true });
+    area.overlay(['menu row']);
+    const before = bytes();
+    area.setLines(['task update arriving mid-select']);
+    expect(bytes()).toBe(before); // stored, never drawn over the menu
+    area.overlay(null);
+    expect(bytes().endsWith('task update arriving mid-select\n')).toBe(true);
+  });
+
+  it('chrome written during an overlay pushes the menu down cleanly (erase → chrome → redraw)', () => {
+    const { out, bytes } = fakeTty();
+    const area = createStatusArea({ chromeOut: out, isTTY: true });
+    area.overlay(['menu row']);
+    area.write('  [task] sibling progress\n');
+    expect(bytes().endsWith(`${ESC}[1A${ESC}[0J` + '  [task] sibling progress\nmenu row\n')).toBe(true);
+  });
+
+  it('styled overlay lines are painted AFTER sanitize and clip — content cannot smuggle styling or movement', () => {
+    const { out, bytes } = fakeTty(30);
+    const style = detectStyle({ isTTY: true, env: { WT_SESSION: '1' } });
+    const area = createStatusArea({ chromeOut: out, isTTY: true, style });
+    area.overlay([{ text: `evil-${ESC}[2J-` + 'x'.repeat(60), role: 'accent' }]);
+    const drawn = bytes();
+    expect(drawn).toContain(`${ESC}[7m`); // the accent paint, applied by the area itself
+    expect(drawn.includes(`evil-${ESC}`)).toBe(false); // content ESC arrived escaped, not raw
+    // The clip ran on the TEXT: the painted line still closes with the accent close code.
+    expect(drawn).toContain(`${ESC}[27m`);
+  });
+
+  it('clear() drops a live overlay', () => {
+    const { out, bytes } = fakeTty();
+    const area = createStatusArea({ chromeOut: out, isTTY: true });
+    area.overlay(['menu row']);
+    area.clear();
+    const after = bytes();
+    area.write('plain\n');
+    expect(bytes()).toBe(after + 'plain\n'); // nothing redraws after clear
+  });
+
+  it('suspend erases a live overlay; resume redraws it', () => {
+    const { out, bytes } = fakeTty();
+    const area = createStatusArea({ chromeOut: out, isTTY: true });
+    area.overlay(['menu row']);
+    area.suspend();
+    expect(bytes().endsWith(`${ESC}[1A${ESC}[0J`)).toBe(true);
+    area.resume();
+    expect(bytes().endsWith('menu row\n')).toBe(true);
+  });
+
+  it('non-TTY: overlay is a pure no-op — zero bytes, zero escapes', () => {
+    const { out, bytes } = fakeTty();
+    const area = createStatusArea({ chromeOut: out, isTTY: false });
+    area.overlay(['menu row']);
+    area.overlay(null);
+    expect(bytes()).toBe('');
   });
 });
 

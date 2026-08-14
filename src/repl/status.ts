@@ -1,5 +1,6 @@
 import { sanitizeLine } from '../shared/text.js';
 import { clipToWidth } from './width.js';
+import { NO_STYLE, type Style, type StyleRole } from './format.js';
 
 /**
  * The sticky status area (Session 11) — the ONLY cursor-moving code in the codebase, strictly
@@ -29,33 +30,46 @@ import { clipToWidth } from './width.js';
  *   with stdout content by construction.
  */
 
+/** A region line: plain, or role-painted BY THE AREA — after sanitize and clip, so styling can
+ *  never be smuggled in through content (the S16.5b lesson) and paint can never break the clip. */
+export type StyledLine = string | { text: string; role?: StyleRole };
+
 export interface StatusArea {
   /** The status-aware chrome sink: every chrome byte goes through here. */
   write(chunk: string): void;
   /** Replace the region's content ([] hides it). Sanitized + clipped at render time. */
   setLines(lines: readonly string[]): void;
+  /**
+   * S22 — the ephemeral overlay channel (the select menu). While non-null it draws INSTEAD of
+   * the base lines; setLines during an overlay stores the base silently, so a task update
+   * arriving mid-select can never clobber a menu. overlay(null) erases and restores the base.
+   */
+  overlay(lines: readonly StyledLine[] | null): void;
   /** Erase and stop redrawing (an approval prompt owns the screen); resume() restores. */
   suspend(): void;
   resume(): void;
-  /** Erase and drop the content (turn end / before an idle prompt). */
+  /** Erase and drop the content — base AND overlay (turn end / before an idle prompt). */
   clear(): void;
 }
 
 const ESC = '[';
 
-export function createStatusArea(opts: { chromeOut: NodeJS.WritableStream; isTTY: boolean }): StatusArea {
+export function createStatusArea(opts: { chromeOut: NodeJS.WritableStream; isTTY: boolean; style?: Style }): StatusArea {
   const { chromeOut, isTTY } = opts;
+  const st = opts.style ?? NO_STYLE;
   if (!isTTY) {
     // Non-TTY: a pure pass-through — no state, no escapes, byte-identical chrome.
     return {
       write: (chunk) => void chromeOut.write(chunk),
       setLines: () => {},
+      overlay: () => {},
       suspend: () => {},
       resume: () => {},
       clear: () => {},
     };
   }
 
+  let overlayLines: StyledLine[] | null = null;
   let lines: string[] = [];
   let height = 0; // lines currently ON SCREEN (0 = region not drawn)
   let suspended = false;
@@ -76,17 +90,22 @@ export function createStatusArea(opts: { chromeOut: NodeJS.WritableStream; isTTY
   };
 
   const draw = (): void => {
-    if (suspended || lines.length === 0) return;
+    const active: readonly StyledLine[] = overlayLines ?? lines;
+    if (suspended || active.length === 0) return;
     if (!atLineStart) {
       dirty = true; // a chrome line is half-open — defer to the next newline-terminated write
       return;
     }
     const width = columns() - 2; // margin for the ambiguous-width glyphs (▸ ⚑ ·) in status lines
-    for (const l of lines) {
-      const clean = sanitizeLine(l);
-      chromeOut.write(`${clipToWidth(clean, width)}\n`);
+    for (const l of active) {
+      const text = typeof l === 'string' ? l : l.text;
+      const role = typeof l === 'string' ? undefined : l.role;
+      // Order is the contract: sanitize (content can never move the cursor) → clip (paint must
+      // not widen a line past the terminal) → paint (applied by the area, never by content).
+      const clean = clipToWidth(sanitizeLine(text), width);
+      chromeOut.write(`${role !== undefined ? st.seg(role, clean) : clean}\n`);
     }
-    height = lines.length;
+    height = active.length;
     dirty = false;
   };
 
@@ -96,10 +115,16 @@ export function createStatusArea(opts: { chromeOut: NodeJS.WritableStream; isTTY
       erase();
       chromeOut.write(chunk);
       atLineStart = chunk.endsWith('\n');
-      if (atLineStart && (dirty || lines.length > 0)) draw();
+      if (atLineStart && (dirty || lines.length > 0 || overlayLines !== null)) draw();
     },
     setLines(next): void {
       lines = [...next];
+      if (overlayLines !== null) return; // stored silently — the overlay owns the region
+      erase();
+      draw();
+    },
+    overlay(next): void {
+      overlayLines = next === null ? null : [...next];
       erase();
       draw();
     },
@@ -114,6 +139,7 @@ export function createStatusArea(opts: { chromeOut: NodeJS.WritableStream; isTTY
     clear(): void {
       erase();
       lines = [];
+      overlayLines = null;
       dirty = false;
     },
   };

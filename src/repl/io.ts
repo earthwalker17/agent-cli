@@ -21,6 +21,15 @@ import { sanitizeLine } from '../shared/text.js';
 
 export type ReplLine = { kind: 'line'; text: string } | { kind: 'eof' } | { kind: 'interrupt' };
 
+/** One decoded keypress, as delivered to a captureKeys handler (S22). */
+export interface KeyEvent {
+  seq: string;
+  name?: string;
+  ctrl: boolean;
+  meta: boolean;
+  shift: boolean;
+}
+
 export interface ReplIO {
   /** Idle prompt. One pending read at a time. Consumes typed-ahead lines. */
   prompt(promptText: string): Promise<ReplLine>;
@@ -45,6 +54,18 @@ export interface ReplIO {
    * line answers it — the existing approval-safety pins hold by construction).
    */
   setMidTurnHandler(handler: ((line: string) => boolean) | null): void;
+  /**
+   * S22 — exclusive raw-key routing for the select widget. TTY only. Detaches readline's OWN
+   * keypress processing (arrow-history recall, echo, 'line' assembly) for the capture's
+   * lifetime, so no key can reach the line path: type-ahead, the mid-turn handler and the
+   * pending-read slot are structurally inert while a capture is active — "a displayed prompt
+   * always wins", by construction. Returns the idempotent release, or null when unavailable
+   * (non-TTY, a capture already active, or readline's internals changed shape) — the caller
+   * falls back to the line-question path unchanged. Ctrl+C fires the registered interrupt
+   * handler BEFORE the key is delivered (the 'SIGINT' ordering contract); stream close
+   * delivers a synthetic name:'eof' key so a mid-capture EOF can never hang.
+   */
+  captureKeys(handler: (k: KeyEvent) => void): (() => void) | null;
   /** Suppress readline echo while a turn is running (input keeps flowing). */
   mute(): void;
   unmute(): void;
@@ -78,18 +99,29 @@ export interface ReplIOOptions {
 
 export function createReplIO(opts: ReplIOOptions): ReplIO {
   const gate = new Gate(opts.output);
+  const emitter = opts.input as NodeJS.EventEmitter;
+  // S22: snapshot the input's 'keypress' listeners around construction. With terminal:true,
+  // readline installs exactly ONE keypress listener on the input stream; the diff identifies
+  // it so captureKeys can detach it for a select's lifetime. If a Node upgrade changes that
+  // shape, rlKeypress is undefined and captureKeys degrades to null — the widget falls back
+  // to the line grammar rather than fighting an unknown readline.
+  const keypressBefore = opts.isTTY ? emitter.listeners('keypress') : [];
   const rl = readline.createInterface({
     input: opts.input,
     output: gate,
     terminal: opts.isTTY,
     historySize: opts.isTTY ? 100 : 0,
   });
+  const rlKeypress = opts.isTTY
+    ? emitter.listeners('keypress').find((l) => !keypressBefore.includes(l))
+    : undefined;
 
   let closed = false;
   const typedAhead: string[] = [];
   let pending: ((r: ReplLine) => void) | undefined;
   let interruptHandler: (() => void) | undefined;
   let midTurnHandler: ((line: string) => boolean) | null = null;
+  let keyCapture: ((k: KeyEvent) => void) | null = null;
 
   const settle = (r: ReplLine): void => {
     const p = pending;
@@ -113,6 +145,9 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
   rl.on('close', () => {
     closed = true;
     settle({ kind: 'eof' });
+    // A capture must learn about stream end too — without this, a select whose input dies
+    // mid-menu would wait on keys that can never arrive.
+    keyCapture?.({ seq: '', name: 'eof', ctrl: false, meta: false, shift: false });
   });
   rl.on('SIGINT', () => {
     // Order matters: fire the turn-abort first, then unblock whoever is waiting on a read.
@@ -178,6 +213,41 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
     },
     setMidTurnHandler(handler) {
       midTurnHandler = handler;
+    },
+    captureKeys(handler) {
+      if (!opts.isTTY || rlKeypress === undefined || keyCapture !== null || closed) return null;
+      const deliver = (ev: KeyEvent): void => {
+        try {
+          handler(ev);
+        } catch {
+          /* a throwing handler must never break the stream */
+        }
+      };
+      const wrapped = (seq: unknown, key: unknown): void => {
+        const k = (key ?? {}) as { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean };
+        const ev: KeyEvent = {
+          seq: typeof seq === 'string' ? seq : '',
+          ...(k.name !== undefined ? { name: k.name } : {}),
+          ctrl: k.ctrl === true,
+          meta: k.meta === true,
+          shift: k.shift === true,
+        };
+        // Ctrl+C ordering, identical to the 'SIGINT' path above: the turn-abort fires before
+        // the waiter — here, the select widget — learns anything.
+        if (ev.ctrl && ev.name === 'c') interruptHandler?.();
+        deliver(ev);
+      };
+      emitter.removeListener('keypress', rlKeypress as (...args: unknown[]) => void);
+      emitter.on('keypress', wrapped);
+      keyCapture = deliver;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        emitter.removeListener('keypress', wrapped);
+        emitter.on('keypress', rlKeypress as (...args: unknown[]) => void);
+        keyCapture = null;
+      };
     },
     mute() {
       gate.muted = true;
