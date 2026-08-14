@@ -400,6 +400,10 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     }
     endSessionSafely(session, 'error', (err as Error).message);
     io.close();
+    // The status region may still be drawn on the fatal path (nothing cleared it): erase it
+    // first, or the raw write lands INSIDE the region and the transcript keeps a corrupted
+    // erase count above the last thing the user ever sees.
+    statusArea.clear();
     streams.chromeOut.write(`fatal: ${(err as Error).message}\n`);
     return 1;
   }

@@ -136,6 +136,15 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
     {
       const wasMuted = gate.muted;
       gate.muted = false;
+      // Resolver BEFORE prompt bytes (S22). A PassThrough delivers 'data' synchronously, so a
+      // driver whose chrome listener answers the instant the prompt appears re-enters readline
+      // INSIDE rl.prompt() — before the old post-write install ran — and the answer landed in
+      // typedAhead, where a `fresh` question never looks: the REPL waited forever. Installing
+      // the resolver first makes that window zero by construction. (Reactive drivers keep their
+      // small answer delays: they may also react to HEADER chrome printed before ask() runs.)
+      const settled = new Promise<ReplLine>((resolve) => {
+        pending = resolve;
+      });
       if (opts.isTTY) {
         rl.setPrompt(promptText);
         rl.prompt();
@@ -143,9 +152,7 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
         opts.output.write(promptText);
       }
       try {
-        r = await new Promise<ReplLine>((resolve) => {
-          pending = resolve;
-        });
+        r = await settled;
       } finally {
         gate.muted = wasMuted;
       }

@@ -349,6 +349,27 @@ describe('REPL io: approval prompts vs typed-ahead lines (TTY)', () => {
     expect(interrupted).toBe(true);
     io.close();
   });
+
+  it('a same-tick answer to the prompt bytes cannot be lost (S22: the resolver installs first)', async () => {
+    // The zero-delay reactive driver: a PassThrough delivers 'data' synchronously, so this
+    // handler runs INSIDE rl.prompt()'s own write. Before S22 the pending resolver was
+    // installed after the prompt bytes went out, so this answer re-entered readline early,
+    // buffered as type-ahead — which a fresh question never consumes — and the ask hung
+    // forever. The reordering makes the window zero by construction.
+    const { createReplIO } = await import('../src/repl/io.js');
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let asked = false;
+    output.on('data', (c: Buffer) => {
+      if (!asked && c.toString('utf8').includes('approve command?')) {
+        asked = true;
+        input.write('n\n');
+      }
+    });
+    const io = createReplIO({ input, output, isTTY: true });
+    expect(await io.question('approve command? ')).toBe('n');
+    io.close();
+  });
 });
 
 describe('approval prompt display safety', () => {
