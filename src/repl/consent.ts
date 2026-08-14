@@ -357,10 +357,12 @@ export function createConsentAsker(): ConsentAsker {
       // ── C: the session is finishable ────────────────────────────────────────────────────────
       // At the TURN boundary, only where an approved plan makes completion a delivery boundary;
       // plan-less sessions are asked once, at the typed /quit (S22 — the recorded S21.6 nag).
+      // Legacy plans count: a resumed pre-canonical session with an approved plan kept its
+      // turn-boundary offer before S22 and keeps it now (review finding).
       if (boundary === 'turn') {
         try {
           const st = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
-          if (!(st.kind === 'canonical' && st.status === 'approved')) return;
+          if (!((st.kind === 'canonical' || st.kind === 'legacy') && st.status === 'approved')) return;
         } catch {
           return; // an unreadable plan state must not become a completion question
         }

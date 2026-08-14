@@ -944,8 +944,24 @@ describe('renderer: live command output unit behavior', () => {
     // end behind an honest fold marker.
     expect(out).toContain('line(s) folded — tail below; /expand shows the full output');
     const capAt = out.indexOf('display capped');
-    expect(out.indexOf('line-4')).toBeGreaterThan(capAt); // tail only — never streamed live
     expect(out.slice(out.indexOf('folded'))).toContain('line-4'); // the run's end is on screen
+    // The DISCRIMINATING pin (S22 review): line-3 lines exist only in the folded middle — never
+    // in the head (the cap trips during the line-2 batch) and never in the 8-line tail (all
+    // line-4s). Their total absence is what proves post-cap output stopped streaming live; the
+    // earlier `indexOf('line-4') > capAt` alone was vacuous (line-4 bytes only exist post-cap).
+    expect(out).not.toContain('line-3');
+    expect(out.indexOf('line-4')).toBeGreaterThan(capAt);
+  });
+
+  it('the final UNTERMINATED line reaches the fold tail — the verdict line is never dropped (S22 review)', () => {
+    const { r, text } = makeRenderer();
+    r.onEvent(ev({ type: 'command.started', callId: 'c1', pid: 1, shell: 's', cwd: 'w', timeoutMs: 1000 }));
+    for (let i = 0; i < 5; i++) r.onCommandOutput(('line-' + i + '-' + 'x'.repeat(120) + '\n').repeat(24), 'stdout');
+    r.onCommandOutput('FINAL VERDICT: 3 tests failed', 'stdout'); // no trailing newline
+    r.onEvent(ev({ type: 'command.ended', callId: 'c1', termination: 'exited', exitCode: 1, durationMs: 5 }));
+    const out = text();
+    expect(out).toContain('line(s) folded — tail below');
+    expect(out.slice(out.indexOf('folded'))).toContain('FINAL VERDICT: 3 tests failed');
   });
 
   it('a command that stays under the cap renders no fold chrome at all', () => {

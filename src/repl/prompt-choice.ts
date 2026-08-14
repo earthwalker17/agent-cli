@@ -110,14 +110,22 @@ export function parseChoice<K extends string>(
  * The block minus the input line — shared verbatim by the line path (which appends `  > `) and
  * the S22 select path (which prints it as chrome before the menu, so scrollback keeps a complete
  * transcript and the piped and TTY surfaces stay byte-compatible where drivers pattern-match).
+ *
+ * `enterClause: false` (the select path) drops the "(Enter = <decline>)" suffix: on a menu,
+ * Enter confirms the MOVABLE highlight, so the line-grammar clause becomes false the moment the
+ * user navigates — and a consent surface that contradicts itself is how a plan gets approved by
+ * someone who meant to decline it (review finding). The widget's own hint line carries the
+ * correct instruction instead.
  */
 export function renderChoiceBlock<K extends string>(
   header: string,
   choices: readonly PromptChoice<K>[],
   declineLabel: string,
+  opts: { enterClause?: boolean } = {},
 ): string {
   const keys = choices.map((c) => `[${c.key}] ${sanitizeLine(c.label)}`).join('   ');
-  return ['', ...header.split('\n').map((l) => `  ${l}`), `  ${keys}   (Enter = ${sanitizeLine(declineLabel)})`].join('\n');
+  const suffix = opts.enterClause === false ? '' : `   (Enter = ${sanitizeLine(declineLabel)})`;
+  return ['', ...header.split('\n').map((l) => `  ${l}`), `  ${keys}${suffix}`].join('\n');
 }
 
 export async function askChoice<K extends string>(

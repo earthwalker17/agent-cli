@@ -1173,7 +1173,14 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         }
       }
       ctx.renderer.flush();
-      ctx.modelOut.write(body.endsWith('\n') ? body : `${body}\n`);
+      // Sanitize per line, exactly as /diff does: the recorded bytes are untrusted command
+      // output, and replaying raw ANSI/OSC to the terminal would let it move the cursor, clear
+      // the screen or retitle the window (review finding). The true bytes stay in the record.
+      const safe = body
+        .split('\n')
+        .map((l) => sanitizeLine(l))
+        .join('\n');
+      ctx.modelOut.write(safe.endsWith('\n') ? safe : `${safe}\n`);
       return 'continue';
     }
 

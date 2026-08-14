@@ -114,6 +114,10 @@ export function createRenderer(opts: {
   };
 
   const flushCmdOutput = (final: boolean): void => {
+    // Suppressed means the ring owns the buffer now: consuming it here would silently drop the
+    // final unterminated line — often the run's verdict line — before flushFoldTail can fold
+    // it (review finding; the suppressed-path comment promises the partial reaches the tail).
+    if (cmdSuppressed) return;
     lastCmdFlush = Date.now();
     let text = cmdBuf;
     let rest = '';
@@ -127,7 +131,7 @@ export function createRenderer(opts: {
       }
     }
     cmdBuf = rest;
-    if (text.length === 0 || cmdSuppressed) return;
+    if (text.length === 0) return;
     if (toolOpen) {
       chromeOut.write('\n');
       toolOpen = false;

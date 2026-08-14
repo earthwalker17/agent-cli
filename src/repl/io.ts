@@ -59,13 +59,18 @@ export interface ReplIO {
    * keypress processing (arrow-history recall, echo, 'line' assembly) for the capture's
    * lifetime, so no key can reach the line path: type-ahead, the mid-turn handler and the
    * pending-read slot are structurally inert while a capture is active — "a displayed prompt
-   * always wins", by construction. Returns the idempotent release, or null when unavailable
-   * (non-TTY, a capture already active, or readline's internals changed shape) — the caller
-   * falls back to the line-question path unchanged. Ctrl+C fires the registered interrupt
-   * handler BEFORE the key is delivered (the 'SIGINT' ordering contract); stream close
-   * delivers a synthetic name:'eof' key so a mid-capture EOF can never hang.
+   * always wins", by construction. Returns the idempotent release plus `drained`: the
+   * half-typed line readline was holding at engage (echo is muted mid-turn, so it was
+   * INVISIBLE), which the widget must surface as its typed buffer — leaving it split would
+   * strand the prefix in readline and hand the suffix to the menu, where a fragment like
+   * 'sts for the parser' answers a security prompt by its first character (the review
+   * finding). Null when unavailable (non-TTY, a capture already active, or readline's
+   * internals changed shape) — the caller falls back to the line-question path unchanged.
+   * Ctrl+C fires the registered interrupt handler BEFORE the key is delivered (the 'SIGINT'
+   * ordering contract); stream close delivers a synthetic name:'eof' key so a mid-capture EOF
+   * can never hang.
    */
-  captureKeys(handler: (k: KeyEvent) => void): (() => void) | null;
+  captureKeys(handler: (k: KeyEvent) => void): { release: () => void; drained: string } | null;
   /** Suppress readline echo while a turn is running (input keeps flowing). */
   mute(): void;
   unmute(): void;
@@ -270,13 +275,27 @@ export function createReplIO(opts: ReplIOOptions): ReplIO {
       emitter.removeListener('keypress', rlKeypress as (...args: unknown[]) => void);
       emitter.on('keypress', wrapped);
       keyCapture = deliver;
+      // Drain the half-typed line readline was holding (typed unechoed mid-turn): the widget
+      // shows it as its typed buffer, so in-flight input is never split across the two
+      // surfaces — the whole line stays visible and submits as one string, exactly what the
+      // pre-S22 line path did. The write into readline's internals is deliberate and single-
+      // site: leaving the prefix would prepend it invisibly to the user's next instruction.
+      const rlAny = rl as unknown as { line?: string; cursor?: number };
+      const drained = typeof rlAny.line === 'string' ? rlAny.line : '';
+      if (drained.length > 0) {
+        rlAny.line = '';
+        rlAny.cursor = 0;
+      }
       let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        emitter.removeListener('keypress', wrapped);
-        emitter.on('keypress', rlKeypress as (...args: unknown[]) => void);
-        keyCapture = null;
+      return {
+        drained,
+        release: () => {
+          if (released) return;
+          released = true;
+          emitter.removeListener('keypress', wrapped);
+          emitter.on('keypress', rlKeypress as (...args: unknown[]) => void);
+          keyCapture = null;
+        },
       };
     },
     mute() {

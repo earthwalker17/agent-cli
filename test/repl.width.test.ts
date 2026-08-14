@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { clipToWidth, codePointWidth, displayWidth } from '../src/repl/width.js';
 
-// Every non-ASCII character in this file is written as an escape on purpose: a precomposed
-// character and a base+combining sequence are indistinguishable to a reader, and this suite
-// exists precisely to tell their widths apart.
-const CJK = '中'; // one CJK unified ideograph, display width 2
-const ELLIPSIS = '…';
+// Every ambiguity-prone fixture is CONSTRUCTED from code points (S22 review): a precomposed
+// character and a base+combining sequence are indistinguishable to a reader, and any
+// NFC-normalizing editor or formatter would silently convert a raw combining literal into the
+// precomposed form — leaving the "combining marks measure zero" tests vacuously green.
+const cp = (n: number): string => String.fromCodePoint(n);
+const CJK = cp(0x4e2d); // one CJK unified ideograph, display width 2
+const ELLIPSIS = cp(0x2026);
+const E_COMBINING = `e${cp(0x0301)}`; // e + combining acute — NEVER the precomposed U+00E9
+const N_COMBINING = `n${cp(0x0303)}`; // n + combining tilde
+const E_PRECOMPOSED = cp(0x00e9);
+const ZWSP = cp(0x200b);
+const BOM = cp(0xfeff);
+const RLO = cp(0x202e);
 
 describe('displayWidth', () => {
   it('ASCII measures one column per character', () => {
@@ -27,15 +35,17 @@ describe('displayWidth', () => {
   });
 
   it('combining marks measure zero', () => {
-    expect(displayWidth('é')).toBe(1); // e + combining acute
-    expect(displayWidth('ñ')).toBe(1); // n + combining tilde
-    expect(displayWidth('é')).toBe(1); // precomposed for contrast
+    expect(E_COMBINING.length).toBe(2); // proof the fixture really is base+combining
+    expect(displayWidth(E_COMBINING)).toBe(1);
+    expect(displayWidth(N_COMBINING)).toBe(1);
+    expect(E_PRECOMPOSED.length).toBe(1); // and the precomposed contrast really is one unit
+    expect(displayWidth(E_PRECOMPOSED)).toBe(1);
   });
 
   it('zero-width and bidi characters measure zero (raw content honesty)', () => {
-    expect(displayWidth('a​b')).toBe(2); // zero-width space
-    expect(displayWidth('﻿')).toBe(0); // BOM/ZWNBSP
-    expect(displayWidth('‮')).toBe(0); // RLO
+    expect(displayWidth(`a${ZWSP}b`)).toBe(2);
+    expect(displayWidth(BOM)).toBe(0);
+    expect(displayWidth(RLO)).toBe(0);
   });
 
   it('emoji measure two columns and surrogate pairs count once', () => {
@@ -73,7 +83,7 @@ describe('clipToWidth', () => {
   });
 
   it('a combining sequence survives the clip attached to its base', () => {
-    expect(clipToWidth('ébcdef', 3)).toBe(`éb${ELLIPSIS}`);
+    expect(clipToWidth(`${E_COMBINING}bcdef`, 3)).toBe(`${E_COMBINING}b${ELLIPSIS}`);
   });
 
   it('degenerate budgets fail closed', () => {

@@ -405,6 +405,34 @@ describe('anti-nag (S21.5)', () => {
     expect(atQuit.asked).toHaveLength(1);
     expect(kinds()).toContain('session.accepted');
   });
+
+  it('S22: an APPROVED plan keeps the turn-boundary completion ask — the third boundary cell', async () => {
+    // A main-only plan: completeness skips parent-owned tasks, so the session is finishable the
+    // moment the work exists — which is exactly the delivery-boundary shape the turn gate keeps.
+    // (S22 review: the first two cells — plan-less turn silence, quit ask — were pinned; this
+    // one was not, so inverting the gate clause would have passed a green suite.)
+    const mainOnly = PlanGraphSchema.parse({
+      objective: 'write the note',
+      tasks: [{ id: 't1', title: 'write it', intent: 'write the note', role: 'main', verify: 'read it back', touches: ['a.ts'] }],
+    });
+    const w = await writeCanonicalPlan(layout(), session.id, mainOnly, session.snapshots, session.clock);
+    if ('error' in w) throw new Error(w.error);
+    await setCanonicalStatus(layout(), session.id, 'approved', session.snapshots, session.clock);
+    session.log.append({ type: 'plan.approved', planId: session.id, sha256: w.contentSha });
+    session.log.append({
+      type: 'file.mutated',
+      callId: 'c1',
+      path: path.join(ws, 'a.ts'),
+      kind: 'create',
+      beforeSha256: null,
+      afterSha256: 'a'.repeat(64),
+      createdDirs: [],
+    });
+    const atTurn = ctxWith(['y']);
+    await createConsentAsker().maybeAsk(atTurn.ctx, ON);
+    expect(atTurn.asked).toHaveLength(1);
+    expect(kinds()).toContain('session.accepted');
+  });
 });
 
 describe('precedence — one prompt per boundary (S21.5)', () => {
@@ -594,9 +622,11 @@ describe('the contextual prompt on a real TTY (S21.5)', () => {
       ],
       [
         { awaitChrome: /\/help for commands/, send: 'build the widget' },
-        // Empty is a DECLINE, never a default-yes.
+        // Bare Enter confirms the initial highlight — the decline row — approving nothing.
+        // (S22 review: the select header deliberately carries NO "(Enter = …)" clause; the
+        // widget's hint line is the one instruction on screen.)
         { awaitChrome: /\[y\] approve/, send: '' },
-        { awaitChrome: /\(Enter = not now\)[\s\S]*\n/, send: '/quit' },
+        { awaitChrome: /\(arrows move, Enter confirms the highlight/, send: '/quit' },
       ],
     );
     expect(r.code).toBe(0);
@@ -700,8 +730,16 @@ describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-a
 
     expect(r.code).toBe(0);
     expect(r.chrome).toContain('[c] commit the 1 file(s)');
-    // The boundary rule, visible in the transcript: the offer came only after the typed /quit.
-    expect(r.chrome.indexOf('[c] commit the 1 file(s)')).toBeGreaterThan(r.chrome.indexOf('/quit'));
+    // The boundary rule, visible in the transcript. `indexOf('/quit')` alone matched the STARTUP
+    // BANNER's "/quit to leave" and proved nothing (S22 review) — the real anchor is the typed
+    // /quit's echo, which is the first '/quit' AFTER the write-turn's digest, and nothing
+    // completion-shaped may precede it.
+    const digestAt = r.chrome.indexOf('file(s) · ');
+    expect(digestAt).toBeGreaterThan(-1);
+    const quitEcho = r.chrome.indexOf('/quit', digestAt);
+    expect(quitEcho).toBeGreaterThan(-1);
+    expect(r.chrome.slice(0, quitEcho)).not.toContain('[c] commit the');
+    expect(r.chrome.slice(0, quitEcho)).not.toContain('[y] accept the session');
     // Both halves recorded, and the commit event is the one the slash body appends — no second
     // path, no second shape.
     expect(r.events.some((e) => e.type === 'session.accepted' && e.complete)).toBe(true);

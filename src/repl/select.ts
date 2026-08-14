@@ -117,6 +117,7 @@ export function createSelectWidget(deps: {
       return new Promise<SelectResult<K>>((resolve) => {
         let release: (() => void) | null = null;
         let done = false;
+        let drained = '';
         const finish = (r: SelectResult<K>): void => {
           if (done) return;
           done = true;
@@ -139,18 +140,24 @@ export function createSelectWidget(deps: {
         };
 
         // Capture BEFORE any output (see the module contract).
-        release = io.captureKeys((k: KeyEvent) => {
+        const capture = io.captureKeys((k: KeyEvent) => {
           try {
             handleKey(k);
           } catch {
             /* a throwing handler must never wedge the stream */
           }
         });
-        if (release === null) {
+        if (capture === null) {
           done = true;
           resolve({ kind: 'unavailable' });
           return;
         }
+        release = capture.release;
+        drained = capture.drained;
+        // A half-typed mid-turn line was invisibly in flight when the menu engaged: surface it
+        // as the typed buffer, so it stays ONE string the user can see, finish, clear (Ctrl+U)
+        // or submit — never a hidden prefix plus a fragment answering a security prompt.
+        if (drained.length > 0) typed = drained;
         deps.chromeLine(opts.header);
         area.overlay(menuLines());
 

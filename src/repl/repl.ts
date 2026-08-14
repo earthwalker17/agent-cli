@@ -113,7 +113,9 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
           declineLabel: string,
         ): Promise<PromptAnswer<K>> => {
           const r = await selectWidget.run<K>({
-            header: renderChoiceBlock(header, choices, declineLabel),
+            // No "(Enter = …)" clause on the menu: Enter confirms the movable highlight, and the
+            // widget's hint line says so — one instruction on screen, never two that disagree.
+            header: renderChoiceBlock(header, choices, declineLabel, { enterClause: false }),
             choices,
             // The decline-shaped row is the initial highlight — Enter with no navigation keeps
             // meaning exactly what an empty line means (no affirmative default).
@@ -348,23 +350,43 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
           key: c.name,
           label: `/${c.name}${c.args !== undefined ? ` ${c.args}` : ''} — ${c.summary}`,
         }));
+        // The window must fit the terminal: the overlay's erase math counts drawn lines, and a
+        // menu taller than the screen clamps the cursor-up at the top row and wipes foreign
+        // chrome on every redraw. Budget: rows minus the two "… more" markers, the hint line,
+        // and a margin for the prompt/header (review finding).
+        const termRows = (streams.chromeOut as Partial<NodeJS.WriteStream>).rows;
+        const menuMax = Math.max(3, Math.min(12, (typeof termRows === 'number' && termRows > 6 ? termRows : 24) - 6));
         const r = await selectWidget.run({
           header: style.dim('  commands'),
           choices: rows,
           initialKey: 'help',
           showKeys: false,
-          maxVisible: 12,
+          maxVisible: menuMax,
         });
         let picked: string | null = null;
-        if (r.kind === 'picked') picked = r.key;
+        if (r.kind === 'unavailable') {
+          // Capture degraded on a real TTY (readline internals changed shape): keep the old
+          // path honest rather than swallowing the keystroke — dispatch prints its usual
+          // unknown-command line below (review finding).
+        } else if (r.kind === 'picked') picked = r.key;
         else if (r.kind === 'typed') {
           const t = r.text.trim().toLowerCase().replace(/^\//, '');
           const names = COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]);
-          picked = names.includes(t) ? t : (names.filter((n) => n.startsWith(t)).length === 1 && t.length > 0 ? names.find((n) => n.startsWith(t))! : null);
+          // Exact names at any length; PREFIX resolution needs ≥2 characters — a lone letter is
+          // one keystroke away from /accept or /undo, both consequential (review finding).
+          picked = names.includes(t)
+            ? t
+            : t.length >= 2 && names.filter((n) => n.startsWith(t)).length === 1
+              ? names.find((n) => n.startsWith(t))!
+              : null;
           if (picked === null && t.length > 0) renderer.chromeLine(`unknown command: /${sanitizeLine(t)} — try /help`);
+          // The transcript must show what actually ran, not the abbreviation that ran it.
+          if (picked !== null && picked !== t) renderer.chromeLine(style.dim(`  running /${picked}`));
         }
-        if (picked === null) continue;
-        line = `/${picked}`;
+        if (r.kind !== 'unavailable') {
+          if (picked === null) continue;
+          line = `/${picked}`;
+        }
       }
       if (line.startsWith('/')) {
         if ((await dispatchSlash(line, commandCtx)) === 'quit') {

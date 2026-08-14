@@ -225,6 +225,25 @@ describe('select widget: interrupt, EOF, and safety', () => {
 });
 
 describe('select widget: readline handoff', () => {
+  it('a half-typed mid-turn line is drained into the VISIBLE typed buffer — never split (S22 review)', async () => {
+    // The hazard: mid-turn typing is unechoed; a select engaging mid-line used to freeze the
+    // prefix invisibly in readline and hand only the suffix to the menu, where a fragment like
+    // 'sts for the parser' answers a security prompt by its first character. Drained, the WHOLE
+    // line is the typed buffer — visible, editable, submitted as one string.
+    const { input, io, widget } = rig();
+    input.write('add te'); // in flight when the menu engages
+    await tick();
+    const p = run(widget);
+    await tick();
+    input.write(`sts${ENTER}`); // the continuation lands in the menu
+    expect(await p).toEqual({ kind: 'typed', text: 'add tests' });
+    // Nothing stranded in readline: the next line round-trips clean.
+    const line = io.prompt('> ');
+    await tick();
+    input.write(`hello${ENTER}`);
+    expect(await line).toEqual({ kind: 'line', text: 'hello' });
+  });
+
   it('after a select resolves, the ordinary line path works again (reattach round-trip)', async () => {
     const { input, io, widget } = rig();
     const p = run(widget);

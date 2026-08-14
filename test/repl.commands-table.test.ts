@@ -98,10 +98,13 @@ describe('the command table ↔ dispatch drift pin', () => {
   it('every case label in the dispatch switch has a table row (the reverse direction)', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src', 'repl', 'commands.ts'), 'utf8');
     // The dispatch switch's cases sit at 4-space indentation in dispatchSlash; nested command
-    // bodies indent deeper, so this scan is anchored to the switch itself.
-    const labels = [...src.matchAll(/^ {4}case '([a-z]+)':/gm)].map((m) => m[1]!);
-    expect(labels.length).toBeGreaterThan(20); // the scan found the real switch, not a fragment
+    // bodies indent deeper, so this scan is anchored to the switch itself. The character class
+    // admits digits and hyphens (S22 review: a `case 'md2pdf':` under `[a-z]+` would silently
+    // escape the pin), and SET EQUALITY replaces the loose >20 guard — a case leaving the scan
+    // is as loud as a case leaving the table.
+    const labels = [...src.matchAll(/^ {4}case '([a-z0-9-]+)':/gm)].map((m) => m[1]!);
     const tabled = new Set(COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]));
+    expect(new Set(labels).size).toBe(tabled.size);
     for (const label of labels) {
       expect(tabled.has(label), `case '${label}' has no command-table row`).toBe(true);
     }

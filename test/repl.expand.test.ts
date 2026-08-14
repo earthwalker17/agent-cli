@@ -114,7 +114,11 @@ describe('/expand', () => {
     expect(modelText).toContain('first-line');
     expect(modelText).toContain('last-line');
     expect(modelText.length).toBeGreaterThan(40_000); // the whole thing, not the 16k preview
-    expect(chrome.join('\n')).toContain('full output ');
+    // Discriminating oracle (S22 review): 'full output ' alone is a SUBSTRING of the opposite
+    // provenance message ("…the full output was not retained"), so pin the sha-bearing form and
+    // the fallback's absence.
+    expect(chrome.join('\n')).toMatch(/full output [0-9a-f]{12}/);
+    expect(chrome.join('\n')).not.toContain('not retained');
   });
 
   it('falls back to the recorded head+tail when no blob was saved, and says so', async () => {
