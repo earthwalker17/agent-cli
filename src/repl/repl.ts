@@ -323,7 +323,12 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   try {
     for (;;) {
       renderer.flush();
-      const read = await io.prompt(style.glyph.prompt);
+      // S22 — the composer boundary: one blank chrome line separates the previous exchange from
+      // the prompt, and the glyph carries the user role color. Both are TTY-shaped by
+      // construction (paint is identity off-TTY) and the blank line is explicitly gated so
+      // piped transcripts stay byte-identical.
+      if (streams.isTTY) renderer.chromeLine('');
+      const read = await io.prompt(style.seg('user', style.glyph.prompt));
       if (read.kind === 'eof') break;
       if (read.kind === 'interrupt') {
         consecutiveInterrupts++;
