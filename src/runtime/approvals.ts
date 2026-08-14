@@ -105,77 +105,11 @@ export function formatApprovalPrompt(req: ApprovalRequest, offerDurable = false)
   // unsandboxed and un-undoable (S14.5 review finding).
   lines.push(`  reason: ${sanitizeLine(req.reason)}`);
   if (req.noUndoWarning) lines.push('  ⚠ this action is NOT undoable');
-  // [s] is shown only when a session grant would actually be STORED: the class must be
-  // grantable AND the request must not be a shell command — grant enforcement refuses
-  // command-bearing tools (a command's class is a best-effort label over untrusted text,
-  // never a fact to key standing permission on). The live V0.7 E2E surfaced the old gap: an
-  // 'external'-labeled forwarded command offered a no-op [s]. Forwarded asks always explain
-  // that [q] stops THAT task only, and a forwarded [s] grant lives and dies with the child.
-  // A typed check offers a DIFFERENT [s] (Session 12): consent to re-run those exact
-  // harness-resolved commands, never a class-scoped session grant. Distinct wording matters —
-  // the two consents cover different things and must not read as the same promise.
-  // 'setup' joins the exclusion for the same reason as 'check'/'preview': its consent lives in the
-  // replay store, not in a class-scoped grant. Note an install IS classified `external`, which IS
-  // grantable — so without this exclusion a session grant keyed (project_setup, external) would be
-  // stored and then never read, standing authority won by a label. The [s] below is offered off
-  // the KEYS instead, which is what makes a migration (no keys) show no [s] at all.
-  // 'remote-write' joins the exclusion, and for the strongest reason on the list (Session 20). A
-  // non-overwriting publish is classified `external`, which IS grantable — so without this the
-  // prompt would offer `[s]` for "allow for the rest of this session" on an operation whose whole
-  // design is that it asks every single time. The engine never consults a grant in that branch and
-  // the runtime never stores one; this is the third place the same sentence is written, because a
-  // consent surface that disagrees with itself is how standing authority gets won by accident.
-  const grantable =
-    isGrantable(req.classification) &&
-    req.kind !== 'command' &&
-    req.kind !== 'check' &&
-    req.kind !== 'preview' &&
-    req.kind !== 'setup' &&
-    req.kind !== 'remote-write';
   const forwarded = req.taskContext !== undefined;
-  const sPart =
-    req.kind === 'setup'
-      ? req.checkCount === undefined
-        ? '' // migrate/seed, or an unhashable lockfile: nothing would be stored, so nothing is offered
-        : '   [s] allow re-runs of THIS EXACT install while the lockfile is unchanged'
-      : req.kind === 'check'
-      ? // Count what it actually grants: one keystroke stores replay consent for EVERY command in
-        // the batch, and a prompt that says "this command" while granting three is a lie.
-        `   [s] allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'}`
-      : req.kind === 'preview'
-        ? // A preview [s] consents to RE-STARTS of the exact command(s) (body-bound, this session
-          // only) — not to any other script, and not across sessions (grants are never restored).
-          `   [s] allow re-starts of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'} this session`
-        : req.kind === 'research'
-          ? // A research [s] IS a real class-scoped grant (unlike check/preview/setup, whose
-            // consent lives in the replay store), so it is offered — but the wording must name
-            // what actually bounds it. "Allow for the rest of this session" would read as an open
-            // line to the internet; the truth is that the session research budget is the ceiling,
-            // and the reason line above states what remains of it.
-            '   [s] allow further research this session, within the session budget'
-          : req.kind === 'remote-read'
-            ? // A remote-read [s] IS a real class-scoped grant, bounded by the session read
-              // allowance the reason line above states. The wording names what it does NOT cover,
-              // because "allow remote access this session" is exactly the sentence a user would
-              // later believe had covered the push.
-              '   [s] allow further remote READS this session (never a push, tag or release)'
-            : grantable
-            ? forwarded
-              ? '   [s] allow for the rest of THIS TASK'
-              : '   [s] allow for the rest of this session'
-            : '';
-  // S21: the durable option. The wording prints the LITERAL rule and its scope before anything
-  // persists — the studied failure (Codex #22181) is a vague "don't ask again" that turned out
-  // to be a machine-wide program-name allow. Ours is exact or it is not offered.
-  const aPart = !durableOffered(req, offerDurable)
-    ? ''
-    : req.kind === 'check'
-      ? `\n  [a] ALWAYS allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'} in this workspace on this machine (a changed script or command re-asks; revoke: agent grants)`
-      : req.kind === 'research'
-        ? `\n  [a] ALWAYS allow ${req.tool === 'delegate_task' ? 'research-subagent spawns' : 'bounded web searches'} on this machine — every workspace you trust; per-session budgets still apply (stored rule: ${req.tool}::external; revoke: agent grants)`
-        : req.kind === 'remote-read'
-          ? `\n  [a] ALWAYS allow remote READS on this machine — never a push, tag or release; the per-session read allowance still applies (stored rule: ${req.tool}::external; revoke: agent grants)`
-          : '';
+  const sLabel = sessionGrantLabel(req);
+  const sPart = sLabel === null ? '' : `   [s] ${sLabel}`;
+  const aLabel = durableOffered(req, offerDurable) ? durableGrantLabel(req) : null;
+  const aPart = aLabel === null ? '' : `\n  [a] ${aLabel}`;
   lines.push(
     `  [y] allow once${sPart}   [n] deny   ` +
       (forwarded ? '[q] deny & stop THIS TASK (the rest of the turn continues)' : '[q] deny & stop') +
@@ -184,7 +118,114 @@ export function formatApprovalPrompt(req: ApprovalRequest, offerDurable = false)
   return lines.join('\n');
 }
 
-function parseAnswer(answer: string, offeredDurable: boolean): ApprovalOutcome {
+/**
+ * The [s] option's label, or null when nothing would be stored. ONE derivation shared by the
+ * prompt text and the S22 select menu, so the two surfaces cannot drift (cross-pinned by test).
+ *
+ * [s] is shown only when a session grant would actually be STORED: the class must be
+ * grantable AND the request must not be a shell command — grant enforcement refuses
+ * command-bearing tools (a command's class is a best-effort label over untrusted text,
+ * never a fact to key standing permission on). The live V0.7 E2E surfaced the old gap: an
+ * 'external'-labeled forwarded command offered a no-op [s]. Forwarded asks always explain
+ * that [q] stops THAT task only, and a forwarded [s] grant lives and dies with the child.
+ * A typed check offers a DIFFERENT [s] (Session 12): consent to re-run those exact
+ * harness-resolved commands, never a class-scoped session grant. Distinct wording matters —
+ * the two consents cover different things and must not read as the same promise.
+ * 'setup' joins the exclusion for the same reason as 'check'/'preview': its consent lives in the
+ * replay store, not in a class-scoped grant. Note an install IS classified `external`, which IS
+ * grantable — so without this exclusion a session grant keyed (project_setup, external) would be
+ * stored and then never read, standing authority won by a label. The [s] is offered off the
+ * KEYS instead, which is what makes a migration (no keys) show no [s] at all.
+ * 'remote-write' joins the exclusion, and for the strongest reason on the list (Session 20). A
+ * non-overwriting publish is classified `external`, which IS grantable — so without this the
+ * prompt would offer `[s]` for "allow for the rest of this session" on an operation whose whole
+ * design is that it asks every single time. The engine never consults a grant in that branch and
+ * the runtime never stores one; this is the third place the same sentence is written, because a
+ * consent surface that disagrees with itself is how standing authority gets won by accident.
+ */
+export function sessionGrantLabel(req: ApprovalRequest): string | null {
+  if (req.kind === 'setup') {
+    // migrate/seed, or an unhashable lockfile: nothing would be stored, so nothing is offered.
+    return req.checkCount === undefined ? null : 'allow re-runs of THIS EXACT install while the lockfile is unchanged';
+  }
+  if (req.kind === 'check') {
+    // Count what it actually grants: one keystroke stores replay consent for EVERY command in
+    // the batch, and a prompt that says "this command" while granting three is a lie.
+    return `allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'}`;
+  }
+  if (req.kind === 'preview') {
+    // A preview [s] consents to RE-STARTS of the exact command(s) (body-bound, this session
+    // only) — not to any other script, and not across sessions (grants are never restored).
+    return `allow re-starts of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'} this session`;
+  }
+  if (req.kind === 'research') {
+    // A research [s] IS a real class-scoped grant (unlike check/preview/setup, whose
+    // consent lives in the replay store), so it is offered — but the wording must name
+    // what actually bounds it. "Allow for the rest of this session" would read as an open
+    // line to the internet; the truth is that the session research budget is the ceiling,
+    // and the reason line above states what remains of it.
+    return 'allow further research this session, within the session budget';
+  }
+  if (req.kind === 'remote-read') {
+    // A remote-read [s] IS a real class-scoped grant, bounded by the session read
+    // allowance the reason line above states. The wording names what it does NOT cover,
+    // because "allow remote access this session" is exactly the sentence a user would
+    // later believe had covered the push.
+    return 'allow further remote READS this session (never a push, tag or release)';
+  }
+  // check/preview/setup already returned above with their replay-store wordings, so of the
+  // documented exclusion list only the shell command and the remote write remain reachable here.
+  const grantable = isGrantable(req.classification) && req.kind !== 'command' && req.kind !== 'remote-write';
+  if (!grantable) return null;
+  return req.taskContext !== undefined ? 'allow for the rest of THIS TASK' : 'allow for the rest of this session';
+}
+
+/**
+ * The [a] option's label, or null where no durable identity exists. S21: the wording prints the
+ * LITERAL rule and its scope before anything persists — the studied failure (Codex #22181) is a
+ * vague "don't ask again" that turned out to be a machine-wide program-name allow. Ours is exact
+ * or it is not offered. Callers gate on `durableOffered`; this only words the offer.
+ */
+export function durableGrantLabel(req: ApprovalRequest): string | null {
+  if (req.kind === 'check') {
+    return `ALWAYS allow re-runs of ${(req.checkCount ?? 1) > 1 ? `THESE ${String(req.checkCount)} EXACT commands` : 'THIS EXACT command'} in this workspace on this machine (a changed script or command re-asks; revoke: agent grants)`;
+  }
+  if (req.kind === 'research') {
+    return `ALWAYS allow ${req.tool === 'delegate_task' ? 'research-subagent spawns' : 'bounded web searches'} on this machine — every workspace you trust; per-session budgets still apply (stored rule: ${req.tool}::external; revoke: agent grants)`;
+  }
+  if (req.kind === 'remote-read') {
+    return `ALWAYS allow remote READS on this machine — never a push, tag or release; the per-session read allowance still applies (stored rule: ${req.tool}::external; revoke: agent grants)`;
+  }
+  return null;
+}
+
+export interface ApprovalChoice {
+  key: 'y' | 's' | 'a' | 'n' | 'q';
+  label: string;
+}
+
+/**
+ * The S22 select rows for an approval — derived from the SAME label derivations the prompt text
+ * uses and cross-pinned by test, so the menu and the frozen prompt strings cannot drift. Takes
+ * the RESOLVED offeredDurable (the value `durableOffered` computed for this ask), never the raw
+ * config flag: the menu must offer exactly what the text offers.
+ */
+export function approvalChoices(req: ApprovalRequest, offeredDurable: boolean): ApprovalChoice[] {
+  const forwarded = req.taskContext !== undefined;
+  const s = sessionGrantLabel(req);
+  const a = offeredDurable ? durableGrantLabel(req) : null;
+  return [
+    { key: 'y', label: 'allow once' },
+    ...(s !== null ? [{ key: 's' as const, label: s }] : []),
+    ...(a !== null ? [{ key: 'a' as const, label: a }] : []),
+    { key: 'n', label: 'deny' },
+    { key: 'q', label: forwarded ? 'deny & stop THIS TASK (the rest of the turn continues)' : 'deny & stop' },
+  ];
+}
+
+/** Exported since S22: the select widget's typed fallback and menu picks route through THIS
+ *  parser, so approval-answer meaning keeps exactly one owner. */
+export function parseAnswer(answer: string, offeredDurable: boolean): ApprovalOutcome {
   switch (answer.trim().toLowerCase()[0]) {
     case 'y':
       return { decision: 'allow', scope: 'once', source: 'user' };
@@ -210,13 +251,20 @@ function parseAnswer(answer: string, offeredDurable: boolean): ApprovalOutcome {
  * path (io) has its own interrupt wiring and ignores it.
  */
 export function createInteractiveApprover(
-  io?: { question: (q: string) => Promise<string> },
+  io?: {
+    question: (q: string) => Promise<string>;
+    /** S22: the select surface. Receives the full prompt text (sans input line) plus the
+     *  RESOLVED durable offer; the implementation must route every outcome through
+     *  `parseAnswer` (or deny-stop on eof) so answer meaning keeps one owner. */
+    askApproval?: (req: ApprovalRequest, offeredDurable: boolean, promptText: string) => Promise<ApprovalOutcome>;
+  },
   signal?: AbortSignal,
   opts?: { offerDurable?: boolean },
 ): Approver {
   const offerDurable = opts?.offerDurable === true;
   return async (req: ApprovalRequest): Promise<ApprovalOutcome> => {
     const offered = durableOffered(req, offerDurable);
+    if (io?.askApproval !== undefined) return io.askApproval(req, offered, formatApprovalPrompt(req, offerDurable));
     const prompt = formatApprovalPrompt(req, offerDurable) + '\n  > ';
     if (io) return parseAnswer(await io.question(prompt), offered);
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

@@ -597,6 +597,45 @@ describe('the contextual prompt on a real TTY (S21.5)', () => {
 });
 
 /**
+ * S22 — approval prompts on the same widget. The frozen prompt block still prints (every pin and
+ * driver regex matches it); the menu rows derive from approvalChoices; and the safety posture is
+ * pinned end to end: one arrow-Up allows, bare Enter refuses THIS action and the turn continues.
+ */
+describe('approval prompts on a real TTY (S22)', () => {
+  const RUN = [
+    { say: 'working', calls: [{ name: 'run_command', input: { command: 'echo hi' } }] },
+    { say: 'done' },
+    { say: 'bye' },
+  ];
+
+  it('arrow-Up from the deny highlight reaches [y]; Enter records allow/once and the command runs', async () => {
+    const ESC_BYTE = String.fromCharCode(0x1b);
+    const r = await driveTTY(RUN, [
+      { awaitChrome: /\/help for commands/, send: 'run it' },
+      // Command menu rows are [y, n, q] with [n] highlighted; one Up reaches [y].
+      { awaitChrome: /\[y\] allow once/, sendRaw: `${ESC_BYTE}[A\r` },
+      { awaitChrome: /pid /, send: '/quit' },
+    ]);
+    expect(r.code).toBe(0);
+    expect(r.events.find((e) => e.type === 'approval.resolved')).toMatchObject({ decision: 'allow', scope: 'once' });
+    expect(r.events.some((e) => e.type === 'command.started')).toBe(true);
+  }, 120_000);
+
+  it('bare Enter denies once (never grants, never kills the task) and the session survives', async () => {
+    const r = await driveTTY(RUN, [
+      { awaitChrome: /\/help for commands/, send: 'run it' },
+      { awaitChrome: /\[y\] allow once/, sendRaw: '\r' },
+      // The turn continues after the deny: its digest is the first place this string can appear.
+      { awaitChrome: /0 file\(s\)/, send: '/quit' },
+    ]);
+    expect(r.code).toBe(0);
+    expect(r.events.find((e) => e.type === 'approval.resolved')).toMatchObject({ decision: 'deny', scope: 'once' });
+    expect(r.events.some((e) => e.type === 'command.started')).toBe(false);
+    expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
+  }, 120_000);
+});
+
+/**
  * Session 21.6 — the commit as a CHOICE at the acceptance boundary.
  *
  * The commit is the one delivery action the model has no path to, and until now the boundary

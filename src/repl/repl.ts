@@ -14,6 +14,8 @@ import { renderAgentPlanView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { createReplIO, type ReplIO } from './io.js';
+import { approvalChoices, parseAnswer } from '../runtime/approvals.js';
+import type { ApprovalOutcome, ApprovalRequest } from '../types.js';
 import { createProviderRegistry, type ProviderRegistry } from '../provider/registry.js';
 import { createRenderer, type Renderer } from './render.js';
 import { createStatusArea } from './status.js';
@@ -131,8 +133,40 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
         }
       : undefined;
 
+  // S22: approval prompts ride the same widget. The full prompt block prints as chrome (its
+  // strings are frozen — every driver and test pin matches it), the menu derives from the SAME
+  // label derivations via approvalChoices, and every outcome routes through parseAnswer — menu
+  // picks are submitted as their key letter, typed text verbatim — so answer meaning keeps one
+  // owner. Initial highlight is [n]: Enter refuses THIS action (deny once, not deny-stop), and
+  // eof/interrupt keeps the exact `?? 'q'` deny-stop coercion of the line path.
+  const askApprovalSelect =
+    selectWidget !== undefined
+      ? async (req: ApprovalRequest, offeredDurable: boolean, promptText: string): Promise<ApprovalOutcome> => {
+          const r = await selectWidget.run({ header: promptText, choices: approvalChoices(req, offeredDurable), initialKey: 'n' });
+          switch (r.kind) {
+            case 'picked':
+              return parseAnswer(r.key, offeredDurable);
+            case 'typed':
+              return parseAnswer(r.text, offeredDurable);
+            case 'declined':
+              return parseAnswer('n', offeredDurable);
+            case 'eof':
+              return { decision: 'deny-stop', scope: 'once', source: 'user' };
+            case 'unavailable':
+              return parseAnswer((await question(`${promptText}\n  > `)) ?? 'q', offeredDurable);
+          }
+        }
+      : undefined;
+
   const registry = opts.registry ?? createProviderRegistry();
-  const ctx = buildRunContext(values, { config, io: { question: async (q) => (await question(q)) ?? 'q' }, registry });
+  const ctx = buildRunContext(values, {
+    config,
+    io: {
+      question: async (q) => (await question(q)) ?? 'q',
+      ...(askApprovalSelect !== undefined ? { askApproval: askApprovalSelect } : {}),
+    },
+    registry,
+  });
   const layout = resolveLayout(ctx.ws, { ensure: true });
 
   // The shared assembly path (sandbox probe → git probe → map → system prompt → session + records).

@@ -15,7 +15,7 @@ import {
 } from '../provider/catalog.js';
 import { createProviderRegistry, resolveProviderName, type ProviderRegistry } from '../provider/registry.js';
 import type { ProjectLayout } from '../store/layout.js';
-import type { Approver, Provider, SessionMode } from '../types.js';
+import type { ApprovalOutcome, ApprovalRequest, Approver, Provider, SessionMode } from '../types.js';
 
 export { DEFAULT_MODEL };
 
@@ -106,7 +106,12 @@ export function makeProvider(values: CliValues, config?: { provider?: string }, 
 export function makeApprover(
   values: CliValues,
   mode: SessionMode,
-  io?: { question: (q: string) => Promise<string> },
+  io?: {
+    question: (q: string) => Promise<string>;
+    /** S22: the REPL's select surface, passed through verbatim. The guard order below is
+     *  untouched — dangerous mode and non-interactive answer before any prompt exists. */
+    askApproval?: (req: ApprovalRequest, offeredDurable: boolean, promptText: string) => Promise<ApprovalOutcome>;
+  },
   approvalSignal?: AbortSignal,
 ): Approver {
   if (values['dangerously-allow-all']) return dangerousApprover;

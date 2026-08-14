@@ -442,6 +442,38 @@ describe('approval prompt display safety', () => {
     expect(rev).not.toContain('[s]');
     expect(rev).toContain('[q] deny & stop');
   });
+
+  it('S22 cross-pin: approvalChoices mirrors the frozen prompt text — keys agree in both directions', async () => {
+    const { approvalChoices, formatApprovalPrompt } = await import('../src/runtime/approvals.js');
+    const base = { callId: 'c', summary: 's', detail: '', reason: 'r' } as const;
+    const taskContext = { childSessionId: 'child-1', role: 'executor' };
+    const matrix: { req: Parameters<typeof formatApprovalPrompt>[0]; offer: boolean }[] = [
+      { req: { ...base, tool: 'run_command', classification: 'external', kind: 'command' }, offer: false },
+      { req: { ...base, tool: 'run_command', classification: 'external', kind: 'command', taskContext }, offer: false },
+      { req: { ...base, tool: 'read_file', classification: 'sensitive' }, offer: false },
+      { req: { ...base, tool: 'read_file', classification: 'sensitive', taskContext }, offer: false },
+      { req: { ...base, tool: 'delegate_task', classification: 'reversible' }, offer: false },
+      { req: { ...base, tool: 'run_check', classification: 'reversible', kind: 'check', checkCount: 2 }, offer: true },
+      { req: { ...base, tool: 'run_check', classification: 'reversible', kind: 'check', checkCount: 1 }, offer: false },
+      { req: { ...base, tool: 'project_setup', classification: 'destructive', kind: 'setup' }, offer: false },
+      { req: { ...base, tool: 'web_search', classification: 'external', kind: 'research' }, offer: true },
+      { req: { ...base, tool: 'remote_status', classification: 'external', kind: 'remote-read' }, offer: true },
+      { req: { ...base, tool: 'remote_push', classification: 'external', kind: 'remote-write' }, offer: false },
+    ];
+    for (const { req, offer } of matrix) {
+      const prompt = formatApprovalPrompt(req, offer);
+      const offered = prompt.includes('[a]'); // the RESOLVED offer, read off the frozen text itself
+      const choices = approvalChoices(req, offered);
+      // Every menu row's key appears bracketed in the prompt, and every bracketed key has a row.
+      for (const c of choices) expect(prompt).toContain(`[${c.key}]`);
+      for (const k of ['y', 's', 'a', 'n', 'q'] as const) {
+        expect(choices.some((c) => c.key === k)).toBe(prompt.includes(`[${k}]`));
+      }
+      // The decline rows exist unconditionally — Enter always has a safe target.
+      expect(choices.some((c) => c.key === 'n')).toBe(true);
+      expect(choices.some((c) => c.key === 'q')).toBe(true);
+    }
+  });
 });
 
 describe('REPL: resilience', () => {
