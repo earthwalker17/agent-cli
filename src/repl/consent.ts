@@ -220,7 +220,13 @@ export function createConsentAsker(): ConsentAsker {
     if (ask === undefined) return null;
     const spent = new Set<K>();
     for (;;) {
-      const answer = await askChoice(ask, header, choices, declineLabel);
+      // S22: the select surface when the REPL wired one (TTY), the line grammar otherwise.
+      // Both return the same PromptAnswer contract, so everything downstream — review keys,
+      // anti-nag, null-means-do-nothing — is indifferent to which surface answered.
+      const answer =
+        ctx.askSelect !== undefined
+          ? await ctx.askSelect(header, choices, declineLabel)
+          : await askChoice(ask, header, choices, declineLabel);
       if (answer.key === null) return null;
       const cmd = review[answer.key];
       if (cmd !== undefined && !spent.has(answer.key)) {

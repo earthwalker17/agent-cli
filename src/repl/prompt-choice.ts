@@ -106,15 +106,26 @@ export function parseChoice<K extends string>(
  * The block opens with a blank line for the same reason `formatApprovalPrompt` does: the renderer
  * may have an unterminated tool line open, and the leading newline closes it visually.
  */
+/**
+ * The block minus the input line — shared verbatim by the line path (which appends `  > `) and
+ * the S22 select path (which prints it as chrome before the menu, so scrollback keeps a complete
+ * transcript and the piped and TTY surfaces stay byte-compatible where drivers pattern-match).
+ */
+export function renderChoiceBlock<K extends string>(
+  header: string,
+  choices: readonly PromptChoice<K>[],
+  declineLabel: string,
+): string {
+  const keys = choices.map((c) => `[${c.key}] ${sanitizeLine(c.label)}`).join('   ');
+  return ['', ...header.split('\n').map((l) => `  ${l}`), `  ${keys}   (Enter = ${sanitizeLine(declineLabel)})`].join('\n');
+}
+
 export async function askChoice<K extends string>(
   ask: (q: string) => Promise<string | null>,
   header: string,
   choices: readonly PromptChoice<K>[],
   declineLabel: string,
 ): Promise<PromptAnswer<K>> {
-  const keys = choices.map((c) => `[${c.key}] ${sanitizeLine(c.label)}`).join('   ');
-  const block = ['', ...header.split('\n').map((l) => `  ${l}`), `  ${keys}   (Enter = ${sanitizeLine(declineLabel)})`, '  > '].join(
-    '\n',
-  );
+  const block = `${renderChoiceBlock(header, choices, declineLabel)}\n  > `;
   return parseChoice(await ask(block), choices);
 }

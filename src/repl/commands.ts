@@ -39,6 +39,7 @@ import type { Session } from '../runtime/session.js';
 import type { ProjectLayout } from '../store/layout.js';
 import type { Renderer } from './render.js';
 import { NO_STYLE, type Style } from './format.js';
+import type { PromptAnswer, PromptChoice } from './prompt-choice.js';
 
 /**
  * Slash commands are thin adapters over existing kernel functions, run against the session's OWN
@@ -83,6 +84,17 @@ export interface CommandContext {
    *  without one — tests, non-TTY — emits byte-identical pre-S22 output. Paint only, never new
    *  glyph bytes: piped transcripts must not drift. */
   style?: Style;
+  /**
+   * S22: the arrow-key select surface (TTY only; absent everywhere else, and every caller falls
+   * back to the line grammar). Same contract as `askChoice`: the returned answer's null key
+   * ALWAYS means do nothing, typed text goes through `parseChoice` (NEGATIVE_WORDS intact), and
+   * the widget itself never interprets an answer.
+   */
+  askSelect?: <K extends string>(
+    header: string,
+    choices: readonly PromptChoice<K>[],
+    declineLabel: string,
+  ) => Promise<PromptAnswer<K>>;
 }
 
 /**

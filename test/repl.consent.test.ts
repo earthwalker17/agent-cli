@@ -466,7 +466,7 @@ describe('the escalation prompt (S21.5)', () => {
  */
 async function driveTTY(
   script: ScriptTurn[],
-  steps: { awaitChrome: RegExp; send: string }[],
+  steps: { awaitChrome: RegExp; send?: string; sendRaw?: string }[],
 ): Promise<{ code: number; chrome: string; events: SessionEvent[] }> {
   const scriptFile = path.join(tmp, 'script.json');
   fs.writeFileSync(scriptFile, JSON.stringify(script));
@@ -483,13 +483,16 @@ async function driveTTY(
     chromeChunks.push(c);
     buf += c.toString('utf8');
     while (next < steps.length && steps[next]!.awaitChrome.test(buf)) {
-      const line = steps[next]!.send;
-      // A short delay is REQUIRED, not politeness. `io.ts` writes the prompt bytes and only then
-      // installs its single `pending` resolver, so a line written the instant the prompt appears
-      // can arrive first and be buffered as type-ahead — where a `fresh` question will never
-      // consume it, and the REPL waits forever. A human's reaction time hides this window; a
-      // driver has to respect it. The live E2E drivers do the same thing.
-      setTimeout(() => input.write(`${line}\n`), 60);
+      const step = steps[next]!;
+      // The short delay is belt-and-suspenders since S22 (ask() now installs its resolver
+      // BEFORE the prompt bytes, and a select captures keys before its header prints), but it
+      // stays: a driver may react to chrome printed before either mechanism engages, and a
+      // human's reaction time is the behavior being simulated. `sendRaw` writes bytes verbatim
+      // (arrow sequences, bare Enter) with no trailing newline appended.
+      setTimeout(() => {
+        if (step.sendRaw !== undefined) input.write(step.sendRaw);
+        else input.write(`${step.send ?? ''}\n`);
+      }, 60);
       next++;
     }
   });
@@ -568,6 +571,28 @@ describe('the contextual prompt on a real TTY (S21.5)', () => {
     expect(r.code).toBe(0);
     expect(r.events.some((e) => e.type === 'plan.approved')).toBe(false);
     expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
+  }, 120_000);
+
+  it('S22: arrow keys walk the select menu and Enter records the approval — no letter ever typed', async () => {
+    const ESC_BYTE = String.fromCharCode(0x1b);
+    const UP = `${ESC_BYTE}[A`;
+    const r = await driveTTY(
+      [
+        { say: 'planning', calls: [{ name: 'update_plan', input: { plan: PLAN } }] },
+        { say: 'plan written' },
+        { say: 'bye' },
+      ],
+      [
+        { awaitChrome: /\/help for commands/, send: 'build the widget' },
+        // Initial highlight is [n] (the decline row); two Ups reach [y]; Enter confirms.
+        { awaitChrome: /\[y\] approve/, sendRaw: `${UP}${UP}\r` },
+        { awaitChrome: /plan approved \(content sha/, send: '/quit' },
+      ],
+    );
+    expect(r.code).toBe(0);
+    expect(r.events.some((e) => e.type === 'plan.approved')).toBe(true);
+    // The menu really rendered (its hint line is ASCII on every glyph table).
+    expect(r.chrome).toContain('(arrows move, Enter confirms the highlight');
   }, 120_000);
 });
 

@@ -22,6 +22,8 @@ import { createTaskTable } from './live-tasks.js';
 import { detectStyle } from './format.js';
 import { completionLine, dispatchSlash, sessionAcceptance, type CommandContext } from './commands.js';
 import { createConsentAsker, planReapprovalNeeded } from './consent.js';
+import { createSelectWidget } from './select.js';
+import { askChoice, parseChoice, renderChoiceBlock, type PromptAnswer, type PromptChoice } from './prompt-choice.js';
 import { routeSigil } from './sigils.js';
 
 /**
@@ -93,6 +95,42 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
       statusArea.resume();
     }
   };
+  // S22: the arrow-key select surface — TTY only, layered OVER the line grammar, never replacing
+  // it. The widget's own fallback (capture unavailable) routes back through the same question
+  // seam, so every answer path ends in parseChoice and the two surfaces cannot disagree about
+  // what an answer means.
+  const selectWidget = streams.isTTY
+    ? createSelectWidget({ io, area: statusArea, style, chromeLine: (t) => renderer.chromeLine(t) })
+    : undefined;
+  const askSelect =
+    selectWidget !== undefined
+      ? async <K extends string>(
+          header: string,
+          choices: readonly PromptChoice<K>[],
+          declineLabel: string,
+        ): Promise<PromptAnswer<K>> => {
+          const r = await selectWidget.run<K>({
+            header: renderChoiceBlock(header, choices, declineLabel),
+            choices,
+            // The decline-shaped row is the initial highlight — Enter with no navigation keeps
+            // meaning exactly what an empty line means (no affirmative default).
+            initialKey: (choices.find((c) => c.key === 'n') ?? choices.at(-1)!).key,
+          });
+          switch (r.kind) {
+            case 'picked':
+              return { key: r.key, raw: r.key, reason: 'chosen' };
+            case 'typed':
+              return parseChoice(r.text, choices);
+            case 'declined':
+              return { key: null, raw: null, reason: 'declined' };
+            case 'eof':
+              return { key: null, raw: null, reason: 'eof' };
+            case 'unavailable':
+              return askChoice((q) => question(q), header, choices, declineLabel);
+          }
+        }
+      : undefined;
+
   const registry = opts.registry ?? createProviderRegistry();
   const ctx = buildRunContext(values, { config, io: { question: async (q) => (await question(q)) ?? 'q' }, registry });
   const layout = resolveLayout(ctx.ws, { ensure: true });
@@ -188,6 +226,7 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
     pendingNotes,
     style,
     ...(canAsk ? { question: (q: string) => question(q) } : {}),
+    ...(canAsk && askSelect !== undefined ? { askSelect } : {}),
     retrieval: assembled.retrieval,
     checkTool: assembled.checkTool,
     checkCaps: assembled.checkCaps,
