@@ -1,4 +1,5 @@
 import { sanitizeLine } from '../shared/text.js';
+import { clipToWidth } from './width.js';
 
 /**
  * The sticky status area (Session 11) — the ONLY cursor-moving code in the codebase, strictly
@@ -16,10 +17,9 @@ import { sanitizeLine } from '../shared/text.js';
  *   the bottom line whenever it is live.
  * - Status content is sanitized (sanitizeLine strips \r and escapes) and clipped to the
  *   terminal width per redraw, so untrusted text can never move the cursor itself. The clip
- *   counts UTF-16 code units, not display columns — safe today because every status line is
- *   structurally ASCII-narrow (slug ids, role enums, tool names) plus a couple of ambiguous-
- *   width glyphs covered by the 2-column margin; a width-aware clip is required before any
- *   free-form user text may land here.
+ *   counts DISPLAY COLUMNS (width.ts, Session 22 — the prerequisite the old code-unit clip
+ *   named before free-form text could land here); ambiguous-width characters measure 1, which
+ *   the 2-column margin absorbs.
  * - A terminal SHRUNK after a draw can reflow the on-screen region; the next erase then
  *   under-counts physical rows and may leave a stale fragment ABOVE the region until it
  *   scrolls away (cosmetic; real output above the region is never touched — the cursor never
@@ -84,7 +84,7 @@ export function createStatusArea(opts: { chromeOut: NodeJS.WritableStream; isTTY
     const width = columns() - 2; // margin for the ambiguous-width glyphs (▸ ⚑ ·) in status lines
     for (const l of lines) {
       const clean = sanitizeLine(l);
-      chromeOut.write(`${clean.length > width ? `${clean.slice(0, Math.max(0, width - 1))}…` : clean}\n`);
+      chromeOut.write(`${clipToWidth(clean, width)}\n`);
     }
     height = lines.length;
     dirty = false;
