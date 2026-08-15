@@ -223,19 +223,46 @@ export function approvalChoices(req: ApprovalRequest, offeredDurable: boolean): 
   ];
 }
 
+/** What the prompt actually put on the table. `session` is `sessionGrantLabel(req) !== null`;
+ *  `durable` is the resolved `durableOffered` value. parseAnswer needs BOTH, because an answer
+ *  key must never win a scope the prompt never offered. */
+export interface OfferedScopes {
+  session: boolean;
+  durable: boolean;
+}
+
 /** Exported since S22: the select widget's typed fallback and menu picks route through THIS
- *  parser, so approval-answer meaning keeps exactly one owner. */
-export function parseAnswer(answer: string, offeredDurable: boolean): ApprovalOutcome {
-  switch (answer.trim().toLowerCase()[0]) {
+ *  parser, so approval-answer meaning keeps exactly one owner.
+ *
+ *  S22.5 hardening (the pooled first-character hazard, closed): the two SCOPE-WIDENING answers
+ *  are EXACT tokens gated on what the prompt offered — `s`/`session` and `a`/`always` — so a
+ *  refusal-shaped word can never widen consent by its first letter. Before this, `stop` and
+ *  `skip` read as [s] (a session grant) and `abort`/`allow` as [a] (machine-durable where
+ *  offered) — and because the engine executes on ANY allow, `stop` typed at a remote-write
+ *  prompt would have run the push. The minimum-privilege affirmative (`y…`, exact `allow` →
+ *  once) and the two refusals (first-char `q` → deny & stop, everything else → deny) keep their
+ *  tolerant reads: a word that merely starts with those letters can only ever grant the LEAST
+ *  privileged choice or reduce privilege — the same only-narrowing rule NEGATIVE_WORDS follows
+ *  on the consent surface. */
+export function parseAnswer(answer: string, offered: OfferedScopes): ApprovalOutcome {
+  const norm = answer.trim().toLowerCase();
+  if (norm === 's' || norm === 'session') {
+    return offered.session
+      ? { decision: 'allow', scope: 'session', source: 'user' }
+      : { decision: 'deny', scope: 'once', source: 'user' };
+  }
+  // Machine-durable ONLY where the prompt actually offered it; everywhere else it stays what any
+  // unrecognized key is — a deny. An answer that silently upgraded scope on prompts that never
+  // mentioned it would be standing authority won by a typo.
+  if (norm === 'a' || norm === 'always') {
+    return offered.durable
+      ? { decision: 'allow', scope: 'machine', source: 'user' }
+      : { decision: 'deny', scope: 'once', source: 'user' };
+  }
+  if (norm === 'allow') return { decision: 'allow', scope: 'once', source: 'user' };
+  switch (norm[0]) {
     case 'y':
       return { decision: 'allow', scope: 'once', source: 'user' };
-    case 's':
-      return { decision: 'allow', scope: 'session', source: 'user' };
-    // 'a' means machine-durable ONLY where the prompt actually offered it; everywhere else it
-    // stays what any unrecognized key is — a deny. An answer key that silently upgraded scope
-    // on prompts that never mentioned it would be standing authority won by a typo.
-    case 'a':
-      return offeredDurable ? { decision: 'allow', scope: 'machine', source: 'user' } : { decision: 'deny', scope: 'once', source: 'user' };
     case 'q':
       return { decision: 'deny-stop', scope: 'once', source: 'user' };
     default:
@@ -263,8 +290,11 @@ export function createInteractiveApprover(
 ): Approver {
   const offerDurable = opts?.offerDurable === true;
   return async (req: ApprovalRequest): Promise<ApprovalOutcome> => {
-    const offered = durableOffered(req, offerDurable);
-    if (io?.askApproval !== undefined) return io.askApproval(req, offered, formatApprovalPrompt(req, offerDurable));
+    const offered: OfferedScopes = {
+      session: sessionGrantLabel(req) !== null,
+      durable: durableOffered(req, offerDurable),
+    };
+    if (io?.askApproval !== undefined) return io.askApproval(req, offered.durable, formatApprovalPrompt(req, offerDurable));
     const prompt = formatApprovalPrompt(req, offerDurable) + '\n  > ';
     if (io) return parseAnswer(await io.question(prompt), offered);
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

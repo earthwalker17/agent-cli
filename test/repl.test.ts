@@ -302,8 +302,10 @@ describe('REPL io: approval prompts vs typed-ahead lines (TTY)', () => {
     output.on('data', () => {});
     const io = createReplIO({ input, output, isTTY: true });
 
-    // The user types their NEXT INSTRUCTION while a turn is running ("sure, add tests too"
-    // happens to start with 's' — which parseAnswer reads as allow-for-session).
+    // The user types their NEXT INSTRUCTION while a turn is running. (Under the pre-S22.5
+    // grammar "sure, add tests too" would even have parsed as allow-for-session by its first
+    // character; parseAnswer is exact-token for scope keys now, but the structural rule this
+    // test pins is prior to the grammar: a line typed before the question must never reach it.)
     input.write('sure, add tests too\n');
     await tick();
 

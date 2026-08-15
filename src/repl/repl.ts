@@ -14,7 +14,7 @@ import { renderAgentPlanView } from '../plan/views.js';
 import { sanitizeLine } from '../shared/text.js';
 import type { ProjectLayout } from '../store/layout.js';
 import { createReplIO, type ReplIO } from './io.js';
-import { approvalChoices, parseAnswer } from '../runtime/approvals.js';
+import { approvalChoices, parseAnswer, sessionGrantLabel } from '../runtime/approvals.js';
 import type { ApprovalOutcome, ApprovalRequest } from '../types.js';
 import { createProviderRegistry, type ProviderRegistry } from '../provider/registry.js';
 import { createRenderer, type Renderer } from './render.js';
@@ -145,18 +145,21 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
   const askApprovalSelect =
     selectWidget !== undefined
       ? async (req: ApprovalRequest, offeredDurable: boolean, promptText: string): Promise<ApprovalOutcome> => {
+          // S22.5: parseAnswer gates scope-widening answers on what the prompt OFFERED, so the
+          // offered set is derived from the same label derivation the menu rows use.
+          const offered = { session: sessionGrantLabel(req) !== null, durable: offeredDurable };
           const r = await selectWidget.run({ header: promptText, choices: approvalChoices(req, offeredDurable), initialKey: 'n' });
           switch (r.kind) {
             case 'picked':
-              return parseAnswer(r.key, offeredDurable);
+              return parseAnswer(r.key, offered);
             case 'typed':
-              return parseAnswer(r.text, offeredDurable);
+              return parseAnswer(r.text, offered);
             case 'declined':
-              return parseAnswer('n', offeredDurable);
+              return parseAnswer('n', offered);
             case 'eof':
               return { decision: 'deny-stop', scope: 'once', source: 'user' };
             case 'unavailable':
-              return parseAnswer((await question(`${promptText}\n  > `)) ?? 'q', offeredDurable);
+              return parseAnswer((await question(`${promptText}\n  > `)) ?? 'q', offered);
           }
         }
       : undefined;
