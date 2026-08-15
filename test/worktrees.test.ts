@@ -7,7 +7,6 @@ import {
   registerWorktree,
   registryFile,
   registryLockFile,
-  SWEEP_LIVE_MAX_AGE_MS,
   sweepOrphanedWorktrees,
   unregisterWorktree,
   worktreesRoot,
@@ -105,8 +104,12 @@ describe('sweep (injected remover — no git)', () => {
     const dGone = mk('gone-ok'); // dead owner, removal succeeds
     const dFail = mk('gone-fail'); // dead owner, removal fails → stays registered
     const dLive = mk('live'); // live owner → untouched
-    const dAged = mk('aged'); // live pid but an hour past the age hatch → swept
-    const oldIso = new Date(Date.now() - SWEEP_LIVE_MAX_AGE_MS - 60 * 60 * 1000).toISOString();
+    // S22.5 regression (the removed age hatch): a live pid is NEVER swept on age. This entry is
+    // 30 hours old — the shape of an executor whose forwarded approval waited overnight (approval
+    // wait is excluded from the executor clock, so this is a LEGITIMATE live task, and the old
+    // 8h hatch destroyed its uncaptured work with `worktree remove --force`).
+    const dAged = mk('aged');
+    const oldIso = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
     await registerWorktree(reg, entry(dGone, { pid: 11 }));
     await registerWorktree(reg, entry(dFail, { pid: 22 }));
     await registerWorktree(reg, entry(dLive, { pid: 33 }));
@@ -129,12 +132,13 @@ describe('sweep (injected remover — no git)', () => {
       },
     });
 
-    expect(swept.removed.sort()).toEqual([dAged, dGone].sort());
+    expect(swept.removed).toEqual([dGone]);
     expect(swept.failed).toEqual([{ dir: dFail, detail: 'EBUSY (simulated)' }]);
-    expect(swept.skippedLive).toEqual([dLive]);
+    expect(swept.skippedLive.sort()).toEqual([dAged, dLive].sort());
     expect(fs.existsSync(dLive)).toBe(true);
+    expect(fs.existsSync(dAged)).toBe(true); // the overnight executor's work survives
     const after = loadRegistry(reg).map((e) => e.dir);
-    expect(after.sort()).toEqual([dConcurrent, dFail, dLive].sort());
+    expect(after.sort()).toEqual([dAged, dConcurrent, dFail, dLive].sort());
   });
 
   it('drops missing-dir entries without calling the remover', async () => {

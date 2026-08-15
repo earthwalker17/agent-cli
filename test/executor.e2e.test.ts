@@ -5,7 +5,7 @@ import path from 'node:path';
 import { findGitOnPath, runGit } from '../src/git/client.js';
 import { worktreeSupport } from '../src/git/worktree.js';
 import { createApprovalForwarder } from '../src/runtime/approval-forwarder.js';
-import { loadRegistry, registerWorktree, registryFile, SWEEP_LIVE_MAX_AGE_MS, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
+import { loadRegistry, registerWorktree, registryFile, sweepOrphanedWorktrees, worktreesRoot } from '../src/runtime/worktrees.js';
 import { createDelegateTool, type ExecutorDeps, type PlanGateInfo } from '../src/tools/delegate.js';
 import type { PlanState } from '../src/plan/canonical.js';
 import { owedHarnessRefsFromEvents, pruneHarnessCheckpointRefs } from '../src/cli/assemble.js';
@@ -695,20 +695,22 @@ describe.skipIf(!hasGit)('executor tasks end to end (real git)', () => {
     const agedDir = await mk('aged-1');
     const reg = registryFile(layout.projectDir);
     const nowIso = new Date().toISOString();
-    const oldIso = new Date(Date.now() - SWEEP_LIVE_MAX_AGE_MS - 60 * 60 * 1000).toISOString(); // an hour past the hatch
+    // S22.5: 30h old — the shape of a live executor whose forwarded approval waited overnight.
+    // The removed age hatch used to sweep this LIVE task's worktree; a live pid always skips now.
+    const oldIso = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
     await registerWorktree(reg, { dir: liveDir, repoRoot: repo, childSessionId: 'c1', createdAt: nowIso, ownerSessionId: 'sA', pid: 1111 });
     await registerWorktree(reg, { dir: deadDir, repoRoot: repo, childSessionId: 'c2', createdAt: nowIso, ownerSessionId: 'sB', pid: 2222 });
     await registerWorktree(reg, { dir: agedDir, repoRoot: repo, childSessionId: 'c3', createdAt: oldIso, ownerSessionId: 'sC', pid: 3333 });
 
-    // 1111 and 3333 are "alive"; 2222 is dead. The aged entry sweeps despite its live pid.
+    // 1111 and 3333 are "alive"; 2222 is dead. ONLY the dead entry sweeps — age never overrides.
     const swept = await sweepOrphanedWorktrees(layout.projectDir, REAL_GIT!, { isAlive: (pid) => pid !== 2222 });
-    expect(swept.skippedLive).toEqual([liveDir]);
-    expect(swept.removed.sort()).toEqual([agedDir, deadDir].sort());
+    expect(swept.skippedLive.sort()).toEqual([agedDir, liveDir].sort());
+    expect(swept.removed).toEqual([deadDir]);
     expect(fs.existsSync(liveDir)).toBe(true); // the live sibling's worktree is untouched
     expect(fs.existsSync(deadDir)).toBe(false);
-    expect(fs.existsSync(agedDir)).toBe(false);
-    // The live entry SURVIVES in the registry for its owner's own cleanup.
-    expect(loadRegistry(reg).map((e) => e.dir)).toEqual([liveDir]);
+    expect(fs.existsSync(agedDir)).toBe(true); // the overnight executor's uncaptured work survives
+    // The live entries SURVIVE in the registry for their owners' own cleanup.
+    expect(loadRegistry(reg).map((e) => e.dir).sort()).toEqual([agedDir, liveDir].sort());
   });
 
   it('task-base refs: tracked at spawn, session-end prune deletes + records, apply still works from blobs', async () => {

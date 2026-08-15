@@ -31,9 +31,9 @@ import { isPidAlive } from '../store/event-log.js';
  * must never destroy a LIVE sibling's worktree. The locking machinery lives in
  * shared/registry-lock.ts (extracted in Session 13 for the preview registry — identical
  * semantics, one implementation); the rules that stay HERE are the sweep policies:
- *  - entries are stamped with their owning session + pid; the sweep skips entries whose pid is
- *    alive (conservative: a recycled pid delays a sweep, never the reverse) unless the entry is
- *    older than any live task can be (executor wall clock is minutes; the age hatch is hours);
+ *  - entries are stamped with their owning session + pid; the sweep skips every entry whose pid
+ *    is alive (conservative: a recycled pid delays a sweep, never the reverse — the removed age
+ *    hatch is argued at length above SweepOptions);
  *  - the lock is held only at the registry read/write edges — never across git removals, which
  *    can take minutes on a stuck handle. The sweep's final save is a MERGE (re-read, drop only
  *    what this sweep disposed of), so a concurrent registration always survives.
@@ -66,17 +66,19 @@ export function registryFile(projectDir: string): string {
 // Re-exported so existing consumers (tests included) keep one import site per concept.
 export { registryLockFile, REGISTRY_LOCK_STALE_MS };
 
-/**
- * Sweep age hatch: an entry older than this is swept even if its recorded pid is alive — only a
- * crashed session whose pid was recycled onto a long-lived process should look like this.
- *
- * 2h → 8h (S20.5, coupled to the executor-clock change in the same session): the wall clock now
- * EXCLUDES forwarded-approval wait, so a live executor whose human stepped away can legitimately
- * be hours old — the old hatch would have swept a live task's worktree out from under it. The
- * cost of the wider hatch is only that a genuinely recycled-pid orphan lingers a few hours
- * longer before the sweep takes it; a DEAD pid is still swept immediately.
+/*
+ * There is deliberately NO age hatch on live-pid entries (S22.5; it was 2h at V0.7.1, widened to
+ * 8h in S20.5, removed here). The hatch's premise — "older than any live task can be" — died the
+ * moment the executor wall clock started EXCLUDING forwarded-approval wait (S20.5): a live
+ * executor whose human stepped away overnight is legitimately arbitrarily old, and NO finite age
+ * distinguishes it from a crashed session whose pid was recycled onto a long-lived process.
+ * Nothing file-based can either (a crashed owner's stale registry entry and lock file both show
+ * the same live pid). Since one side of the ambiguity is destroying a live executor's uncaptured
+ * work with `worktree remove --force` and the other is a temp-dir checkout lingering until its
+ * squatter pid dies, the sweep now sides with the preview registry's doctrine — destruction
+ * needs positive identity; a live pid ALWAYS skips. A DEAD pid is still swept immediately, which
+ * covers the common crash (a crashed session's pid is normally dead, not recycled).
  */
-export const SWEEP_LIVE_MAX_AGE_MS = 8 * 60 * 60 * 1000;
 
 function isWorktreeEntry(e: unknown): e is WorktreeRegistryEntry {
   return (
@@ -155,10 +157,8 @@ export async function sweepOrphanedWorktrees(projectDir: string, gitPath: string
       dropDirs.add(e.dir); // already gone
       continue;
     }
-    const age = nowMs() - Date.parse(e.createdAt);
-    const beyondAgeHatch = Number.isFinite(age) && age > SWEEP_LIVE_MAX_AGE_MS;
-    if (e.pid !== undefined && Number.isInteger(e.pid) && isAlive(e.pid) && !beyondAgeHatch) {
-      skippedLive.push(e.dir); // a live sibling owns it — not an orphan
+    if (e.pid !== undefined && Number.isInteger(e.pid) && isAlive(e.pid)) {
+      skippedLive.push(e.dir); // a live owner — never an orphan, however old (see the header)
       continue;
     }
     candidates.push(e);

@@ -41,7 +41,6 @@ import { MAX_REPAIR_ATTEMPTS, REPAIRS_PER_SESSION, REPAIR_WALL_MS } from '../src
 import { MAX_REVIEW_ROUNDS, MAX_TASK_ATTEMPTS } from '../src/tools/delegate.js';
 import { MAX_PROJECT_UNITS, MAX_UNIT_DEPTH } from '../src/checks/workspace.js';
 import { DEFAULT_TRIGGER_CHARS, DEFAULT_TARGET_CHARS } from '../src/runtime/elision.js';
-import { SWEEP_LIVE_MAX_AGE_MS } from '../src/runtime/worktrees.js';
 import { MODELS, UNKNOWN_MODEL_CAPS, capsFor, contextBudgetFor } from '../src/provider/catalog.js';
 import { AGENT_MD_CAP_CHARS, JOURNAL_INJECT_CAP_CHARS, CODEBASE_CAP_CHARS, USER_AGENT_CAP_CHARS } from '../src/memory/load.js';
 import { JOURNAL_KEEP_FULL, JOURNAL_MAX_CHARS } from '../src/memory/journal.js';
@@ -102,10 +101,10 @@ describe('scale bounds (S16 raised these; S20.5 retuned them for the v1.6 shape)
     // read-only default: its work has the same interleaved read → confirm → record → read shape
     // that starved the diligent lenses at 15.
     expect(ROLE_CONTRACTS.inspector.budget).toEqual({ maxSteps: 24, timeoutMs: 720_000, maxOutputTokens: 30_000 });
-    // The worktree sweep's live-pid age hatch is COUPLED to the executor clock (S20.5): with
-    // approval wait excluded, a live task can legitimately be hours old.
-    expect(SWEEP_LIVE_MAX_AGE_MS).toBe(8 * 60 * 60 * 1000);
-    expect(SWEEP_LIVE_MAX_AGE_MS).toBeGreaterThan(EXECUTOR_BUDGET.timeoutMs * 4);
+    // S22.5: the worktree sweep's live-pid age hatch is GONE — with approval wait excluded from
+    // the executor clock (S20.5) a live task can be arbitrarily old, so no finite hatch was safe.
+    // A live pid always skips; the absence of the constant is itself the contract now, pinned by
+    // test/worktrees.test.ts ('a live pid is NEVER swept on age').
   });
 
   it('web research (Session 19; S20.5 raised the session pools)', () => {
