@@ -64,6 +64,66 @@ const READ_ONLY_GIT_SUBCMDS = new Set([
   'status', 'log', 'diff', 'show', 'branch', 'remote', 'rev-parse', 'describe', 'tag', 'shortlog',
   'ls-files', 'ls-tree', 'symbolic-ref', 'reflog', 'whatchanged', 'name-rev', 'var', 'version',
 ]);
+
+/**
+ * Per-subcommand argument validation for the five "read-only" git subcommand NAMES that admit
+ * mutating or network-reaching FORMS (S22.5 audit): `tag <name>` creates a ref, `branch <name>`
+ * creates one and `-d/-D/-m` delete/rename, `remote add/set-url/…` rewrite .git/config while
+ * `remote update/prune/show` contact the network (which the sandbox deliberately does not
+ * confine), `symbolic-ref <ref> <target>` REWRITES the first ref, and `reflog expire/delete`
+ * rewrite the reflog. Auto-allow is a POSITIVE PROOF, so each of these admits only its
+ * list/read shape; every other form falls to ask (fail closed, like everything else here).
+ */
+const GIT_SUBCMD_ARG_RULES: Record<string, (rest: string[]) => { ok: boolean; reason?: string }> = {
+  remote: (rest) => {
+    if (rest.every((a) => a === '-v' || a === '--verbose')) return { ok: true }; // bare list forms
+    if (rest[0] === 'get-url') {
+      const tail = rest.slice(1);
+      const flagsOk = tail.filter((a) => a.startsWith('-')).every((a) => a === '--push' || a === '--all');
+      const names = tail.filter((a) => !a.startsWith('-'));
+      if (flagsOk && names.length === 1) return { ok: true };
+      return { ok: false, reason: 'git remote get-url auto-runs only with one remote name; anything else asks' };
+    }
+    return {
+      ok: false,
+      reason: `git remote ${rest[0] ?? ''} rewrites .git/config or contacts the network; only listing forms (remote, remote -v, remote get-url <name>) auto-run`,
+    };
+  },
+  tag: (rest) => {
+    if (rest.length === 0) return { ok: true }; // bare `git tag` lists
+    const unsafe = rest.find((a) => /^(-a|-s|-d|-f|-e|-u|-m|-F|--annotate|--sign|--delete|--force|--edit|--local-user|--message|--file)/.test(a));
+    if (unsafe !== undefined) return { ok: false, reason: `git tag ${unsafe} creates, deletes or edits a tag; only listing forms auto-run` };
+    const listFlag = rest.some((a) => a === '-l' || a === '--list' || /^-n\d*$/.test(a));
+    if (!listFlag) return { ok: false, reason: 'git tag with arguments and no -l/--list would CREATE a tag; only listing forms auto-run' };
+    return { ok: true };
+  },
+  branch: (rest) => {
+    // Flags-only listing forms; ANY positional (a branch name) is a create/delete/rename target.
+    const SAFE_BRANCH_FLAG =
+      /^(-a|--all|-r|--remotes|-v|-vv|--verbose|-l|--list|--show-current|--merged|--no-merged|--contains|--no-contains|--sort=.*|--format=.*|--column(=.*)?|--no-column|-i|--ignore-case)$/;
+    const bad = rest.find((a) => !SAFE_BRANCH_FLAG.test(a));
+    if (bad !== undefined) {
+      return { ok: false, reason: `git branch ${bad} is not a provably read-only listing form (a bare name CREATES a branch); only listing flags auto-run` };
+    }
+    return { ok: true };
+  },
+  'symbolic-ref': (rest) => {
+    const badFlag = rest.find((a) => a.startsWith('-') && !/^(--short|-q|--quiet)$/.test(a));
+    if (badFlag !== undefined) return { ok: false, reason: `git symbolic-ref ${badFlag} disqualifies auto-run` };
+    const positionals = rest.filter((a) => !a.startsWith('-'));
+    if (positionals.length !== 1) {
+      return { ok: false, reason: 'git symbolic-ref auto-runs only in its single-ref READ form (a second ref REWRITES the first)' };
+    }
+    return { ok: true };
+  },
+  reflog: (rest) => {
+    if (rest[0] !== undefined && !rest[0].startsWith('-') && rest[0] !== 'show') {
+      return { ok: false, reason: `git reflog ${rest[0]} is not the read-only 'show' form (expire/delete REWRITE the reflog)` };
+    }
+    return { ok: true };
+  },
+};
+
 const gitCheck: ArgCheck = (args) => {
   const first = args[0];
   if (first === undefined) return { ok: false, reason: 'bare git is not auto-runnable' };
@@ -71,6 +131,11 @@ const gitCheck: ArgCheck = (args) => {
   if (first.startsWith('-')) return { ok: false, reason: `git global flag ${first} disqualifies auto-run` };
   if (!READ_ONLY_GIT_SUBCMDS.has(first.toLowerCase())) {
     return { ok: false, reason: `git ${first} is not a known read-only subcommand` };
+  }
+  const subRule = GIT_SUBCMD_ARG_RULES[first.toLowerCase()];
+  if (subRule !== undefined) {
+    const r = subRule(args.slice(1));
+    if (!r.ok) return r;
   }
   // Reject any pager/exec/config escape hiding in later args.
   for (const a of args.slice(1)) {
