@@ -237,17 +237,35 @@ describe('browser_flow evidence', () => {
     expect(h.deps.caps.checksRun).toBe(0);
   });
 
-  it('budget refusals spawn nothing and record nothing', async () => {
+  it('the check-budget refusal spawns nothing and names the consequence and both exits', async () => {
     const h = harness({ caps: { checksRun: CHECKS_PER_SESSION } });
     const t = createBrowserFlowTool(h.deps);
     const r = await t.execute(FLOW_INPUT, h.ctx);
     expect(r.error).toContain('check budget');
+    // S22.5: the flow is the 'browser' kind's ONLY producer, so a bare refusal stranded a plan
+    // gating on it — the refusal now carries run_check's consequence-and-exits text.
+    expect(r.output).toContain('cannot be accepted as complete');
+    expect(r.output).toContain('update_plan');
+    expect(r.output).toContain('/accept confirm');
     expect(h.checks).toHaveLength(0);
+  });
 
-    const h2 = harness({ artifactBudget: { usedBytes: ARTIFACT_BYTES_PER_SESSION } });
+  it('a SPENT artifact byte budget does not refuse the flow: it runs, and artifacts drop with markers (S22.5)', async () => {
+    // The gate's evidence is the typed step outcomes, not the stored bytes — refusing here
+    // stranded the browser gate over screenshots that were never what the flow proves.
+    const h2 = harness({
+      artifactBudget: { usedBytes: ARTIFACT_BYTES_PER_SESSION },
+      run: (_s, d2) => {
+        d2.onBrowserLaunched?.();
+        return Promise.resolve(passResult({ artifacts: [{ kind: 'screenshot', bytes: SHOT, label: 'shot', mediaType: 'image/png' }] }));
+      },
+    });
     const r2 = await createBrowserFlowTool(h2.deps).execute(FLOW_INPUT, h2.ctx);
-    expect(r2.error).toContain('artifact budget');
-    expect(h2.checks).toHaveLength(0);
+    expect(r2.ok).toBe(true);
+    expect(h2.flows).toHaveLength(1); // the flow RAN and its evidence recorded
+    expect(r2.output).toContain('1 declared screenshot(s) NOT stored');
+    expect(h2.flows[0]!.screenshotsOmitted).toBe(1);
+    expect(h2.flows[0]!.artifacts).toEqual([]);
   });
 
   it('an over-budget trace is dropped with its size recorded, never silently', async () => {

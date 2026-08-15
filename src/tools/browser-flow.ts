@@ -144,17 +144,23 @@ export function createBrowserFlowTool(deps: BrowserToolDeps): Tool<BrowserFlowIn
       };
 
       if (deps.caps.checksRun + 1 > CHECKS_PER_SESSION) {
+        // Mirrors run_check's budget refusal (S22.5): a bare refusal stranded a plan gating on
+        // 'browser' with no exit named — the flow is this kind's ONLY producer.
         return refuse(
-          `this session's check budget is exhausted (${String(deps.caps.checksRun)}/${String(CHECKS_PER_SESSION)} run — browser flows share it). Nothing ran.`,
+          `this session's check budget is exhausted (${String(deps.caps.checksRun)}/${String(CHECKS_PER_SESSION)} run — browser flows share it). Nothing ran. ` +
+            `Repeated identical flows are not progress.\n` +
+            `Consequence: any plan task gating on a browser check can no longer be satisfied, so its dependents stay blocked and the ` +
+            `session cannot be accepted as complete. The only exits are to amend the plan's checks/gates with update_plan ` +
+            `(this resets approval and requires the user to re-approve), or to tell the user, who can record a partial ` +
+            `acceptance with /accept confirm.`,
           'check budget exhausted',
         );
       }
-      if (deps.artifactBudget.usedBytes >= ARTIFACT_BYTES_PER_SESSION) {
-        return refuse(
-          `this session's browser-artifact budget is exhausted (${String(Math.round(deps.artifactBudget.usedBytes / 1024 / 1024))} MiB stored). Nothing ran.`,
-          'artifact budget exhausted',
-        );
-      }
+      // A spent ARTIFACT byte budget deliberately does NOT refuse the flow (S22.5): the gate's
+      // evidence is the typed step outcomes, not the stored screenshots, and the storage loop
+      // below already drops over-budget artifacts with recorded omission markers — the same
+      // honest degradation a mid-run exhaustion gets. Refusing here stranded the browser gate
+      // over bytes that were never what the flow proves.
 
       // A turn aborted before anything ran: refuse the CALL, no events, nothing spawned.
       if (ctx.signal?.aborted === true) {
