@@ -153,4 +153,83 @@ describe('reconstruct crash reconciliation', () => {
     expect(rendered).toContain('effects are unknown');
     expect(rendered).not.toContain('"interrupted by session crash"');
   });
+
+  // ── S22.5: completion-aware replay — the kill window between the report* evidence append and
+  // the tool.completed append (redaction + up-to-8MiB spill write) used to replay as "effects
+  // unknown, re-run" while /report showed the same call's recorded verdict. Two surfaces, one
+  // call, two different truths; the log's own completion evidence now wins.
+  const cmdBase = (tool: string, input: unknown): SessionEvent[] => [
+    { v: 1, seq: 1, ts: 't', type: 'user.message', text: 'go' },
+    {
+      v: 1, seq: 2, ts: 't', type: 'assistant.message', text: 'running',
+      toolCalls: [{ id: 'c1', name: tool, input }],
+      stopReason: 'tool_use', usage: { inputTokens: 0, outputTokens: 0 },
+    },
+    { v: 1, seq: 3, ts: 't', type: 'tool.requested', callId: 'c1', tool, input },
+  ];
+
+  it('a command whose command.ended LANDED replays its verdict, not "effects unknown" (S22.5)', () => {
+    const events: SessionEvent[] = [
+      ...cmdBase('run_command', { command: 'npm run build' }),
+      { v: 1, seq: 4, ts: 't', type: 'command.started', callId: 'c1', pid: 777, shell: 'powershell.exe', cwd: ws, timeoutMs: 120000 },
+      { v: 1, seq: 5, ts: 't', type: 'command.ended', callId: 'c1', termination: 'exited', exitCode: 0, durationMs: 900 },
+      // Crash in the post-processing window: no tool.completed.
+    ];
+    const r = reconstruct(events, ws);
+    expect(r.orphanedCallIds).not.toContain('c1'); // positive evidence, not an orphan
+    const block = r.messages.flatMap((m) => m.content).find((b) => b.type === 'tool_result' && b.toolUseId === 'c1');
+    expect(block!.type === 'tool_result' && block!.isError === true).toBe(false); // isError is omitted when false
+    const rendered = JSON.stringify(r.messages);
+    expect(rendered).toContain('FINISHED (exit 0)');
+    expect(rendered).not.toContain('effects are unknown');
+  });
+
+  it('typed checks whose verdicts LANDED replay them by name instead of demanding a re-run (S22.5)', () => {
+    const events: SessionEvent[] = [
+      ...cmdBase('run_check', { checks: ['build', 'test'] }),
+      { v: 1, seq: 4, ts: 't', type: 'check.started', callId: 'c1', check: 'build', recipeId: 'node.script.build', command: 'npm run build', cwd: ws, timeoutMs: 600000 },
+      { v: 1, seq: 5, ts: 't', type: 'check.completed', callId: 'c1', check: 'build', recipeId: 'node.script.build', status: 'pass', summary: 'build passed', exitCode: 0, durationMs: 5 },
+      { v: 1, seq: 6, ts: 't', type: 'check.completed', callId: 'c1', check: 'test', recipeId: 'node.script.test', status: 'fail', summary: 'test failed', exitCode: 1, durationMs: 5 },
+    ];
+    const r = reconstruct(events, ws);
+    expect(r.orphanedCallIds).not.toContain('c1');
+    const rendered = JSON.stringify(r.messages);
+    expect(rendered).toContain('build: pass, test: fail');
+    expect(rendered).toContain('re-run only checks NOT listed here');
+    expect(rendered).not.toContain('produced no verdict');
+  });
+
+  it('a VERIFIED remote mutation replays as landed — never as a generic crash inviting a second push (S22.5)', () => {
+    const events: SessionEvent[] = [
+      ...cmdBase('remote_push', { ref: 'main' }),
+      {
+        v: 1, seq: 4, ts: 't', type: 'remote.mutated', callId: 'c1', operation: 'push.branch', host: 'github.com',
+        target: 'github.com/u/r', exactTarget: 'refs/heads/main', afterOid: 'abc123abc123abc123', overwrote: false,
+        ok: true, verified: true, durationMs: 900,
+      },
+    ];
+    const r = reconstruct(events, ws);
+    expect(r.orphanedCallIds).not.toContain('c1');
+    const block = r.messages.flatMap((m) => m.content).find((b) => b.type === 'tool_result' && b.toolUseId === 'c1');
+    expect(block!.type === 'tool_result' && block!.isError === true).toBe(false); // isError is omitted when false
+    const rendered = JSON.stringify(r.messages);
+    expect(rendered).toContain('VERIFIED against the remote');
+    expect(rendered).toContain('do NOT re-run it');
+    expect(rendered).not.toContain('interrupted by session crash');
+  });
+
+  it('an UNREADABLE mutated file degrades to unknown-post-state instead of failing the resume (S22.5)', () => {
+    // A directory at the recorded path makes readFileSync throw (EISDIR) — the same failure
+    // class as an AV/indexer holding a just-written file at the moment of resume. Crash
+    // recovery must degrade honestly, not die with a raw fs error.
+    const dirAsFile = path.join(ws, 'held.txt');
+    fs.mkdirSync(dirAsFile, { recursive: true });
+    const events: SessionEvent[] = [
+      ...base(),
+      { v: 1, seq: 4, ts: 't', type: 'file.mutated', callId: 'c1', path: dirAsFile, kind: 'modify', beforeSha256: sha256('a'), afterSha256: sha256('b'), createdDirs: [] },
+    ];
+    const r = reconstruct(events, ws);
+    expect(r.unknownPostStateCallIds).toContain('c1');
+    expect(JSON.stringify(r.messages)).toContain('disk state could not be verified');
+  });
 });

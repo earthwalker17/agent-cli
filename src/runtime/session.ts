@@ -308,13 +308,28 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   const taskStartedBy = new Map<string, Extract<SessionEvent, { type: 'task.started' }>[]>();
   const taskChangesBy = new Set<string>();
   const checkpointBy = new Map<string, Extract<SessionEvent, { type: 'harness.checkpoint' }>>();
+  // S22.5: COMPLETION evidence, indexed alongside the started markers. The report* channels
+  // append these DURING tool.execute, before the tool.completed that follows redaction and the
+  // spill write — so a kill in that window leaves a call whose outcome the log already records.
+  // Replaying it as "effects unknown, re-run" contradicted /report over the same bytes (and for
+  // a remote mutation invited a second push). The harness.checkpoint branch below was the S21.6
+  // precedent; these four give command/check/setup/remote outcomes the same completion-aware
+  // replay.
+  const commandEndedBy = new Map<string, Extract<SessionEvent, { type: 'command.ended' }>>();
+  const checkCompletedBy = new Map<string, Extract<SessionEvent, { type: 'check.completed' }>[]>();
+  const setupCompletedBy = new Map<string, Extract<SessionEvent, { type: 'setup.completed' }>>();
+  const remoteMutatedBy = new Map<string, Extract<SessionEvent, { type: 'remote.mutated' }>[]>();
   for (const e of events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
     else if (e.type === 'file.mutated') (mutatedBy.get(e.callId) ?? mutatedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
     else if (e.type === 'command.started') commandStartedBy.add(e.callId);
+    else if (e.type === 'command.ended') commandEndedBy.set(e.callId, e);
     else if (e.type === 'check.started') (checkStartedBy.get(e.callId) ?? checkStartedBy.set(e.callId, []).get(e.callId)!).push(e.check);
+    else if (e.type === 'check.completed') (checkCompletedBy.get(e.callId) ?? checkCompletedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'setup.started') setupStartedBy.set(e.callId, { action: e.action, projectId: e.projectId });
+    else if (e.type === 'setup.completed') setupCompletedBy.set(e.callId, e);
+    else if (e.type === 'remote.mutated') (remoteMutatedBy.get(e.callId) ?? remoteMutatedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'task.started') (taskStartedBy.get(e.callId) ?? taskStartedBy.set(e.callId, []).get(e.callId)!).push(e);
     else if (e.type === 'task.changes') taskChangesBy.add(e.callId);
     // S21.6: an agent checkpoint's ONLY per-call evidence is this event — unlike every other
@@ -327,8 +342,16 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
   const orphanedCallIds: string[] = [];
   const unknownPostStateCallIds: string[] = [];
   const diskMatches = (m: Extract<SessionEvent, { type: 'file.mutated' }>): boolean => {
-    const cur = fs.existsSync(m.path) ? sha256(fs.readFileSync(m.path)) : null;
-    return cur === m.afterSha256;
+    // Guarded (S22.5): resume runs at exactly the moment an AV scanner or indexer may hold the
+    // just-written file — the same transient EPERM/EBUSY class the live readback path tolerates.
+    // An unreadable file must degrade to the honest "disk state could not be verified" result,
+    // not throw crash recovery away with a raw fs error.
+    try {
+      const cur = fs.existsSync(m.path) ? sha256(fs.readFileSync(m.path)) : null;
+      return cur === m.afterSha256;
+    } catch {
+      return false;
+    }
   };
   const resultFor = (id: string): ContentBlock => {
     const c = completedBy.get(id);
@@ -352,6 +375,54 @@ export function reconstruct(events: readonly SessionEvent[], workspaceRoot: stri
         id,
         `interrupted after the recovery point was recorded (${ckpt.oid.slice(0, 12)}, ref ${ckpt.ref}); the session allowance was charged. Verify with git_status view=checkpoints — do not re-take it.`,
         false,
+      );
+    }
+    // S22.5 completion-aware replays: the outcome landed in the log before the crash — only the
+    // call's OUTPUT was lost. Like the checkpoint branch above, these are positive evidence, not
+    // orphans, and the replay must agree with what /report shows for the same call.
+    const rms = remoteMutatedBy.get(id);
+    if (rms !== undefined && rms.length > 0) {
+      const rm = rms[rms.length - 1]!;
+      const landed = rm.ok && rm.verified;
+      return toolResultBlock(
+        id,
+        landed
+          ? `interrupted AFTER the remote mutation completed: ${rm.operation} → ${rm.exactTarget} on ${rm.host} landed and was VERIFIED against the remote` +
+              `${typeof rm.afterOid === 'string' ? ` (now at ${rm.afterOid.slice(0, 12)})` : ''}. Only the call's output was lost — do NOT re-run it; confirm with remote_status view=refs.`
+          : `interrupted during a remote mutation: ${rm.operation} → ${rm.exactTarget} on ${rm.host} recorded ok=${String(rm.ok)}, verified=${String(rm.verified)}. Re-observe the remote (remote_status view=refs) before any retry.`,
+        !landed,
+      );
+    }
+    const ce = commandEndedBy.get(id);
+    if (ce !== undefined) {
+      if (ce.termination === 'exited') {
+        return toolResultBlock(
+          id,
+          `interrupted after the command FINISHED (exit ${String(ce.exitCode)}); the crash lost only the captured output — the recorded evidence stands (/report). Re-run only if the output itself is needed again.`,
+          ce.exitCode !== 0,
+        );
+      }
+      return toolResultBlock(
+        id,
+        `interrupted: the command ended without a verdict (${ce.termination}) and the session crashed before its result was recorded; its effects are unknown — verify before retrying`,
+        true,
+      );
+    }
+    const ccs = checkCompletedBy.get(id);
+    if (ccs !== undefined && ccs.length > 0) {
+      const verdicts = ccs.map((c) => `${c.check}: ${c.status}`).join(', ');
+      return toolResultBlock(
+        id,
+        `interrupted after typed check verdict(s) were recorded (${verdicts}); the crash lost only the output. The recorded verdicts stand — re-run only checks NOT listed here.`,
+        !ccs.every((c) => c.status === 'pass'),
+      );
+    }
+    const sc = setupCompletedBy.get(id);
+    if (sc !== undefined) {
+      return toolResultBlock(
+        id,
+        `interrupted after the project ${sc.action} for ${sc.projectId} recorded its outcome (${sc.status}${sc.exitCode !== null ? `, exit ${String(sc.exitCode)}` : ''}); the crash lost only the output — the recorded outcome stands.`,
+        sc.status !== 'ok',
       );
     }
     orphanedCallIds.push(id);
@@ -671,7 +742,11 @@ export async function runTurn(session: Session, userText: string, opts: TurnOpti
       if (signal?.aborted || stopRequested) {
         sawAbort = sawAbort || (signal?.aborted ?? false);
         toolResults.push(
-          recordSkippedCall(session, tu, signal?.aborted ? 'interrupted by user' : 'skipped: session stopped by user'),
+          // Cause-neutral wording (S22.5): in a CHILD session this same signal fires for the
+          // wall clock, the token budget, the stalled-loop supervisor and a parent abort — four
+          // harness causes 'interrupted by user' falsely attributed to a human. The true cause
+          // lives in turn.aborted / task.ended / session.ended; the per-call text stays neutral.
+          recordSkippedCall(session, tu, signal?.aborted ? 'interrupted: turn aborted' : 'skipped: session stopped by user'),
         );
         continue;
       }
@@ -718,11 +793,13 @@ export function repairDanglingToolUses(session: Session): boolean {
   const mutatedBy = new Set<string>();
   const snapBy = new Set<string>();
   const spawnedBy = new Set<string>();
+  const endedBy = new Map<string, Extract<SessionEvent, { type: 'command.ended' }>>();
   for (const e of session.log.events) {
     if (e.type === 'tool.completed') completedBy.set(e.callId, e);
     else if (e.type === 'file.mutated') mutatedBy.add(e.callId);
     else if (e.type === 'snapshot.created') snapBy.add(e.callId);
     else if (e.type === 'command.started' || e.type === 'check.started' || e.type === 'setup.started') spawnedBy.add(e.callId);
+    else if (e.type === 'command.ended') endedBy.set(e.callId, e);
   }
   // The appended completion SHADOWS reconstruct's own classification on every later resume
   // (resultFor consults completions first), so it must tell the same truth reconstruct would:
@@ -731,6 +808,11 @@ export function repairDanglingToolUses(session: Session): boolean {
   const messageFor = (id: string): string => {
     if (mutatedBy.has(id)) return 'interrupted mid-call AFTER file changes were recorded — the writes are on disk and covered by /undo; verify before retrying';
     if (snapBy.has(id)) return 'interrupted after a pre-write snapshot; the write may or may not have reached disk — verify before retrying';
+    const ended = endedBy.get(id);
+    if (ended !== undefined && ended.termination === 'exited') {
+      // S22.5, matching reconstruct's completion-aware replay: the verdict is on the record.
+      return `interrupted mid-call AFTER the command finished (exit ${String(ended.exitCode)}) — the recorded evidence stands; only the output was lost`;
+    }
     if (spawnedBy.has(id)) return 'interrupted after this call spawned a process; its effects are unknown — verify before retrying';
     return 'interrupted: the turn failed before this call ran';
   };

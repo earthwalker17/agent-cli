@@ -122,7 +122,7 @@ describe('turn abort: tool phase', () => {
     expect(events.some((e) => e.type === 'turn.aborted' && e.phase === 'tools')).toBe(true);
     const completions = events.filter((e) => e.type === 'tool.completed');
     expect(completions.length).toBe(2);
-    expect(completions[1]).toMatchObject({ ok: false, outputPreview: 'interrupted by user' });
+    expect(completions[1]).toMatchObject({ ok: false, outputPreview: 'interrupted: turn aborted' });
 
     // The wire history stays API-valid, and the next turn runs cleanly on it.
     assertApiValidHistory(session.messages);

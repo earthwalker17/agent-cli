@@ -144,7 +144,7 @@ describe('buildReport determinism & honesty', () => {
     const { json, md } = buildReport({ events });
     expect(json.commands).toHaveLength(1);
     expect(json.commands[0]).toMatchObject({ command: 'npm test', termination: 'aborted' });
-    expect(md).toContain('killed: aborted by user');
+    expect(md).toContain('killed: aborted');
     expect(md).toContain('no exit code');
     expect(md).toContain('never counts as a passing check');
     expect(json.filesChanged[0]!.checked).toBe(false); // a killed check can never CHECK a file

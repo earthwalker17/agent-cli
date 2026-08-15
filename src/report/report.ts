@@ -1287,7 +1287,10 @@ function renderMarkdown(r: ReportJson): string {
       } else if (c.termination === 'timeout') {
         L.push(`- \`${c.command}\`  → killed: timed out (${c.durationMs} ms); no exit code${box}`);
       } else if (c.termination === 'aborted') {
-        L.push(`- \`${c.command}\`  → killed: aborted by user (${c.durationMs} ms); no exit code${box}`);
+        // 'aborted', not 'aborted by user' (S22.5): a child session's abort can be the wall
+        // clock, the token budget or the loop supervisor; the true cause is in the turn/task/
+        // session events, so the per-command line stays cause-neutral.
+        L.push(`- \`${c.command}\`  → killed: aborted (${c.durationMs} ms); no exit code${box}`);
       } else if (c.termination === 'spawn-error') {
         L.push(`- \`${c.command}\`  → failed to spawn${box}`);
       } else {

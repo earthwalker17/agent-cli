@@ -122,7 +122,7 @@ describe('run_command', () => {
     );
     expect(r.ok).toBe(false);
     expect(r.termination).toBe('aborted');
-    expect(r.error).toMatch(/aborted by user/);
+    expect(r.error).toMatch(/aborted after/);
     expect(r.exitCode).toBeUndefined();
     const started = events.find((e) => e.kind === 'started');
     const ended = events.find((e) => e.kind === 'ended');

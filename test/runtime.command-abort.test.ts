@@ -106,7 +106,7 @@ describe('mid-command cancellation (runtime)', () => {
     const completions = events.filter((e) => e.type === 'tool.completed');
     expect(completions.length).toBe(2);
     expect(completions[0]).toMatchObject({ ok: false });
-    expect(completions[1]).toMatchObject({ ok: false, outputPreview: 'interrupted by user' }); // the skipped write
+    expect(completions[1]).toMatchObject({ ok: false, outputPreview: 'interrupted: turn aborted' }); // the skipped write
 
     expect(events.some((e) => e.type === 'turn.aborted' && e.phase === 'tools')).toBe(true);
 
@@ -114,7 +114,7 @@ describe('mid-command cancellation (runtime)', () => {
     const toolResults = session.messages
       .flatMap((m) => m.content)
       .filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result');
-    expect(toolResults[0]!.content).toMatch(/aborted by user/);
+    expect(toolResults[0]!.content).toMatch(/aborted after/);
 
     // The real child is actually dead (bounded poll, not a fixed sleep).
     const pid = started!.type === 'command.started' ? started!.pid : 0;

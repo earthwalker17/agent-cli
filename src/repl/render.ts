@@ -262,7 +262,7 @@ export function createRenderer(opts: {
           flushCmdOutput(true);
           flushFoldTail();
           if (e.termination === 'timeout' || e.termination === 'aborted') {
-            const why = e.termination === 'timeout' ? `timed out after ${fmtDuration(e.durationMs)}` : 'aborted by user';
+            const why = e.termination === 'timeout' ? `timed out after ${fmtDuration(e.durationMs)}` : 'aborted';
             chromeLine(style.yellow(`  ${g.warn} command ${why} — process tree force-killed (best effort); no exit code`));
           }
           break;

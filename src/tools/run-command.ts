@@ -166,7 +166,9 @@ export const runCommandTool: Tool<z.infer<typeof RunInput>> = {
       case 'timeout':
         return { ...base, error: `timed out after ${timeoutMs}ms; no exit code${killNote}` };
       case 'aborted':
-        return { ...base, error: `aborted by user after ${outcome.durationMs}ms; no exit code${killNote}` };
+        // Cause-neutral (S22.5): in a child session this abort can be the wall clock, the token
+        // budget or the loop supervisor — 'by user' was a false attribution in durable evidence.
+        return { ...base, error: `aborted after ${outcome.durationMs}ms; no exit code${killNote}` };
       case 'spawn-error':
         return { ...base, error: outcome.spawnError ?? 'failed to spawn shell' };
     }
