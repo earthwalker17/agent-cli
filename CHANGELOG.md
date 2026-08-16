@@ -51,6 +51,13 @@ not imply a registry release, and documentation someone can actually read.
   audit` reports zero with and without `--omit=dev`.
 - `.github/dependabot.yml` described a `typescript` exclusion that was not configured. It now
   describes what is actually there.
+- **The Code of Conduct pointed at a channel that did not exist.** Its enforcement section routed
+  reports to the security-advisory form "or by opening a discussion with the maintainer directly" —
+  but Discussions was not enabled on this repository at all. Discussions is now on, and the section
+  states what is true: two channels, the advisory form named as the only PRIVATE one this project
+  has rather than as the right tool, and Discussions named with the warning that it is public and
+  therefore unsuited to a report about a person. The issue chooser gains both a Discussions link
+  and a pointer to `docs/USAGE.md`.
 
 ### Changed
 
