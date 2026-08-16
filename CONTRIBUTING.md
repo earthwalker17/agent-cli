@@ -15,11 +15,13 @@ they explain *why* several things that look over-engineered are the way they are
 git clone https://github.com/earthwalker17/agent-cli.git
 cd agent-cli
 npm install          # runs the build automatically (see the `prepare` script)
-npm test             # 2,415 tests, hermetic — no network, no API key, no billing
+npm test             # the full suite, hermetic — no network, no API key, no billing
 ```
 
-Requires **Node 22+**. Developed and tested Windows-first; the logic is cross-platform, but only
-the Windows path rules and the Windows sandbox backend are exercised in full.
+Requires **Node 22+**. Developed Windows-first, and CI gates on **both Windows and Linux**. Windows
+is the load-bearing leg: the Low-integrity sandbox suites and the win32 path rules execute only
+there, so it is the run that can falsify this project's claims. On Linux those suites skip and the
+rest proves the runtime is genuinely cross-platform. macOS is not exercised by CI.
 
 To use the CLI itself you need `ANTHROPIC_API_KEY` in your environment. Running the agent costs
 money — the test suite does not.
