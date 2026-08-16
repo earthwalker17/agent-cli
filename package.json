@@ -53,7 +53,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.115.0",
+    "@anthropic-ai/sdk": "^0.116.0",
     "@rgrove/parse-xml": "^4.2.3",
     "diff": "^8.0.4",
     "fflate": "^0.8.3",
