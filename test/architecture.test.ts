@@ -157,6 +157,21 @@ describe('module boundaries (S20.5) — invariants, not an edge matrix', () => {
 });
 
 describe('release surface (S22.5)', () => {
+  it('the Node floor guard is the FIRST import, and imports nothing itself (S22.6)', () => {
+    // The guard's whole promise is that it runs before anything else. ESM evaluates imports in
+    // source order and BEFORE the importing module's body, so that promise holds only while
+    // `./node-floor.js` is literally the first import of the entry point and node-floor itself
+    // pulls in nothing. Either fact silently reverting turns the friendly "upgrade Node" line
+    // back into whatever cryptic error the module graph produces first on an old runtime.
+    const entry = fs.readFileSync(path.join(SRC, 'cli', 'index.ts'), 'utf8');
+    const firstImport = entry.match(/^import\s.*$/m)?.[0] ?? '';
+    expect(firstImport).toContain('./node-floor.js');
+
+    const floor = fs.readFileSync(path.join(SRC, 'cli', 'node-floor.ts'), 'utf8');
+    expect(floor.match(/^import\s/m), 'node-floor.ts must import nothing — an import runs before it').toBeNull();
+    expect(floor).toContain('process.exit(1)');
+  });
+
   it('package-lock.json records the same version as package.json', () => {
     // The lockfile version is stamped only when `npm install` runs after a bump; it sat at
     // 1.4.0 through six releases. Drift is invisible until someone reads the lockfile and

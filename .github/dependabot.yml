@@ -5,8 +5,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    # typescript is pinned with a tilde on purpose (patch-only): TS minors routinely surface new
-    # errors in a codebase this strict, and that should be a deliberate upgrade, not a bot PR.
+    # Only widen a declared range when the new version does not already satisfy it, so ordinary
+    # patch bumps arrive as lockfile-only PRs.
+    #
+    # Note what this does NOT do, since the comment here used to imply otherwise: typescript is
+    # tilde-pinned (`~5.9.3`) because TS minors routinely surface new errors in a codebase this
+    # strict — but a tilde pin plus this strategy still produces a PR when a minor lands, because
+    # the minor does not satisfy the range. That is the intended outcome: the bump is visible and
+    # reviewed by hand rather than silent. It is not an exclusion, and there is deliberately no
+    # `ignore` entry pretending it is one.
     versioning-strategy: increase-if-necessary
     groups:
       dev-dependencies:

@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// FIRST, and deliberately above every other import: ESM evaluates imports in source order, so a
+// dependency-free module here is the only thing that can run before the rest of the graph loads.
+// See src/cli/node-floor.ts for why a check in this file's own body would not be first at all.
+import './node-floor.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -28,15 +32,6 @@ import { createProviderRegistry } from '../provider/registry.js';
 import { assembleSession } from './assemble.js';
 import { memoryDir, parseFrontmatter, readDocCapped } from '../memory/store.js';
 import { runMemoryUpdate } from '../memory/update.js';
-
-// Node floor (S22.5): `engines` is ADVISORY — npm warns and installs anyway — and the failure
-// mode on an old runtime is a cryptic crash mid-session (AbortSignal.any and friends), long
-// after startup. One check before anything else runs, one actionable line, a non-zero exit.
-const nodeMajor = Number(process.versions.node.split('.')[0]);
-if (Number.isFinite(nodeMajor) && nodeMajor < 22) {
-  process.stderr.write(`agent-cli requires Node 22 or newer; this is Node ${process.versions.node}. Upgrade Node and re-run.\n`);
-  process.exit(1);
-}
 
 // The single version source is package.json; the CLI reads its own copy so the banner can
 // never drift from the published version again (the usage header sat at "V0.7" for seven
