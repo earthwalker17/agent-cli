@@ -3,6 +3,12 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/earthwalker17/agent-cli/security/advisories/new
     about: Report privately — please do not open a public issue for security problems.
+  - name: Questions and ideas
+    url: https://github.com/earthwalker17/agent-cli/discussions
+    about: Not sure it is a bug? Ask here rather than filing an issue.
+  - name: How to use it
+    url: https://github.com/earthwalker17/agent-cli/blob/main/docs/USAGE.md
+    about: Every command, flag, exit code, provider and configuration knob.
   - name: How it works
     url: https://github.com/earthwalker17/agent-cli/blob/main/docs/ARCHITECTURE.md
     about: Contracts, orderings, and the honest limits of the implemented system.

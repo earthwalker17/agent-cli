@@ -53,13 +53,22 @@ officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behaviour may be reported to the
-project maintainer through
-[GitHub private vulnerability reporting](https://github.com/earthwalker17/agent-cli/security/advisories/new)
-or by opening a discussion with the maintainer directly. All complaints will be reviewed and
-investigated promptly and fairly.
+project maintainer. All complaints will be reviewed and investigated promptly and fairly, and the
+privacy and security of the reporter will be respected.
 
-All community leaders are obligated to respect the privacy and security of the reporter of any
-incident.
+**Where to report, stated honestly.** This is a single-maintainer project with no staffed contact
+address, so the reporting options are these two and no others:
+
+- **Privately:** [GitHub private vulnerability reporting](https://github.com/earthwalker17/agent-cli/security/advisories/new).
+  That form is built for security reports rather than conduct reports, and it is being named here
+  because it is the only private channel this project has — not because it is the right tool.
+  Reports about people are read and handled the same way, and nothing about the form makes them
+  public.
+- **Publicly, when that is appropriate:** [Discussions](https://github.com/earthwalker17/agent-cli/discussions).
+  A discussion is visible to everyone, so it suits a concern about conduct in a public thread and
+  does **not** suit a report about a person you would not want to name in the open.
+
+If neither fits your situation, say so in a private report and it will be handled from there.
 
 ## Attribution
 
