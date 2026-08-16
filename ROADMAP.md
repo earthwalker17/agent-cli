@@ -6,6 +6,101 @@ limitations. Newest first. Contracts live in `ARCHITECTURE.md`.
 
 ---
 
+## Session 22.5 (2026-08-15/16) — Production release hardening & the final E2E (v1.10.1)
+
+**Objective.** A consolidation/proof session, deliberately zero capability expansion: the most
+thorough production-readiness pass so far over v1.10.0, then the final full-system live E2E from
+an empty folder using the post-fix build. Publish only afterwards, so the release notes carry
+the proof.
+
+### The audit and the fixes (eleven commits, each typecheck+suite-gated)
+
+One bounded 6-lens Workflow (kernel, limits, authority, ARCH-contracts, packaging, ux) plus
+three plan-mode explorations → ~21 unique findings, **every actionable one hand-verified against
+source** before any fix. Full text: `agent-cli-s225-live/audit-findings-all-lenses.txt`.
+
+- `8d939fe` **approvals**: scope keys `[s]`/`[a]` exact-token (`s`/`session`, `a`/`always`) AND
+  gated on whether the prompt offered that scope; `allow`→once; `stop`/`skip`/`sure`/`abort` now
+  DENY. The recorded hazard: `stop` typed at a remote-write prompt parsed as a grant, and the
+  engine executes on any allow — it EXECUTED THE PUSH.
+- `553e1e4` **policy**: read-only git subcommand names get read-only ARGUMENT proofs
+  (`git tag v1` created a ref via auto-run; `git remote update` reached the network; `git remote
+  add` rewrote `.git/config`). 16 adversarial + 9 safe corpus rows.
+- `1d8f75c` **worktrees**: the live-pid age hatch is REMOVED — approval wait is excluded from
+  the executor clock, so a live task's age is unbounded and no finite hatch was safe; a live pid
+  always skips, dead pids sweep immediately.
+- `6b191da` **browser**: a spent artifact byte budget drops artifacts (with omission markers)
+  instead of refusing the whole flow; the check-budget refusal names its exits.
+- `a4431b1` **runtime**: crash replay consults recorded COMPLETION evidence
+  (`command.ended`/`check.completed`/`setup.completed`/`remote.mutated`) instead of "effects
+  unknown — re-run" (a VERIFIED push used to replay as a crash inviting a second push); resume
+  survives an unreadable spill file; abort wording is cause-neutral.
+- `651989c` **consent**: `[c]` no longer mints `session.accepted` when the commit it promised
+  was cancelled/refused (event-log snapshot, git.commit required); the plan-less quit-boundary
+  header stops claiming a plan and gates. Both were then OBSERVED live in the E2E.
+- `4274218` **ux smalls**: HELP teaches the bare-`/` menu + Tab; ambiguous `/` prefixes name
+  candidates instead of "unknown"; the untracked-guard prompts say declining skips the WHOLE
+  checkpoint; one-shot exit-2 runs explain their denials on stderr; `/research`+`/remote` keep
+  their section separators; the command table's commit row gains `[--no-trailer]`.
+- `175ee7e` **packaging**: a Node<22 floor guard before anything runs (engines is advisory);
+  release builds emit no source maps and clean `dist/` first (tarball 380→192 files, ~half the
+  bytes); `package-lock.json` restamped (it said 1.4.0 for six releases) and pinned ==
+  package.json by a test.
+- `07888bc` **limits**: the unpinned load-bearing bounds join the visible table — plan graph
+  32k/20 tasks and flow 20 steps/15s waits through their schemas, artifact budgets
+  (96 MiB/30/80/48 MiB), capture 4 MiB / spill 8 MiB, config maxSteps 400, and the
+  REPETITION-side review caps (8 findings / 10 observations).
+- `213d74c` **docs**: every public surface reconciled (ARCHITECTURE v1.10.x incl. the undo/
+  grants/startup-order/spill/hatch/budget corrections; README status+links+flags; SECURITY
+  rows; CONTRIBUTING count; CHANGELOG link refs; `--session` help).
+- `9e03289` **v1.10.1** bump + CHANGELOG.
+
+**Verification.** Typecheck clean at every stage; per-chunk test gates; the full suite recorded
+in `agent-cli-s225-live/suite-final.log`: **2,415 tests / 151 files — 2397 passed, 7 failures
+all load-induced** (the run took 3× its baseline under deliberate concurrent load; three files
+are the documented contention class) **and all five files pass in isolation**.
+
+### The final E2E — "Shelfmark" (validated 37/37 from persisted evidence + the live remote)
+
+An empty Desktop folder → a public GitHub release, driven by a scripted *user* against kimi-k3,
+recorded end to end (master 2:42:38). The full honest record — including what broke and whose
+fault it was — is `agent-cli-s225-live/DEMO.md`; the validator is
+`agent-cli-s225-live/validation/validate.mjs` (37/37, `VALIDATION.txt`).
+
+- **Leg 0**: trust `[t]` on camera; init/identity/origin through real prompts (one arrow-key
+  answered); no commits. The completion consent fired unscripted at `/quit` and showed fix F's
+  corrected plan-less header in production.
+- **Leg 1**: 3 researcher waves (18/36 searches, 9/20 extracts, 23 recorded findings; the
+  node:sqlite verdict matches the preflight's independent machine fact); the plan approved via
+  the consent menu (`[v]` then arrows); parallel executors on unborn HEAD; **take 1A was killed
+  22 min in by recording infrastructure** (the harness runner's ~20-min background cap — bridge,
+  ConPTY, session, recorder all died mid-executor-wave), and **leg 1B resumed the session on
+  camera**: 2 orphaned worktrees swept, evidence replayed, the build finished — 6 integrations,
+  40 typed checks, 6 preview starts, 9 browser flows, DOCX+PDF rendered AND model-inspected,
+  review round (11 findings, no blockers), commit `6da12d8`, acceptance COMPLETE. A mid-build
+  plan amendment (the token-budget-killed web executor's work recovered by the parent) blocked
+  `/accept` until the USER approved the draft — exactly the designed authority split.
+- **Leg 2**: resume; `/commit --all` sweeps the two files session attribution rightly skipped;
+  publish with auth+refs inspected first — push main, tag v0.1.0, Release, **3/10 remote
+  writes, 38 approvals total, 0 denied**, every mutation verified against the remote; the live
+  repo page and the running app recorded. Remote main == local HEAD, re-verified post-hoc.
+- **Harness verdicts from the run**: crash recovery, budgets-rebuilt-on-resume, the consent
+  boundary, and the authority split all behaved as designed under real failure. The defects
+  found live were driver/recording-infrastructure bugs (all recorded in DEMO.md notes 1–7);
+  none required patching the generated app, and none were product defects.
+
+**Decisions.** Publish v1.10.1 after the E2E so the release cites the proof (this entry).
+Driver lessons recorded for the next chain: `quitWithConsent`, commit-before-accept ordering,
+the `agent resumed` banner wording, detached launches for hours-long takes.
+
+**Open issues.** The deferred pool is unchanged (see below); the S23 candidates stand
+(cross-platform honesty vs the slides pack). The E2E master video gets its launch cut next
+session.
+
+**Next step.** Publish v1.10.1 (push + tag + Release) on explicit approval; then S23.
+
+---
+
 ## Session 22 (2026-08-14) — Terminal UX consolidation (v1.10.0)
 
 **Objective.** Make the interactive surface match what the harness became — arrow-key prompts,

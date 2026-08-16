@@ -221,6 +221,22 @@ typed `/quit`, while plan-carrying sessions keep the turn boundary. The non-TTY 
 proven byte-stable by diffing the same scripted piped session across v1.9.0 and v1.10.0 builds.
 Details: `ROADMAP.md` Session 22, `ARCHITECTURE.md` "The REPL", CHANGELOG 1.10.0.
 
+### Session 22.5 — Production Release Hardening & Final E2E — **DONE (v1.10.1)**
+
+Consolidation, no new capability: a bounded six-lens repo audit (~21 findings, every actionable
+one hand-verified) produced eleven fix commits — approval answers exact-token and offer-gated
+(`stop` at a remote-write prompt used to EXECUTE the push), read-only git argument proofs, the
+live-pid worktree age hatch removed, crash replay consulting recorded completion evidence, the
+consent `[c]`/header fixes, packaging (Node-22 floor, mapless clean builds halving the tarball,
+lockfile pinned to the package version), the unpinned bounds joining the limits table, and a
+full documentation reconciliation. Then the final full-system E2E ("Shelfmark", kimi-k3, driven
+by a scripted user): empty folder → research → arrow-approved plan → parallel build **surviving
+a real infrastructure kill via `agent resume` on camera** → typed checks/previews/browser flows
+→ DOCX/PDF inspected by the model → review → commit → acceptance → resume → push/tag/Release to
+a public repo, validated **37/37 from persisted evidence plus the live remote**, with a 2:42:38
+long-form master recording. Details: `ROADMAP.md` Session 22.5,
+CHANGELOG 1.10.1, `agent-cli-s225-live/DEMO.md`.
+
 ### Session 23 — candidates (decide in plan mode, from repository evidence)  ← **NEXT**
 
 Two directions carry the most accumulated pressure; the session should open by picking one:

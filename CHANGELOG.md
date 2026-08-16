@@ -12,7 +12,12 @@ Development history before 1.0.0 is recorded session-by-session in
 **Production release hardening** (Session 22.5). No new capability: a repo-wide audit (six
 differentiated lenses, ~21 findings, every actionable one hand-verified against source) followed
 by fixes for every substantiated defect, a packaging pass, and a documentation reconciliation.
-Behavior changes are all corrections of unsound behavior.
+Behavior changes are all corrections of unsound behavior. The result was then proven by the
+final full-system live E2E: an empty folder to a public GitHub release (research → arrow-key
+plan approval → parallel build surviving a real mid-build kill via `agent resume` → typed
+checks/previews/browser flows → DOCX/PDF inspected by the model → review → commit → acceptance
+→ push/tag/Release, each mutation individually approved), validated **37/37 from persisted
+evidence plus the live remote** — see `ROADMAP.md` Session 22.5.
 
 ### Fixed
 
