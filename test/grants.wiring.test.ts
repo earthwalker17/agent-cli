@@ -169,9 +169,17 @@ describe('the runtime storage site (machine scope)', () => {
 
 describe('the production seam (assembly closure semantics, exercised via the store)', () => {
   it('workspace keying uses the trust derivation, so grants and trust can never disagree about identity', async () => {
-    const key = trustKey(fs.realpathSync.native(ws));
+    const real = fs.realpathSync.native(ws);
+    const key = trustKey(real);
     await addGrant(state, { kind: 'check-replay', workspaceKey: key, replayKey: 'k-1', label: 'npm run test' }, '2026-08-11T00:00:00.000Z');
-    // A DIFFERENT casing of the same real path folds to the same key — trustKey's contract.
-    expect(trustKey(fs.realpathSync.native(ws).toUpperCase())).toBe(key);
+    // trustKey is `caseFold`, and caseFold is PLATFORM-AWARE by contract — so this assertion has
+    // two correct answers and both are pinned. On Windows (and macOS's default filesystem) a
+    // re-cased spelling of the same directory IS the same directory, so it must fold to one key
+    // or a grant could be dodged by typing the path differently. On a case-sensitive filesystem
+    // `/tmp/ws` and `/TMP/WS` are two directories, and folding them would silently widen one
+    // workspace's standing authority onto another. Asserting only the first half is what kept
+    // the Linux CI leg red (S22.6).
+    if (process.platform === 'win32') expect(trustKey(real.toUpperCase())).toBe(key);
+    else expect(trustKey(real.toUpperCase())).not.toBe(key);
   });
 });

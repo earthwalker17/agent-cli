@@ -131,10 +131,18 @@ describe('a task gate scoped to a project', () => {
     expect(s.tasks.find((t) => t.id === 'a')!.verification.status).toBe('green');
   });
 
-  it("S20.5: a plan spelled 'API' matches checks recorded under the canonical 'api'", () => {
-    // selectUnit folds case (its comment documents the 'API' unclearable-gate trap), so a check
-    // requested for project 'API' RUNS in canonical 'api' and records projectId 'api'. The gate
-    // fold compared exactly — the plan's gate could then never satisfy and never waive.
+  it("S20.5: a plan spelled 'API' matches checks recorded under the canonical 'api' where the filesystem folds case", () => {
+    // selectUnit folds case (its comment documents the 'API' unclearable-gate trap), so on a
+    // case-insensitive filesystem a check requested for project 'API' RUNS in canonical 'api'
+    // and records projectId 'api'. The gate fold compared exactly — the plan's gate could then
+    // never satisfy and never waive.
+    //
+    // The fold is `caseFold`, which is deliberately platform-aware, so the correct answer differs
+    // and both halves are pinned (S22.6). Where the filesystem is case-SENSITIVE, `api` and `API`
+    // are two different directories: selectUnit refuses the mismatch up front rather than running
+    // the check somewhere else, so nothing records under 'api' on the task's behalf and the gate
+    // stays honestly pending. Silently folding there would be the real bug — a green in `api`
+    // reported as evidence about `API`.
     reset();
     const g = validatePlanGraph(
       graph({
@@ -142,7 +150,7 @@ describe('a task gate scoped to a project', () => {
       } as never),
     ).graph!;
     const s = foldGraphState(g, [...ranTask(), check({ projectId: 'api' })]);
-    expect(s.tasks.find((t) => t.id === 'a')!.verification.status).toBe('green');
+    expect(s.tasks.find((t) => t.id === 'a')!.verification.status).toBe(process.platform === 'win32' ? 'green' : 'pending');
   });
 });
 
@@ -161,7 +169,10 @@ describe('graph-level gates scoped to projects', () => {
     expect(completionGateState(g(), events).pending).toEqual([]);
   });
 
-  it("S20.5: boundary-gate scopes fold case too — gates.projects ['API'] accepts runs in 'api'", () => {
+  it("S20.5: boundary-gate scopes fold case exactly as the filesystem does — gates.projects ['API'] vs runs in 'api'", () => {
+    // Same platform-aware contract as the task-gate case above: folded where the filesystem folds,
+    // distinct where it does not. A case-sensitive host must leave the gate PENDING rather than
+    // accept a run in a different directory as proof for the one the plan named.
     reset();
     const gg = validatePlanGraph(graph({ gates: { completion: ['test'], projects: ['API', 'web'] } } as never)).graph!;
     const events = [
@@ -169,7 +180,7 @@ describe('graph-level gates scoped to projects', () => {
       check({ projectId: 'api' }),
       check({ projectId: 'web' }),
     ];
-    expect(completionGateState(gg, events).pending).toEqual([]);
+    expect(completionGateState(gg, events).pending).toEqual(process.platform === 'win32' ? [] : ['test']);
   });
 
   it('an honestly unsupported project waives, a bad-request one never does', () => {
