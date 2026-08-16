@@ -49,7 +49,8 @@ const narrowing = {
   remoteBlockedHosts: z.array(z.string().min(1).max(253)).max(256).optional(),
 };
 
-const UserConfigSchema = z
+/** Exported for the limits table only — config loading goes through loadConfig. */
+export const UserConfigSchema = z
   .object({
     /** Provider preference (Session 15). USER layer only — the workspace schema structurally
      *  cannot express it: a cloned repo must never choose which vendor receives the session. */

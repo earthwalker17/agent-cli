@@ -1964,7 +1964,7 @@ function redactedForLog<I>(session: Session, tool: Tool<I>, result: ToolResult, 
 }
 
 /** Defensive spill ceiling — the exec capture cap already bounds real inputs well below this. */
-const SPILL_MAX_BYTES = 8 * 1024 * 1024;
+export const SPILL_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Preserve truncated-away tool output as a content-addressed blob (Session 11.5). Opt-in per

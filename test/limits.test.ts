@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_MAX_STEPS } from '../src/runtime/session.js';
+import { DEFAULT_MAX_STEPS, SPILL_MAX_BYTES } from '../src/runtime/session.js';
+import { DEFAULT_CAPTURE_BYTES } from '../src/exec/run.js';
+import { PLAN_GRAPH_MAX_CHARS, PlanGraphSchema } from '../src/plan/schema.js';
+import { DEFAULT_STEP_TIMEOUT_MS, FlowSpecSchema } from '../src/browser/types.js';
+import { ARTIFACT_BYTES_PER_SESSION } from '../src/tools/browser-flow.js';
+import { RENDERS_PER_SESSION } from '../src/tools/artifact-render.js';
+import { INSPECTED_PAGES_PER_SESSION, INSPECT_BYTES_PER_SESSION } from '../src/tools/artifact-inspect.js';
+import { MAX_FINDINGS_PER_REVIEWER } from '../src/tools/report-finding.js';
+import { MAX_OBSERVATIONS_PER_INSPECTOR } from '../src/tools/report-observation.js';
+import { UserConfigSchema } from '../src/config/config.js';
 import { EXECUTOR_BUDGET, ROLE_CONTRACTS } from '../src/runtime/roles.js';
 import {
   CONTENT_CHARS_PER_SESSION,
@@ -197,6 +206,48 @@ describe('scale bounds (S16 raised these; S20.5 retuned them for the v1.6 shape)
     expect(MAX_PROJECT_UNITS).toBe(16);
     expect(MAX_UNIT_DEPTH).toBe(2);
   });
+
+  // ── S22.5: the audit's unpinned load-bearing bounds join the table ─────────────────────────
+
+  it('plan graph size and task count — asserted through the schema that enforces them (S22.5)', () => {
+    expect(PLAN_GRAPH_MAX_CHARS).toBe(32_000);
+    const task = (i: number) => ({ id: `t${String(i)}`, title: 'x', intent: 'x', role: 'main', verify: 'x', touches: ['a'] });
+    const graph = (n: number) => ({ objective: 'o', tasks: Array.from({ length: n }, (_, i) => task(i)) });
+    expect(PlanGraphSchema.safeParse(graph(20)).success).toBe(true);
+    expect(PlanGraphSchema.safeParse(graph(21)).success).toBe(false);
+  });
+
+  it('browser flow steps and per-step waits — asserted through the schema (S22.5)', () => {
+    const goto = { do: 'goto', path: '/', ready_when: { text: 'ready' } };
+    const flow = (n: number, timeout?: number) => ({
+      name: 'f',
+      steps: [goto, ...Array.from({ length: n - 1 }, () => ({ do: 'wait_for', text: 'x', ...(timeout !== undefined ? { timeout_ms: timeout } : {}) }))],
+    });
+    expect(FlowSpecSchema.safeParse(flow(20)).success).toBe(true);
+    expect(FlowSpecSchema.safeParse(flow(21)).success).toBe(false);
+    expect(FlowSpecSchema.safeParse(flow(2, 15_000)).success).toBe(true);
+    expect(FlowSpecSchema.safeParse(flow(2, 15_001)).success).toBe(false);
+    expect(DEFAULT_STEP_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it('artifact budgets per session — flow bytes, renders, inspected pages (S22.5)', () => {
+    expect(ARTIFACT_BYTES_PER_SESSION).toBe(96 * 1024 * 1024);
+    expect(RENDERS_PER_SESSION).toBe(30);
+    expect(INSPECTED_PAGES_PER_SESSION).toBe(80);
+    expect(INSPECT_BYTES_PER_SESSION).toBe(48 * 1024 * 1024);
+  });
+
+  it('output capture and spill ceilings (S22.5)', () => {
+    expect(DEFAULT_CAPTURE_BYTES).toBe(4 * 1024 * 1024);
+    expect(SPILL_MAX_BYTES).toBe(8 * 1024 * 1024);
+    // The spill exists to preserve what capture truncates: it must hold a full default capture.
+    expect(SPILL_MAX_BYTES).toBeGreaterThanOrEqual(DEFAULT_CAPTURE_BYTES);
+  });
+
+  it('the user-config maxSteps ceiling — asserted through the schema (S22.5)', () => {
+    expect(UserConfigSchema.safeParse({ maxSteps: 400 }).success).toBe(true);
+    expect(UserConfigSchema.safeParse({ maxSteps: 401 }).success).toBe(false);
+  });
 });
 
 describe('the catalog context budgets follow the derivation rule (S20.5)', () => {
@@ -252,6 +303,13 @@ describe('repetition and consent bounds (deliberately UNCHANGED — in S16 and a
 
   it('a third adversarial review round is still refused outright', () => {
     expect(MAX_REVIEW_ROUNDS).toBe(2);
+  });
+
+  it('review evidence is bounded per child — consolidation, not enumeration (S22.5)', () => {
+    // REPETITION-side on purpose: more slots buy longer lists of the same defect, never better
+    // review. Both tools refuse past the cap with a consolidate instruction.
+    expect(MAX_FINDINGS_PER_REVIEWER).toBe(8);
+    expect(MAX_OBSERVATIONS_PER_INSPECTOR).toBe(10);
   });
 
   it('the elision DEFAULTS are untouched — per-model budgets moved in the catalog, where they are data', () => {

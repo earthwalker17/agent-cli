@@ -54,7 +54,7 @@ export interface ExecOutcome {
  * evidence a later classification needs. The model-facing size stays independently bounded by
  * truncateForModel; this cap widens EVIDENCE, not context.
  */
-const DEFAULT_CAPTURE_BYTES = 4 * 1024 * 1024;
+export const DEFAULT_CAPTURE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_DRAIN_TIMEOUT_MS = 1500;
 const EXIT_AFTER_KILL_BOUND_MS = 5000;
 
