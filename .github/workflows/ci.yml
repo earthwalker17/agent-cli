@@ -36,6 +36,14 @@ jobs:
       - name: Install (runs prepare → build)
         run: npm ci
 
+      # Scoped to what an installer of this project actually receives. `npm ci` prints a bare
+      # "N vulnerabilities" summary that folds in the dev tree (vitest → vite → postcss and
+      # friends), and that number is not a claim about this package — nothing dev-only ships.
+      # This step is the claim: the RUNTIME dependency tree carries no high/critical advisory.
+      # It is a lockfile-level fact, so it runs once, on the load-bearing platform.
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Verify the build produced the CLI entry point
         shell: bash
         run: test -f dist/cli/index.js || (echo "dist/cli/index.js missing — the smoke suite would silently skip" && exit 1)
@@ -49,16 +57,19 @@ jobs:
         # each make a real, billable API call. CI stays hermetic — no network, no keys.
         run: npm test
 
-  # Advisory, and honestly labelled as such. The suite is Windows-first: a number of tests assert
-  # Windows path and environment semantics directly (backslash traversal, UNC rejection,
-  # case-insensitive child-env deduplication, taskkill-based tree kill). The RUNTIME behaves
-  # correctly on Linux — it is those tests that encode win32 assumptions — so a red result here
-  # means "not yet ported", not "broken on Linux". Porting them is tracked in ROADMAP.md's
-  # deferred pool. This job is kept visible rather than deleted so the gap stays measurable.
+  # The second real gate (S22.6). This job was advisory-red from 2026-07-28 until S22.6 on the
+  # theory that "the suite is not yet ported"; measured, that was three assertions, not a suite.
+  # They asserted Windows case-folding of paths and project ids — which `caseFold` deliberately
+  # does NOT do on a case-sensitive filesystem — and they now pin both platforms' answers.
+  #
+  # What genuinely differs here is coverage, not correctness: the Windows-only suites SKIP on
+  # Linux (30 skipped vs 11), because the Low-integrity/Job Object sandbox, taskkill tree-kill
+  # and the win32 path rules have no counterpart to exercise. Windows therefore remains the
+  # platform on which this project's sandbox claims can be falsified; Linux proves the rest of
+  # the runtime is genuinely cross-platform rather than merely believed to be.
   linux:
-    name: Linux · Node 22 (advisory — suite not yet ported)
+    name: Linux · Node 22
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -77,5 +88,5 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test (advisory)
+      - name: Test
         run: npm test
