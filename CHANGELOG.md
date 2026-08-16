@@ -9,6 +9,81 @@ Development history before 1.0.0 is recorded session-by-session in
 [`docs/ARCHITECTURE.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/ARCHITECTURE.md). (Absolute links: this file ships in the
 package, those do not.)
 
+## [1.10.2] — 2026-08-16
+
+**Release surface and repository polish** (Session 22.6). No capability change: the runtime is
+byte-for-byte the v1.10.1 behaviour apart from where the Node floor guard sits. What changed is
+everything a first-time visitor or installer meets — CI that means something, packaging that does
+not imply a registry release, and documentation someone can actually read.
+
+### Fixed
+
+- **CI is green on both platforms, and the Windows failure was diagnosed rather than muted.** The
+  run for the v1.10.1 commit failed six tests across four files. None was a defect: the runner was
+  starved. Vitest sizes its worker pool from the CPU count, and a large share of these 151 files
+  spawn real subprocesses, so on a 4-vCPU runner the measured load was `Duration 347s` wall against
+  `tests 972s` summed — roughly 2.8x oversubscription. Under it, a fixture `git init` blew
+  `runGit`'s 15s default and reported as though git had refused; a synchronous `mkdtempSync` hook
+  exceeded the 10s hook timeout; teardown hit Windows `EBUSY`; and a chromium print exceeded a
+  per-test cap that sat *below* the global one. CI now caps the pool at 2 workers, fixture-side git
+  gets a fixture-sized bound, temp teardown retries the error class Node already knows how to
+  retry, and the browser print gets the loosest backstop in its suite rather than the tightest.
+  **The product's own bounds are untouched** — loosening a shipped constant to make CI pass would
+  have been hiding the failure.
+- **A genuine timing race in the supervision suite.** Its scaled budget gave the stall note a
+  250ms window before the wall clock ended the child; a starved event loop coalesces timers for
+  longer than that. It had already failed alone on an earlier run. The fixture's clock widens to a
+  2s window; the production constants (60s stall, 30s cadence) are unchanged.
+- **The Linux CI leg is a real gate.** It had been advisory-red since 2026-07-28 under the label
+  "suite not yet ported", and the roadmap recorded ten failing tests. Measured, it was three, all
+  asserting Windows case-folding on a case-sensitive filesystem — `caseFold` is already correctly
+  platform-aware, and the tests encoded only half its contract. Each now pins **both** answers,
+  which is a real invariant: folding a re-cased path on Linux would silently widen one workspace's
+  standing grants onto a different directory. `continue-on-error` is gone.
+- **The Node floor guard now actually runs first.** Its comment claimed "one check before anything
+  else runs", but it sat below thirty imports — and ESM evaluates every imported module before the
+  importing module's body, so it was the thirty-first thing to execute. It moves to
+  `src/cli/node-floor.ts`, imported first and importing nothing. A structural test pins both halves.
+- **The audit claim is scoped to what ships.** `npm ci` prints a vulnerability count that folds in
+  the dev tree, which is not a claim about this package. CI now asserts
+  `npm audit --omit=dev --audit-level=high` as a step. The lockfile also carries the one-line
+  `nanoid` 3.3.17 → 3.3.18 bump (GHSA-2v37-7h3g-55p8, dev-only, never in the tarball), so `npm
+  audit` reports zero with and without `--omit=dev`.
+- `.github/dependabot.yml` described a `typescript` exclusion that was not configured. It now
+  describes what is actually there.
+
+### Changed
+
+- **`private: true`.** The package metadata was fully dressed for a registry publish, but the npm
+  name `agent-cli` has belonged to an unrelated package since 2019, so a publish could only ever
+  403. That was a false readiness signal. The install path is, and stays, `git clone`.
+- **`exports` closes the deep-import surface.** Without it, all 188 emitted modules were public
+  API. `{"./package.json": "./package.json"}` blocks the rest; the CLI's own version read is an
+  `fs` read of a file URL and is unaffected.
+- **The README is a front door rather than an essay** — 855 lines to 317. It now leads with the
+  actual argument instead of a feature list, and states "lightweight" as what it is: a 14,123-line
+  runtime kernel and nine runtime dependencies, eight of them confined to a single module each —
+  not a small line count (189 files, 50,513 lines; 36,196 excluding blanks and comments).
+- **The documentation is a hierarchy.** `PROJECT.md`, `ARCHITECTURE.md` and `ROADMAP.md` moved to
+  `docs/`, joined by two pages extracted from the README so nothing honest was lost:
+  `docs/USAGE.md` (the complete command, flag, provider, configuration and capability surface) and
+  `docs/SAFETY.md` (the security model and every limitation, which `SECURITY.md` now links).
+  `ARCHITECTURE.md` was compressed 2,287 → 1,252 lines by removing session archaeology and keeping
+  every contract; `ROADMAP.md` 1,064 → 462 by keeping every milestone and dropping proof narration.
+  `BLUEPRINT.md` is deleted — its programme was fully executed, and its surviving deferrals folded
+  into the roadmap.
+- `@anthropic-ai/sdk` 0.115 → 0.116.
+
+### Notes
+
+- Dependabot #10 and #11 stay open deliberately. #10's "dev-dependencies group" title hides two
+  majors — TypeScript ~5.9 → ~7.0 and `@types/node` ^22 → ^26, the latter describing APIs above
+  this package's own Node 22 floor. #11 is `undici` 7 → 8, deferred on the record because the proxy
+  dispatcher needs live verification.
+- The evidence directories cited throughout the roadmap (`agent-cli-sNN-live`) are on the
+  development machine, not in this repository. The roadmap now says so once rather than leaving a
+  reader hunting for paths that were never public.
+
 ## [1.10.1] — 2026-08-16
 
 **Production release hardening** (Session 22.5). No new capability: a repo-wide audit (six
@@ -1116,6 +1191,7 @@ likely to matter:
 - Non-Node/Python projects report check kinds as `unsupported` with a reason rather than guessing.
 - Single-user assumption on the session lock.
 
+[1.10.2]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.10.2
 [1.10.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.10.1
 [1.10.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.10.0
 [1.9.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.9.0

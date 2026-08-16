@@ -14,12 +14,55 @@ and the summary here.
 **Where the project is now.** v1.10.x is functionally complete for V1: a bounded agent kernel with
 one policy choke point, append-only evidence, typed verification, crash-safe resume and an explicit
 acceptance boundary — plus capability packs for documents/PDF, web research, local git, and remote
-GitHub delivery, across five model providers. 2,415 hermetic tests over 151 files gate every change
+GitHub delivery, across five model providers. 2,416 hermetic tests over 151 files gate every change
 on Windows and Linux.
 
 ---
 
 ## Sessions
+
+### Session 22.6 (2026-08-16) — Public release surface and repository polish (v1.10.2)
+
+Zero capability change; the target was everything a first-time visitor or installer meets.
+
+**The release gate was red, and the diagnosis mattered more than the fix.** The CI run for the
+v1.10.1 commit — the one the tag and the latest Release both point at — failed six tests across
+four files on Windows. None was a defect: the runner was starved, measured at `Duration 347s` wall
+against `tests 972s` summed. Vitest sizes its pool from the CPU count, and a large share of these
+files spawn real subprocesses, so a 4-vCPU runner was carrying far more concurrent processes than
+cores. CI now caps the pool at 2 workers; fixture-side git gets a fixture-sized bound; temp
+teardown retries the error class Node already retries; the browser print gets the loosest backstop
+in its suite rather than one *below* the global. **The product's own bounds were not touched** —
+loosening a shipped constant to make CI pass is hiding a failure, not fixing one.
+
+**The Linux leg became a real gate.** Advisory-red since 2026-07-28 under the label "suite not yet
+ported", with ten failures on record. Measured, it was three, all asserting Windows case-folding on
+a case-sensitive filesystem — and `caseFold` was already correct, the tests having encoded only
+half its contract. Each now pins both answers, which is a real invariant rather than a formality:
+folding a re-cased path on Linux would silently widen one workspace's standing grants onto a
+different directory. What remains between the platforms is coverage, not correctness.
+
+**Packaging stopped implying a registry release.** The metadata was fully dressed to publish, but
+the npm name has belonged to an unrelated package since 2019, so `private: true` now makes that
+explicit. `exports` closes the deep-import surface — without it all 188 emitted modules were public
+API, which is a poor fit for a project whose thesis is one choke point. And the Node floor guard,
+whose comment claimed it ran "before anything else", was the thirty-first thing to execute, because
+ESM evaluates every import before the importing module's body; it moved to its own dependency-free
+module imported first, pinned by a structural test.
+
+**The documentation became a hierarchy.** The README went from 855 lines to 317 and now leads with
+the argument rather than a feature list. The three reference documents moved to `docs/`, joined by
+`USAGE.md` and `SAFETY.md` extracted from the README so nothing honest was lost; `ARCHITECTURE.md`
+was compressed 2,287 → 1,252 lines by removing session archaeology and keeping every contract, and
+this file 1,064 → 462. `BLUEPRINT.md` was deleted, its programme fully executed.
+
+**Verified:** typecheck clean, the full suite green locally (2,404 passed, 11 skipped, 1 documented
+contention-class failure that passed in isolation and was caused by running four vitest processes
+at once), and — the actual gate — a green Actions run on **both** jobs.
+
+**Still open.** The two-worker CI cap trades wall time for a gate that means something; if the
+runner ever gets faster the cap is worth revisiting. macOS remains unexercised by CI. Dependabot
+#10 (TypeScript 7, `@types/node` 26) and #11 (undici 8) stay open deliberately.
 
 ### Session 22.5 (2026-08-15/16) — Production release hardening (v1.10.1)
 
