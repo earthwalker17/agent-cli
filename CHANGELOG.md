@@ -7,6 +7,60 @@ All notable changes to this project are documented here. The format is based on
 Development history before 1.0.0 is recorded session-by-session in
 [`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## [1.10.1] — 2026-08-16
+
+**Production release hardening** (Session 22.5). No new capability: a repo-wide audit (six
+differentiated lenses, ~21 findings, every actionable one hand-verified against source) followed
+by fixes for every substantiated defect, a packaging pass, and a documentation reconciliation.
+Behavior changes are all corrections of unsound behavior.
+
+### Fixed
+
+- **Approval answers are exact tokens, gated on what the prompt offered.** The scope keys parse
+  only as `s`/`session` and `a`/`always`, and only when that scope was actually offered;
+  `allow` means once; `stop`, `skip`, `sure` and `abort` now DENY. Before this, `stop` typed at
+  a remote-write prompt parsed as a session grant — and since the engine executes on any allow,
+  it executed the push.
+- **Read-only git subcommand names get read-only ARGUMENT proofs.** `git tag v1` created a ref
+  via auto-run, `git remote update` reached the network (which the sandbox does not confine),
+  and `git remote add origin ./x` rewrote `.git/config` — all under subcommand names the
+  allowlist treated as reads. Per-subcommand rules now admit only the list/read forms
+  (16 adversarial + 9 safe corpus rows added).
+- **A live executor's worktree is never swept on age.** The 8h "age hatch" could force-remove a
+  LIVE executor's worktree: approval wait is excluded from the executor clock, so a legitimate
+  task's age is unbounded, and nothing file-based distinguishes a live owner from a crashed one
+  with a recycled pid. A live pid now always skips; dead pids still sweep immediately.
+- **Crash replay consults recorded completion evidence.** Resume now indexes
+  `command.ended`/`check.completed`/`setup.completed`/`remote.mutated` and replays recorded
+  verdicts instead of "effects unknown — re-run": a VERIFIED remote push used to replay as a
+  generic crash inviting a second push. Resume also survives an unreadable spill file (EBUSY no
+  longer degrades crash recovery to a raw fs error), and abort wording is cause-neutral (child
+  aborts fire for wall-clock/budget reasons, not only the user).
+- **A spent artifact byte budget no longer refuses a browser flow** — the flow runs and drops
+  artifacts with the existing omission markers; the check-budget refusal now names its exits.
+- **`[c]` at the completion prompt no longer mints an acceptance for a commit that did not
+  complete** (a cancelled or declined commit recorded `session.accepted` anyway), and the
+  completion header no longer claims "everything the plan declares is done" in plan-less
+  sessions.
+- The `/` menu names the candidates for an ambiguous prefix instead of calling it unknown;
+  `/research` and `/remote` keep their section separators; the untracked-file checkpoint guards
+  say that declining skips the whole checkpoint; one-shot runs that exit 2 on denials say so on
+  stderr with the count and where the specifics live.
+
+### Changed
+
+- **Node floor enforced at startup**: below Node 22 the CLI prints one actionable line and exits
+  non-zero (`engines` is advisory, and the old failure mode was a cryptic crash mid-session).
+- **The npm tarball halves**: release builds emit no source maps (sources are not shipped and
+  nothing passes `--enable-source-maps`) and the build cleans `dist/` first, so stale files
+  cannot ride along. `package-lock.json` is restamped on every version bump and a test now pins
+  lockfile version == package version (it had said 1.4.0 since six releases ago).
+- The previously unpinned load-bearing bounds joined the visible limits table (plan graph size
+  and task count, flow steps and step waits, artifact session budgets, capture/spill ceilings,
+  config `maxSteps`, review finding/observation caps) — pins only, no value changed.
+- `--help` names all six subcommands that honor `--session`; HELP teaches the bare-`/` menu and
+  Tab completion; the command table's commit row shows `[--no-trailer]`.
+
 ## [1.10.0] — 2026-08-14
 
 **Terminal UX consolidation** (Session 22). The interactive surface catches up with everything
@@ -1055,6 +1109,7 @@ likely to matter:
 - Non-Node/Python projects report check kinds as `unsupported` with a reason rather than guessing.
 - Single-user assumption on the session lock.
 
+[1.10.1]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.10.1
 [1.10.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.10.0
 [1.9.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.9.0
 [1.8.0]: https://github.com/earthwalker17/agent-cli/releases/tag/v1.8.0

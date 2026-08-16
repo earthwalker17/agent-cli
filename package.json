@@ -1,6 +1,6 @@
 {
   "name": "agent-cli",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "A local-first, terminal-native, safely extensible general-purpose agent harness.",
   "keywords": [
     "agent",

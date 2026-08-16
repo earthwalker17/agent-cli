@@ -14,7 +14,7 @@ open-source project, not a staffed product, so please calibrate expectations acc
 
 | Version | Supported |
 | --- | --- |
-| 1.10.x | ✅ (current: 1.10.0) |
+| 1.10.x | ✅ (current: 1.10.1) |
 | 1.9.x | ⚠️ security fixes only |
 | 1.8.x | ❌ |
 | 1.7.x | ❌ |
