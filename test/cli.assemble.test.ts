@@ -15,6 +15,7 @@ import { trustKey } from '../src/trust/store.js';
 import { indexFilePath } from '../src/retrieval/ranked-map.js';
 import type { GitFacts } from '../src/git/types.js';
 import type { SessionEvent } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS } from './common.fixtures.js';
 
 /** The shared assembly path: one construction sequence for the one-shot CLI and the REPL. */
 
@@ -229,7 +230,7 @@ describe.skipIf(REAL_GIT === null)('assembleSession — ranked map (git-backed, 
   it('builds the ranked map + index, records additive event fields, and resume reuses the warm cache', async () => {
     const deps = makeDeps();
     const ws = deps.ctx.ws;
-    expect((await runGit({ gitPath: REAL_GIT!, argv: ['init', '-q', '-b', 'main'], cwd: ws })).ok).toBe(true);
+    expect((await runGit({ gitPath: REAL_GIT!, argv: ['init', '-q', '-b', 'main'], cwd: ws, timeoutMs: FIXTURE_GIT_TIMEOUT_MS })).ok).toBe(true);
     fs.mkdirSync(path.join(ws, 'src'));
     fs.writeFileSync(path.join(ws, 'src', 'core.ts'), 'export function coreThing() {}\n');
     fs.writeFileSync(path.join(ws, 'src', 'user.ts'), `import { coreThing } from './core.js';\n`);

@@ -21,6 +21,7 @@ import type { SessionEvent, SubagentRoleName, Tool } from '../src/types.js';
 import { TASKS_PER_SESSION } from '../src/runtime/subagent.js';
 import type { SubagentDeps } from '../src/runtime/subagent.js';
 import type { WorkspaceMap } from '../src/workspace/map.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * Session 11: the task-DAG scheduler gate (R1–R9), events-rebuilt delegation caps, and the
@@ -53,7 +54,7 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 // ── Part A: the gate rules, pure ─────────────────────────────────────────────────────────────
@@ -366,7 +367,7 @@ describe('crash mid-group: the replay and the fold stay honest', () => {
 
 describe.skipIf(!hasGit)('task-graph execution end to end (real git)', () => {
   async function git(cwd: string, ...argv: string[]) {
-    return runGit({ gitPath: REAL_GIT!, argv, cwd });
+    return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
   }
 
   it('parallel disjoint wave → early dependent refused → integrate → hand-edit blocks → dependent runs → completed re-run refused', async () => {

@@ -7,6 +7,7 @@ import { createCheckpoint, deleteCheckpointRefs, listCheckpoints, pruneCheckpoin
 import { SnapshotStore } from '../src/store/snapshots.js';
 import { applyUndo } from '../src/runtime/undo.js';
 import type { EventBody, SessionEvent } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /** Stage-9 tests: checkpoint plumbing against real repositories (skipped when git is absent). */
 
@@ -38,11 +39,11 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  return runGit({ gitPath: REAL_GIT!, argv, cwd });
+  return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
 }
 
 async function initRepo(dir: string): Promise<void> {

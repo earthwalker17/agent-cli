@@ -13,6 +13,7 @@ import { ROLE_CONTRACTS } from '../src/runtime/roles.js';
 import { SESSION_TOOL_NAMES, pruneHarnessCheckpointRefs } from '../src/cli/assemble.js';
 import { sha256 } from '../src/shared/hash.js';
 import type { GitEvidence, SessionEvent, ToolContext } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * The Session 21.6 git pack, against real repositories (skipped when git is absent).
@@ -47,11 +48,11 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  return runGit({ gitPath: REAL_GIT!, argv, cwd });
+  return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
 }
 async function initRepo(): Promise<void> {
   expect((await git(repo, 'init', '-q', '-b', 'main')).ok).toBe(true);

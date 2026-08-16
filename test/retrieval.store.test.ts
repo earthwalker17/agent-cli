@@ -7,6 +7,7 @@ import { loadOrBuildIndex, INDEX_VERSION, type RetrievalIndex } from '../src/ret
 import { findGitOnPath, runGit } from '../src/git/client.js';
 import { detectGitFacts } from '../src/git/facts.js';
 import type { Inventory, InventoryFile } from '../src/retrieval/inventory.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /** Session 10: the inventory (git-backed) and the persisted incremental index store. */
 
@@ -23,7 +24,7 @@ beforeEach(() => {
   indexFile = path.join(tmp, 'state', 'index', 'retrieval.json');
 });
 afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 function writeFile(rel: string, content: string): void {
@@ -44,7 +45,7 @@ function fabricateInventory(relPaths: string[], dirtyPaths: string[] = []): Inve
 
 describe.skipIf(!hasGit)('buildInventory (git-backed)', () => {
   async function initRepo(): Promise<void> {
-    expect((await runGit({ gitPath: REAL_GIT!, argv: ['init', '-q', '-b', 'main'], cwd: ws })).ok).toBe(true);
+    expect((await runGit({ gitPath: REAL_GIT!, argv: ['init', '-q', '-b', 'main'], cwd: ws, timeoutMs: FIXTURE_GIT_TIMEOUT_MS })).ok).toBe(true);
   }
 
   it('lists files with stats, digests the path SET, and reports dirty paths', async () => {

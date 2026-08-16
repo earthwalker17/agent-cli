@@ -19,6 +19,7 @@ import type { CliValues } from '../src/cli/context.js';
 import type { ScriptTurn } from '../src/provider/mock.js';
 import type { GitFacts } from '../src/git/types.js';
 import type { SessionEvent } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * Session 14 — the delivery checkpoint at the /accept COMPLETE boundary: created BEFORE the
@@ -47,11 +48,11 @@ beforeEach(() => {
 afterEach(() => {
   if (savedStateDir === undefined) delete process.env['AGENT_CLI_STATE_DIR'];
   else process.env['AGENT_CLI_STATE_DIR'] = savedStateDir;
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  return runGit({ gitPath: REAL_GIT!, argv, cwd });
+  return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
 }
 
 async function initWsRepo(): Promise<void> {

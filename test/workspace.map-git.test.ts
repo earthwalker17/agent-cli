@@ -5,6 +5,7 @@ import path from 'node:path';
 import { buildWorkspaceMap, buildWorkspaceMapAuto } from '../src/workspace/map.js';
 import { findGitOnPath, runGit } from '../src/git/client.js';
 import { detectGitFacts } from '../src/git/facts.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /** Stage-5 tests: the git-backed map builder (real repos; skipped when git is absent). */
 
@@ -13,7 +14,7 @@ const hasGit = REAL_GIT !== null;
 
 const cleanups: string[] = [];
 afterEach(() => {
-  for (const dir of cleanups.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of cleanups.splice(0)) rmTemp(dir);
 });
 
 function tmpdir(): string {
@@ -23,7 +24,7 @@ function tmpdir(): string {
 }
 
 async function initRepo(dir: string): Promise<void> {
-  expect((await runGit({ gitPath: REAL_GIT!, argv: ['init', '-q', '-b', 'main'], cwd: dir })).ok).toBe(true);
+  expect((await runGit({ gitPath: REAL_GIT!, argv: ['init', '-q', '-b', 'main'], cwd: dir, timeoutMs: FIXTURE_GIT_TIMEOUT_MS })).ok).toBe(true);
 }
 
 describe.skipIf(!hasGit)('buildWorkspaceMapAuto (git-backed)', () => {
@@ -53,8 +54,8 @@ describe.skipIf(!hasGit)('buildWorkspaceMapAuto (git-backed)', () => {
     fs.writeFileSync(path.join(dir, 'gone.txt'), 'x');
     fs.mkdirSync(path.join(dir, 'dist'));
     fs.writeFileSync(path.join(dir, 'dist', 'bundle.js'), 'x');
-    expect((await runGit({ gitPath: REAL_GIT!, argv: ['add', '-A', '--', '.'], cwd: dir })).ok).toBe(true);
-    expect((await runGit({ gitPath: REAL_GIT!, argv: ['-c', 'user.name=T', '-c', 'user.email=t@e.c', 'commit', '-q', '-m', 'init'], cwd: dir })).ok).toBe(true);
+    expect((await runGit({ gitPath: REAL_GIT!, argv: ['add', '-A', '--', '.'], cwd: dir, timeoutMs: FIXTURE_GIT_TIMEOUT_MS })).ok).toBe(true);
+    expect((await runGit({ gitPath: REAL_GIT!, argv: ['-c', 'user.name=T', '-c', 'user.email=t@e.c', 'commit', '-q', '-m', 'init'], cwd: dir, timeoutMs: FIXTURE_GIT_TIMEOUT_MS })).ok).toBe(true);
     fs.rmSync(path.join(dir, 'gone.txt'));
 
     const facts = await detectGitFacts(dir, { gitPath: REAL_GIT });

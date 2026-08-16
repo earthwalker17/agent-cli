@@ -107,9 +107,23 @@ describe('budget pressure: one annotation at 80%, the cap still cancels', () => 
   });
 });
 
+/**
+ * SCALED BUDGET (S22.6). These two cases used `timeoutMs: 500`, which scales the ticker to a
+ * 250ms stall threshold and a 62ms cadence — a stall note therefore had to land in a 250ms-wide
+ * window before the wall clock ended the child. On a starved CI runner the event loop coalesces
+ * timers for longer than that, and the note was simply never taken: run 31457805592 (2026-08-11)
+ * failed on this alone, and run 31941151786 (2026-08-16) reproduced it.
+ *
+ * 4_000 widens the window to 2s with ~4 ticks inside it, which no realistic scheduling delay
+ * swallows. Nothing about what is asserted changes, and the PRODUCTION constants (60s stall, 30s
+ * cadence at the real role budgets — `src/runtime/subagent.ts`) are untouched: this is the
+ * fixture's clock, not the contract's.
+ */
+const SCALED_BUDGET_MS = 4_000;
+
 describe('stall and wall pressure (scaled thresholds; production constants at real budgets)', () => {
   it('a silent child records one stall observation and wall pressure before the timeout', async () => {
-    const { deps } = makeDeps([{ hang: true } as ScriptTurn], { budget: { timeoutMs: 500 } });
+    const { deps } = makeDeps([{ hang: true } as ScriptTurn], { budget: { timeoutMs: SCALED_BUDGET_MS } });
     const r = await runSubagentTask(deps, { role: 'explorer', task: 'inspect', parentSessionId: 'p' });
 
     expect(r.status).toBe('timeout');
@@ -139,7 +153,7 @@ describe('a command IN FLIGHT is working, not stalled (Session 16)', () => {
   }, 30_000);
 
   it('still records a stall for a child that is genuinely idle', async () => {
-    const { deps } = makeDeps([{ hang: true } as ScriptTurn], { budget: { timeoutMs: 500 } });
+    const { deps } = makeDeps([{ hang: true } as ScriptTurn], { budget: { timeoutMs: SCALED_BUDGET_MS } });
     const r = await runSubagentTask(deps, { role: 'explorer', task: 'inspect', parentSessionId: 'p' });
     expect(r.supervision.filter((s) => s.what === 'stall')).toHaveLength(1);
   }, 30_000);

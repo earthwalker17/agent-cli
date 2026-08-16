@@ -6,6 +6,7 @@ import { findGitOnPath, runGit } from '../src/git/client.js';
 import { prepareCommit, performCommit, runCommitFlow, AGENT_TRAILER, type CommitContext } from '../src/git/commit.js';
 import { sha256 } from '../src/shared/hash.js';
 import type { SessionEvent } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * Stage-8 tests: the deliberate-commit flow against real repositories. The global/system git
@@ -38,11 +39,11 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  const r = await runGit({ gitPath: REAL_GIT!, argv, cwd });
+  const r = await runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
   return r;
 }
 

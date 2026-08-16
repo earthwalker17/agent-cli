@@ -16,6 +16,7 @@ import {
   type RemoteGitDeps,
 } from '../src/remote/observe.js';
 import { RemoteError } from '../src/remote/errors.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * Observing a real remote (Session 20).
@@ -55,11 +56,11 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  return runGit({ gitPath: REAL_GIT!, argv, cwd });
+  return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
 }
 const IDENT = ['-c', 'user.name=T', '-c', 'user.email=t@e.c'];
 

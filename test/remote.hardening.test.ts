@@ -14,6 +14,7 @@ import { createRemoteStatusTool } from '../src/tools/remote-status.js';
 import { createRemoteState, type RemoteState } from '../src/tools/remote-state.js';
 import type { GhResult, RemoteContext } from '../src/remote/types.js';
 import type { ApprovalRequest, RemoteEvidence, ToolContext } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * The boundary hardening that the Session 20 adversarial review and the live run produced.
@@ -50,11 +51,11 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  return runGit({ gitPath: REAL_GIT!, argv, cwd });
+  return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
 }
 const IDENT = ['-c', 'user.name=T', '-c', 'user.email=t@e.c'];
 

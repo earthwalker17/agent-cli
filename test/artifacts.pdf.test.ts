@@ -189,6 +189,14 @@ describe('render_document policy + execute (no browser needed)', () => {
 const hasBrowser = likelyBrowserAvailable();
 const d = hasBrowser ? describe : describe.skip;
 
+/**
+ * A real chromium launch + print is the slowest single operation in this suite, so it gets the
+ * loosest backstop rather than a tighter-than-global one. The old 90s cap was BELOW the 120s
+ * global `testTimeout`, which is backwards: on CI run 31941151786 the print took 90,006ms and
+ * failed on the cap while its sibling squeaked through at 69,374ms. This is a hang backstop.
+ */
+const BROWSER_PRINT_TIMEOUT_MS = 180_000;
+
 d('renderPdf against the system browser', () => {
   it('prints, paginates, and validates: headings findable, footer text printed, page count real', async () => {
     const s = spec(
@@ -216,7 +224,7 @@ d('renderPdf against the system browser', () => {
     expect(extras.pageCount).toBe(2);
     expect(report.failures).toEqual([]);
     expect(report.status).toBe('pass');
-  }, 90_000);
+  }, BROWSER_PRINT_TIMEOUT_MS);
 
   it('validation FAILS loudly when the footer never prints (seeded: no templates passed)', async () => {
     const s = spec([{ kind: 'paragraph', runs: [run('body')] }], { footer: { center: 'Footer-Sentinel {pageNumber}' } });
@@ -229,5 +237,5 @@ d('renderPdf against the system browser', () => {
     const { report } = await validatePdfAgainstSpec(new Uint8Array(printed.bytes), s);
     expect(report.status).toBe('fail');
     expect(report.failures.join(' ')).toContain('Footer-Sentinel');
-  }, 90_000);
+  }, BROWSER_PRINT_TIMEOUT_MS);
 });

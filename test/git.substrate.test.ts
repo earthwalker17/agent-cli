@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { buildGitEnv, findGitOnPath, gitHardeningArgs, runGit } from '../src/git/client.js';
 import { detectGitFacts } from '../src/git/facts.js';
 import { parsePorcelainV2 } from '../src/git/porcelain.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * Stage-1 substrate tests. The parser and PATH-resolution tests are pure; the integration
@@ -19,7 +20,7 @@ const IDENT = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 
 const cleanups: string[] = [];
 afterEach(() => {
-  for (const dir of cleanups.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of cleanups.splice(0)) rmTemp(dir);
 });
 
 function tmpdir(prefix: string): string {
@@ -29,7 +30,7 @@ function tmpdir(prefix: string): string {
 }
 
 async function git(cwd: string, ...argv: string[]) {
-  const r = await runGit({ gitPath: REAL_GIT!, argv, cwd });
+  const r = await runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
   return r;
 }
 
@@ -62,7 +63,7 @@ describe('findGitOnPath', () => {
       expect(path.isAbsolute(rel)).toBe(false); // the premise the assertion depends on
       expect(findGitOnPath({ PATH: rel }, 'win32')).toBeNull();
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      rmTemp(dir);
     }
   });
 

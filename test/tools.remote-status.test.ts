@@ -9,6 +9,7 @@ import { createRemoteState, type RemoteState } from '../src/tools/remote-state.j
 import { endpointOf } from '../src/remote/url.js';
 import type { GhInvocation, GhResult, GhRunner, RemoteContext } from '../src/remote/types.js';
 import type { RemoteEvidence, ToolContext } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * remote_status (Session 20).
@@ -74,11 +75,11 @@ beforeEach(() => {
   ghCalls = [];
 });
 afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  return runGit({ gitPath: REAL_GIT!, argv, cwd });
+  return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
 }
 
 async function setupRepo(): Promise<void> {

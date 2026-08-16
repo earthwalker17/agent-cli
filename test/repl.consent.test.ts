@@ -19,6 +19,7 @@ import { createNoneSandbox } from '../src/sandbox/none.js';
 import type { ScriptTurn } from '../src/provider/mock.js';
 import type { Renderer } from '../src/repl/render.js';
 import type { SessionEvent } from '../src/types.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * Session 21.5 — contextual consent.
@@ -63,7 +64,7 @@ afterEach(() => {
   }
   if (prevStateEnv === undefined) delete process.env['AGENT_CLI_STATE_DIR'];
   else process.env['AGENT_CLI_STATE_DIR'] = prevStateEnv;
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 function layout() {
@@ -728,7 +729,7 @@ describe('approval prompts on a real TTY (S22)', () => {
  */
 describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-and-commit on a real TTY (S21.6)', () => {
   async function git(...argv: string[]) {
-    return runGit({ gitPath: findGitOnPath(process.env, process.platform)!, argv, cwd: ws });
+    return runGit({ gitPath: findGitOnPath(process.env, process.platform)!, argv, cwd: ws, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
   }
 
   it('offers [c], and the commit runs through the same body /commit runs', async () => {

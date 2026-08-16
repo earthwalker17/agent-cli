@@ -21,6 +21,7 @@ import { seededIdGen } from '../src/shared/ids.js';
 import type { ApprovalOutcome, ApprovalRequest, SubagentRoleName, Tool } from '../src/types.js';
 import type { SubagentDeps } from '../src/runtime/subagent.js';
 import type { WorkspaceMap } from '../src/workspace/map.js';
+import { FIXTURE_GIT_TIMEOUT_MS, rmTemp } from './common.fixtures.js';
 
 /**
  * Stage C (V0.7): executor role end to end — approval forwarding, worktree isolation, change
@@ -53,11 +54,11 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  rmTemp(tmp);
 });
 
 async function git(cwd: string, ...argv: string[]) {
-  return runGit({ gitPath: REAL_GIT!, argv, cwd });
+  return runGit({ gitPath: REAL_GIT!, argv, cwd, timeoutMs: FIXTURE_GIT_TIMEOUT_MS });
 }
 async function initRepo(dir: string): Promise<void> {
   expect((await git(dir, 'init', '-q', '-b', 'main')).ok).toBe(true);
