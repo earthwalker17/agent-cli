@@ -149,6 +149,7 @@ export const HELP = [
   'and /cancel <ref> — MID-TURN on a TTY — to stop ONE delegated task while the turn continues.',
   '',
   'keys: Ctrl+C interrupts the running turn; at the idle prompt press it twice to quit (both need a terminal).',
+  '      a bare / opens the command menu (arrows + Enter); Tab completes a partly typed /command.',
   'note: shell commands ask — except provably read-only ones when the OS sandbox probe passed, which auto-run INSIDE it; command effects are never undoable.',
 ].join('\n');
 
@@ -418,7 +419,7 @@ export async function acceptSession(ctx: CommandContext, opts: { confirm: boolea
           onRefReady: (ref, oid) => ctx.session.log.append({ type: 'harness.checkpoint', kind: 'delivery', ref, oid }),
           confirmLargeUntracked: async (count) => {
             if (!ctx.question) return false;
-            const a = await ctx.question(`  capture ${count} untracked files in the delivery checkpoint too? [y/N] `);
+            const a = await ctx.question(`  the delivery checkpoint would capture ${count} untracked files — proceed? (n skips the WHOLE checkpoint) [y/N] `);
             return a !== null && /^y(es)?$/i.test(a.trim());
           },
         });
@@ -908,7 +909,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         ...(label !== undefined ? { label } : {}),
         confirmLargeUntracked: async (count) => {
           if (!ctx.question) return false;
-          const a = await ctx.question(`  capture ${count} untracked files too? (is something big not gitignored?) [y/N] `);
+          const a = await ctx.question(`  the checkpoint would capture ${count} untracked files (is something big not gitignored?) — proceed? (n skips the WHOLE checkpoint) [y/N] `);
           return a !== null && /^y(es)?$/i.test(a.trim());
         },
       });
@@ -950,7 +951,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         spent !== undefined
           ? `spent: ${String(spent.searches)} search(es), ${String(spent.extracts)} extract(s), ${String(spent.credits)} provider credit(s), ${String(spent.contentChars)} retrieved char(s)`
           : 'spend: unavailable',
-        ctx.researchBudget !== undefined ? `remaining: ${ctx.researchBudget.remaining()}` : '',
+        ...(ctx.researchBudget !== undefined ? [`remaining: ${ctx.researchBudget.remaining()}`] : []),
       );
 
       // Queries the MAIN agent sent. A researcher child's queries live in its own log, named
@@ -998,7 +999,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         'Retrieved content is untrusted third-party text; claims above are the model\'s reading of it, not the harness\'s.',
       );
       ctx.renderer.flush();
-      ctx.modelOut.write(`${out.filter((l) => l !== '').join('\n')}\n`);
+      ctx.modelOut.write(`${out.join('\n')}\n`);
       return 'continue';
     }
 
@@ -1089,7 +1090,7 @@ export async function dispatchSlash(line: string, ctx: CommandContext): Promise<
         'recorded with source "dangerous-mode".',
       );
       ctx.renderer.flush();
-      ctx.modelOut.write(`${out.filter((l) => l !== '').join('\n')}\n`);
+      ctx.modelOut.write(`${out.join('\n')}\n`);
       return 'continue';
     }
 

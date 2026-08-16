@@ -30,7 +30,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: 'undo', args: '[all]', summary: 'revert the last (or every) file-tool change of this session' },
   { name: 'report', args: '[section]', summary: 'the evidence record; a section narrows it' },
   { name: 'expand', args: '[last | <n>]', summary: 'reprint a folded command/check output in full, from the record (Ctrl+E)' },
-  { name: 'commit', args: '[-m "msg"] [--all]', summary: 'commit session-attributed changes after a preview + confirmation' },
+  { name: 'commit', args: '[-m "msg"] [--all] [--no-trailer]', summary: 'commit session-attributed changes after a preview + confirmation' },
   { name: 'checkpoint', args: '[label | list | restore <n>]', summary: 'capture the workspace to a hidden git ref, or return to one' },
   { name: 'plan', args: '[show | approve | discard]', summary: 'the plan document and its approval gate' },
   { name: 'accept', args: '[confirm]', summary: 'the completion boundary; confirm records a PARTIAL acceptance' },

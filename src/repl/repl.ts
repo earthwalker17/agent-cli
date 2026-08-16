@@ -377,12 +377,17 @@ export async function runRepl(values: CliValues, opts: ReplOptions = {}): Promis
           const names = COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]);
           // Exact names at any length; PREFIX resolution needs ≥2 characters — a lone letter is
           // one keystroke away from /accept or /undo, both consequential (review finding).
-          picked = names.includes(t)
-            ? t
-            : t.length >= 2 && names.filter((n) => n.startsWith(t)).length === 1
-              ? names.find((n) => n.startsWith(t))!
-              : null;
-          if (picked === null && t.length > 0) renderer.chromeLine(`unknown command: /${sanitizeLine(t)} — try /help`);
+          const prefixed = t.length >= 2 ? names.filter((n) => n.startsWith(t)) : [];
+          picked = names.includes(t) ? t : prefixed.length === 1 ? prefixed[0]! : null;
+          if (picked === null && t.length > 0) {
+            // An ambiguous prefix is not an UNKNOWN command — saying so sent people to /help
+            // to look up a command they had half-typed correctly (S22.5).
+            renderer.chromeLine(
+              prefixed.length > 1
+                ? `ambiguous: /${sanitizeLine(t)} matches ${prefixed.map((n) => `/${n}`).join(' · ')}`
+                : `unknown command: /${sanitizeLine(t)} — try /help`,
+            );
+          }
           // The transcript must show what actually ran, not the abbreviation that ran it.
           if (picked !== null && picked !== t) renderer.chromeLine(style.dim(`  running /${picked}`));
         }

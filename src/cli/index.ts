@@ -315,6 +315,14 @@ async function runTask(values: CliValues, task: string, opts: { resumeId?: strin
           `Continue with: agent resume ${session.id} (raise with --max-steps <n>)\n`,
       );
     }
+    if (result.denials > 0) {
+      // Exit 2 already says "denials or step budget" in aggregate; this line says WHICH, how
+      // many, and where the specifics live — the difference between "it failed" and "it was
+      // not allowed to do N things".
+      process.stderr.write(
+        `note: ${String(result.denials)} approval(s) were denied (non-interactive runs auto-deny) — the result is partial; see agent report ${session.id}\n`,
+      );
+    }
     if (reason !== 'aborted') {
       // Session-end hygiene before endSession (the event must land in the open log).
       if (pruneHarnessRefs !== undefined) {
@@ -649,7 +657,7 @@ async function cmdCheckpoint(values: CliValues, sub?: string, subArg?: string): 
       confirmLargeUntracked: async (count) => {
         if (values.yes === true) return true;
         if (!isTty) return false;
-        const a = await askOnTty(`capture ${count} untracked files too? (is something big not gitignored?) [y/N] `);
+        const a = await askOnTty(`the checkpoint would capture ${count} untracked files (is something big not gitignored?) — proceed? (n skips the WHOLE checkpoint) [y/N] `);
         return a !== null && /^y(es)?$/i.test(a.trim());
       },
     });
