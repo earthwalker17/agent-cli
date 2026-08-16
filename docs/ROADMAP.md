@@ -56,13 +56,23 @@ the argument rather than a feature list. The three reference documents moved to 
 was compressed 2,287 → 1,252 lines by removing session archaeology and keeping every contract, and
 this file 1,064 → 462. `BLUEPRINT.md` was deleted, its programme fully executed.
 
-**Verified:** typecheck clean, the full suite green locally (2,404 passed, 11 skipped, 1 documented
-contention-class failure that passed in isolation and was caused by running four vitest processes
-at once), and — the actual gate — a green Actions run on **both** jobs.
+**The GitHub surface caught up too.** Discussions was enabled — which mattered because the Code of
+Conduct had been routing conduct reports to a Discussions channel that did not exist, alongside the
+security-advisory form, which is the wrong tool used silently. Both channels are now named with
+their limitations. About and topics were refreshed against the new README, and a branch ruleset
+makes both CI checks genuinely required on `main`, with force-push and deletion blocked. That
+ruleset ends direct pushes to `main`: from here, changes go through a pull request, which is how
+this record itself landed.
+
+**Verified:** typecheck clean; the full suite green locally (**2,405 passed, 11 skipped, 0 failed**
+over 151 files); a green Actions run on **both** jobs for the tagged commit; and a clean-clone
+smoke — `git clone` → `npm install` → `agent --version` reporting 1.10.2, `agent providers` and
+`agent help` working, `npm audit` reporting zero with and without `--omit=dev`.
 
 **Still open.** The two-worker CI cap trades wall time for a gate that means something; if the
 runner ever gets faster the cap is worth revisiting. macOS remains unexercised by CI. Dependabot
-#10 (TypeScript 7, `@types/node` 26) and #11 (undici 8) stay open deliberately.
+#10 (TypeScript 7, `@types/node` 26) and #11 (undici 8) stay open deliberately. The social-preview
+image and the Discussions categories are GitHub-UI-only and were not set.
 
 ### Session 22.5 (2026-08-15/16) — Production release hardening (v1.10.1)
 
