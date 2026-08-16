@@ -155,3 +155,19 @@ describe('module boundaries (S20.5) — invariants, not an edge matrix', () => {
     expect(offenders, offenders.map((e) => `${e.fromFile} → ${e.spec}`).join('\n')).toEqual([]);
   });
 });
+
+describe('release surface (S22.5)', () => {
+  it('package-lock.json records the same version as package.json', () => {
+    // The lockfile version is stamped only when `npm install` runs after a bump; it sat at
+    // 1.4.0 through six releases. Drift is invisible until someone reads the lockfile and
+    // concludes the tree is older than it is — regenerate it as part of every version bump.
+    const root = path.resolve(__dirname, '..');
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as { version: string };
+    const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8')) as {
+      version: string;
+      packages: Record<string, { version?: string }>;
+    };
+    expect(lock.version).toBe(pkg.version);
+    expect(lock.packages['']?.version).toBe(pkg.version);
+  });
+});

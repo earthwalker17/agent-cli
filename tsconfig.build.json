@@ -2,7 +2,10 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // The tarball ships no sources: 188 dangling .map files were ~half its bytes, and nothing
+    // in the product passes --enable-source-maps. Dev builds (tsconfig.json) keep their maps.
+    "sourceMap": false
   },
   "include": ["src"]
 }
