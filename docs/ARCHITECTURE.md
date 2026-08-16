@@ -1,872 +1,338 @@
-# ARCHITECTURE
+# Architecture
 
-How Agent CLI **v1.10.x** is actually built. This describes the implemented system — its modules,
-contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
-deferred; this file avoids session narration except where a decision's *reason* is the contract.
+How Agent CLI is actually built: the modules, the contracts between them, the orderings that are
+load-bearing, and the limits that are real. This describes the system as implemented — not a plan.
+[`ROADMAP.md`](ROADMAP.md) records how it got here and what is deliberately deferred.
 
-## Map of this document
+**Contents**
 
-**Runtime kernel** — [Shape](#shape) · [Startup order](#startup-order-load-bearing) · [The core loop](#the-core-loop-runtimesessionts) · [Context budget](#context-budget-runtimeelisionts) · [Managed execution](#managed-execution-exec) · [Contracts](#contracts-srctypests) · [Event log](#event-log-storeevent-logts) · [Recovery](#recovery-storesnapshotsts-runtimeundots) · [Resume](#resume-runtimesessionts--reconstruct) · [Providers](#providers-provider) · [Networking](#networking-nettransportts)
+- [The shape of the system](#the-shape-of-the-system)
+- [A session, end to end](#a-session-end-to-end)
+- [Authority: trust, policy, sandbox, grants](#authority-trust-policy-sandbox-grants)
+- [Evidence: the event log and what is derived from it](#evidence-the-event-log-and-what-is-derived-from-it)
+- [Understanding a workspace](#understanding-a-workspace)
+- [Doing the work: plans, tasks, isolation](#doing-the-work-plans-tasks-isolation)
+- [Proving the work: checks, previews, browsers, review](#proving-the-work-checks-previews-browsers-review)
+- [Capability packs](#capability-packs)
+- [Providers and networking](#providers-and-networking)
+- [The terminal](#the-terminal)
+- [Limits that are real](#limits-that-are-real)
 
-**Policy, sandbox and trust** — [Trust](#trust-trust) · [Configuration](#configuration-configconfigts) · [Policy model](#policy-model-policy) · [Sandbox and enforced isolation](#sandbox-and-enforced-isolation-sandbox)
+---
 
-**Understanding a workspace** — [Repository intelligence](#repository-intelligence-retrieval-toolsretrievets) · [Project units](#project-units-checksworkspacets) · [Wire images](#wire-images) · [Project memory](#project-memory-memory--six-documents-context-not-authority)
+## The shape of the system
 
-**Doing the work** — [Tasks, roles, and parallel groups](#tasks-roles-and-parallel-groups-runtimesubagentts-runtimerolests-toolsdelegatets) · [Executor isolation and integration](#executor-isolation-and-integration) · [Planning lifecycle](#planning-lifecycle-plan-toolsupdate-plants-plan-plan-the-approval-prompt) · [The task DAG and the scheduler gate](#the-task-dag-and-the-scheduler-gate) · [Supervision and task-scoped cancellation](#supervision-and-task-scoped-cancellation)
+A modular monolith in TypeScript (strict, ESM, Node 22). **One** runtime function, `runTurn`,
+drives the agent loop; the one-shot CLI and the interactive REPL are both thin consumers of it,
+so there is no second execution path to keep in sync. Data is plain JSON-serializable
+discriminated unions; classes appear only where state genuinely lives (`EventLog`,
+`SnapshotStore`).
 
-**Verifying it** — [Project setup](#project-setup-setup-toolsproject-setupts--install-migrate-seed) · [Typed verification](#typed-verification-checks-toolsrun-checkts) · [Managed preview processes](#managed-preview-processes-preview-toolspreviewts) · [Browser verification](#browser-verification-browser-toolsbrowser-flowts-toolsview-imagets) · [The verification gate](#the-verification-gate) · [Typed recovery](#typed-recovery-recovery-toolsrecoverts) · [The structural review gate](#the-structural-review-gate-reviewledgerts-reportfinding-review) · [The evidence report](#verification-reportreportts)
+**Nine runtime dependencies, eight of them behind a single module each** — `@anthropic-ai/sdk`
+(`provider/anthropic.ts`), `undici` (`net/transport.ts`), `playwright-core` (`browser/flow.ts`),
+`diff` (`shared/diff.ts`), `ignore` (`workspace/map.ts`), `fflate` (`artifacts/zip.ts`),
+`@rgrove/parse-xml` (`artifacts/xml.ts`), `unpdf` (`artifacts/pdf-read.ts`). Only `zod` is
+pervasive, and only as input-schema validation at the tool and config boundary. There is no web
+framework, no CLI framework (argv is `node:util`'s `parseArgs`), no logger, and no daemon.
 
-**Packs (outside the kernel)** — [The documents workflow pack](#the-documents-workflow-pack-artifacts-toolsartifact-ts) · [The research pack](#the-research-pack-research-toolsweb-ts-toolsrecord-sourcets--session-19) · [The remote-delivery pack](#the-remote-delivery-pack-remote-toolsremote-ts--session-20) · [GitOps](#gitops-git--two-halves-split-by-what-the-user-can-see)
+**Module boundaries are a test, not a convention** (`test/architecture.test.ts`): no `../../`
+imports, `shared/` is a leaf that imports nothing outside itself, `sandbox/` is imported from
+outside only through its index, and module cycles are a frozen removal-only set — exactly two,
+both argued in place (`cli↔repl`, the wiring hub; `runtime↔tools`, the registry seam). Adding a
+third fails the suite.
 
-**Delivering and remembering** — [Harness checkpoint lineage](#harness-checkpoint-lineage) · [The acceptance boundary](#the-acceptance-boundary-runtimeacceptancets-accept) · [The REPL](#the-repl-repl)
+| Module | Responsibility |
+| --- | --- |
+| `types.ts` | Every shared contract, no logic: the action taxonomy, `Tool<I>` and its facts, policy/approval/provider wire types, `ExecSpec`, the event-log union. Modules depend on shapes, not on each other. |
+| `shared/` | Leaf utilities: injectable clock and ids, hashing and redaction, path containment (`caseFold`, `isInside`), display sanitization and harness-delimiter neutralization, typed error classes, credential scrubbing, atomic document writes, the one file-registry lock. |
+| `policy/` | `paths.ts` validates a path; `engine.ts` classifies and decides (the single choke point); `command-review.ts` proves a shell command read-only or does not. |
+| `store/` | State outside the workspace: `layout.ts` (state-root resolution), `event-log.ts` (append-only JSONL with locking), `snapshots.ts` (content-addressed pre-images), `grants.ts` (durable machine grants). |
+| `exec/` | The managed-subprocess substrate: `run.ts` (`runManaged`), `env.ts` (child env hygiene), `kill.ts` (verified tree kill), `shell.ts` (exit-code-faithful shell wrapping). Policy-free and log-free. |
+| `sandbox/` | OS-level confinement backends: `windows-lowil.ts` (Low integrity + Job Object), `none.ts`, selected and probed through `index.ts`. |
+| `runtime/` | The turn engine: `session.ts` (start/run/resume/end), `subagent.ts` (bounded children), `acceptance.ts`, `approvals.ts`, `elision.ts`, `undo.ts`, `worktrees.ts`, `task-changes.ts`, `roles.ts`. |
+| `tools/` | The model-facing surface — one file per tool, plus the `TOOLS` registry. Tools declare facts; they contain no policy logic. |
+| `checks/` | Typed verification: project detection, project-unit discovery, the declarative recipe table, toolchain probing, exit-code normalization. |
+| `plan/` | The canonical plan graph: zod schema and semantic validation, the content-sha identity approval binds to, the JSON store, deterministic projections, and the pure execution fold. |
+| `review/`, `recovery/` | Two pure folds with their own data tables: the adversarial review ledger, and the eleven-class bounded repair policy. |
+| `git/`, `remote/` | The managed git client and the managed `gh` client, plus commits, hidden-ref checkpoints, worktrees, and observation-bound GitHub publishing. |
+| `retrieval/`, `workspace/` | What the model sees of the repository: inventory → extraction → import graph → ranking → a rendered map under a hard budget; plus the flat-map fallback and the system-prompt builders. |
+| `artifacts/`, `research/` | The two non-coding capability packs: documents/PDF, and source-backed web research. Neither imports the kernel. |
+| `preview/`, `browser/` | Managed long-lived dev servers, and deterministic browser flows against them. |
+| `memory/` | Six bounded project-memory documents, their caps, their merges, and their staleness rules. |
+| `provider/`, `net/` | Five model providers over two protocols behind one contract, plus the proxy-aware transport. |
+| `report/` | `buildReport`: a pure function from the event log to a structured object and a Markdown rendering. `diff.ts` renders the attributable session diff. |
+| `repl/`, `cli/` | The interactive terminal and the argv dispatch. `cli/assemble.ts` is the one session-assembly path both consume. |
+| `config/`, `trust/`, `setup/` | Narrowing-only layered config; recorded workspace consent; dependency install/migrate/seed by declared intent. |
 
+---
 
-## Shape
+## A session, end to end
 
-A modular monolith in TypeScript (strict, ESM, Node 22). One runtime function (`runTurn`) drives
-the agent loop; both interfaces — the one-shot CLI and the interactive REPL — are thin consumers
-of it (no parallel execution path). Data is plain JSON-serializable discriminated unions; classes
-appear only where state genuinely lives (`EventLog`, `SnapshotStore`). Nine runtime dependencies:
-`@anthropic-ai/sdk`, `zod` (v4, one schema source per tool), `ignore` (gitignore fallback walker),
-`undici` (proxy transport), `diff` (jsdiff line diffs), `playwright-core` (browser verification;
-no install scripts, no bundled binaries — it drives the *system* browser), and the documents
-pack's substrate: `fflate` (deterministic zip), `@rgrove/parse-xml` (bounded strict XML), `unpdf`
-(PDF reading + the bundled pdf.js the rasterizer injects).
+### Startup order (load-bearing)
 
-**Module boundaries are a TEST** (`test/architecture.test.ts`, S20.5): no `../../` imports,
-`shared/` is a leaf, `sandbox/` is imported only through its index, and module cycles are a
-frozen removal-only set — exactly two, both argued in place (`cli↔repl` the wiring hub,
-`runtime↔tools` the registry seam).
+For every session-starting command, in this order:
 
-```
-src/
-  types.ts                 All shared contracts (no logic): action taxonomy, Tool<I> + facts,
-                           policy/approval/provider wire types, ExecSpec, the event-log union.
-  shared/                  LEAF utilities (imports nothing outside itself — test-pinned).
-    clock.ts, ids.ts       Injectable clock + id generation (determinism levers for tests).
-    hash.ts                sha256, the single truncation contract, HMAC secret redaction.
-    pathutil.ts            caseFold + isInside + normalizeRelPrefix (containment, never probed).
-    text.ts                sanitizeLine + neutralizeHarnessDelimiters (display/fence spoofing).
-    diff.ts                jsdiff wrapper: lineDiffStat, unifiedDiff, binary/size guards.
-    errors.ts              Typed error classes (branch on class, never on message).
-    secrets.ts             Credential-shape scrubbing (gh/git output, event emit sites).
-    domain.ts              Host/label predicates shared by research + remote denylists.
-    docio.ts               writeDocAtomic + frontmatter (S20.5 — was the plan↔memory cycle).
-    proc.ts                isAlive pid probe (S20.5 — was shared→exec's one outward edge).
-    registry-lock.ts       The ONE file-registry lock (O_EXCL token + in-process chain).
-  policy/
-    paths.ts               validatePath — Windows-first boundary/hard-reject gate.
-    engine.ts              classify + decide + Grants. Pure. The single policy choke point:
-                           eleven fail-closed fact branches ahead of command/mutation/read.
-    command-review.ts      analyzeCommand — deterministic positive-proof auto-run gate.
-  store/
-    layout.ts              State-dir resolution + refuse-if-inside-workspace.
-    event-log.ts           Append-only JSONL: lock, tail-repair, corruption/version handling.
-    snapshots.ts           Content-addressed pre-image blobs; capture/restore with drift refuse.
-    grants.ts              Durable machine grants (S21): strict schema, corrupt = hard error,
-                           registry-locked atomic writes, append-only grants.log audit.
-  exec/
-    env.ts                 buildChildEnv — env hygiene (secret drops, core floor, proxy pass).
-    kill.ts                killTree — verified best-effort tree kill (helper wait BOUNDED, S20.5).
-    run.ts                 runManaged — the managed-subprocess runner. Policy- and log-free.
-    shell.ts               shellInvocation — the ONE exit-code-fidelity shell wrapper.
-  checks/                  Typed verification.
-    types.ts               CheckRecipe / DetectedProject / CheckResult contracts.
-    detect.ts              Bounded never-throwing manifest detection + stat fingerprint.
-    workspace.ts           Project-UNIT discovery (root/workspaces/depth-1/containers) +
-                           selectUnit; dropped-unit notes now reach the system prompt (S20.5).
-    session-workspace.ts   The ONE live SharedWorkspace holder (detect once, refresh on setup).
-    toolchain.ts           Stat-only machine-toolchain probe + drift pseudo-stamps (S18).
-    recipes.ts             The declarative recipe table + toCommand (the single composer).
-    normalize.ts           Exit-code-is-the-verdict normalization + named signal extraction.
-  setup/intents.ts         install/migrate/seed resolution: lockfile→command, script allowlist.
-  preview/                 Managed preview processes.
-    types.ts               SupervisedSpec/Handle + PreviewRegistryEntry contracts.
-    process.ts             startSupervised — the long-running runner (fd logging, TTL, log cap).
-    recipes.ts             Preview script resolution (dev>preview>serve>start) + previewFact.
-    ready.ts               Announced-port HTTP readiness (bounded, abortable, honest).
-    registry.ts            previews.json + the identity-verified crash sweep (recency before
-                           cap, newest first — S20.5).
-    identity.ts            Process identity (encoded-CommandLine + creation-time tolerance).
-  browser/                 Browser verification.
-    types.ts               The zod FlowSpec (typed steps/asserts) + FlowRunResult contracts.
-    probe.ts               Real launch probe (msedge→chrome→cache) + cheap plan-time guess.
-    flow.ts                The deterministic flow executor (origin lock, typed taxonomy).
-  artifacts/               The documents pack (S17): zip.ts/xml.ts/opc.ts bounded substrate,
-                           format.ts magic-byte identification, docx/pptx/pdf/xlsx readers with
-                           coverage verdicts, model.ts (DocSpec), docx-render.ts (deterministic),
-                           html-render.ts + pdf-render.ts (browser print), pdf-pages.ts
-                           (rasterization), validate.ts (parse-back), img-dim.ts, errors.ts.
-  research/                The web-research pack (S19): tavily.ts (the ONE egress host),
-                           sanitize.ts (ingestion neutralization + URL refusal), types.ts
-                           (budgets as data), format.ts, errors.ts.
-  remote/                  The remote-delivery pack (S20): gh.ts (managed gh runner), argv.ts
-                           (harness-composed argv), url.ts + refs.ts (endpoint/ref validation),
-                           observe.ts (ls-remote observation, scoped heads+tags — S20.5),
-                           parse.ts (tolerant gh JSON), format.ts, context.ts, errors.ts.
-  recovery/                Typed recovery. (FailureClass lives in types.ts.)
-    catalogue.ts           The eleven-class recovery matrix, as DATA.
-    classify.ts            Deterministic classification from persisted evidence.
-    ledger.ts              Pure fold: repair attempts with DERIVED outcomes.
-    policy.ts              Bounded-repair eligibility + typed stop reasons.
-  review/ledger.ts         Pure fold: derived requirement, round qualification, finding
-                           statuses with derived triage worth, blockers + caveats.
-  git/
-    types.ts               GitFacts / GitResult / porcelain contracts (harness capability).
-    client.ts              runGit over runManaged — hardened on every invocation.
-    ls.ts                  The git-backed file listing (S20.5 — was the workspace↔retrieval cycle).
-    facts.ts               detectGitFacts — session-start probe; explicit nulls on every degrade.
-    porcelain.ts           Pure `status --porcelain=v2 -z` parser.
-    commit.ts              The deliberate-commit flow (preview → confirm → perform).
-    format.ts              Model-facing rendering: untrusted-repo fence, never file content.
-    checkpoint.ts          Hidden-ref checkpoints: create/list/prune + restore flows.
-    worktree.ts            Detached task worktrees: version gate, add, EOL pin, honest removal.
-  sandbox/                 (imported from outside ONLY via index.ts — test-pinned)
-    types.ts               SandboxBackend + EnforcementFacts contracts.
-    bootstrap.ts           The versioned PowerShell + inline-C# Low-IL host script.
-    windows-lowil.ts       The enforced Windows backend: transform-at-spawn (wrapSpec) + probe.
-    none.ts                Honest no-enforcement backend; identity wrap.
-    index.ts               selectSandbox — platform → backend.
-  tools/                   The model-facing surface. One file per tool; per-session factories
-                           close over caps rebuilt from events.
-    index.ts               read_file/list_files/search/write_file/edit_file + TOOLS registry.
-    run-command.ts         Shell tool on runManaged; applies ctx.sandbox.wrap at spawn time.
-    run-check.ts           run_check — typed verification (parent-only).
-    project-setup.ts       project_setup — install/migrate/seed with its own consent + events.
-    preview.ts             preview — the managed preview-server tool (parent-only).
-    browser-flow.ts        browser_flow — typed browser verification (parent-only).
-    view-image.ts          view_image — session-artifact image reads (screenshots + pages).
-    artifact-read.ts       read_document — bounded document reads with a coverage verdict.
-    artifact-render.ts     render_document — spec → DOCX/PDF + deterministic validation.
-    artifact-inspect.ts    inspect_pages — PDF pages → pixels the model can judge.
-    web-search.ts          web_search — the parent's bounded search (results, never pages).
-    web-extract.ts         web_extract — researcher-only full-page reads.
-    record-source.ts       record_source — the researcher's ONLY findings channel.
-    research-budget.ts     The ONE shared session research budget + its event fold.
-    remote-status.ts       remote_status — auth/repository/refs/pulls/issues/runs reads.
-    remote-push.ts         remote_push — observation-bound branch/tag publish.
-    remote-release.ts      remote_release — a Release for a tag ALREADY on the remote.
-    remote-state.ts        Remote spend/observations/identity state + event folds.
-    git-status.ts          git_status — local repository views; no free-text argv, no file bytes.
-    git-checkpoint.ts      git_checkpoint — create-only hidden-ref capture + the secret guard.
-    recover.ts             recover — the bounded repair ledger tool (parent-only).
-    report-finding.ts      report_finding — the reviewer child's ONLY findings channel.
-    review.ts              review — parent triage over recorded findings.
-    delegate.ts            delegate_task — parallel groups, executor orchestration, briefs,
-                           the DAG gate (R1–R12), caps, group digest.
-    retrieve.ts            retrieve — read-only view over the session index.
-    update-plan.ts         update_plan — the model's ONLY plan write path.
-    apply-changes.ts       apply_task_changes + the captured-changes registry.
-  retrieval/               inventory.ts (git-backed file facts + path-SET digest) →
-                           extract.ts (regex symbols/imports: ts/js, python, rust, go, c/c++) →
-                           graph.ts (import resolution + PageRank) → store.ts (the persisted
-                           incremental index, written ONLY at assembly) → rank.ts (traceable
-                           signals) → render.ts (tiered map under a HARD char budget) →
-                           ranked-map.ts (the assembly seam; any failure → flat map).
-  net/transport.ts         Proxy-aware transport factory (pure resolver + custom fetch).
-  provider/
-    catalog.ts             The capability model as DATA — incl. per-model context budgets under
-                           the S20.5 derivation rule (window fit + billing clamps, test-pinned).
-    profiles.ts            Per-provider chat-compat wire deviations (deepseek/kimi/glm).
-    errors.ts              ProviderError taxonomy + bounded connection-phase retry.
-    sse.ts                 One incremental SSE parser for the fetch-based adapters.
-    registry.ts            The ONE construction seam: env-only keys + bounded key validation.
-    mock.ts                Scripted offline provider (test backbone); `hang` turns for aborts.
-    anthropic.ts           Streaming SDK adapter + pure mapping + thinking round-trip.
-    openai-responses.ts    OpenAI Responses API adapter (stateless, reasoning items replayed).
-    openai-compat.ts       ONE Chat-Completions adapter, profile-parameterized.
-  memory/
-    store.ts               Capped never-throwing doc reads (docio re-export for memory callers).
-    load.ts                Session-start load: caps, crash notes from log tails, injection.
-    journal.ts             JOURNAL.md rolling policy (2 full + compressed stubs, 24 KiB).
-    codebase.ts            CODEBASE.md provenance/staleness (dual digests).
-    lessons.ts             LESSONS.md pure roll/merge (S21): slug-keyed, provenance-stamped.
-    research.ts            RESEARCH.md deterministic fold (S21): perishable, dated, idempotent.
-    update.ts              End-of-session narrative (ONE cached-prefix call) + atomic writes.
-  plan/
-    store.ts               LEGACY markdown plan store — resumed pre-canonical sessions only.
-    schema.ts              Canonical plan graph: zod shape, semantic validation, canonicalJson +
-                           planContentSha — the approval-binding CONTENT identity.
-    canonical.ts           <id>.plan.json store: amendment contract, approve-refuses-invalid,
-                           readPlanState (the ONE reader) + approvedCurrentGraph (the ONE gate
-                           filter every consumer shares).
-    views.ts               Deterministic user/agent projections + the generated-view writer.
-    graph-state.ts         Pure event fold → per-task execution states (the DAG's truth);
-                           plan-vs-event project ids fold case like selectUnit (S20.5).
-  runtime/
-    session.ts             startSession / runTurn / resumeSession / reconstruct / endSession;
-                           executeCall gate, spill choke, evidence recorders.
-    subagent.ts            runSubagentTask — ONE bounded child session over the same runTurn;
-                           supervision; the wall clock EXCLUDES measured approval wait (S20.5).
-    roles.ts               Runtime role contracts over the policy fact table in types.ts.
-    worktrees.ts           Worktree home, crash registry (owner-stamped, locked), guarded sweep.
-    task-changes.ts        Bounded binary-safe executor change capture to blobs.
-    approval-forwarder.ts  Serialized child→parent approval queue; signal-linked entries.
-    elision.ts             elideHistory — pure, monotone wire-history budget.
-    approvals.ts           Approvers + prompt formatting ([s] hidden where no grant would store).
-    acceptance.ts          The session completion fold: complete/unfinished + /accept state.
-    undo.ts                applyUndo (last / all) over the recorded mutations.
-    input-coerce.ts        The tolerant one-level decode for double-encoded tool arguments.
-  trust/                   trust.json + audit log (store.ts), consent gate (gate.ts),
-                           `agent trust` (commands.ts).
-  config/config.ts         Layered narrowing-only config (+ research/remote denylists).
-  repl/
-    repl.ts                runRepl — prompt → runTurn over ONE session; resume honesty notes.
-    io.ts                  The ONE persistent readline; mid-turn typed /-lines; EOF fail-closed;
-                           captureKeys (S22 select routing) + the Ctrl+E expand chord.
-    render.ts              EventLog.onAppend renderer + live command-output preview + fold tail.
-    commands.ts            Slash commands (/help … /expand); the ONE fold per surface.
-    command-table.ts       The slash-command surface as DATA (S22): Tab completer + / menu rows,
-                           drift-pinned against the dispatch switch in both directions.
-    init.ts                /init onboarding (S21): global AGENT.md Q&A + project starter.
-    status.ts              The sticky status area — the ONLY cursor-moving code, TTY-only;
-                           S22 adds the overlay channel (select menus) + display-width clipping.
-    select.ts              The arrow-key select widget (S22): captureKeys + overlay, no cursor
-                           code of its own, no answer grammar of its own.
-    width.ts               Display-column measurement + clip (S22) — the status area's clip unit.
-    live-tasks.ts          Render-only live task table + the /cancel registry.
-    heartbeat.ts           The dim "model working (Ns)" line for always-thinking models.
-    format.ts              Shared chrome formatters + the S22 style ROLES (seg) and glyph tables.
-    consent.ts             Contextual consent (S21.5); S22 splits boundaries: turn vs typed-/quit.
-    prompt-choice.ts       The ONE consent answer grammar + renderChoiceBlock (S22).
-    sigils.ts              @ routing table (S21.5).
-  workspace/
-    map.ts                 The FLAT map fallback (git listing via git/ls, else pure walker).
-    system-prompt.ts       System-prompt builders (main + per-role) incl. the project block
-                           with detection notes (S20.5).
-  report/
-    report.ts              Pure Event[] → {md, json}; CHECKED correlation; all sections.
-    diff.ts                The attributable session diff (pre-image blob → disk bytes).
-  cli/
-    index.ts               parseArgs dispatch + subcommand bodies; loud one-shot max-steps end.
-    context.ts             buildRunContext — flags > config > catalog precedence.
-    assemble.ts            assembleSession — the ONE construction path both interfaces consume;
-                           every cap fold rebuilt from events on resume.
-    trust-check.ts         The TTY trust gate.
-```
+1. Workspace realpath, then **refuse if the state root resolves inside the workspace** (re-checked
+   in `ensureTrusted`, so a folder cannot plant a `trust.json` granting itself consent).
+2. **Trust gate.** Nothing above this line has read a workspace byte.
+3. Config load — the workspace config file is untrusted bytes until trust passes.
+4. Per-project state creation, then `assembleSession`: **sandbox select + probe** → **git probe**
+   (after trust, because it executes git against the repo) → orphaned-worktree sweep →
+   orphaned-preview sweep → ranked map + retrieval index (any failure falls back to the flat map
+   with the reason surfaced) → project-memory load → system prompt → start or resume.
+5. Post-start records in a fixed order: `trust.verified`, `config.loaded`, `sandbox.status`,
+   `git.context`, `remote.context` (always, usable remote or not — the local remote inventory is
+   the premise every later remote decision rests on), then `workspace.mapped`, `memory.loaded`,
+   `preview.swept` when the sweep found orphans, and `grants.loaded` when durable grants apply.
+6. Per-session tool attachment: `retrieve`, `delegate_task` with the executor bundle and the
+   approval-forwarding queue, `update_plan`, `run_check`, `preview`, `browser_flow`, `recover`,
+   `review`, `apply_task_changes` with the captured-changes registry rebuilt from events.
 
-## Startup order (load-bearing)
+Read-only commands (`report`, `sessions`, `diff`, `map`, `plan`, `memory`, `providers`, `version`,
+`help`) are ungated, create no state directories, and run no git. `commit`, `checkpoint` and
+`undo` **are** trust-gated: the first two execute repository hooks and write `.git`, and `undo`
+restores bytes into the workspace — reverting a change is exactly as consequential as making one.
+`map` reads workspace bytes but sends nothing to a model, and keeps the pure walker pre-trust.
 
-For every session-starting command: workspace realpath → **state-root-inside-workspace refusal**
-(also checked in `ensureTrusted`, so a folder cannot plant a `trust.json` granting itself
-consent) → **trust gate** → config load (the workspace file is untrusted bytes until trust
-passes) → per-project state creation → then `assembleSession`: **sandbox select + probe** →
-**git probe** (post-trust — it executes git against the repo) → **orphaned-worktree sweep**
-(registry-driven, path-guarded, never blocks) → **orphaned-preview sweep** (identity-verified
-kills, wall-budgeted) → **ranked map + retrieval index** (any failure falls back to the flat map
-with the reason surfaced) → **project-memory load** (six docs incl. the global AGENT.md, S21) →
-system prompt → start/resume → post-start
-records in a fixed order (trust.verified, config.loaded, sandbox.status, git.context,
-remote.context — always, usable remote or not: the local remote inventory is the premise every
-later remote decision rests on — then workspace.mapped, memory.loaded, `preview.swept` when the
-assembly sweep found orphaned preview processes, and `grants.loaded` when durable grants apply —
-S21, loaded and validated at every start AND resume) → per-session tool attachment (retrieve, delegate_task with the
-executor bundle + forwarding queue, update_plan, run_check, preview, browser_flow, recover,
-review, apply_task_changes with the changes registry rebuilt from events on resume).
-
-Read-only commands (`report`/`sessions`/`diff`/`map`/`plan`/`memory`/`providers`/`version`/
-`help`) are ungated, never create state dirs, and never run git (`providers` also makes no network
-call); `agent commit`/`agent checkpoint`/`agent undo` ARE trust-gated (`commit`/`checkpoint`
-execute repo hooks and write `.git`; `undo` restores bytes INTO the workspace — reverting a
-change is exactly as consequential as making it, S21.5); `map` reads workspace bytes but sends
-nothing to a model (documented exception) and keeps the pure walker pre-trust.
-
-## The core loop (`runtime/session.ts`)
+### The core loop (`runtime/session.ts`)
 
 `runTurn(session, userText, { signal? })` appends a `user.message`, then loops up to `maxSteps`:
 
-1. Build a `ProviderRequest` — system prompt, the **elided view** of history, tool schemas
-   derived from the tools' zod schemas — and call `provider.complete(req, onText)`.
-2. Record `assistant.message` with **structured** content (text + each tool_use's id/name/input)
-   so resume is faithful. Push the assistant turn onto the history.
-3. If tool_use blocks exist, process each sequentially through `executeCall`, collect all
-   `tool_result` blocks, push them as one user message, repeat.
-4. Otherwise end the loop — but **any unanswered tool_use blocks are still answered first**:
-   blocks and stopReason can diverge (a `max_tokens` cut mid-tool-call yields tool_use blocks
-   with stopReason `max_tokens`), and leaving them unanswered made every later request 400 for
-   the life of the session.
+1. Build a `ProviderRequest` — system prompt, the **elided view** of history, tool schemas derived
+   from each tool's zod schema — and call `provider.complete`.
+2. Record `assistant.message` with structured content (text plus each tool_use's id/name/input) so
+   resume is faithful.
+3. If tool_use blocks exist, process each sequentially through `executeCall`, collect the
+   `tool_result` blocks, push them as one user message, and repeat.
+4. Otherwise end — but **answer any unanswered tool_use blocks first**. Blocks and stop reason can
+   diverge (a `max_tokens` cut mid-tool-call yields tool_use blocks with stop reason `max_tokens`),
+   and leaving them unanswered makes every later request 400 for the life of the session.
 
-`executeCall` is the gate: record `tool.requested` (verbatim, untrusted) → parse input against
-the tool's zod schema → `decide(...)` → record `policy.decision`. A parse FAILURE first passes
-through `input-coerce.ts`: when an `invalid_type` issue expected object/array and a STRING sits
-at that path that itself `JSON.parse`s to a structure, it is decoded and re-validated ONCE —
-kimi-k3 double-encodes nested arguments and cannot dig itself out from the schema error alone.
-Anything else keeps the original error plus a plain-language hint naming the stringified path.
-`tool.requested` and the wire history keep the model's ORIGINAL bytes; policy and execution both
-see the decoded input (the same thing an approval prompt shows). A still-failing parse is a
-recorded deny. On `deny`, return a terminal error result (with a `tool.completed` so resume
-never mistakes it for a crash). On `ask`, call the approver and record `approval.resolved`; a
-`session`-scope allow adds a grant. On `allow`/approved, run `runExecution`.
+**`executeCall` is the gate.** Record `tool.requested` (the model's verbatim, untrusted bytes) →
+parse the input against the tool's zod schema → `decide(...)` → record `policy.decision`. On
+`deny`, return a terminal error result *with* a `tool.completed`, so resume never mistakes a
+denial for a crash. On `ask`, call the approver and record `approval.resolved`. On allow, run.
+
+A parse failure first passes through `input-coerce.ts`: when an `invalid_type` issue expected an
+object or array and a string sits at that path that itself parses as JSON, it is decoded and
+re-validated **once** (some models double-encode nested arguments and cannot recover from the
+schema error alone). The wire history and `tool.requested` keep the original bytes; policy and
+execution both see the decoded input — the same thing the approval prompt shows.
 
 `runExecution` captures a pre-mutation snapshot when required (a capture failure escalates to a
-no-undo ask — never a silent proceed), then executes the tool with a **per-call context**: the
-turn's AbortSignal plus callId-bound evidence channels (`reportCommand`, `reportCheck`,
-`reportTask`, `reportPreview`, `reportBrowser`, `reportRepair`, `reportReview`, and render-only
-`onOutput`) — the runtime binds the callId, so a tool can never forge another call's evidence.
-It records `file.mutated` for snapshotted paths and `tool.completed`. The **model sees the real
-tool output**; the **persisted log redacts** secret-classified reads.
+no-undo ask, never a silent proceed), then executes with a **per-call context**: the turn's
+`AbortSignal` plus callId-bound evidence channels. The runtime binds the callId, so a tool cannot
+forge another call's evidence. The **model sees real tool output**; the **persisted log redacts**
+secret-classified reads. If reading a just-written file back fails (transient AV or index locks),
+the mutation is still recorded with `postStateUnverified` — losing the event would leave `/undo`
+blind to bytes already on disk.
 
-Post-write readback never escapes: if reading back a just-written file fails (transient AV/index
-locks, EISDIR), the mutation is still recorded with `postStateUnverified` — losing the event
-would leave `/undo` blind to bytes already on disk while the log claimed nothing ran.
+`tool.completed` is also the **spill choke point**: when a tool attached transient
+`ToolResult.fullOutput` and the output was truncated, the full pre-truncation bytes are stored as
+`objects/<sha>` and the event marked `fullOutputSaved` — skipped under any redaction, capped, and
+flagged only when the stored blob's hash verifiably matches. The report says "captured output
+preserved", never "full": the exec capture cap may itself have dropped bytes.
 
-`tool.completed` is also the SPILL choke point: when a tool attached transient
-`ToolResult.fullOutput` (five do: `run_command`, `run_check`, `delegate_task`, `project_setup`,
-and `read_document`) and the output
-was truncated, the runtime stores the full pre-truncation bytes as `objects/<sha>` and marks the
-event `fullOutputSaved` — skipped under ANY redaction, capped at 8 MiB (S20.5: 2→8), never turn-failing, and
-flagged only when the stored blob's hash verifiably equals the recorded sha. `reconstruct`
-deliberately does NOT read blobs back (the model never saw the full bytes live). The report says
-"captured output preserved", never "full" — the exec capture cap may itself have dropped bytes.
+**Abort and repair.** The tool loop has a pre-gate: once the signal is aborted or a deny-and-stop
+is seen, no further call executes — including auto-allowed in-workspace writes. Skipped calls get
+synthesized request/completion events and error results so the wire history stays API-valid, and
+the turn records `turn.aborted {phase}`. An executing `run_command` **is** interruptible: the
+signal reaches the child, which is tree-killed, verified and drained, reported as
+`termination: 'aborted'` — distinct evidence from `turn.aborted` (process versus turn).
+`repairDanglingToolUses` answers orphaned tool_use blocks from their recorded completions after a
+mid-turn throw, so one failed turn cannot poison every later request.
 
-### Abort and repair
+### Context budget (`runtime/elision.ts`)
 
-The tool loop has a **pre-gate**: once `signal.aborted` or deny-&-stop is seen, no further call
-executes — including auto-allowed in-workspace writes. Skipped calls get synthesized
-`tool.requested`/`tool.completed` events and error `tool_result` blocks so the wire history stays
-API-valid; the turn records `turn.aborted {phase}`. An abort during model streaming appends
-nothing partial. An **executing `run_command` IS interruptible**: the signal reaches the child
-through the exec substrate, which tree-kills, verifies, drains bounded, and reports
-`termination: 'aborted'` — distinct evidence from `turn.aborted` (process vs turn).
-`'interrupted by user'` remains reserved for calls that never spawned. The one-shot CLI wires
-SIGINT to the same signal (first press aborts, second force-exits).
+The full conversation is resent every step and old tool outputs are the bulk of it. `elideHistory`
+is a **pure** function recomputed per request:
 
-`repairDanglingToolUses(session)` is the REPL's recovery after a mid-turn throw: unanswered
-`tool_use` blocks are answered from their recorded completions (or an error result), so one
-failed turn cannot poison every later request with a 400.
+- **Image pass (unconditional):** image parts older than two assistant steps become
+  `[screenshot <label>: viewed live…; preserved at objects/<sha>]` markers, on a deliberately
+  separate window from the char pass's four steps.
+- **Char pass:** when raw history crosses the trigger, the oldest tool_result *contents* are
+  replaced by a marker (char count, sha256, evidence-log pointer) until the sent size meets the
+  target. Both bounds derive from the selected model's catalog entry, so a small-window model is
+  never fed a large-window history.
+- **Monotonicity is enforced and survives resume.** Elided results stay elided; the set is
+  re-seeded on resume from the log's `context.compacted` events. Without that, an aging screenshot
+  could free budget the char pass then used to restore older outputs verbatim — invalidating the
+  moving cache breakpoint and contradicting the record.
+- **Reasoning blocks weigh their payload only.** The `text` field is a display copy that is never
+  re-sent; charging both double-weighed every block on the providers that set them equal.
 
-## Context budget (`runtime/elision.ts`)
+Only tool_result content is replaced: tool_use/result pairing, assistant text, user messages and
+the last four assistant steps are untouched. `session.messages` and the log are never mutated.
+The **exhausted** state — history over target even fully elided — fires one loud
+`context.compacted {exhausted: true}` at the crossing and re-arms if pressure recedes.
 
-The full conversation is resent every step; old tool outputs are the bulk. `elideHistory` is a
-PURE function recomputed per request:
+### Resume
 
-- **Image pass (unconditional):** image parts older than `IMAGE_KEEP_LAST_STEPS = 2` assistant
-  steps become `[screenshot <label>: viewed live…; preserved at objects/<sha>]` markers even
-  below the char trigger — a deliberately separate window from `keepLastSteps = 4`.
-- **Char pass:** when RAW history crosses the trigger, the oldest tool_result contents are
-  replaced with a marker (char count + sha256 + evidence-log pointer) until the sent size is ≤
-  the target. The bounds come from the model's catalog `budgetTokens` via `contextBudgetFor`
-  (×4 chars trigger, half target); `DEFAULT_TRIGGER_CHARS = 400_000` / `DEFAULT_TARGET_CHARS =
-  200_000` are the fallback for sessions with no catalog identity. S20.5 replaced the flat 100k
-  budget with a per-model derivation rule (window fit + provider billing clamps), so a 1M-window
-  model no longer elides at ~10% of its real window.
-- **Monotonicity is enforced, not assumed, AND survives resume (S20.5):** the runtime passes its
-  live `alreadyElided` set and those results STAY elided; on resume the set is re-seeded from the
-  log's `context.compacted` events (it was process-memory only, so a resumed session under a
-  larger budget could restore outputs the log records as permanently elided). Without it, an
-  aging screenshot could free budget that the char pass used to restore older outputs verbatim —
-  invalidating the moving cache breakpoint (the whole suffix re-billed) and contradicting the
-  record. The end-of-session narrative request carries the same set, for the same reason.
-- **Reasoning blocks weigh their PAYLOAD only** (plus `text` when no payload exists): `text` is a
-  display copy that is never re-sent, and the compat adapters set it equal to the payload —
-  charging both double-weighed every kimi/deepseek block and could fire the exhausted warning at
-  half the real reasoning volume (S16.5b).
+`reconstruct` rebuilds the provider conversation from the committed log. It is faithful for every
+tool result except redacted secret reads, which by design are not persisted and cannot be replayed.
+Crash recovery reconciles against `file.mutated` and post-hashes: a completed edit whose
+`tool.completed` was lost to a truncated tail is recognized as **applied** (the post-hash matches
+disk); a snapshot with no matching mutation is flagged **unknown post-state**; a bare
+`tool.requested` is a true **orphan** — unless `command.started` shows the command had spawned
+(the replay says its effects are unknown), `task.started` shows delegated tasks were running (the
+replay points at every surviving child log), or a recorded completion verdict exists
+(`command.ended` / `check.completed` / `setup.completed` / `remote.mutated`), in which case the
+verdict is replayed rather than inviting a re-run.
 
-Only tool_result CONTENT is replaced: tool_use/result pairing (API validity), assistant text,
-user messages, and the last 4 assistant steps are untouched; outputs smaller than their marker
-are skipped. `session.messages` and the log are NEVER mutated; `context.compacted` records
-exactly which outputs the model can no longer see. The **exhausted** state (history over target
-even fully elided) is recorded even in the STEADY STATE where the elided set stops growing but
-un-elidable content — assistant text, reasoning payloads — keeps accumulating: a session-scoped
-latch fires ONE loud `context.compacted {exhausted:true}` at the crossing and re-arms if pressure
-recedes (S20.5 — the old growth-gated warning went silent exactly when the session was heading
-for a hard context-window failure).
+Grants and the system prompt/map are regenerated fresh — current state outranks stale context.
+Rebuilt from events at assembly: the captured-changes registry, delegate/check/preview caps, the
+research spend, and the owed harness-ref list, so a crashed life's cleanup debts survive.
 
-## Repository intelligence (`retrieval/`, `tools/retrieve.ts`)
+### The acceptance boundary (`runtime/acceptance.ts`, `/accept`)
 
-Large-repo understanding is selective and ranked, not a broad file dump. One in-memory
-**RetrievalHandle** is built per session at assembly and read everywhere else.
+Completion is an explicit recorded boundary, never a side effect of quitting. `computeAcceptance`
+is a pure fold over (plan state, graph fold, events). **COMPLETE** requires the plan fully executed
+(every task completed or parent-owned; a draft plan is deliberately not silently complete) *and*
+every applicable executor capture applied, registry-wide. Three further axes make a session
+**unfinished**: a completed task whose declared check gate is still pending; a declared
+`gates.completion` kind that has not passed since the last change; an open escalation or unproven
+repair.
 
-- **Inventory:** `git ls-files` + per-file size/mtime + dirty paths (`status --porcelain=v2 -z
-  -uall`, subdir-prefix aware), capped at 20k files. `inventorySha256` digests the sorted path
-  SET — deliberately independent of rendering, so map-format changes cannot flap staleness.
-- **Extraction:** line-anchored regex symbols/imports for the ts/js family, Python, Rust, Go,
-  and C/C++ (S18; one `c-cpp` id — a `.h` is not attributable to either language; every other
-  language ranks via path/git signals, declared everywhere). Pattern TABLES per language, all
-  column-0 anchored (module-level items only — Rust `impl` methods and Python nested defs stay
-  invisible by design): Rust items with `pub` as the exported surface plus `mod x;` emitted as
-  `mod::x` pseudo-specifiers; Go funcs/types/consts with the language's own case rule for
-  exported, single AND block import forms; C/C++ aggregates, `#define` macros, one conservative
-  function pattern, `#include` edges, a header's declarations reading as its public surface.
-  Resolution (graph.ts): Rust through sibling/`mod.rs` and the nearest `lib.rs`/`main.rs` crate
-  root (`super::`/`self::` dirname arithmetic; external crates drop); Go by DIRECTORY-SUFFIX
-  matching onto one deterministic representative file (module paths are unknowable without
-  go.mod in a per-file resolver — wrong only toward missing edges; single-segment specs drop as
-  stdlib); C/C++ includer-relative then `include/`/`src/` roots. `SymbolKind` gained
-  struct/trait/mod/macro with NO index version bump (strings in JSON; newly eligible files
-  extract on the next warm load — the pinned convergence). `LangId` (per-file extraction) and
-  `ProjectKind` (per-unit build system) are deliberately SEPARATE vocabularies: a lone `.rs`
-  scratch file indexes without any cargo unit existing. Injection defense is
-  structural: symbol captures are bounded identifier classes, import specifiers are
-  charset-filtered — repo prose cannot enter the system prompt through extraction. Secret-named,
-  binary, and >256 KiB files are never read.
-- **Index:** `<projectDir>/index/retrieval.json` — a derived, idempotent cache written ONLY at
-  assembly (a command-less observe tool must never mutate durable state). Warm loads stat-diff
-  and re-extract only changes; corrupt/missing/version-mismatch rebuilds cold; a ~10s wall budget
-  yields an honest `'partial'` that CONVERGES across sessions. Deliberately lock-less: any
-  consistent snapshot is valid, atomic tmp+rename prevents torn reads, rebuild is the recovery.
-  Known limit: same-size+same-mtime edits are invisible to stat-diff — a misrank at worst, never
-  a wrong line (excerpts are live).
-- **Ranking:** a task-agnostic structural prior (bounded PageRank over resolved relative imports,
-  entry-point/manifest heuristics, uncommitted-change boost, depth and test/vendor penalties)
-  plus `rankForQuery` (path/symbol term matches + graph-neighbor boost + the prior).
-  Deterministic, and every hit carries human-readable `signals` — traceable selection is a
-  contract, not a debug feature.
-- **Rendered map:** tiers under a HARD 16k-char budget (every tier charged as appended, footer
-  reserved, per-line clipping): coverage-honesty header → uncommitted files (≤20) → the COMPLETE
-  directory tree with per-dir counts (the recall backstop — ranking orders detail but never hides
-  that a directory exists) → ranked key files with top exported symbols and **no line numbers**
-  (line numbers only ever come from live reads) → footer pointing at retrieve/search/list_files.
-  `WorkspaceMap.sha256` remains `sha256(text)` — "exactly what the model saw".
-- **The `retrieve` tool:** `{query, max_results≤50, scope_paths?}` → ranked hits with signals +
-  symbols + excerpt lines read LIVE at query time (≤64 files/≤500ms; secret/binary skipped;
-  vanished files dropped and counted). Policy: no command/delegates/planDoc facts, empty mutation
-  plan, declared `readsPaths` → observe/auto-allow in-workspace, ask on out-of-workspace scopes.
-- **Consumers:** the parent session; read-only child roles (through the named admission seam);
-  `/map`; `workspace.mapped` fields; CODEBASE staleness. Executor children and pre-trust
-  `agent map` deliberately stay on the flat map.
+It also carries non-blocking **caveats** — above all gates waived because the project or the
+machine cannot run them, each naming the scope it means ("NEVER RAN in `web`; it passed in `api`").
+One derivation feeds `/accept`, `/status`, the quit summary, the report, and the journal handoff.
 
-## Project units (`checks/workspace.ts`)
+`/accept` is user-typed consent. On COMPLETE it appends `session.accepted` and runs bounded
+cleanup: prune this session's owed harness refs, and retire a fully-executed approved plan through
+the existing discard flow (the file stays on disk as audit). With unfinished work it refuses with
+the honest list; `/accept confirm` records a partial acceptance and retires nothing. Re-accepting
+with no work since is a no-op that also finishes an interrupted cleanup. Work-shaped events after
+an acceptance mark it **stale**, and every surface says so. Cleanup never erases rollback, audit
+or resume material.
 
-A workspace holds one or more project UNITS, not one project at its root — a `web/`+`api/`
-repository with no root manifest previously went silently inert, every gate unrunnable.
+---
 
-- **Discovery** is bounded, stat-first and NEVER throwing (the `detect.ts` discipline): the root
-  when it has a manifest, whatever the root `package.json` `workspaces` / `pnpm-workspace.yaml`
-  `packages:` / root `Cargo.toml` `[workspace] members` / `go.work` `use` directives declare
-  (S18 — cargo members and go.work uses are hand-extracted bounded scans, the pnpm-YAML
-  precedent), every depth-1 directory holding a manifest, and the children of conventional
-  containers (`apps`/`packages`/`services`/`libs`/`modules`). Unit manifests:
-  `package.json`, `pyproject.toml`, `setup.cfg`, `Cargo.toml`, `go.mod`, `CMakeLists.txt` —
-  a cmake unit is NAMED without recipe rows so refusals say what the project is. Depth 1 is
-  scanned GENERALLY rather than against a name list — a Python service in `svc/` is a real
-  project; `target/` and `vendor/` join the scan skip set.
-  Caps: `MAX_PROJECT_UNITS = 16` (S20.5: 12→16, and the dropped-units note now renders into the system prompt — a unit past the cap is a visible drop, not a silent nonexistence), `MAX_UNIT_DEPTH = 2`, 200 directories per listing.
-- **Two rules are load-bearing.** A unit exists only where a MANIFEST exists (directory names are
-  candidates, never units). And everything NOT interpreted is RECORDED as a `note`: the glob
-  vocabulary is "a literal directory" or "a single trailing `/*`", and anything richer is refused
-  with a reason, because half-interpreting a glob silently yields a different unit set than the
-  package manager itself uses.
-- **Ordering is deterministic** (root first, then lexicographic; listings are filtered, then
-  sorted, then capped) because unit ids qualify recipe ids, and recipe ids are what consent binds
-  to. Ids are case-folded on case-insensitive filesystems, and a unit whose real path escapes the
-  workspace (a symlinked workspace entry) is dropped.
-- **`selectUnit` refuses ambiguity; it never picks.** With more than one unit a call must name its
-  `project` — deliberately including the workspaces-monorepo case where a root unit exists, since
-  a container root resolves most kinds to `unsupported`, and that reason WAIVES a declared gate.
-  A workspace with NO project resolves to its root, so "this project cannot run a build" stays a
-  capability answer rather than becoming a call refusal that could never be waived.
-- **Per-unit resolution:** `resolveChecks`/`resolvePreview`/`resolveSetup` all take a unit; the
-  command spawns with the unit's cwd; recipe ids are unit-qualified (`node.script.test@api`) —
-  but NOT for the root unit, so single-project workspaces keep byte-identical ids, grants,
-  evidence and tests. `check.started`/`check.completed` carry an additive `projectId`.
-- **`DetectedProject`** gains `id`, `lockfile` (name + content sha), `manifestSha256`,
-  `npmrcSha256`, `packageManagerSpec`, and `envFiles` (NAMES only — `.env` contents are a
-  secret-classified read, but "ships `.env.example`, has no `.env`" is a fact worth surfacing
-  rather than a dev server that dies during startup for no visible reason). The stamp union
-  qualifies every `relPath` by unit, so the TOCTOU guard notices a manifest appearing in ANY unit.
-  S18 adds optional per-ecosystem sub-records — `rust` (workspace root, Cargo.lock, edition, the
-  `[build].target` cross triple from `.cargo/config.toml`, rust-toolchain file), `go` (module
-  path, go directive, go.sum, vendor/), `cmake` (project name) — and `ProjectKind` widens to
-  `node | python | rust | go | cmake`. The stat-candidate list covers the new manifests plus
-  `.cargo/config.toml` and `rust-toolchain*`, so a Cargo.toml edit is drift the guard can see;
-  `target/` is deliberately NOT stamped (its mtime moves per build while nothing resolution-
-  relevant depends on it).
-- **Toolchain facts (S18, `checks/toolchain.ts`)** — machine availability as a first-class fact,
-  stat-only and never spawning: cargo/rustc/go probed on PATH (PATHEXT-aware, bounded), rustup
-  components and installed targets probed under the TOOLCHAIN dirs — never `~/.cargo/bin`, whose
-  proxy shims exist for every component name whether or not the component does (union across
-  installed toolchains, an approximation the module states). One probe per `detectWorkspace`,
-  shared by reference across units. Freshness rides the existing TOCTOU seam instead of a second
-  cache: present toolchains become pseudo-stamps under the reserved `~toolchain/` prefix,
-  appended identically by `detectWorkspace` and `probeWorkspaceStamps` — installing Go (or
-  `rustup target add`) mid-session flips staleness and the shared holder re-detects; absence is
-  never cached across a session (the S16.5 probe lesson). A presence probe is not a health
-  check: a findable-but-broken toolchain still fails at run with a real signal.
-- **One detection per session, one LIVE holder.** Assembly detects once, before the system prompt,
-  and `checks/session-workspace.ts` publishes that snapshot to `run_check`, `preview` and
-  `project_setup` through a single `SharedWorkspace`. Per-tool copies protected a window that does
-  not exist (tool calls execute strictly one at a time, so `decide()` and `execute()` are
-  back-to-back) and let a post-install check resolve against a stale snapshot — refused at execute
-  for a call nobody approved. `project_setup` refreshes the holder after a run; the drift guard is
-  unchanged, and the never-gated case has its own honest message.
-- **The prompt block is a photograph.** It is built before the first turn and lives in the cached
-  stable prefix, so it is labelled AS OBSERVED AT SESSION START and points at the tools that
-  resolve against current state. A multi-project workspace also gets ONE startup chrome line naming
-  its projects and which are uninstalled — the model had those facts since S16; the human did not.
+## Authority: trust, policy, sandbox, grants
 
-## Project setup (`setup/`, `tools/project-setup.ts`) — install, migrate, seed
+Three separate controls, deliberately not conflated: **trust** records that you consented to the
+agent operating in a folder; **approval** asks before a consequential action; the **sandbox** is
+the OS technically confining a process.
 
-The check inversion applied to the one operation the harness refused to perform until now. There
-is still no dependency-install CHECK KIND: setup has its own tool, its own consent, its own event
-stream, and no path to satisfying a verification gate. A check still means "we verified"; it never
-means "we fetched".
+### Trust (`trust/`)
 
-- **The model names an INTENT and a UNIT; the harness names the command.** `install` resolves from
-  the LOCKFILE (`package-lock.json`→`npm ci`; `pnpm-lock.yaml`→`pnpm install --frozen-lockfile`;
-  `yarn.lock`→ v1 `--frozen-lockfile` or Berry `--immutable`, read from `packageManager`). When
-  yarn.lock exists and nothing declares the major, it REFUSES rather than guessing between two
-  incompatible flags. The lockfile chosen follows the DETECTED package manager, so a stale
-  `package-lock.json` in a migrated repo does not compose `npm ci` for a pnpm project; every other
-  lockfile present is named in the evidence. No lockfile still installs, saying the versions are
-  NOT pinned. Python is `unsupported` with the reason. `migrate`/`seed` resolve the project's OWN
-  script from a fixed per-intent allowlist, so neither can become "run any script" — and when the
-  only blocker is missing `node_modules`, the recorded reason is `precondition-curable`, not a
-  false `no-recipe` capability claim for a project that declares the script (S16.5b).
-- **Consent, two different answers for two different consequences.** An install is `external` and
-  MAY replay under `[s]`, bound to `sha(lockfile + package.json + every install-affecting config
-  file)` — never the lockfile alone, because every package manager executes package.json's
-  lifecycle scripts during an install, and `.npmrc`, `.yarnrc.yml` (`yarnPath`) and
-  `.pnpmfile.cjs` (a `readPackage` hook) each choose what code runs and where it comes from — all
-  ordinary auto-allowed writes, so binding the lockfile alone let an auto-allowed package.json
-  write turn one `[s]` into standing arbitrary-shell consent. `migrate`/`seed` are `destructive`
-  and ask EVERY time: a migration is not idempotent, so "you approved this once" cannot honestly
-  mean "you approved it again". They issue no replay keys, and `destructive` is structurally
-  non-grantable — two independent reasons for the same answer. Installs deliberately DO run
-  lifecycle scripts; `--ignore-scripts` would break esbuild/playwright/prebuilds and make the
-  capability a lie, so the prompt says so instead.
-- **Evidence:** `setup.started` (from `onSpawn` only) / `setup.completed` are NEW event types,
-  additive, schema still v1. Reusing `check.*` would have taught every existing reader a
-  falsehood — `collectPassingEvidence` marks a file CHECKED on a zero exit, gates count a passing
-  kind as verification, and the repair ledger accepts one as proof. The exit code is the verdict
-  (`ok`, never `pass`); `reconstruct` replays an interrupted setup as "dependency or local data
-  state is UNKNOWN — re-run it"; `setup.started` joins `WORK_EVENT_TYPES` and the pre-integration
-  spawn set. `SETUPS_PER_SESSION = 12`, events-rebuilt.
-- **Parent-only**, for a sharper reason than `run_check`'s: an executor worktree is disposable, so
-  an install there populates a directory about to be deleted, and a migration there writes the
-  REAL local database from what the user believes is isolation.
-- **Recovery:** `dependency-setup` finally has a path forward — its catalogue entry names
-  `project_setup install`, still human-gated and still `autoEligible: false`. A failed setup
-  classifies as that class by construction; a TIMED-OUT one is `timeout-resource` and an ABORTED
-  one is `unknown`, because a Ctrl+C on a slow `npm ci` produced no verdict. A repair proof must
-  come from the project that failed.
+Recorded consent, explicitly not a sandbox. `trust.json` (keyed by case-folded real path) and an
+append-only `trust.log` live at the state root, outside every workspace, so folder contents can
+never influence trust. A corrupt store is a hard error — never read as "trusted", never silently
+rewritten. The consent prompt is offered only on a real TTY (a piped answer nobody read is not
+consent); non-interactive untrusted runs refuse with exit 3; `--trust-this-workspace` consents for
+one invocation and is never persisted.
 
-## Typed verification (`checks/`, `tools/run-check.ts`)
+### Configuration (`config/config.ts`)
 
-**The model names KINDS; the harness names COMMANDS.** That inversion is the whole trust
-argument, and everything else follows from it.
+Two strict-schema layers merged **narrowing-only**: the user layer (`<state>/config.json`) carries
+preferences (`provider`, `model`, `maxSteps`, `memoryUpdates`) plus narrowing knobs; the workspace
+layer (`<ws>/.agent-cli/config.json`) carries **narrowing only**, because a workspace is
+attacker-influenceable. The knobs are `protectedPaths`, `secretPatterns`, `envExcludePatterns`,
+`remoteBlockedHosts` and `researchBlockedDomains` — all deny lists, with no allowed-list
+counterpart, because a permit list would be widening. The schemas structurally cannot express
+widening; unknown keys and bad JSON are hard errors. Provenance is recorded as
+`config.loaded {sources: [{path, sha256}]}`, and `.agent-cli/` is write-protected from the agent's
+own file tools.
 
-- **Kinds:** `build | test | test-targeted | typecheck | lint | format | static-analysis`
-  (+ `browser`, produced only by flows). There is deliberately NO dependency-install kind —
-  installing runs third-party code with network access, which is not "verify what we just
-  built"; a missing toolchain is an honest `unsupported` precondition the user resolves.
-- **Detection:** bounded, never-throwing manifest reads over a FIXED candidate list (so a newly
-  ADDED manifest is noticed too), plus a stat-only fingerprint. Everything taken from workspace
-  bytes is charset-filtered AT INGESTION, because it is later composed into a command line.
-  Script text is capped at 200 chars for display — and `scriptShas` carries the sha of the
-  **untruncated** value, because consent binds the body (below).
-- **Recipes:** declarative rows with `applies` / `unmetPrecondition` / `argv` / `bodyScript` /
-  timeout / effects. A project's OWN script always beats a guessed tool invocation, and the first
-  applicable row wins — resolution is deterministic, which is what consent can bind to.
-  `toCommand` is the single composer: bare-safe tokens pass through, everything else is
-  single-quoted, and an unrepresentable argument throws rather than being hand-escaped. Node/TS
-  is first-class, Python minimal, **Rust/Cargo and Go modules first-class (S18)**, CMake
-  detected-but-unsupported, everything else `unsupported` **with the reason**. A script
-  recipe requires `node_modules` only when the project actually DECLARES dependencies.
-  The cargo rows: `cargo build`/`cargo test`/`cargo check` (typecheck)/`cargo clippy -- -D
-  warnings` (lint; clippy's plain exit ignores lint findings, so the strict CI form IS the
-  recipe)/`cargo fmt --check` — compile rows carry `workspaceAuthored: true` because build.rs
-  and proc-macros execute workspace code at build time. The go rows: `go build ./...` (build AND
-  typecheck — Go's compiler is its typechecker, and the deliberate duplication keeps a typecheck
-  gate honest instead of no-recipe-waived), `go test ./...`, `go vet ./...`
-  (static-analysis), and a `test-targeted` row that maps path scopes onto `./pkg/...` package
-  patterns (Go selection is path-shaped; the unit prefix is stripped, `.go` files fold to their
-  package dir). Holes are DECISIONS with stated reasons via `ECOSYSTEM_KIND_NOTES`: no rust
-  test-targeted (cargo selects tests by NAME), no go format (`gofmt -l` exits 0 either way, and
-  an output-parsed verdict would break the contract below). Preconditions are ROW-OWNED
-  (`UnmetPrecondition {reason, why}`): whether a blocker is an uninstalled project (curable), a
-  missing machine toolchain (waives loudly), or a host incapability (waives quietly) is a fact
-  only the row can state — the old central rule hard-coded Node's answer (`hasDependencies &&
-  !hasNodeModules`) into generic control flow; the node rows still answer byte-identically,
-  test-pinned. Cross-target crates (a `[build].target` triple
-  in `.cargo/config.toml`) split honestly: `cargo fmt` stays host-verifiable, compiles gate on
-  the installed rustup target (else `toolchain-unavailable` naming `rustup target add <triple>`),
-  and `cargo test` refuses permanently as `precondition` — cross-compiled test binaries cannot
-  execute on this host, and the harness manages no hardware or emulators.
-- **Normalization:** **THE EXIT CODE IS THE VERDICT.** `exited`+0 ⇒ pass, `exited`+non-zero ⇒
-  fail, every non-exit termination ⇒ `error` — never `pass`. Parsers only enrich
-  `summary`/`findings`/`signals`. The named **signals** are the durable half: full output is
-  truncated and only spilled to a blob, so failure classification later reads the signal ids
-  persisted on the event, not text that has left the context. S18 appended `rust-error` and
-  `go-error` (order pinned — SIGNAL_RULES is append-only), widened `syntax-error` (Go's
-  lowercase spelling) and `assertion-failed` (Rust ≥1.73's backticked form), and added rustc
-  two-line / Go one-line finding extractors. Known hazard, documented not fixed: gcc/clang's
-  `fatal error: foo.h: No such file or directory` would false-fire `command-not-found` →
-  dependency-setup — unreachable today because no C/C++ recipe exists to emit such output, and
-  narrowing the generic rule would break real not-found detection for zero current benefit.
-- **`run_check`** (per-session factory, PARENT-ONLY): holds the detected project SNAPSHOT,
-  because the policy `check()` fact must be pure and because the command the human approved must
-  be the command that runs. Executors are deliberately excluded — a worktree materializes without
-  gitignored dependencies, so a check there would refuse on a precondition almost every time.
-  A bound `test-targeted` run with no explicit scope defaults to its plan task's declared
-  `touches` (substituted before the policy fact resolves, so the human approves what runs).
-- **Three refusals that spawn nothing:** the resolved command (or the script BODY it invokes)
-  changed since the gate; a malformed request (`test-targeted` with no usable scope) — refused as
-  a CALL, with no event, so a caller mistake can never become gate evidence; and the session
-  check budget (`CHECKS_PER_SESSION = 160` — shared with browser flows; S20.5: 80→160, events-rebuilt).
-- **Evidence:** `check.started` is emitted from `onSpawn` ONLY, so it means exactly what
-  `command.started` means — a process really started. An `unsupported` kind records a completed
-  event alone carrying `unsupportedReason` (`no-recipe` | `precondition` | `precondition-curable`
-  | `bad-request` | `toolchain-unavailable`), which lets a gate distinguish "this project cannot"
-  from "you asked wrong" and from "this project is not installed yet". `toolchain-unavailable` is
-  the MACHINE-capability answer (no cargo/go on PATH, a rustup component or target missing),
-  produced before anything spawns and naming the exact user cure; it waives a gate — the
-  browser-unavailable precedent: an absence the harness will never install on its own must not
-  strand acceptance — but LOUDLY: the gate folds track these waivers apart
-  (`toolchainUnavailable`/`toolchainUnavailableIn`) and the acceptance caveat says "TOOLCHAIN IS
-  NOT INSTALLED on this machine" instead of the generic "unsupported". `precondition-curable` is
-  produced when the project DECLARES dependencies and has no `node_modules`: a transient state
-  with a named cure (`project_setup install`), decided by the node rows themselves (row-owned
-  `why`). It does NOT waive a gate — an uninstalled project is unverified, not unverifiable (the
-  full reason lives with the gate fold below). `reconstruct` replays an interrupted check as
-  "produced no verdict; effects unknown — re-run".
+### The policy engine (`policy/`)
 
-### Consent for checks — replay, bound to what actually runs
+Two independent ideas, honestly separated: **path validation** and **action classification**.
 
-A check runs project code at full user privilege: it is `reversible` + `noUndo`, always
-`execBoundary: 'unsandboxed'` (the Low-IL boundary denies workspace writes, so a build could not
-run inside it — the mode is recorded, never implied), and it ASKS. Repeated checks would be
-unaffordable at one approval each, so a `session`-scope answer stores **replay consent**:
+`validatePath` (Windows-first) hard-rejects NUL, `\\?\` / `\\.\` device prefixes, UNC paths,
+reserved device names, NTFS alternate data streams, and trailing dot or space; resolves through
+`realpathSync.native` of the deepest existing ancestor plus the tail; and containment-checks
+against `realpath(workspace) + separator`, so a sibling prefix (`C:\ws` versus `C:\ws-evil`) cannot
+escape. It returns facts; the engine decides.
 
-- keyed by `sha256(recipeId + command + bodySha)` in a SEPARATE store with no `ActionClass`. The
-  **body** is load-bearing: `npm run test` is a stable string whose behavior lives in
-  package.json, which the agent can rewrite through an ordinary auto-allowed in-workspace write.
-  `bodySha` hashes the **untruncated** script value — hashing the display-capped text let an
-  append past character 200 ride the earlier approval.
-- `GRANTABLE` / `isGrantable` / `Grants.add` are UNTOUCHED. Widening the class table would
-  silently break an unrelated consent: the executor-spawn ask is classified `reversible` and is
-  deliberately non-grantable, yet the prompt offers `[s]` whenever `isGrantable(classification)`
-  holds — a widened class would render an `[s]` storing a grant the delegates branch never reads.
-- the prompt shows every resolved command verbatim and counts what `[s]` grants.
+`decide(tool, input, ctx, grants)` is **deny-first, first match wins**, over the facts a tool
+declares:
 
-## Managed preview processes (`preview/`, `tools/preview.ts`)
+| Branch | Verdict |
+| --- | --- |
+| **Delegation** (`delegates`) | Step 0, deliberately first: a delegating tool must never reach the command path or the observe fall-through. Any unknown role denies the whole group; any mutating role asks (class `reversible`, deliberately not session-grantable, so every executor spawn is a human decision). |
+| **Plan-document write** (`planDoc`) | `reversible`/allow — the store archives prior bytes and the write cannot touch workspace files. `planDoc` + `command` denies. |
+| **Typed check** (`check`) | Before the command branch, because a check spawns a process. `reversible` + `noUndo` + `execBoundary: 'unsandboxed'`, and asks unless every resolved command already carries replay consent. The fact must be pure — resolved from a captured project snapshot, never the filesystem. |
+| **Browser flow** (`browser`) | Bound to a running managed preview allows; anything else **denies**. There is no ask path for arbitrary origins. |
+| **Session-evidence read** (`evidenceRead`) | Allows only for a sha this session's own artifacts recorded; an un-admitted sha denies. |
+| **Remote read / remote write** (`remoteRead`, `remoteWrite`) | Two separate facts, each fail-closed. A read asks as `external` and is session-grantable within a real counter; a write asks **every time**, is never passed through `applyGrant`, and offers no `[s]` anywhere. |
+| **Local git read / checkpoint** (`gitRead`, `gitCheckpoint`) | Same two-fact shape. A read allows as `observe` with a rule naming the argv; a checkpoint allows as `reversible` + `noUndo` and is the one model-reachable write inside `.git`. |
+| **Research** (`research`) | Command-less and mutation-less, so it would otherwise auto-allow as "read-only workspace access" — false in the one direction that matters. Reading is not the consequence; **sending** is. |
+| **Artifact render / inspect** (`artifact`) | Render cross-checks the fact's declared outputs against the resolved mutation plan (divergence denies); inspect splits on provenance and denies secret-named paths outright, because pixels cannot be redacted. |
+| **Shell command** (`command`) | Automatic review — see below. A declared `cwd` is validated with the write-target containment rule and refused for protected paths: `.git` and the state dir are protected as *places*, not only as write destinations. A hardcoded circuit-breaker denies workspace and drive wipes. |
+| **Declared write** | Out-of-workspace or protected (`.git`, the state dir, any `.agent-cli` segment, configured `protectedPaths`) denies; otherwise `reversible`/allow with `requiresSnapshot`. |
+| **Reads** | Out-of-workspace or secret-named ask as `sensitive`, with log redaction. Secret classification runs on **both** the raw request and the resolved path, so a symlink or an 8.3 alias of `.env` cannot evade it. |
 
-The one process class whose lifetime is not bounded by a tool call: a preview server is an
-explicit SESSION resource with recorded start, readiness, health, logs, and deterministic end.
+A throwing fact denies. A tool declaring conflicting facts denies. That last rule is what makes
+"the read tool cannot publish" verifiable by grepping for a second fact and finding none.
 
-- **`startSupervised`** is `runManaged`'s deliberate inverse: it returns a live handle
-  (`pid, exited, isAlive, stop, tail`) instead of awaiting an outcome. Output goes to a
-  per-preview LOG FILE via an inherited fd — no pipes, so an orphan surviving harness death can
-  never wedge on a full pipe buffer half-serving requests — and the parent's fd copy closes at
-  spawn. The child is `unref()`ed. Lifetime bounds are typed stop reasons: TTL (120 min — S20.5: a multi-hour session outlived 60), log cap
-  (16 MiB → `log-overflow`), explicit stop, session end. `stop()` bounds BOTH the kill helper and
-  the wait for death, and re-checks OS liveness first so a crash coinciding with a timer is never
-  relabeled. POSIX children get their own process group; on Windows detaching is NOT viable
-  (DETACHED_PROCESS kills the PowerShell wrapper instantly — verified), so a one-shot console
-  Ctrl+C also reaches the preview: documented, not silent.
-- **Consent reuses the check inversion**: the model names a SCRIPT from a fixed allowlist
-  (dev > preview > serve > start — "preview" must never euphemize "run any script"); the harness
-  composes `<pm> run <name>`; the engine's check branch splits on kind `'preview'` with its own
-  rule ids so the PERSISTED decision says "KEEPS RUNNING, binds a local port". `[s]` stores
-  body-bound replay keys (`preview.`-prefixed recipeIds keep them disjoint from check consent); a
-  DECLARED port folds into the consent identity and the prompt. Grants stay in-memory: a resumed
-  session re-asks. A TOCTOU re-probe refuses at execute if the resolved command/body changed.
-- **Readiness is honest**: the harness probes HTTP only on a port the server's own output
-  ANNOUNCED (declared ports included — an unannounced answer is somebody else's socket), caps
-  candidates, honors the deadline and the turn abort, re-checks liveness after a successful
-  probe, and records "socket ownership not verified". The tail is ANSI-stripped before parsing
-  (a dev server writing to a log file can still colourise: picocolors forces colour on win32
-  regardless of TTY, which would put the port behind an escape sequence). Each candidate port is
-  probed on BOTH loopback literals, `127.0.0.1` then `[::1]`, and **the address that ANSWERED is
-  what gets recorded** — Node 22 resolves `localhost` verbatim, so a server told to listen on that
-  name binds `::1` here and refuses IPv4 entirely; the recorded URL is also the origin a browser
-  flow is locked to, so it must be an address proven to answer rather than the first one tried. An HTTP answer means A server is up;
-  APPLICATION state is judged only by browser flows. An aborted wait leaves the process running
-  and says so; a readiness timeout stops it with `start-failed`, never a user-shaped `stopped`.
-- **Events + ordering (load-bearing)**: registry entry BEFORE `preview.started`; `preview.ended`
-  has exactly ONE writer (the exit listener, installed at spawn: stop-reason first-cause,
-  closed-log tolerant) and lands BEFORE unregistration. The spawn→register window is covered by
-  REPORTING: the sweep scans for recent logs with no registry record and no ended marker — and
-  the sweep now STAMPS that marker on every log it disposes of (after the registry write
-  succeeds), so a reaped orphan is not re-reported as a lost start for 48h.
-- **The crash sweep kills only on POSITIVE identity**: dead pid → drop; live sibling owner →
-  skip; live orphan → the recorded command's re-derived `-EncodedCommand` token must appear in
-  Win32_Process.CommandLine AND creation time must sit within ±15s of `createdAt`, else the kill
-  is SKIPPED and reported. There is deliberately NO age hatch on kills (delayed removal is safe;
-  killing a recycled pid is not); >24h unverifiable records are deregistered WITHOUT a kill; a
-  20s identity wall budget bounds startup. Stop-all runs on every session-end path.
-  `/accept` deliberately does NOT stop previews (the user may browse the accepted app).
-- **Honest answers when a preview is GONE:** the tool keeps an in-memory `endedReason(previewId)`
-  so the browser layer can tell a harness lifecycle stop apart from a crash; `status` surfaces a
-  PREVIOUS-life registry survivor of the SAME session id (an unverifiable orphan was previously
-  invisible exactly while it held the port Vite strictPort needs), and the resume note names the
-  stop-it-first way out; the nothing-was-gated drift refusal says "nothing was approved and
-  nothing started" instead of claiming a nonexistent approval was invalidated.
+**`analyzeCommand` is a positive proof of safety**, deterministic over the command string alone —
+the model's opinion is never consulted. Auto-run requires *all* of: a single simple command with no
+shell metacharacters, encoding or control characters (chaining, redirection, substitution,
+expansion sigils, quotes and the `--%` stop-parse token all disqualify); an executable on a small
+curated read-only allowlist (basename, extensions stripped, NFKC-normalized, casefolded); and
+per-executable argument checks with nothing escaping the workspace. Everything else asks.
+Obfuscation defeats any string reviewer, which is why safety here is *proven* rather than
+pattern-matched — and why the reviewer is a prompt-skip gate, never the boundary.
 
-## Browser verification (`browser/`, `tools/browser-flow.ts`, `tools/view-image.ts`)
+**Session grants** are in-memory, keyed `(tool, class)`, and store only grantable classes
+(`sensitive`, `external`) — never `destructive`, never `reversible`, and **never** any
+command-bearing tool: a command's classification is a best-effort label over untrusted model text,
+so a grant keyed on it would be standing shell permission won by a label. Grants are not persisted
+and not restored on resume. The prompt hides `[s]` whenever no grant would actually be stored.
 
-The check inversion applied to UI: the model declares a TYPED FLOW; the harness owns execution,
-waits, and the failure taxonomy. `playwright-core` drives the SYSTEM browser — probe order
-msedge → chrome → Playwright-cache Chromium, cached per session **SUCCESS-only**
-(`cacheSuccessfulProbe`: a cached transient failure turned every later flow into the gate-WAIVING
-unsupported/precondition — acceptance could reach COMPLETE without the UI ever driven; a failed
-probe re-probes on the next flow — seconds, never honesty); a machine with none degrades to the
-gate-waiving `unsupported/precondition`. A flow bound to a preview the HARNESS stopped (TTL / log
-cap / explicit stop) between approval and execution reports `preview-stopped-lifecycle` (routed
-to `timeout-resource` — a resource bound expired, nothing about the app failed), keeping
-`preview-died` → runtime-process for real crashes. S20.5 closed the two gaps in that split: a
-lifecycle stop landing MID-flow (the reapers are asynchronous) is reclassified after the run by
-re-consulting the ended reason, and an UNBOUND flow can name the reason too (via the most
-recently ended preview) — but only when nothing is left alive, so a sibling's death is never
-borrowed. Over-budget or store-failing SCREENSHOTS are counted (`screenshotsOmitted` on the event
-and a do-not-cite output line), matching the trace-omission honesty.
+### Durable machine grants (`store/grants.ts`)
 
-- **FlowSpec (zod, strict)**: `goto{path (relative-only), ready_when{selector|text} REQUIRED}`,
-  `click/fill/select/press/wait_for`, typed `expect{text|visible|hidden|value|url|count}`,
-  `screenshot{label}`. Readiness honesty is structural: goto waits for 'commit' only and then the
-  DECLARED condition — a load event, networkidle, or a quiet spinner never count; expect/
-  screenshot steps cannot precede the first goto (schema) and steps run strictly in order,
-  stopping at the first failure. Caps: ≤20 steps, ≤4 declared screenshots, per-step timeouts
-  clamped to the 120s flow wall (90→120 S20.5: a cold dev server's first compile ate most of
-  90s), bounded error/request records.
-- **Typed taxonomy**: `timeout` / `assertion` (last observed state recorded) / `navigation` (the
-  origin lock: any off-origin TOP-LEVEL navigation aborts the flow; a REAL URL-origin comparison,
-  not a string prefix) / `runtime` (uncaught page error) / `protocol` (browser/driver died — the
-  app was never judged). Console errors are findings, not verdicts, unless
-  `fail_on_console_error`; off-origin SUBRESOURCE requests are recorded, never blocked. A failing
-  step gets a best-effort failure screenshot. A preview dying mid-flow is `preview-died` (status
-  error), never a timeout blamed on the app.
-- **Evidence rides the check channel**: `check.started` (the browser genuinely launched) and
-  `check.completed {check:'browser'}` with `exitCode: null` and NO termination, ALWAYS — which is
-  exactly what keeps a browser pass out of the report's file-CHECKED correlation (exit-0 rule)
-  while gates, waivers, acceptance caveats, classification, and the repair ledger all work
-  unchanged. A `browser.flow` event carries the detail. Flows share the session check budget plus
-  a 96 MiB events-rebuilt artifact byte budget; a spent budget drops artifacts (with omission
-  markers) but never refuses the flow itself — dropped artifacts are recorded, never silent.
-- **Policy**: the `browser` fact's whole decision is `previewBound` — a flow bound to a RUNNING
-  managed preview auto-allows, anything else DENIES (no ask path for arbitrary origins). Execute
-  re-verifies; a died-in-between preview is a typed error, never a silent pass. The fact also
-  carries the READY SET and the requested id, so a denial names what is running and asks for a
-  `preview_id` instead of telling a session with two live servers to start a third.
-- **Project attribution**: both check events carry the bound preview's `projectId`. Without it a
-  project-scoped `browser` gate was permanently unsatisfiable AND unwaivable — every gate consumer
-  folds a missing `projectId` to the root, and `run_check` cannot produce kind `browser` at all.
-  An unbound flow still binds to whatever single preview is ready, which in a full-stack session
-  can legitimately be the API, so the RESULT states which preview, project and URL it drove.
-- **Visual judgment is judgment**: `view_image` returns real pixels for a sha ONLY if this
-  session's `browser.flow` artifacts recorded it — enforced at the GATE (an un-admitted sha
-  DENIES, because the shared blob store also holds spilled output and snapshot pre-images) and
-  re-checked at execute. Visual impressions can add findings but never discharge a gate or
-  override a failed deterministic assertion.
+The one explicit, user-recorded exception to "authority is not durable", designed narrowly against
+the known failure mode of vague "don't ask again" answers that mint machine-wide permissions.
 
-## The documents workflow pack (`artifacts/`, `tools/artifact-*.ts`)
+- **Exact identity only.** An `[a]` answer persists either the approved check batch's exact replay
+  keys (body-sha-bound, so any script or command drift re-asks structurally; scoped to the
+  workspace by the same derivation trust uses) or one `(tool, external)` pair from a closed
+  eligible set: `web_search`, the researcher spawn, and `remote_status` reads — three read-only
+  external consents whose blast radius per-session budgets already bound. No prefixes, no patterns.
+- **Everything else is ineligible, with the reason written on the set itself**: remote writes,
+  migrate and seed, executor spawns, `run_command`, out-of-workspace and secret reads, artifact
+  inspection, preview replay, install replay.
+- **The offer is structural.** `[a]` renders only from an interactive approver — never
+  non-interactive, never under `--dangerously-allow-all` (which answers before any prompt exists),
+  never on a forwarded child ask, and only for eligible requests. An unoffered `a` parses as a
+  **deny**, so scope cannot be upgraded by a typo.
+- **The record never lies.** Persistence runs *before* `approval.resolved` is appended; a failed
+  persist downgrades the recorded scope to `session` with the reason in the event's detail.
+- **Visible and revocable.** `<stateRoot>/grants.json` (strict schema, corrupt is a hard error,
+  never rewritten) with registry-locked atomic writes and an append-only `grants.log`. Assembly
+  loads matching entries at every start and resume, validates class entries against the eligibility
+  set, seeds the in-memory grants, and appends `grants.loaded` — standing authority is visible in
+  the evidence of every session it touches. `agent grants revoke <id>` (or `/grants revoke`)
+  applies from the next assembly; a running session keeps its in-memory copy, and says so.
 
-The first NON-CODING workflow, built to test whether the kernel's contracts generalize. It adds
-no orchestration layer, no plugin system and no second agent loop: three per-session tools, one
-policy fact, two additive event types, and a module of pure format logic outside the kernel.
+### The sandbox (`sandbox/`)
 
-**The loop is spec-centred:** `request → read sources → author a *.docspec.json → render →
-deterministic validation → SEE the pages → revise THE SPEC → re-render → deliver`. The spec is an
-ordinary workspace file written with the ordinary file tools, which is what makes revision
-snapshot-backed, undoable, diffable and attributable for free — no incremental-artifact-patching
-machinery exists or is needed.
+A backend is selected once per session, **probed**, and reported truthfully. The runtime never
+assumes enforcement from a platform name.
 
-- **Substrate.** `zip.ts` opens OOXML containers IN MEMORY ONLY (nothing is ever extracted to
-  disk, so zip-slip is structurally impossible rather than defended against), validating every
-  entry name and capping entries/bytes on `max(size, originalSize)` — a STORED entry is
-  materialized by its COMPRESSED size, so gating only the uncompressed field let a forged central
-  directory pull 300 KB past a 1 KB cap before the after-inflate check fired. Writing is
-  deterministic: sorted entries, FIXED mtime (fflate would stamp the live clock into
-  2-second-resolution DOS fields), fixed level. `xml.ts` is a size- AND depth-bounded strict
-  parse (unbounded nesting overflowed the recursive walk with an untyped RangeError instead of
-  refusing the file), plus the escapers every generated string must pass through, which also drop
-  code points XML 1.0 cannot carry.
-- **Identification is by MAGIC BYTES + the content-types part, never the extension**, and
-  `identifyDocument` NEVER throws: every failure is an `unsupported` verdict with a reason that
-  echoes no file content (a `.env` renamed `report.docx` must fail the sniff without leaking a
-  byte). OLE containers refuse honestly as the one thing this pack cannot disambiguate without
-  an OLE reader: legacy binary Office vs an encrypted OOXML document.
-- **Readers** (`docx-read` / `pptx-read` / `pdf-read` / `xlsx-read`) return ONE summary shape
-  whose first field is a **coverage verdict** — `full | partial | structural` with reasons — so
-  "we read it" can never quietly mean three different depths. PPTX slide ORDER comes from the
-  declared `sldIdLst` resolved through the relationship map (file numbering is a convention, not
-  the order), with a warned numeric fallback. PDF reading uses `unpdf` with `isEvalSupported`
-  off; password-protected and unopenable files degrade structurally rather than throwing.
-- **The DocSpec** (`model.ts`) is one strict zod schema with hard caps and a parse function that
-  returns the COMPLETE issue list with nothing written — the `update_plan` revision-loop pattern.
-  Image paths are spec-file-relative BY SCHEMA and re-validated at execute; font names are
-  charset-constrained because they are interpolated into a CSS block, and HTML rawtext ends at
-  the first `</style` regardless of CSS quoting.
-- **`docx-render.ts` is byte-deterministic**: fixed rIds, no `w:rsid`, FIXED docProps timestamps
-  (an artifact's identity is its content, not its render time), `{date}`/`{pageNumber}`/
-  `{totalPages}` as real `fldChar` field runs, real named styles carrying `outlineLvl`, ONE
-  numbering instance per list block (shared numIds are the classic restart bug), rPr children in
-  CT_RPr schema sequence, transitional `ST_Jc` values. Same spec + same image bytes ⇒ same
-  sha256, test-pinned by rendering twice. `html-render.ts` emits ONE self-contained page (no
-  script, no link, no external src — images are data: URIs) plus Playwright header/footer
-  templates, and `pdf-render.ts` prints it through the SHARED cached browser probe on an
-  `offline` context with http(s) route-abort. PDF bytes are NOT claimed deterministic (Chromium
-  embeds dates and ids); DOCX bytes are.
-- **Validation is deterministic and model-free** — the half a non-vision session still gets in
-  full. `validate.ts` parses each artifact BACK: outline equality, table shapes, dangling
-  `r:embed`/`r:id`/style/numId references, header/footer presence, a PAGE field whenever
-  `{pageNumber}` was asked for, printed page count, headings findable in the printed text.
-  Two severities, deliberately separate: structural mismatches are FAILURES; layout heuristics
-  (blank page, stranded heading) are NOTES that can never block, because the first false
-  positive would turn a guess into a gate. Validation reads with validation-scale bounds and
-  normalizes both sides the way the renderer does — comparing an artifact against the READER's
-  display bounds manufactured "does not match its spec" failures on correct renders (S17 review).
-- **`inspect_pages` closes the visual loop**: `pdf-pages.ts` injects unpdf's bundled pdf.js into
-  a blank page of the probed browser (the same zero-dep library that reads PDFs in Node renders
-  them where a real DOM exists — native-free by construction), enforcing a per-image byte
-  ceiling by re-rendering at reduced scale and DROPPING a page that still will not fit. Pages
-  become content-addressed blobs, ride the existing wire-image channel (so the vision choke and
-  image aging apply unchanged), and join `view_image`'s admission set in lockstep.
+`windows-lowil` is a genuinely OS-enforced boundary. `wrapSpec` is a transform at spawn time: it
+rewrites the spec so `runManaged` spawns a versioned PowerShell + inline-C# host instead of the
+shell. The host duplicates the caller's own token, lowers it to **Low integrity** (no admin needed
+for a lowered copy of your own token), creates a **Job Object** (kill-on-close, active-process cap,
+UI restrictions), and launches the real command forwarding its inherited standard handles — so
+output capture and the kill/drain machinery are unchanged. The child's `TEMP` points at a
+Low-labeled scratch directory under the state root.
 
-**Policy: one new fact, two consequence shapes** (`tool.artifact`, engine branch 0f):
+**What it enforces**, verified against the live OS: Mandatory Integrity Control denies the child's
+writes to Medium-and-above objects — the workspace, the user profile, system directories, and the
+harness state directory — at the kernel; and the Job Object reaps the whole process tree on kill,
+including a detached grandchild `taskkill /T` cannot reach. **What it does not enforce**, stated
+verbatim in `EnforcementFacts.doesNotConfine`: reads, network, writes to Low-labeled locations, and
+service-reparented work.
 
-- `render` writes workspace artifacts and may launch the browser. The generic mutation branch
-  would have described it as an "in-workspace file change" and — decisively — the engine NEVER
-  evaluates `readsPaths` on a tool with a non-empty mutation plan, so a render's claimed read
-  coverage was structurally void. The rule cross-checks the fact's outputs against `mutates()`
-  RESOLVED (the snapshot machinery follows `mutates()`; divergence denies) and says in the
-  recorded reason that spec-referenced reads are enforced AT EXECUTE — where the spec path
-  itself and every image path are validated for containment and secret names, refusing into the
-  error list with nothing written.
-- `inspect` is command-less and mutation-less: the S6 trap with a browser behind it. Admission
-  splits on provenance — an artifact THIS SESSION rendered from a spec that embedded no
-  workspace images inherits the render's consent (execute re-verifies CONTENT identity, and a
-  drifted file refuses naming cures that actually exist); anything else ASKS as grantable
-  `sensitive`; secret-named paths DENY outright, because pixels cannot be redacted the way text
-  can. The embedded-images clause is the anti-laundering rule: a spec may name any in-workspace
-  image, so without it a render+inspect pair showed the model arbitrary workspace pixels with no
-  approval at all.
+**Fail closed.** `ensureAvailable()` spawns a Low-IL child and confirms *both* Low integrity *and*
+an actual write-deny before `enforced: true`. On any non-Windows platform, or on probe failure, the
+backend degrades to `none` semantics and the engine **disables auto-run entirely** — every command
+asks. The host never falls back to unsandboxed. `PolicyDecision.execBoundary` decides which wrap
+the runtime hands a tool, and `command.started.sandbox` records the boundary actually used.
 
-**Evidence: `artifact.rendered` / `artifact.inspected`** are additive event types on the S16
-setup pattern — they can NEVER satisfy a verification gate, and the report's asymmetry test pins
-it (a render exiting clean after a mutation leaves the file UNCHECKED). They are deliberately NOT
-in `WORK_EVENT_TYPES`: every render already emits snapshot-covered `file.mutated` events, which
-are what acceptance staleness counts. A failing LATEST validation per path is a loud acceptance
-CAVEAT, not unfinished work (blocker semantics need delete/undo resolution rules that do not
-exist yet; the caveat retires when the artifact is overwritten, deleted or undone). That
-retirement actually FIRES since S20.5: it matches the render's additive absolute path against
-later `file.mutated`/`undo.applied` events (they carry absolute OS paths; the render's own `path`
-is workspace-relative — they could never be equal before), excludes the render call's own trailing
-mutation, and honors `undo.applied` (undo emits that, never `file.mutated`). Budgets are
-events-rebuilt
-like every other: `RENDERS_PER_SESSION = 30` (S20.5) counted over calls that produced an artifact, HARD-FAILED after being charged (the additive `artifact.render-failed` marker — an attempt is evidence), or
-completed (a browserless PDF-only render legitimately emits no artifact event),
-`INSPECTED_PAGES_PER_SESSION = 80` over UNIQUE image shas with a 48 MiB blob budget (S20.5).
-
-**Honest limits, stated in the product, not only here:** DOCX visual fidelity belongs to Word, so
-DOCX claims are structural and parse-back verified while visual judgment happens on the PDF twin
-rendered from the same spec; no browser ⇒ DOCX still renders and the PDF is skipped with a
-recorded reason (a print that FAILS is a different, `ok:false` answer); no image input ⇒
-inspection refuses and says the deterministic verdict is what remains. Editing pre-existing DOCX
-files, PPTX generation, footnotes, TOC fields, tracked changes, cell merges and RTL fidelity are
-out of scope rather than partially supported.
-
-## Wire images
-
-`tool_result.content` widens to `string | (text|image)[]`; `ToolResult.images` is a TRANSIENT
-channel whose pixels are already content-addressed blobs. The persisted `tool.completed` records
-METADATA + the `objects/<sha>` pointer — a log line never contains base64 (pinned against raw log
-bytes) — and `reconstruct` rebuilds from `outputPreview`, so a resumed conversation degrades to
-pointers BY CONSTRUCTION. The provider maps parts to SDK blocks, dropping harness-internal
-sha/label enrichment; the moving cache breakpoint verifiably lands on the top-level tool_result
-block, never a nested part.
-
-## Managed execution (`exec/`)
+### Managed execution (`exec/`)
 
 `runManaged(spec) → ExecOutcome` is the substrate every shell execution goes through. It is
 policy-free and log-free: policy stays in the engine, evidence stays in the runtime.
@@ -874,1414 +340,913 @@ policy-free and log-free: policy stays in the engine, evidence stays in the runt
 - **Termination is typed**: `exited | timeout | aborted | spawn-error`. Only `exited` carries an
   exit code — a killed command has `exitCode: null` by contract and can never read as a passing
   check anywhere downstream.
-- **Kill/drain state machine**: timeout or abort → `killTree` (async `taskkill /PID /T /F`; exit
-  0 and 128 both mean "gone"; bounded liveness probes; result recorded in `killDetail`, honest
-  when unverified) → settle on `'exit'` with a bounded wait → race `'close'` against a drain
-  timeout, then destroy streams. Never awaits `'close'` unconditionally: a detached grandchild
-  holding inherited pipe handles cannot hang the outcome (nodejs/node#21960 class;
-  regression-tested with a real surviving-grandchild fixture). Settling awaits an in-flight
-  `killTree` so kill evidence is never lost to the child's own exit racing ahead. Tree kill is
-  BEST EFFORT and says so: grandchildren orphaned by a dead intermediate parent are structurally
-  unreachable without Job Objects (documented gap).
-- **Capture**: stdin `'ignore'` (interactive children fail fast, never hang the turn); stdout and
-  stderr captured separately and interleaved, head+tail under byte caps (stderr-prioritized
-  1/3–2/3 split of the 4 MiB default — S20.5: 1→4 MiB, because capture truncation is UNRECOVERABLE, a middle gap no later spill or model-truncation can restore) from raw buffers, decoded once. `truncateForModel` remains
-  the final model-facing truncation contract on top.
-- **Env hygiene**: children get the parent env minus names containing
-  `key/secret/token/password/credential` (case-insensitive; config `envExcludePatterns` may add
-  more), deduped case-insensitively, with a non-excludable floor (`SystemRoot`/`windir` etc. —
-  WinError 10106) and proxy variables passed through (embedded proxy credentials remain visible —
-  an honest, documented limitation, NOT a security boundary). `AGENT_CLI=1` marks harness children.
+- **Kill and drain.** Timeout or abort triggers `killTree` (exit 0 and 128 both mean "gone";
+  bounded liveness probes; the result recorded honestly, including when unverified), then settles
+  on `'exit'` with a bounded wait and races `'close'` against a drain timeout. It never awaits
+  `'close'` unconditionally, so a detached grandchild holding inherited pipe handles cannot hang
+  the outcome. Tree kill is best-effort and says so.
+- **Capture.** stdin is `'ignore'`, so interactive children fail fast rather than hanging a turn;
+  stdout and stderr are captured separately and interleaved, head-plus-tail under byte caps
+  (stderr-prioritized), decoded once.
+- **Env hygiene.** Children get the parent environment minus names containing
+  `key`/`secret`/`token`/`password`/`credential` (case-insensitive; config may add more), deduped
+  case-insensitively, with a non-excludable floor and proxy variables passed through. Embedded
+  proxy credentials remain visible — an honest documented limit, not a boundary.
 
-## Contracts (`src/types.ts`)
+---
 
-- `Tool<I>` declares `schema` (one zod source), `mutates(input, ctx)` (write paths, or `null` =
-  undeclarable side effects), optional `readsPaths`, `command`, `check`, `browser`,
-  `evidenceRead`, `delegates`, `planDoc`, and `execute`. Policy reads these facts; tools contain
-  no policy logic. Optional `approvalContext(input)` is DISPLAY-ONLY: extra lines folded into the
-  approval request's `detail` inside try/catch — never consulted by policy.
-- `ToolContext` optionally carries `signal` (turn cancellation), `onOutput` (render-only), the
-  callId-bound evidence reporters, `sandbox` (`ExecSandbox`), and `rules` (config narrowing).
-- `ExecSandbox` = `{ mode, enforced, active, wrap(spec) }`: `enforced` (availability) gates
-  auto-run; `active` marks a call actually confined — and is true only when a backend exists to
-  confine it, so the recorded boundary can never over-claim; `wrap` is the enforcing transform
-  for an auto-run call and identity otherwise.
-- `PolicyDecision` = `{ classification, decision, rule, reason, requiresSnapshot, noUndo?,
-  redactOutput?, execBoundary? }`.
-- `SessionEvent` = `{ v, seq, ts } & EventBody`, a discriminated union. `v` is the schema version;
-  the log is a versioned public contract.
-- `Provider.complete(req, onText?, signal?)` returns `{ blocks, stopReason, usage }`; abort is
-  detected via `signal.aborted` after a throw, never via provider-specific error classes.
+## Evidence: the event log and what is derived from it
 
-## Trust (`trust/`)
+### The event log (`store/event-log.ts`)
 
-Recorded consent — explicitly NOT a sandbox. `trust.json` (keyed by case-folded real path) and an
-append-only `trust.log` audit live at the **state root**, outside every workspace. A corrupt store
-is a hard error, never read as "trusted" and never silently rewritten. The consent prompt is
-offered only on a real TTY (a piped answer nobody read is not consent); non-interactive untrusted
-runs refuse with exit 3; `--trust-this-workspace` consents for one invocation and is never
-persisted. Displayed paths pass through `sanitizeLine`. Every session appends
-`trust.verified {source}`.
+One JSON object per line at `<state>/projects/<slug>/sessions/<id>.jsonl`, written synchronously.
+`EventLog.open` acquires an atomic exclusive lock (refusing a live foreign holder, reclaiming a
+stale one, and re-reading a present-but-unparseable lock before any steal, because the exclusive
+create is visible before the JSON bytes land), repairs a partial trailing line **before** the first
+append, and refuses mid-file corruption and newer schema versions. `events` is **live** — appends
+through the instance appear immediately, which is what `/undo`, `/report` and `/status` depend on —
+and observable via `onAppend`. `readLenient` is a lock-free, never-throwing reader for the report
+and session listing.
 
-## Configuration (`config/config.ts`)
+The schema stays **v1**, and every extension has been additive — new event types or optional
+fields. Bumping `v` would lock old binaries out of new logs. The accumulated surface covers
+session and turn lifecycle; trust, config, policy decisions and approvals; provider identity
+changes (env var *names* and hosts only, never credentials); tool requests and completions, file
+mutations, snapshots and undos; command start/end with typed termination and the sandbox boundary;
+git context, commits, checkpoints, restores and hidden-ref lineage; context compaction; memory
+loads and updates; workspace mapping; task lifecycle, changes, applies and supervision; plan
+routing, updates, approval and discard; check start/completion with named signals and project
+scope; setup start/completion; repair attempts, escalations and dismissals; preview and browser
+events; artifact renders and inspections; review findings and triage; and acceptance.
 
-Two strict-schema layers merged narrowing-only: user `<state>/config.json` (prefs `model`,
-`maxSteps`, `memoryUpdates` + narrowing) and workspace `<ws>/.agent-cli/config.json` (narrowing
-ONLY — no prefs, since a workspace is attacker-influencable). Narrowing knobs: `researchBlockedDomains`, `remoteBlockedHosts`, `protectedPaths`,
-`secretPatterns`, `envExcludePatterns`. The schemas cannot express widening; unknown keys/bad JSON
-are hard `ConfigError`s. Rules travel on `ToolContext`; provenance is recorded as
-`config.loaded {sources: [{path, sha256}]}`. The `.agent-cli/` directory is write-protected from
-the agent's file tools by the path validator.
+### Snapshots and undo (`store/snapshots.ts`, `runtime/undo.ts`)
 
-## Project memory (`memory/`) — six documents, context not authority
+Pre-mutation file bytes are stored content-addressed at `<state>/…/objects/<sha256>` — no git
+dependency, so undo works with no repository present. `SnapshotStore.restore` verifies the file
+still holds the recorded post-mutation hash and **refuses drifted files** rather than clobbering
+them. `applyUndo` reverts the last mutating action or all of them in reverse order, chaining a
+multiply-edited file back to its original bytes and removing directories the mutation created if
+now empty. Every undo appends `undo.applied`; the log is never rewritten.
 
-Cross-session continuity with hard caps and honest degrades (a broken or oversize doc can NEVER
-block a session — it loads truncated or is skipped with a status recorded in `memory.loaded`).
-The complete inventory, with every bound pinned in `test/limits.test.ts` (S21) and the
-worst-case TOTAL injection — 86,016 chars ≈ ~21k tokens, all riding the cached stable prefix —
-asserted as ONE ceiling a new doc must deliberately trip:
+Git checkpoints **layer on top**: a checkpoint restore snapshots current bytes first and records
+ordinary `file.mutated` events under one synthetic callId, so the restore is itself one undoable
+unit of this same machinery. Git never becomes the undo mechanism.
 
-| doc | home | owner / writer | cap (inject) | lifecycle |
+### The report (`report/report.ts`)
+
+`buildReport` is a pure function `(Event[], approvedGraph?) → { json, md }`.
+
+**A changed file is labeled CHECKED only if a `run_command` — or a typed check — genuinely exited
+zero after that file's last mutation.** The two sources are merged and sorted by seq before the
+lookup, and a check's `pass` is derived from the identical `exited && exitCode === 0` rule. Each
+piece of passing evidence carries the **scope** it covers — a check's project unit, a command's
+declared cwd — and the correlation requires the file to be inside it, so a green build in `web/`
+never marks a changed file in `api/`. A `command.ended` recording a kill vetoes CHECKED even
+against a stray exit-0 completion. Everything else is UNCHECKED, and the report prints *which*
+command with the exact wording "check ran, exit 0" and no correctness claim.
+
+Commands that never executed stay visible under Actions/Approvals rather than "Commands run";
+killed commands render as `killed: … no exit code`; a start with no completion renders `STARTED but
+never completed … effects unknown`. Every command carries its actual boundary marker, and a header
+block renders the session's `sandbox.status` — mode, whether it was enforced, and the verbatim
+confines/does-not-confine scope. The session's end is read from the newest lifecycle event, so a
+resumed-then-crashed log never reports the earlier clean end.
+
+Sections, all derived purely from events: per-file churn; commits, checkpoints and restores;
+captured-output pointers; delegated tasks (with the footer that child usage is not in the parent
+totals and subagent reports are narration); plan; task changes and integration; typed checks;
+recovery; preview processes; browser verification; adversarial review; git recovery and audit
+state; and completion. The reviewable *content* lives in `report/diff.ts`: the attributable session
+diff, built from the first pre-image blob against current disk bytes, undo folded in, external
+edits flagged DRIFTED.
+
+---
+
+## Understanding a workspace
+
+### Repository intelligence (`retrieval/`, `tools/retrieve.ts`)
+
+Large-repo understanding is selective and ranked, not a broad file dump. One in-memory handle is
+built per session at assembly and read everywhere else.
+
+- **Inventory:** `git ls-files` plus per-file size/mtime plus dirty paths, capped at 20k files.
+  The digest covers the sorted path *set*, deliberately independent of rendering, so map-format
+  changes cannot flap staleness.
+- **Extraction:** line-anchored regex symbols and imports for the TS/JS family, Python, Rust, Go
+  and C/C++, from per-language pattern tables, all column-0 anchored — module-level items only, so
+  Rust `impl` methods and Python nested definitions stay invisible by design. Injection defence is
+  structural: symbol captures are bounded identifier classes and import specifiers are
+  charset-filtered, so repository prose cannot enter the system prompt through extraction.
+  Secret-named, binary and oversized files are never read.
+- **Index:** a derived, idempotent cache written **only** at assembly (a command-less observe tool
+  must never mutate durable state). Warm loads stat-diff and re-extract only changes; corrupt,
+  missing or version-mismatched indexes rebuild cold; a wall budget yields an honest `partial` that
+  converges across sessions. Deliberately lock-less — any consistent snapshot is valid, atomic
+  tmp+rename prevents torn reads, and rebuild is the recovery.
+- **Ranking:** a task-agnostic structural prior (bounded PageRank over resolved relative imports,
+  entry-point and manifest heuristics, an uncommitted-change boost, depth and test/vendor
+  penalties) plus per-query path/symbol matching and graph-neighbour boost. Deterministic, and
+  every hit carries human-readable `signals` — traceable selection is a contract, not a debug
+  feature.
+- **The rendered map** is tiered under a hard 16k-character budget: a coverage-honesty header,
+  uncommitted files, **the complete directory tree with per-directory counts** (the recall
+  backstop — ranking orders detail but never hides that a directory exists), ranked key files with
+  their top exported symbols and **no line numbers** (line numbers only ever come from live reads),
+  and a footer pointing at the tools. `WorkspaceMap.sha256` is the sha of exactly what the model
+  saw.
+- **`retrieve`** returns ranked hits with signals, symbols, and excerpt lines read **live** at
+  query time. Executor children and pre-trust `agent map` deliberately stay on the flat map.
+
+### Project units (`checks/workspace.ts`)
+
+A workspace holds one or more project **units**, not one project at its root.
+
+- **Discovery** is bounded, stat-first and never-throwing: the root when it has a manifest;
+  whatever the root declares (npm/pnpm `workspaces`, Cargo `[workspace] members`, `go.work` `use`);
+  every depth-1 directory holding a manifest; and the children of conventional containers
+  (`apps`, `packages`, `services`, `libs`, `modules`). Recognized manifests are `package.json`,
+  `pyproject.toml`, `setup.cfg`, `Cargo.toml`, `go.mod` and `CMakeLists.txt` — a CMake unit is
+  *named* without recipe rows, so refusals can say what the project is.
+- **Two rules are load-bearing.** A unit exists only where a **manifest** exists (directory names
+  are candidates, never units). And everything not interpreted is **recorded as a note**: the glob
+  vocabulary is "a literal directory" or "a single trailing `/*`", and anything richer is refused
+  with a reason, because half-interpreting a glob silently yields a different unit set than the
+  package manager itself uses.
+- **Ordering is deterministic** (root first, then lexicographic; filtered, sorted, then capped)
+  because unit ids qualify recipe ids, and recipe ids are what consent binds to. Ids fold case on
+  case-insensitive filesystems only; a unit whose real path escapes the workspace is dropped.
+- **`selectUnit` refuses ambiguity; it never picks.** With more than one unit a call must name its
+  `project`. A workspace with no project resolves to its root, so "this project cannot run a build"
+  stays a capability answer rather than a call refusal that could never be waived.
+- **Toolchain facts are stat-only and never spawn**: cargo, rustc and go probed on PATH, rustup
+  components and installed targets probed under the toolchain directories. Present toolchains
+  become pseudo-stamps on the existing drift seam, so installing Go mid-session flips staleness and
+  the shared holder re-detects; absence is never cached across a session. A presence probe is not a
+  health check, and the module says so.
+- **One detection per session, one live holder.** Assembly detects once, before the system prompt,
+  and publishes that snapshot to `run_check`, `preview` and `project_setup` through a single shared
+  object. The system-prompt block is a *photograph*, labelled as observed at session start.
+
+### Project memory (`memory/`) — six documents, context not authority
+
+Cross-session continuity with hard caps and honest degrades: a broken or oversize document can
+never block a session — it loads truncated, or is skipped with a status recorded in
+`memory.loaded`. Every bound is pinned in `test/limits.test.ts`, including the worst-case **total**
+injection as one ceiling a new document must deliberately trip.
+
+| Document | Home | Owner | Inject cap | Lifecycle |
 | --- | --- | --- | --- | --- |
-| global `AGENT.md` | `<stateRoot>/` | USER (created by `/init` only) | 16 KiB | machine-wide constitution, injected FIRST; project AGENT.md overrides on conflict |
-| `AGENT.md` | workspace root | USER | 24 KiB | project constitution; also injected into every subagent (the global one deliberately is NOT) |
-| `JOURNAL.md` | `<projectDir>/memory/` | harness+model | 12 KiB (24 on disk) | rolling session entries, newest first |
-| `CODEBASE.md` | `<projectDir>/memory/` | model body, harness stamps | 16 KiB | full-replacement architecture summary, dual-digest staleness |
-| `LESSONS.md` | `<projectDir>/memory/` | model proposes ≤3/session, harness merges | 8 KiB (16 on disk, ≤30 entries) | durable pitfalls/failure patterns, slug-keyed |
-| `RESEARCH.md` | `<projectDir>/memory/` | harness (deterministic fold) | 8 KiB (16 on disk, ≤50 entries) | PERISHABLE findings with sources; 30-day staleness horizon |
+| global `AGENT.md` | state root | user (created by `/init`, hand-edited after) | 16 KiB | machine-wide constitution, injected first; the project file overrides on conflict; deliberately **not** given to subagents |
+| `AGENT.md` | workspace root | user | 24 KiB | project constitution; injected into every session *and* every subagent |
+| `JOURNAL.md` | project state dir | harness + model | 12 KiB | rolling session entries, newest first |
+| `CODEBASE.md` | project state dir | model body, harness stamps | 16 KiB | full-replacement architecture summary, dual-digest staleness |
+| `LESSONS.md` | project state dir | model proposes ≤3/session, harness merges | 8 KiB | durable pitfalls, slug-keyed, provenance-stamped |
+| `RESEARCH.md` | project state dir | harness (deterministic fold) | 8 KiB | perishable findings with sources; 30-day staleness horizon |
 
-- **`AGENT.md`** (workspace root, USER-owned, never harness-written; cap 24 KiB): the project
-  constitution, injected into every session's system prompt — and every subagent's — as a labeled
-  section. Read post-trust only.
-- **Global `AGENT.md`** (S21; `<stateRoot>/AGENT.md`, USER-owned; `/init` creates it, only ever
-  hand-edited after): the machine-wide user constitution, injected BEFORE the project AGENT.md
-  with a heading stating its scope and that the project constitution overrides it on conflict —
-  the ecosystem's local-wins layering. `memory.loaded` records it with the additive
-  `scope: 'user'` field. Deliberately smaller (16 KiB) and deliberately NOT given to subagents
-  (children execute briefs; injected chars multiply across fan-outs).
-- **`<projectDir>/memory/JOURNAL.md`** (harness-managed, rolling; inject cap 12 KiB): one
-  `## Session <id>` entry per productive session, newest first. Each couples model-written
-  Summary/Decisions/Open-issues/Next-steps (explicitly labeled "model-written") with a
-  deterministic **Evidence** section derived from the event log via `buildReport` (S21 adds the
-  research line — findings previously vanished from cross-session memory entirely), and a
-  deterministic **Handoff** block (acceptance state incl. staleness, the LIVE unfinished list,
-  the `agent resume <id>` pointer when work remains). The delivery line names the ref the
-  ACCEPTANCE consumed, never the newest creation event (a phantom could hold that). Rolling
-  policy: insert-or-replace by session id (resume-safe), newest 2 entries full, older compressed
-  to stubs that keep the evidence pointer, 24 KiB budget enforced by dropping oldest stubs behind
-  a leading marker. User edits survive byte-verbatim until their entry is compressed.
-- **`<projectDir>/memory/CODEBASE.md`** (harness-managed; cap 16 KiB): a model-written
-  architecture summary, provenance-stamped with the writing session's id + workspace-map digest +
-  HEAD. Stamps are DUAL — legacy `map-digest` plus additive `inventory-digest`; staleness compares
-  inventory digests when both sides have one (immune to map-format changes). Known soft spot: a
-  ranked→flat map-mode transition over-marks stale for a session or two — the safe direction.
-  S21 fixed the one truncation-marker gap: an oversize CODEBASE.md was silently head-cut.
-- **`<projectDir>/memory/LESSONS.md`** (S21, harness-managed): durable project lessons —
-  pitfalls, failure patterns, debugging knowledge. The model proposes up to 3 in the existing
-  end-of-session narrative response (an OPTIONAL zod key: a missed key costs the lessons, never
-  the journal — there is no tool and no mid-session write path); the harness merges by slug
-  (reuse = update, entry moves to front), stamps `*(session <id>, <date>)*` provenance, defuses
-  heading-shaped body lines (a proposal cannot fabricate an entry boundary), and rolls under
-  30 entries / 16 KiB with a leading drop marker. Untouched entries — user edits included —
-  survive byte-verbatim.
-- **`<projectDir>/memory/RESEARCH.md`** (S21, harness-managed; the durable surface S19 deferred):
-  a DETERMINISTIC fold over the session's recorded `research.findings` notes — no model call, so
-  it succeeds even when the narrative failed. Entries keyed by noteId (idempotent across resume
-  re-folds), newest-first by harness-stamped retrieval date, each carrying claim, sources,
-  corroboration, confidence. PERISHABLE by design: entries older than 30 days drop at the next
-  write with an honest leading count; a hand-edited entry whose heading lost its date is never
-  age-dropped (user content errs toward preservation) but stays inside the 50-entry cap. The
-  perishability warning lives in the doc preamble AND the injection fence header.
+The journal couples model-written Summary/Decisions/Open-issues/Next-steps — explicitly labelled
+"model-written" — with a deterministic **Evidence** section derived from the event log, and a
+deterministic **Handoff** block (acceptance state, the live unfinished list, the resume pointer).
+Its rolling policy is insert-or-replace by session id (resume-safe), newest two entries full, older
+compressed to stubs that keep the evidence pointer. Lessons merge by slug: reuse updates and moves
+the entry to the front, heading-shaped body lines are defused so a proposal cannot fabricate an
+entry boundary, and untouched entries — user edits included — survive byte-verbatim. Research
+entries are keyed by note id (idempotent across resume re-folds) and age out after 30 days, because
+a stale research note is exactly the overconfidence web research exists to prevent.
 
-**Injection safety:** every injected memory doc passes through `neutralizeHarnessDelimiters`.
-AGENT.md is workspace bytes a cloned repo controls, and JOURNAL/CODEBASE carry model-authored
-text from earlier sessions; a line mimicking a harness fence would close the region early and let
-the rest occupy space the model is told is harness-authored.
+**Injection safety:** every injected document passes through `neutralizeHarnessDelimiters`.
+`AGENT.md` is workspace bytes a cloned repository controls, and the generated docs carry
+model-authored text from earlier sessions; a line mimicking a harness fence would close the region
+early and let the rest occupy space the model is told is harness-authored.
 
-**Write path** (`update.ts`): runs BEFORE `endSession`, on clean ends only (never error, never
-`aborted` — a Ctrl+C'd session must not fire a model call), gated on real activity. The narrative
-is ONE provider call reusing the exact cached prefix; every failure mode degrades to a
-deterministic skeleton entry marked "narrative unavailable". The call bypasses `runTurn` and is
-recorded as its own `memory.narrative` event — never as fake message events (they would replay
-into a resumed conversation). The journal is RE-READ from disk at quit (two-terminal safety),
-rolled, and written atomically; an unreadable existing journal is refused, never overwritten.
+**The write path** runs before `endSession`, on clean ends only, gated on real activity. The
+narrative is one provider call reusing the exact cached prefix, and every failure mode degrades to
+a deterministic skeleton entry marked "narrative unavailable". It bypasses `runTurn` and is
+recorded as its own `memory.narrative` event, never as fake message events that would replay into a
+resumed conversation. The journal is re-read from disk at quit (two-terminal safety), rolled, and
+written atomically; an unreadable existing journal is refused, never overwritten.
 
-**Sovereignty wording is load-bearing:** the injected section states verbatim that generated docs
-are "CONTEXT, NOT AUTHORITY … the current user request and the observable repository state
-outrank it". Crash notes derive from LOG evidence — the newest non-child sibling log whose newest
-LIFECYCLE event is not `session.ended` (post-hoc CLI appends after a clean end must not read as a
-crash) — never from journal absence. The system prompt is outside elision's `rawChars`, so memory
-injection can never trigger or oscillate elision.
+**Sovereignty wording is load-bearing**: the injected section states verbatim that generated docs
+are "CONTEXT, NOT AUTHORITY … the current user request and the observable repository state outrank
+it". The system prompt sits outside elision's accounting, so memory injection can never trigger or
+oscillate elision.
 
-## Tasks, roles, and parallel groups (`runtime/subagent.ts`, `runtime/roles.ts`, `tools/delegate.ts`)
+---
 
-The main agent keeps user interaction, authority, coordination, integration, and final claims; a
+## Doing the work: plans, tasks, isolation
+
+### Planning (`plan/`)
+
+One canonical structured plan per session at `<projectDir>/plans/<sessionId>.plan.json`, with two
+deterministic projections: a concise user view (regenerated as a marked `<!-- GENERATED VIEW -->`
+markdown file) and a detailed agent view. It is context, never authority.
+
+- **The graph.** Tasks carry a stable slug id, title, intent, role, `dependsOn`, `touches`
+  (workspace-relative prefixes), `verify`, `checks`, risk and a serial flag; the graph carries
+  optional `gates` (integration, completion) and `review` (mode, reason). Semantic validation —
+  unique ids, resolvable acyclic dependencies with the cycle path reported, contained touch
+  prefixes, size cap — refuses with the **complete** error list and writes nothing. That revision
+  loop is the design.
+- **Approval binds the content sha**: `sha256(canonicalJson(plan))` over the plan sub-object with
+  sorted keys and no whitespace. Status and timestamp flips are sha-neutral by construction;
+  whitespace and key-order hand-edits are approval-neutral; any semantic change invalidates.
+- **The amendment contract.** A model write keeps `approved` only for a semantic no-op; otherwise
+  the plan drops to `draft`, which blocks every executor spawn — and because only the user can
+  clear that, the REPL prints one undimmed line naming the blocked tasks and the command, but only
+  when an approval existed and no longer covers the plan. `/plan approve` refuses a file that does
+  not parse and validate. `plan.approved {sha256}` is the consent record, and
+  "approved and current" is *the* executor precondition.
+- **Injection.** The standing per-turn note carries the agent view when the content sha is new to
+  the model and a pointer otherwise — and the pointer always carries the live execution summary,
+  because task states change without changing the content sha. It is wrapped in a harness-note
+  fence whose closing sequence is broken inside the note text, so plan strings cannot close the
+  wrapper and forge user-attributed words.
+
+### The task DAG and the scheduler gate
+
+Execution state is a **pure fold** over (approved graph, events) — no new store. Per-task states:
+queued, blocked, running, awaiting-approval, integrating, completed, failed, cancelled,
+parent-owned, interrupted. A completed executor with **no** capture event folds to `failed`,
+because capture loss must stay re-runnable.
+
+**Definition identity: `completed` belongs to the definition that ran, not to the id.** Every bound
+spawn records the sha of the task's canonical form, and the fold re-opens a completed task whose
+current definition no longer matches the binding that completed it.
+
+The gate runs **before** the base checkpoint and is group-atomic — a refusal spawns nothing:
+
+- **Status gate (strict):** while any plan document exists, executor groups require an
+  approved-and-current plan. Draft, unknown, superseded, diverged, and approved-without-recorded-
+  consent all refuse. *No plan at all does not block* — the per-spawn human ask stays the consent
+  floor.
+- **DAG rules**, active only when an approved-and-current graph exists: unbound executors refuse
+  (naming the ready ids and the escape hatches); unknown id; role mismatch; then **group
+  composition before per-task state**, so "sequence them across calls" is never shadowed —
+  duplicate binding, intra-group dependency, serial/high-risk must run alone, overlapping declared
+  touches between executors; then per-task state — completed re-runs refuse (failed, cancelled and
+  interrupted stay re-spawnable), integrating refuses until applied, an attempt ceiling refuses a
+  task with three genuine failures under its *current* definition, then unmet dependencies refuse
+  naming the dependency's state. Two further rules add the recovery gates below.
+- **Waves are parent-serialized by construction:** one delegate call is one parallel group, and the
+  parent integrates between calls, so the next group's base checkpoint includes applied
+  dependencies. The scheduler is the gate plus the fold plus guidance notes — deliberately not an
+  in-tool wave engine.
+
+### Tasks and roles (`runtime/subagent.ts`, `runtime/roles.ts`, `tools/delegate.ts`)
+
+The main agent keeps user interaction, authority, coordination, integration and final claims; a
 delegated task is a bounded, attributable unit beneath it.
 
-- **Roles, split by layer.** `types.ts` `SUBAGENT_ROLES` is the POLICY fact table — explorer /
-  planner / reviewer / **inspector** are `read-only`, researcher is `read-only-external`, executor
-  is `mutating-worktree`; `decide()` consults only
-  this and fails closed on anything else. `runtime/roles.ts` `ROLE_CONTRACTS` is the RUNTIME
-  contract per role: tool registry (a subset of TOOLS; never the delegate/update_plan/apply tools
-  ⇒ depth 1 and no self-integration, structurally), role prompt builder, harness-fixed budget,
-  and approval mode (`auto-deny` | `forward`). A load-time check pins the two tables consistent.
-  Budgets: read-only 15 steps / 5 min / 30k out; **reviewer 24 steps / 12 min / 30k out** (its
-  brief demands interleaved read→record work, and 15 starved exactly the diligent lenses into
-  `budget-steps`, which cannot qualify a round; S20.5: 8→12 min after two of three kimi lenses
-  hit the wall); executor 40 / 30 min / 50k, and the wall clock now **EXCLUDES measured
-  forwarded-approval wait** (S20.5 — an away human used to kill the executor mid-work and spend
-  an R10 attempt; the runner re-arms a real-time deadline on effective elapsed, and the wait is
-  recorded on `task.ended.approvalWaitMs`).
-- **The `inspector` role (S21.5) — `@review`.** Read-only, tools = the read-only set +
-  `report_observation`, budget 24 steps / 12 min (the reviewer's numbers: the same interleaved
-  read → confirm → record shape), approvals `auto-deny`. It exists as its own role rather than a
-  second use of `reviewer` for three structural reasons, all in `review/ledger.ts`: a reviewer's
-  recorded critical/high findings block `/accept` **regardless of requirement or waiver**, findings
-  never expire, and every round spends one of only two `MAX_REVIEW_ROUNDS` — including a round run
-  before any work, which cannot qualify but still counts. A casual mid-session "have a look at
-  this" must not be able to do any of that. The separation is enforced by construction:
-  `delegateCapsFromEvents` counts only `role === 'reviewer'`, and the ledger mints a round only
-  from that or from a `review.findings` event, so an inspector emitting `inspection.recorded`
-  cannot reach either. Pinned by `test/roles.inspector.test.ts` (a critical observation yields zero
-  rounds, zero blockers, gate satisfied). Observations surface in `/report inspections` and in
-  `ReportJson.inspections` — a sibling of `review`, never merged into it.
+- **Roles are split by layer.** `types.ts` holds the **policy** fact table — explorer, planner,
+  reviewer and inspector are read-only, researcher is read-only-external, executor is
+  mutating-worktree — and `decide()` consults only this, failing closed on anything else.
+  `runtime/roles.ts` holds the **runtime** contract per role: a tool registry that is a subset of
+  `TOOLS` and never includes the delegate, plan-write or apply tools (so depth stays 1 and no child
+  can self-integrate), a role prompt builder, a harness-fixed budget, and an approval mode. A
+  load-time check pins the two tables consistent.
+- **The `inspector` role** backs `@review` and exists separately from `reviewer` for structural
+  reasons: a reviewer's recorded critical or high findings block `/accept` regardless of
+  requirement or waiver, findings never expire, and every round spends one of only two. A casual
+  mid-session "have a look at this" must not be able to do any of that, so the inspector writes to
+  its own advisory channel, which blocks nothing and consumes no round.
 - **Named admission seams.** `retrieve`, `report_finding` and `report_observation` exist only as
-  per-session instances
-  and reach children ONLY through named `SubagentDeps` fields; `childTools()` admits one iff the
-  role contract names it AND the instance is structurally free of command/delegates/planDoc facts
-  (fail closed by dropping). Deliberately not a generic extra-tools list, so depth-1 stays a
-  property of construction. The executor list omits retrieve: the parent index describes the
-  parent workspace, not the worktree.
-- **Briefs and reports.** TaskSpec carries optional `focus`/`avoid` path-prefix lists; the
-  delegate tool composes deterministic per-task brief lines (focus, avoid, missing-path hints —
-  `..`-escaping prefixes are never disk-probed — and sibling coverage) rendered into the child's
-  first message, and warns the group on pairwise focus overlap. Guidance + measurement, not
-  enforcement. Explorer reports have a REQUIRED section contract with a non-blocking harness check
-  ("treat those areas as UNEXAMINED"). Child report text and forwarded context are
-  delimiter-hardened: a line mimicking a harness fence is visibly neutralized, never hidden.
-- **One runtime, parallelism in the TOOL.** A child task = another `Session` driven by the SAME
-  `runTurn`, in-process; a task is exactly ONE turn. `delegate_task` takes `tasks: [1..3]`; the
-  tasks of one call run concurrently via `Promise.all` (the schema max IS the concurrency cap).
-  One call = one parallel group = one evidence unit = ONE approval for a group containing a
-  mutating role (the strictest member governs).
-- **Policy step-0 (fail closed, batched):** `Tool.delegates(input) → {roles}` is evaluated FIRST,
-  inside try/catch (a throwing fact denies); `delegates`+`command`/`planDoc` → deny; empty group →
-  deny; any unknown role → the WHOLE group denies; any mutating role → `ask` (class `reversible`,
-  deliberately NOT session-grantable, so every executor spawn is a human decision); all read-only
-  → allow/`observe`.
-- **Inherited-or-narrower authority, structurally:** role registry ⊆ TOOLS, the parent's narrowing
-  `rules`, the parent's PROBED-and-shared sandbox instance, fresh empty `Grants` per child,
-  AGENT.md injected (generated memory docs deliberately not). Read-only roles get
-  `autoDenyApprover`; the executor's asks FORWARD to the parent's approver.
-- **Caps (harness-fixed, never model-controlled):** per-role budgets; group ≤ 3; `TASKS_PER_SESSION
-  = 32` (S20.5: 16→32 — one pool for all five roles), group-atomic (a group that does not fully
-  fit is refused whole, spawning nothing); a cumulative `SESSION_CHILD_OUTPUT_TOKEN_CAP =
-  400_000` (S20.5: 200k→400k); `MAX_REVIEW_ROUNDS = 2` (a third reviewer
-  group refuses, naming the real exits — triage, or `/accept confirm`); no automatic retries.
-  Cause-tracked cancellation maps parent-abort / wall-clock / token-cap / forwarded deny-stop onto
-  distinct `TaskStatus` values and child end reasons. Progress lines carry `role·childId` identity
-  because group members interleave on one chrome stream.
-- **Approval forwarding:** a serialized FIFO queue wrapping the parent SESSION approver — never io
-  directly — so non-interactive parents fail closed structurally, REPL EOF cascades deny-stop, and
-  `--dangerously-allow-all` keeps its meaning. Every forwarded request carries `taskContext`
-  (rendered as a labeled header; for commands the prompt states the worktree cwd AND that approval
-  runs it unsandboxed); entries are signal-linked — a task that dies while its ask is QUEUED
-  resolves deny without ever displaying; a task that dies while its ask is DISPLAYED unblocks
-  immediately and the eventual stale answer is discarded with an honest chrome line. Answering `q`
-  ends THAT child only; Ctrl+C still aborts the whole turn.
-- **Evidence lineage:** one callId spans a group, so `/tasks`, the report, and `reconstruct` join
-  `task.started`↔`task.ended` by `childSessionId`; a crash replay points at ALL surviving child
-  logs. Session ids are structurally fresh: `EventLog.open(expectFresh)` creates the log file with
-  an atomic exclusive open BEFORE any lock interaction — a collision throws (regenerated) instead
-  of reclaiming a live sibling's lock and merging evidence.
-- **Boundaries (deliberate):** depth 1; no inter-child messaging (siblings are blind to each
-  other; the parent integrates); no task resume.
+  per-session instances and reach children only through named fields; a child gets one iff its role
+  contract names it *and* the instance is structurally free of command, delegates and plan-document
+  facts. Deliberately not a generic extra-tools list, so depth-1 stays a property of construction.
+- **One runtime, parallelism in the tool.** A child task is another `Session` driven by the same
+  `runTurn`, in-process, and a task is exactly one turn. `delegate_task` takes one to three tasks
+  that run concurrently — the schema maximum *is* the concurrency cap. One call is one parallel
+  group, one evidence unit, and one approval for a group containing a mutating role (the strictest
+  member governs).
+- **Inherited-or-narrower authority, structurally:** the role registry is a subset of `TOOLS`, the
+  parent's narrowing rules apply, the probed sandbox instance is shared, grants start empty, and
+  `AGENT.md` is injected while generated memory docs deliberately are not. Read-only roles get an
+  auto-denying approver; the executor's asks **forward** to the parent's approver.
+- **Approval forwarding** is a serialized FIFO queue wrapping the parent *session* approver — never
+  io directly — so non-interactive parents fail closed structurally and `--dangerously-allow-all`
+  keeps its meaning. Every forwarded request carries task context; entries are signal-linked, so a
+  task that dies while its ask is queued resolves deny without ever displaying, and one that dies
+  while displayed unblocks immediately with the stale answer discarded and an honest line printed.
+- **Supervision** runs on the child's append chain plus a scaled ticker (production: 60s stall,
+  30s cadence): loop detection over identical consecutive calls annotates at three and auto-cancels
+  at five; one budget-pressure observation at 80% of tokens or wall clock; one stall observation,
+  suppressed while a command is genuinely in flight. All observations are bounded, never-throwing,
+  and dual-surfaced — persisted events *and* notes at the **head** of the group digest, so
+  head-biased truncation cannot hide a failed status behind a long child report.
+- **Boundaries, deliberately:** depth 1; no inter-child messaging (siblings are blind, the parent
+  integrates); no task resume; no automatic retries.
 
-## Executor isolation and integration
+### Executor isolation and integration
 
-The mutating role never touches the user's workspace. The chain is: base → worktree → capture →
+The mutating role never touches the user's workspace. The chain is base → worktree → capture →
 review → apply, every link evidenced.
 
-- **Base = one hidden-ref checkpoint per GROUP**, created sequentially before fan-out, so the
-  parent's CURRENT working tree (dirty state included) is the base and every member starts from
-  the same attributable oid. Creation appends `task.base-checkpoint` through the callId-bound
-  channel; assembly seeds the owed prune list FROM EVENTS, so a SIGKILLed session's leaked refs
-  are pruned at the resumed life's clean quit or `/accept`. `deleteCheckpointRefs` counts an
-  already-missing ref as deleted, so retries converge.
-- **EOL pin.** Before creating the worktree the harness probes whether checkout normalization
-  would differ from the parent's on-disk bytes (`core.autocrlf=true` over a uniformly-LF tree).
-  If so, BOTH `worktree add` and the capture's `checkout-index` run with
-  `-c core.autocrlf=false -c core.eol=lf`, so worktree bytes equal parent bytes. Without it every
-  captured file refused at apply as base drift, and a matching base would have written CRLF over
-  LF. Deliberately the uniform-LF case only: a mixed tree keeps the refusal, with a diagnosis that
-  names EOL normalization (not generic "drift") and names exits that actually work — the
-  scheduler refuses re-running a task that holds captured changes.
-- **Worktree per task:** `git worktree add --detach` at the base oid, under
-  `<os-tmp>/agent-cli-worktrees/<projectSlug>/` — placement DICTATED by `validatePath`, ephemeral
-  by design. A version gate refuses git < 2.20 (fail closed); non-repo workspaces refuse honestly;
-  an unapproved draft plan blocks executor groups at the tool. The child session is scoped to the
-  worktree with FRESH `detectGitFacts` + map. TRUST: children never pass the CLI trust gate — a
-  harness-created worktree of a trusted workspace is trusted BY DERIVATION and never written to
-  `trust.json`. HONESTY: the worktree materializes WITHOUT gitignored files (stated in the
-  executor prompt: unverified means unverified). A FAILED `worktree add` removes the directory and
-  prunes the admin entry BEFORE unregistering — dropping the registry entry first made the leak
-  unreachable by any sweep.
-- **Capture:** at task end — for ANY status; partial work is evidence — `git status --porcelain=v2
-  -z` in the worktree (detached HEAD IS the base), workspace-prefix filtered, base bytes
-  materialized BINARY-SAFELY via read-tree + `checkout-index --prefix` staging, after + base bytes
-  stored as content-addressed blobs, bounded (`MAX_TASK_CHANGE_FILES = 400` /
-  `MAX_TASK_CHANGE_FILE_BYTES = 5 MiB`; every omission counted). Rename PAIRS survive the cap
-  atomically — keeping a delete whose partner create was dropped would half-apply a move. Recorded
-  as callId-bound `task.changes`; the diff OUTLIVES the worktree. Overlapping write-sets between
-  group members are warned at capture time.
-- **Cleanup is deterministic:** the worktree is ALWAYS removed in `finally` (EBUSY retries → rm
-  fallback → `git worktree prune`); failure is honest `worktree.removed {ok:false}` evidence. A
-  registry under `projectDir` records every worktree at creation; the assembly-time sweep removes
-  crash orphans and is PATH-GUARDED — entries outside this project's worktree home are dropped
-  from the registry but never touched on disk.
-- **The registry is concurrency-safe:** entries are OWNER-STAMPED (`ownerSessionId` + `pid`); the
-  sweep ALWAYS skips live-pid entries — there is deliberately NO age hatch (S22.5: approval wait
-  is excluded from the executor clock, so a live task's age is unbounded and nothing file-based
-  distinguishes a live owner from a crashed one whose pid was recycled; dead pids still sweep
-  immediately). Every mutation runs under an in-process async
-  mutex PLUS a token `O_EXCL` lock file — a live same-pid holder is NEVER reclaimed (group members
-  share the pid). The lock is held only at registry read/write edges, and the sweep's save is a
-  MERGE, so a sibling's concurrent registration always survives.
-- **Integration (`apply_task_changes`, parent-only):** `mutates()` declares the concrete
-  apply-ELIGIBLE workspace paths from the captured evidence (never null; conflicted files are not
-  declared, so they are never snapshotted and never pollute attribution), and the EXISTING
-  snapshot-first / `file.mutated` / undo / diff+commit attribution machinery does all the writing.
-  Per-file drift-refuse rule: the workspace file must still hold the task's base bytes (or already
-  hold the target, or be absent for a create); anything else refuses THAT file. Partial applies
-  are reported per-file (`task.applied`), one undoable unit. The registry is rebuilt from
-  `task.changes` events on resume, so a crash between capture and apply strands nothing.
+- **Base is one hidden-ref checkpoint per group**, created sequentially before fan-out, so the
+  parent's current working tree — dirty state included — is the base and every member starts from
+  the same attributable oid.
+- **EOL pin.** Before creating the worktree the harness probes whether checkout normalization would
+  differ from the parent's on-disk bytes (`core.autocrlf=true` over a uniformly-LF tree) and, if
+  so, forces both the worktree add and the capture staging to preserve them. Without it every
+  captured file refused at apply as base drift. Deliberately the uniform case only: a mixed tree
+  keeps the refusal, with a diagnosis that names EOL normalization rather than generic drift.
+- **Worktree per task**: `git worktree add --detach` at the base oid, under an OS-temp home whose
+  placement is dictated by `validatePath`. A version gate refuses old git; non-repo workspaces
+  refuse honestly. Children never pass the CLI trust gate — a harness-created worktree of a trusted
+  workspace is trusted **by derivation** and never written to `trust.json`. The worktree
+  materializes *without* gitignored files, which the executor prompt states plainly.
+- **Capture** happens at task end for **any** status, because partial work is evidence: the
+  worktree's porcelain status, workspace-prefix filtered, base bytes materialized binary-safely,
+  after and base bytes stored as content-addressed blobs, bounded with every omission counted.
+  Rename pairs survive the cap atomically. The recorded diff outlives the worktree.
+- **Cleanup is deterministic**: the worktree is always removed in a `finally`, and failure is
+  honest `worktree.removed {ok: false}` evidence. The registry is owner-stamped and the sweep
+  **always skips live-pid entries** — there is deliberately no age hatch, because approval wait is
+  excluded from the executor clock, so a live task's age is unbounded and nothing file-based
+  distinguishes a live owner from a crashed one whose pid was recycled.
+- **Integration** (`apply_task_changes`, parent-only) declares the concrete apply-eligible paths
+  from the captured evidence, and the existing snapshot-first / `file.mutated` / undo / commit
+  attribution machinery does all the writing. The per-file rule: the workspace file must still hold
+  the task's base bytes (or already hold the target, or be absent for a create); anything else
+  refuses **that file**. Partial applies are reported per file and land as one undoable unit.
 
-## The research pack (`research/`, `tools/web-*.ts`, `tools/record-source.ts`) — Session 19
+### Typed recovery (`recovery/`)
 
-The one capability that sends anything off this machine. Same pack shape as `artifacts/`: a pure
-module with no kernel imports (`tools`/`runtime`/`policy`/`repl`), its own failure vocabulary
-(`ResearchError`), and thin tool wrappers above it.
-
-**Egress.** `research/tavily.ts` is the only code here that opens a connection, and it opens exactly
-one: `api.tavily.com`. Page retrieval happens on the provider's infrastructure, so the pack owns no
-redirect policy, no response size limiter and no SSRF guard — it never fetches a model-named URL
-itself. The claim is scoped: *the research tools'* egress is one host, **not** the harness's
-(`npm view` is on the auto-run allowlist; the sandbox does not confine network). A configured proxy
-still carries the connection, and the approval prompt says so.
-
-**The policy fact** (`Tool.research()`, engine branch 0g). Needed for a sharper version of the S6
-trap than the six facts before it: a research call is command-less and mutation-less, so it would
-auto-allow as `observe` with the reason "read-only workspace access" — false in the one direction
-that matters. Reading is not the consequence; **sending** is. Deny rules: invalid/conflicting
-contract, non-empty mutation plan, empty request, an unusable target (any single bad URL denies the
-whole call), a config-denylisted domain, and an exhausted bound.
-
-**Consent is the budget.** First call asks (`external`, grantable) with the query verbatim, the
-per-call bounds and the remaining allowance in the reason. One `ResearchBudget` object — 36
-searches / 20 extracts / 120 credits / 1.2M chars (S20.5 raised the session pools) — is shared
-by reference between the parent's
-instance and every researcher child's, and rebuilt from parent events on resume
-(`researchSpendFromEvents`) so a restart cannot refill it. The credit ceiling is checked against the
-*estimate* before the wire, so a call that would overshoot is refused whole rather than half-spent,
-and charged from the provider's real reported figure (clamped) afterwards. Every bound is
-re-enforced at execute: `decide()` is a claim about what will happen, and a sibling can drain the
-remainder while a human reads the prompt.
-
-**The `researcher` role** (`read-only-external`) runs on the ordinary `delegate_task` path — no new
-orchestration, no second loop. Spawning one asks as `external`, placed **after** the mutating check
-so a mixed group is still governed by `task.mutating-role`. Inside the child there is no approver
-(read-only roles auto-deny), so admission comes from `ctx.lineage.role`, which `startSession` stamps
-from the same value that lands on `session.started` — runtime state, not tool state, not model
-input. The rule says *"whose spawn this engine allowed"*, never *"the human approved"*.
-
-**Registry split.** The parent holds `web_search` only. `web_extract` (full page text) and
-`record_source` are researcher-only, which is what makes "the main agent never receives raw
-webpages" a property of construction. `childTools`' admissibility is an exhaustive
-`satisfies Record<FactKind, boolean>` table, so the next policy fact breaks the typecheck rather
-than silently passing into a child registry.
-
-**Per-task vs per-session state.** `researchToolsFor(acc)` runs once per task and creates the
-task's own page counter and spend counter there; the budget stays shared. The spend must be
-per-task because the group fans out under one `Promise.all` — a diff of the shared budget would
-give every sibling the whole group's usage. `research.usage` carries that per-task figure into the
-**parent** log, because the child's own `research.*` events live in a log the parent's fold never
-reads.
-
-**Untrusted content, three mechanisms, honestly ranked.** (1) `sanitizeBlock` at ingestion — like
-`sanitizeLine` but preserving newlines, because a page is a block; (2) `neutralizeHarnessDelimiters`,
-shared with the memory docs; (3) the UNTRUSTED fence plus the prompt contract, which is a
-**mitigation, not a boundary** — a persuasive page can still influence a model. What it cannot do is
-act: a researcher holds no tool that writes, runs, or delegates. URLs are identifiers: a value
-sanitization would alter is refused, not escaped; loopback/private/link-local/single-label hosts and
-bare IP literals are refused (leak prevention and honest early failure, *not* an SSRF guard); IDN
-hosts are flagged.
-
-**Findings, not summaries.** `record_source` takes one falsifiable claim, its source URLs and a
-corroboration verdict, and refuses `corroborated` backed by a single distinct source. `retrievedAt`
-comes from the harness clock. Notes reach the parent as one `research.findings` capture at task end.
-
-**Never verification.** Research events are absent from `WORK_EVENT_TYPES`, never mark a file
-CHECKED and never satisfy a plan gate. Acceptance carries two caveats instead: that the web was
-consulted at all, and that some findings rest on a single source or on sources that disagreed.
-
-## The remote-delivery pack (`remote/`, `tools/remote-*.ts`) — Session 20
-
-The one capability that changes state on a machine the user does not own. Same pack shape as
-`artifacts/` and `research/`: a pure module with no kernel imports beyond the shared type
-vocabulary, its own failure vocabulary (`RemoteError`), and thin tool wrappers above it.
-
-**Two facts, not one capability with a mode.** `FACT_KINDS` gains **`remoteRead` AND
-`remoteWrite`**, each with its own fail-closed branch ahead of the command branch. That is the
-session's thesis made structural rather than documentary: the engine's existing
-conflicting-contract rule then makes a tool that could both read and publish an automatic deny, so
-"the read tool cannot publish" is a property a reviewer verifies by grepping for a second fact and
-finding none. Consent follows the split — a read asks `external` and is session-grantable within a
-real counter (the S19 budget-as-consent shape, worded `[s] allow further remote READS this session
-(never a push, tag or release)`); a write asks **every time**, is never passed through
-`applyGrant`, offers no `[s]` in `formatApprovalPrompt`, and stores nothing at the grant-storage
-site in `session.ts`. The same sentence is written in three places on purpose: a consent surface
-that disagrees with itself is how standing authority gets won by accident.
-
-**Observation binding.** A mutation must carry the live look at the remote its effect was computed
-from; absent, or older than the kernel-owned `REMOTE_OBSERVATION_MAX_AGE_MS`, is a **deny** (the
-`browser.no-preview` precedent). Only `remote_status view=refs` produces observations, so
-"understand the remote before you change it" is enforced by the engine rather than requested in a
-prompt. The bound lives in `src/types.ts`, not in the pack, so a workflow pack cannot widen its own
-leash. Observations and the gh identity are **in memory only** and do not survive a resume, while
-the read/write spend IS rebuilt from events — authority is not durable, spending is. (S21 adds
-the ONE explicit exception: user-recorded durable machine grants, loaded visibly as
-`grants.loaded` at every assembly and revocable at any time — see "Durable machine grants"
-under the policy model. Remote WRITES remain ineligible; a publish still asks every single time.)
-
-**Looking never writes.** The only network verb is `git ls-remote`: no fetch, no remote-tracking
-refs, no FETCH_HEAD. The cost is honest — a commit the remote holds and this repository has never
-seen is genuinely outside our object database, so the relation is reported `unknown` and a force
-push over it is **refused even with `force`**, because the harness cannot say what would be
-discarded. The observation listing is SCOPED to `refs/heads/*` + `refs/tags/*` (plus the target),
-carries a 4 MiB capture bound and a 20,000-row parser cap, and treats either truncation as an
-incomplete listing that forces a single-ref absence re-check before `new` (S20.5 — GitHub exposes
-two refs per PR under `refs/pull/`, which sort before tags and, unscoped, starved the parser so a
-real tag read as absent).
-
-**What the human approved is what executes.** The refspec source is the observed OID, not a branch
-name, so a local branch that moves while a human reads the prompt cannot change what is sent.
-Execute then re-reads the local rev AND the remote ref, runs `git push --dry-run --porcelain` and
-compares its flag column against what the observed relation permits, pushes, and re-reads the
-remote to set `verified`. A force push additionally carries
-`--force-with-lease=<ref>:<observed-oid>` so the **server** enforces the same binding.
-`--force-if-includes` is deliberately absent: it is a no-op without a lease and its real check
-reads a remote-tracking reflog this pack never writes.
-
-**gh is managed like git.** `remote/gh.ts` mirrors `git/client.ts`: absolute-path resolution
-(`gh.exe` only on Windows, no `.cmd` shims, relative PATH entries skipped), `GH_REPO` scrubbed
-because it retargets every command the way `GIT_DIR` does, `GH_DEBUG`/`DEBUG` scrubbed because gh's
-debug mode prints the Authorization header, `GH_PROMPT_DISABLED` + no stdin + bounded timeouts.
-`GH_HOST`/`GH_CONFIG_DIR` deliberately pass through — an enterprise host or a relocated config is
-legitimate — and are RECORDED in `remote.context` so an override is auditable. Remote-bearing git
-calls carry `-c credential.interactive=false`, and ssh remotes get `GIT_SSH_COMMAND="ssh -o
-BatchMode=yes"`; neither is a guarantee (a non-conforming helper exists), which is why every call
-is time-bounded.
-
-**The harness never holds a credential.** Authentication is entirely gh's own stored credential and
-git's credential helper. `buildChildEnv` drops every `*token*` name, so a `GH_TOKEN` in the user's
-shell is not forwarded and *cannot* be — recorded as a fact (`tokenEnvNotForwarded`) rather than
-worked around. `shared/secrets.ts` scrubs credential shapes from all gh/git output at the pack
-boundary and again at the event emit site: the installed gh 2.96.0 predates the
-GHSA-cg6r-mpgc-h9mm fix in which `gh auth status` printed part of the token, remote URLs embed
-credentials in the standard CI form, and git echoes those URLs inside auth failures.
-
-**Everything is harness-composed.** `remote/argv.ts` builds every argv from typed inputs in
-`--flag=value` form, so model text lands only in value positions and a value beginning with `-`
-cannot become a flag. There is no `gh api` passthrough and no generic escape. `gh release create`
-always carries `--verify-tag`: without it gh silently creates the named tag from the default branch
-— a publish nobody asked for, at a commit nobody named.
-
-**Stops rather than guesses.** No remote; several remotes with no upstream; a push URL that differs
-from the fetch URL; a detached or unresolvable local rev; a non-GitHub host for a gh-backed
-operation; gh absent or unauthenticated; a GitHub destination whose publishing account has not been
-established by an `auth` read; a relation a normal push cannot satisfy.
-
-**Never a gate, in either direction.** `remote.*` is absent from `WORK_EVENT_TYPES` (accept →
-commit → push is the ordinary order, so a publish must not stale the acceptance it delivers), and a
-publish is an acceptance **caveat**, never a blocker — including when it failed, and including when
-it succeeded but could not be verified. Symmetrically, the local verification state is *shown* in
-the publish prompt and is deliberately **not** a precondition: making a green gate a requirement
-would make a green gate an authorization, the exact inversion this capability exists to prevent.
-
-**The compound invariant.** The model cannot commit (`/commit` is still user-typed, `GitOps` above)
-and a push transmits committed refs only. Together: *the model cannot publish content a human did
-not commit.*
-
-## Planning lifecycle (`plan/`, `tools/update-plan.ts`, `/plan`, `@plan`, the approval prompt)
-
-One CANONICAL structured plan per session at `<projectDir>/plans/<sessionId>.plan.json` —
-`{version, planId, status, updated, plan}` wrapping a schema-validated task graph — with two
-deterministic projections: the concise user view (regenerated to `<sessionId>.md`, marked
-`<!-- GENERATED VIEW -->`) and the detailed agent view. Never authority. The legacy markdown store
-remains readable for resumed old sessions via `readPlanState`, the ONE reader every consumer uses;
-`approvedCurrentGraph(state)` is the ONE filter that decides whether a graph may drive the review
-requirement — three call sites previously spelled the same triple predicate independently.
-
-- **The plan graph:** tasks carry id (slug, stable across amendments), title, intent, role
-  (executor/explorer/reviewer/main), dependsOn, touches (workspace-relative prefixes), verify
-  (required for executor/main), checks, risk, serial; the graph carries optional `gates`
-  {integration, completion} and `review` {mode, reason}. Semantic validation — unique ids,
-  resolvable acyclic deps (the cycle PATH is reported), contained touch prefixes, size cap —
-  refuses with the COMPLETE error list; `update_plan` returns it verbatim with nothing written
-  (the revision loop is the design). Warnings (non-dep-ordered touch overlap, unrunnable check
-  kinds) surface without blocking.
-- **Approval binds the CONTENT sha**: `planContentSha = sha256(canonicalJson(plan))` — sorted
-  keys, no whitespace, the `plan` sub-object only. Status/timestamp flips are sha-neutral BY
-  CONSTRUCTION; whitespace/key-order hand-edits are approval-neutral; any semantic change
-  invalidates. Optional fields with NO zod default (checks/gates/review) are dropped by
-  `canonicalJson`, so every pre-existing plan keeps its exact sha; an EMPTY list normalizes to
-  absent (`[]` and "no gate" are the same gate).
-- **Projections carry the project axis.** Both views show each task's `project` and the gates'
-  `in EACH of: …` / `in ANY project (unscoped)` clause — the user view had omitted both, so the
-  document whose sha the approval binds could not distinguish "tests must pass in both halves"
-  from "a green test anywhere ends the session". Projection-only, so sha-neutral.
-- **Validation warns at the consent boundary** when a multi-project workspace declares gates or
-  task checks with no project (the unscoped reading is the one that produces a false green), and
-  compares project ids NORMALIZED — a correct `./api` had been scolded for naming a project that
-  does not exist, which pushes a model toward dropping scoping altogether. It also warns when
-  gate kind `browser` rides multi-project `gates.projects` (S16.5b): EACH-of semantics demand a
-  browser_flow bound to EACH named project's OWN preview — including non-UI projects — and the
-  only exits after approval are an api-bound flow or a gates amendment that resets approval.
-  And `update_plan` names the COMPLETED tasks an amendment RE-OPENS (definition identity: prose
-  participates in the sha; a full-graph resubmit rewriting a done task's title silently
-  re-queues it, and the model used to learn that only from `/accept` refusals).
-- **The amendment contract:** a model write keeps `approved` only for a semantic no-op; otherwise
-  → `draft`, including over `superseded`. An amendment therefore blocks every executor spawn, and
-  because only the USER can clear that, the REPL prints one undimmed end-of-turn line naming the
-  blocked tasks and the command — but only when an approval EXISTED and no longer covers the plan
-  (a never-approved draft is the ordinary post-planning state, and a warning that fires in the
-  ordinary case stops being read). `update_plan` tells the model to stop and ask rather than
-  absorb the delegated work. `/plan approve` REFUSES a file that does not parse and
-  validate (no consent to garbage bytes); an unparseable hand-edit reads as status `unknown` with
-  `contentSha` null → gated. `plan.approved {sha256}` is the consent record; `approvedAndCurrent`
-  is THE executor precondition — divergence BLOCKS.
-- **Routing** (`plan.route`, additive): model-judged per prompt rules, forced by `@plan` /
-  `@plan` sigil (recorded `source: 'user-sigil'`; `@direct` was removed in S21.5 — the event type
-  survives so historical logs replay). Absence of plan events is the honest
-  evidence of a direct turn. No harness classifier — the hard floor stays structural (executor
-  gates), not linguistic.
-- **Injection:** the standing per-turn note carries the AGENT view when the content sha is new to
-  the model, a pointer otherwise — and the pointer ALWAYS carries the live execution summary (task
-  states change without changing the content sha). 12 KiB cap; verbatim sovereignty wording;
-  unreadable plans inject an honest header. The note is composed into a `[[harness note: …]]`
-  wrapper whose `]]` sequence is broken in the note text, so plan strings cannot close the wrapper
-  and forge user-attributed words.
-
-## The task DAG and the scheduler gate
-
-Execution state is a PURE FOLD over (approved graph, events) — no new store. Per-task states:
-queued / blocked / running / awaiting-approval (live-only) / integrating (captured, not fully
-applied) / completed (ended-completed AND the applied union covers every applicable captured file;
-a completed EXECUTOR with NO capture event folds to `failed` — capture loss must stay re-runnable)
-/ failed / cancelled / parent-owned (role `main`: auto-satisfies dependents with a surfaced
-warning — asserted, unverifiable) / interrupted (started, never ended, not live — crash evidence).
-
-**Definition identity: `completed` belongs to the definition that RAN, not the id.** Every bound
-spawn records `task.started.planTaskSha` (sha256 of the task's canonical form, `dependsOn` sorted
-— reorder-neutral), and the fold re-opens a completed task whose current definition no longer
-matches the completing binding (dependents re-block — the conservative direction). Legacy sha-less
-bindings keep the id-sticky reading; an `integrating` task integrates its captured old-definition
-work before the reopen can apply. `PlanTaskState` carries the full `attemptHistory`,
-`attemptsForCurrentDefinition`, and `definitionSha`.
-
-`delegate_task` gains `plan_task` (recorded as `task.started.planTaskId` — the DAG join key). The
-gate runs BEFORE the base checkpoint, group-atomic (a refusal spawns nothing):
-
-- **Status gate (strict):** while any plan document exists, executor groups require
-  `approvedAndCurrent` — draft/unknown, superseded, DIVERGED, and approved-without-recorded-consent
-  all refuse; a plan APPROVED this session whose document vanished also refuses. No plan at all
-  does not block: the per-spawn human ask stays the consent floor. A throwing planContext fails
-  closed.
-- **DAG rules** (active iff an approved-and-current graph exists): R1 unbound executors refuse
-  (ready ids + escape hatches named); R2 unknown id; R3 role mismatch; then group composition
-  BEFORE per-task state (so "sequence them across calls" is never shadowed): R6 duplicate binding,
-  R9 intra-group dependency, R8 serial/high-risk must run alone, R7 overlapping declared touches
-  between executors; then per-task state: R5 completed re-runs refuse (failed/cancelled/interrupted
-  stay re-spawnable), integrating refuses until applied, **R10** refuses a task with
-  `MAX_TASK_ATTEMPTS = 3` genuine failure outcomes under its CURRENT definition (crash-interrupted
-  and user-terminated attempts never count; a definition change resets the ceiling), then R4 unmet
-  deps refuse naming the dep's state. **R11/R12** add the recovery gates (below).
-- **Plan-informed briefs:** bound tasks inherit plan `touches` as the focus brief when focus is
-  absent, plus plan-task identity and verification-criteria lines; group notes carry the live
-  execution summary and parent-owned-dep warnings.
-- **DelegateCaps** (tasks, child-output tokens, review rounds) are an injected object REBUILT FROM
-  EVENTS at assembly — a resumed session keeps counting.
-- **Waves are parent-serialized by construction:** one delegate call = one parallel group (≤3);
-  the parent integrates between calls, so the next group's base checkpoint includes applied
-  dependencies. The scheduler is the gate + the fold + guidance notes, deliberately NOT an in-tool
-  wave engine.
-
-## Supervision and task-scoped cancellation
-
-Harness-side in-flight detection on the child onAppend chain + a scaled ticker (production: 60s
-stall, 30s cadence; thresholds scale down with narrowed test budgets): loop detection over
-identical consecutive (tool, input) calls — annotate at 3, auto-cancel at 5 (status `stalled`);
-ONE budget-pressure observation at ≥80% of output tokens or wall clock; ONE stall observation. All
-observations are bounded (≤6/task), never-throwing, and dual-surfaced: persisted `task.supervision`
-events AND notes rendered into the delegate result's **group digest** — placed at the HEAD so
-head-biased truncation can never hide a failed status, an intervention, or declared-vs-actual
-touch divergence behind a long child report. The parent stays blocked on the group await
-mid-flight.
-
-Task-scoped cancellation is the `registerCancel` seam: once the child exists, the runner registers
-ONE narrow idempotent handle (cause `user-cancelled` → status `cancelled` — THIS child only, the
-group and turn continue), unregistered in finally. The REPL's task table owns the registry; a
-forwarded ask queued for a cancelled child resolves `task-aborted` without display.
-
-## The verification gate
-
-A plan task declares the typed checks that gate it, and **dependents unblock only when that gate
-is green**. The mechanism is one predicate, not a new state.
-
-- **Validation:** `checks` on a `role: 'main'` task is an ERROR (a per-task gate is anchored on
-  that task's own integration evidence, which parent-owned work never produces). A kind this
-  project cannot run is a WARNING fed back through `update_plan`'s revision loop, so an
-  unsatisfiable gate is caught at the consent boundary.
-- **`PlanTaskState.verification`** is a FIELD on a `completed` task, deliberately not a state name.
-  A separate "unverified" state would have taken a fully-integrated task out of R5's
-  duplicated-mutation refusal while R10's ceiling could not bound the resulting re-runs.
-- **`depSatisfied` = `(completed && verification.status !== 'pending') || parent-owned`.** That
-  single change propagates to queued/blocked resolution, R4's refusal, and acceptance. A task with
-  no declared checks has status `none` and behaves exactly as before — simple tasks stay cheap.
-- **What a green gate PROVES, exactly:** the declared kinds passed on the workspace at a point
-  AFTER this task's own work was integrated. The anchor is the max over ALL of the task's bindings
-  (capture happens for failed children too, and an earlier attempt's files can be applied later).
-  Satisfaction is harness-derived from event seq, not attested by the model's `plan_task` label.
-  For `test-targeted` the SCOPE is the check: the run's recorded `scopePaths` must overlap the
-  task's `touches`. Project scoping folds CASE (S20.5): a plan authored `project: 'API'` matches a
-  check recorded under the on-disk canonical `api`, because `selectUnit` matches case-insensitively
-  and would otherwise leave the gate permanently unsatisfiable AND unwaivable — the exact
-  unclearable-gate trap selection was fixed for, one fold layer up.
-- **Waivers, honestly:** an `unsupported` result waives the kind — but ONLY when the reason is a
-  capability one. Neither a `bad-request` nor a `precondition-curable` may (the latter
-  means the project simply has not been installed yet, and `project_setup install` is the named
-  cure — waiving it let a session that installed half a stack be accepted as COMPLETE claiming the
-  other half *cannot* be tested). `toolchain-unavailable` (S18) waives DELIBERATELY — a machine
-  without the compiler is the browser-unavailable case one toolchain over — but the folds track
-  it apart and its caveat names the missing toolchain and points at the recorded cure, so "the
-  machine lacks cargo" can never read as "this project cannot be tested". A waiver is recorded
-  as a caveat in the fold note, both plan
-  views, `/tasks`, and `AcceptanceState.caveats`, so a recorded "complete" can never quietly mean
-  "the declared check never ran".
-- **A boundary gate keeps its per-scope detail.** With `gates.projects`, a kind is satisfied only
-  when it passed (or was honestly waived) in EVERY named project, and `byKind` records which
-  projects passed, waived and are missing — so a blocker names the project that is missing and the
-  guidance names it too. Collapsed to a bare kind, `/accept` suggested a `run_check` that a
-  multi-project workspace refuses as ambiguous: a repair loop that could not converge.
-- **Boundaries:** `integrationGateState` refuses a NEW executor wave while `gates.integration` is
-  unsatisfied since the last apply (R12). `completionGateState` blocks `/accept` until
-  `gates.completion` passed after the LAST change — and "change" includes `undo.applied` and
-  `git.restore`, because `applyUndo` writes files back to disk while recording only its own event.
-  The asymmetry is deliberate: a per-task gate is NOT invalidated by unrelated later changes; the
-  completion gate covers the combined state.
-
-## Typed recovery (`recovery/`, `tools/recover.ts`)
-
-Recovery is a POLICY, not "try again": **classification happens before any repair is planned**, and
+Recovery is a **policy**, not "try again": classification happens before any repair is planned, and
 every automatic repair needs a supported class, sufficient evidence, a recovery point, a materially
 different hypothesis, and budget it has not spent.
 
-- **Eleven classes**: dependency-setup, compile-type, test-assertion, lint-format, runtime-process,
-  integration-conflict, policy-approval, timeout-resource, preview-startup, browser-verification,
-  and **unknown** — a real answer with real consequences (stop and escalate), never a shrug.
-- **`catalogue.ts` is DATA**, one entry per class: likely signals, required evidence, diagnostics,
-  eligible actions, regression checks, auto-eligibility, what always needs the user, and stop
-  conditions. It is rendered into failing `run_check` results and gate refusals, so guidance
-  arrives where it is needed instead of living in prompt prose.
-- **`classify.ts`** is deterministic and derivable FROM EVENTS ALONE. Ordering is load-bearing:
-  non-verdict terminations win FIRST (`timeout`, then `aborted` — a user interruption produced no
-  verdict and must not become a repairable defect; below the per-kind branches that test was
-  unreachable), then a missing toolchain outranks every downstream diagnostic. Browser evidence
-  routes ONLY by its own disjoint signal namespace. A delegated task that merely ended `error`
-  stays **unknown** and points at the child log — "a task failed" is not a diagnosis.
-- **`ledger.ts` derives outcomes; it never records them.** There is no `repair.ended` to lose in a
+- **Eleven classes** — dependency-setup, compile-type, test-assertion, lint-format,
+  runtime-process, integration-conflict, policy-approval, timeout-resource, preview-startup,
+  browser-verification, and **unknown**, which is a real answer with real consequences (stop and
+  escalate), never a shrug.
+- **The catalogue is data**: one entry per class carrying likely signals, required evidence,
+  diagnostics, eligible actions, regression checks, auto-eligibility, and stop conditions. It is
+  rendered into failing check results and gate refusals, so guidance arrives where it is needed.
+- **Classification is deterministic and derivable from events alone.** Ordering is load-bearing:
+  non-verdict terminations win first (a user interruption produced no verdict and must not become
+  a repairable defect), then a missing toolchain outranks every downstream diagnostic. A delegated
+  task that merely ended in error stays **unknown** and points at the child log — "a task failed"
+  is not a diagnosis.
+- **The ledger derives outcomes; it never records them.** There is no `repair.ended` to lose in a
   crash: an attempt is `succeeded` only when every regression check it declared actually passed
-  after it, `superseded` by a newer attempt for the same signature, else `open`. The repair proof
-  must include the kind that actually failed — and for scope-bearing kinds the passing run's
-  `scopePaths` must cover the attempt's, or a green check over unrelated paths could "prove" it.
-  Scope expansion is measured from `file.mutated` plus this target's own applies.
-- **`policy.ts` bounds it:** unknown classification, a class needing a human decision, spent
-  attempts, in-session wall time (idle gaps excluded), session and token budgets, an expanded diff,
-  and a repeated identical hypothesis each STOP with a typed reason. What is enforced vs. merely
-  detected vs. not verified at all is stated in the module: scope is MEASURED, not prevented.
-- **`recover`** (parent-only, actions `attempt` / `escalate`) writes only events, so it classifies
-  as `observe` and confers no authority. It creates no checkpoint because the recovery POINT
-  already exists in both paths: parent edits are snapshot-backed by construction, and an executor
-  re-run creates a fresh group base checkpoint.
-- **R11 at the scheduler gate:** once a mutating task has failed under its current definition,
-  re-spawning it is a repair and needs a plan for THAT failure. One free re-spawn stands for stop
-  reasons no model effort can clear, so a transient blip does not cost a plan amendment plus a
-  human re-approval; R10's ceiling still bounds it.
-- **Acceptance:** an open escalation or an unproven repair is honest unfinished work. An escalation
-  resolves BY EVIDENCE when its plan task completes with a satisfied gate — or by the USER's
-  recorded dismissal (S21): `/repair dismiss <n> <reason>` appends `repair.dismissed` joined on
-  the escalation event's own seq (sharing a signature can never clear a neighbor), the fold
-  requires `source: 'user'` (a forged or model-sourced record is inert; the recover tool has no
-  dismiss action), and the dismissal closes the BLOCKER while ALWAYS remaining an acceptance
-  caveat — dismissed is not resolved. `repair.dismissed` is a `WORK_EVENT_TYPES` member, so a
-  prior PARTIAL acceptance goes stale and a re-accept is meaningful. This is the closure path
-  the S20.5 live E2E demonstrated was missing: a `session`-targeted escalation of a
-  non-auto-eligible class (timeout-resource) could not clear by any reachable transition and
-  pinned a fully-green session at PARTIAL. `/accept confirm` remains the user's override; plan
-  task id `session` is now refused as reserved (the escalation sentinel).
+  afterwards, `superseded` by a newer attempt for the same signature, else `open`. The proof must
+  include the kind that actually failed, and for scope-bearing kinds the passing run's scope must
+  cover the attempt's.
+- **Acceptance closure.** An open escalation or unproven repair is honest unfinished work. It
+  resolves by evidence when its plan task completes with a satisfied gate — or by the user's
+  recorded dismissal (`/repair dismiss <n> <reason>`), which closes the blocker while **always**
+  remaining an acceptance caveat. Dismissed is not resolved.
 
-## Harness checkpoint lineage
+### Harness checkpoint lineage
 
-Recovery points at the workflow transitions the coding flow actually has, all as hidden refs under
-`refs/agent-cli/checkpoints/` — never the user's branch history, never a commit as a side effect
-of running Agent CLI.
+Recovery points at the transitions the coding flow actually has, all as hidden refs under
+`refs/agent-cli/checkpoints/` — never the user's branch history, and never a commit as a side
+effect of running Agent CLI.
 
-- **Event BEFORE ref (`opts.onRefReady`)**: `createCheckpoint` invokes the seam between
-  `commit-tree` and `update-ref`, and every harness call site appends its creation event there
-  (`EventLog.append` is synchronous). A crash between the two leaves an OWED ref that does not
-  exist, and `deleteCheckpointRefs` counts a missing ref as deleted — so the creation-instant leak
-  is structurally closed. The inverse is handled honestly: an `update-ref` that FAILS after the
-  append leaves a **phantom** creation, so every reader treats `agent checkpoint list` as live
-  truth, the owed fold is latest-creation-per-ref-wins, and a throwing callback aborts as
-  `ok:false` BEFORE the ref exists. The user-commanded CLI/REPL checkpoint path is deliberately NOT
-  reordered: its ref-scan-based backstop converges without event coupling.
-- **Four kinds, one lifecycle rule** (`HarnessRefKind`): `task-base` (per executor group),
-  `pre-integration`, and `agent` (S21.6 — a recovery point the model asked for) are session-scoped
-  and pruned at clean end; `delivery` survives as the durable audit anchor. `harness.checkpoint` is
-  a NEW event type on purpose — widening `task.base-checkpoint` would make an old reader's owed
-  fold prune the delivery anchor — and `agent` rides it rather than getting a type of its own
-  precisely so it inherits this lifecycle for free.
-- **`owedHarnessRefsFromEvents`** is seq- and kind-aware, re-folded from LIVE events at prune time.
-  Delivery survival keys on the ref the latest acceptance actually CONSUMED
-  (`session.accepted.deliveryRef`) — NOT on the newest creation event, which a phantom could hold;
-  an acceptance that captured no ref leaves the previous anchor alone rather than destroying one it
-  cannot replace.
-- **Pre-integration** fires only under the **covered-change rule**: an un-snapshot-covered writer
-  must have SPAWNED since the last harness checkpoint (`command.started` / `check.started` /
-  `preview.started`). `file.mutated`/`undo.applied`/`git.restore` are deliberately excluded: they
-  are snapshot-backed by construction, and counting them made every apply after the first pay a
-  whole-tree capture. Decline or failure SKIPS with a recorded note and NEVER refuses the apply.
-- **Delivery** (`/accept`, COMPLETE path, git repo only) is captured before the consent event and
-  referenced by it. Idempotent across the crash window: a recorded-but-unconsumed checkpoint is
-  REUSED only when nothing work-shaped happened since AND the ref genuinely exists.
-  `harness.checkpoint` is pinned OUT of `WORK_EVENT_TYPES` — the accept's own cleanup must never
-  stale the accept. Failure caveats and the acceptance still records: consent is never hostage to
-  git. The boundary prints one `/commit` suggestion — commits stay user-typed. `agent checkpoint
-  prune` (the documented backstop) KEEPS delivery anchors unless `--include-delivery`.
+- **Event before ref.** `createCheckpoint` invokes a seam between `commit-tree` and `update-ref`,
+  and every harness call site appends its creation event there. A crash between the two leaves an
+  *owed* ref that does not exist, and deletion counts a missing ref as deleted — so the
+  creation-instant leak is structurally closed. The inverse is handled honestly: an `update-ref`
+  that fails after the append leaves a **phantom** creation, so every reader treats the live ref
+  listing as truth.
+- **Four kinds, one lifecycle rule.** `task-base`, `pre-integration` and `agent` (a recovery point
+  the model asked for) are session-scoped and pruned at clean end; `delivery` survives as the
+  durable audit anchor, keyed on the ref the latest acceptance actually *consumed* rather than the
+  newest creation event, which a phantom could hold.
+- **Pre-integration** fires only under the covered-change rule: an un-snapshot-covered writer must
+  have *spawned* since the last harness checkpoint. Snapshot-backed mutations are deliberately
+  excluded, because counting them made every apply after the first pay a whole-tree capture. A
+  decline or failure skips with a recorded note and never refuses the apply.
 
-## The structural review gate (`review/ledger.ts`, `report_finding`, `review`)
+---
 
-**The reviewers record TYPED findings, the harness derives what the records are worth, and the
-parent's judgment annotates but never erases.**
+## Proving the work: checks, previews, browsers, review
 
-- **`MAX_REVIEW_ROUNDS` (2) lives in the FOLD's module** (delegate re-exports it), because the
-  fold's blocker text must adapt once the cap is spent: with no qualifying round left to buy,
-  "run ONE bounded reviewer group" prescribed a call delegate REFUSES — the S16.5 refusable-cure
-  class. The cap-spent blocker hands the exits to the USER (amend the plan to waive review and
-  re-approve, or `/accept confirm`), and delegate's refusal names the same exits (S16.5b).
-- **A reviewer group refuses while a once-approved plan's approval is invalidated (S21)** —
-  `approvedSha !== null && !approvedAndCurrent` at the delegate gate, cure `/plan approve` (or
-  `/plan discard`). A round started inside an amendment window can only run UNBOUND
-  (`checkDagRules` refuses `plan_task` against a non-current approval) yet still spends the cap
-  — the S20.5 live dead end: both rounds ran unbound, and the spent cap then blocked the bound
-  round the plan's review task needed. The refusal is EX ANTE; the cap itself is untouched, and
-  the recorded decision on `MAX_REVIEW_ROUNDS` says why: unbound rounds in no-plan /
-  never-approved / discarded sessions stay legal and still count — a binding-aware count would
-  be a repetition-bound loosening. (`planApprovalSha` clears on `plan.discarded`, so a discarded
-  plan never trips this.) The gate-read failure path fails closed for reviewer groups too.
-- **Findings are typed at the SOURCE.** `report_finding` is the reviewer child's only findings
-  channel: a PER-TASK accumulator+instance the delegate constructs inside the fan-out (parallel
-  lenses can never interleave), admitted through the named `childTools` seam. Bounded: 8 findings,
-  600-char prose fields, paths validated with the plan-touches containment rule. Model-authored
-  strings are neutralized AT INGESTION, because they are later rendered into harness-attributed
-  lines; a PATH that sanitization would alter is refused outright rather than escaped (an altered
-  path names no real file).
-- **Capture is unconditional** for any reviewer child that existed: `review.findings` with an empty
-  list is a recorded CLEAN lens; a completed reviewer with no capture means the round's evidence
-  was lost. The group digest carries per-lens severity counts.
-- **`foldReview` is pure** over (approved-and-current graph, events) with three rules: the
-  REQUIREMENT is derived (≥1 executor task ⇒ required; the plan's `review` field waives it visibly
-  with a user-approved reason, or forces it) and never stored; a round QUALIFIES only against real
-  work — no effective `task.applied` may land INSIDE the round's window (reviewers that observed
+### Typed verification (`checks/`, `tools/run-check.ts`)
+
+**The model names KINDS; the harness names COMMANDS.** That inversion is the whole trust argument,
+and everything else follows from it.
+
+- **Kinds:** `build`, `test`, `test-targeted`, `typecheck`, `lint`, `format`, `static-analysis`,
+  plus `browser`, which only flows produce. There is deliberately **no** dependency-install kind:
+  installing runs third-party code with network access, which is not "verify what we just built".
+- **Recipes are declarative rows** with `applies`, `unmetPrecondition`, argv or a body script, a
+  timeout, and effects. A project's own script always beats a guessed tool invocation, and the
+  first applicable row wins — resolution is deterministic, which is what consent can bind to. One
+  composer builds the command line: bare-safe tokens pass through, everything else is quoted, and
+  an unrepresentable argument throws rather than being hand-escaped. Node/TS is first-class, Python
+  minimal, Rust/Cargo and Go modules first-class, CMake detected-but-unsupported, everything else
+  `unsupported` **with the reason**. Holes are decisions with stated reasons — no Rust
+  test-targeted (cargo selects tests by name), no Go format (`gofmt -l` exits 0 either way, and an
+  output-parsed verdict would break the contract below). Preconditions are **row-owned**: whether a
+  blocker is an uninstalled project (curable), a missing machine toolchain (waives loudly), or a
+  host incapability (waives quietly) is a fact only the row can state.
+- **Normalization: the exit code is the verdict.** `exited` + 0 is a pass, `exited` + non-zero is a
+  fail, and every non-exit termination is an `error` — never a pass. Parsers only enrich the
+  summary, findings and named **signals**, and the signals are the durable half: full output is
+  truncated and only spilled to a blob, so later failure classification reads persisted signal ids
+  rather than text that has left the context.
+- **Three refusals that spawn nothing:** the resolved command (or the script body it invokes)
+  changed since the gate; a malformed request, refused as a *call* with no event so a caller
+  mistake can never become gate evidence; and the session check budget.
+- **Evidence.** `check.started` is emitted from the spawn callback only, so it means exactly what
+  `command.started` means. An `unsupported` kind records a completed event alone carrying a typed
+  reason — `no-recipe`, `precondition`, `precondition-curable`, `bad-request`, or
+  `toolchain-unavailable` — which lets a gate distinguish "this project cannot" from "you asked
+  wrong" from "this project is not installed yet".
+- **Consent is replay, bound to what actually runs.** A check runs project code at full user
+  privilege, so it is `reversible` + `noUndo`, always unsandboxed (the Low-IL boundary denies
+  workspace writes, so a build could not run inside it), and it asks. A session-scope answer stores
+  replay consent keyed by `sha256(recipeId + command + bodySha)` in a separate store with no action
+  class. The **body** is load-bearing: `npm run test` is a stable string whose behaviour lives in
+  `package.json`, which the agent can rewrite through an ordinary auto-allowed write — and the sha
+  covers the *untruncated* script value, because hashing the display-capped text let an append past
+  the cap ride the earlier approval.
+
+### Project setup (`setup/`, `tools/project-setup.ts`)
+
+The check inversion applied to dependency installs, migrations and seeds — with its own tool, its
+own consent, its own events, and **no path to satisfying a verification gate**. A check means "we
+verified"; it never means "we fetched".
+
+The model names an intent and a unit; the harness resolves the command. `install` resolves from the
+**lockfile**, and refuses rather than guessing when a project declares neither a lockfile nor a
+package manager. `migrate` and `seed` resolve the project's own script from a fixed per-intent
+allowlist, so neither can become "run any script". Consent splits by consequence: an install is
+`external` and may replay under `[s]`, bound to the sha of the lockfile *plus* `package.json`
+*plus* every install-affecting config file — because every package manager executes lifecycle
+scripts during an install, and those config files each choose what code runs and where it comes
+from. Migrations and seeds are `destructive` and ask **every** time: a migration is not idempotent,
+so "you approved this once" cannot honestly mean "you approved it again". Installs deliberately
+*do* run lifecycle scripts, because `--ignore-scripts` would break real toolchains and make the
+capability a lie — so the prompt states the risk instead. It is parent-only, for a sharper reason
+than checks: an executor worktree is disposable, so an install there populates a directory about to
+be deleted, and a migration there writes the *real* local database from what the user believes is
+isolation.
+
+### Managed previews (`preview/`)
+
+The one process class whose lifetime is not bounded by a tool call: an explicit **session
+resource** with recorded start, readiness, health, logs, and a deterministic end.
+
+`startSupervised` is `runManaged`'s deliberate inverse — it returns a live handle instead of
+awaiting an outcome. Output goes to a per-preview **log file** through an inherited fd, so an
+orphan surviving harness death can never wedge on a full pipe buffer half-serving requests.
+Lifetime bounds are typed stop reasons: TTL, log cap, explicit stop, session end. Consent reuses
+the check inversion — the model names a script from a fixed allowlist, the harness composes the
+command, and the persisted decision says "KEEPS RUNNING, binds a local port".
+
+**Readiness is honest.** The harness probes HTTP only on a port the server's own output announced,
+strips ANSI before parsing, honours the deadline and the turn abort, re-checks liveness after a
+successful probe, and records "socket ownership not verified". Each candidate is probed on **both**
+loopback literals and **the address that answered is what gets recorded** — that recorded URL is
+also the origin a browser flow is locked to, so it must be an address proven to answer. An HTTP
+answer means *a* server is up; application state is judged only by browser flows.
+
+The crash sweep kills only on **positive identity** — dead pid drops, a live sibling owner is
+skipped, and a live orphan must match both the re-derived command token and a creation time within
+tolerance, or the kill is skipped and reported. There is deliberately no age hatch on kills:
+delayed removal is safe, killing a recycled pid is not.
+
+### Browser verification (`browser/`)
+
+The check inversion applied to UI: the model declares a **typed flow**; the harness owns execution,
+waits, and the failure taxonomy. `playwright-core` drives the **system** browser (Edge, then
+Chrome, then a Playwright-cache Chromium), and the probe is cached **success-only** — a cached
+transient failure would turn every later flow into a gate-waiving `unsupported`, and acceptance
+could reach COMPLETE without the UI ever being driven.
+
+The spec is strict zod: `goto` requires a **declared** ready condition (a load event, network idle
+or a quiet spinner never count), assertions are typed, and steps run strictly in order stopping at
+the first failure. The failure taxonomy is typed — timeout, assertion (with the last observed
+state), navigation (a real URL-origin comparison; any off-origin top-level navigation aborts the
+flow), runtime, protocol (the browser died, so the app was never judged). Console errors are
+findings, not verdicts, unless the flow asks otherwise.
+
+Evidence rides the check channel with `exitCode: null` and no termination **always**, which is
+exactly what keeps a browser pass out of the report's file-CHECKED correlation while gates,
+waivers, caveats, classification and the repair ledger all work unchanged. **Visual judgment is
+judgment**: `view_image` returns real pixels only for a sha this session's own artifacts recorded —
+enforced at the gate and re-checked at execute, because the shared blob store also holds spilled
+output and snapshot pre-images. Visual impressions can add findings but never discharge a gate or
+override a failed deterministic assertion.
+
+### The verification gate
+
+A plan task declares the typed checks that gate it, and **dependents unblock only when that gate is
+green**. The mechanism is one predicate, not a new state:
+`depSatisfied = (completed && verification.status !== 'pending') || parent-owned`. A task with no
+declared checks has status `none` and behaves exactly as before, so simple tasks stay cheap.
+
+**What a green gate proves, exactly:** the declared kinds passed on the workspace at a point *after*
+this task's own work was integrated. The anchor is the maximum over all of the task's bindings,
+because capture happens for failed children too and an earlier attempt's files can be applied
+later. Satisfaction is harness-derived from event sequence, never attested by the model's label.
+For `test-targeted` the **scope is the check**: the run's recorded scope must overlap the task's
+declared touches.
+
+**Waivers, honestly.** An `unsupported` result waives the kind — but only when the reason is a
+capability one. Neither `bad-request` nor `precondition-curable` may (the latter means the project
+simply has not been installed yet, and there is a named cure). `toolchain-unavailable` waives
+deliberately — a machine without the compiler is the browser-unavailable case one toolchain over —
+but the folds track it apart and its caveat names the missing toolchain, so "the machine lacks
+cargo" can never read as "this project cannot be tested". With `gates.projects`, a kind is
+satisfied only when it passed or was honestly waived in **every** named project, and the fold
+records which projects passed, waived and are missing, so a blocker names the one that is missing.
+
+### The review gate (`review/ledger.ts`)
+
+The reviewers record **typed findings**, the harness derives what the records are worth, and the
+parent's judgment annotates but never erases.
+
+- **Findings are typed at the source.** `report_finding` is the reviewer child's only findings
+  channel: a per-task accumulator constructed inside the fan-out, so parallel lenses can never
+  interleave. Bounded in count and field length; paths validated with the containment rule;
+  model-authored strings neutralized at ingestion because they are later rendered into
+  harness-attributed lines; a path that sanitization would alter is **refused** rather than
+  escaped, because an altered path names no real file.
+- **Capture is unconditional** for any reviewer child that existed: an empty finding list is a
+  recorded *clean lens*, while a completed reviewer with no capture means the round's evidence was
+  lost.
+- **The fold is pure** over (approved-and-current graph, events), with three rules. The requirement
+  is **derived** — at least one executor task means review is required — and never stored; the
+  plan's `review` field waives it visibly with a user-approved reason. A round **qualifies** only
+  against real work: no effective apply may land inside the round's window (reviewers that observed
   mid-apply state reviewed neither before nor after), and at least one unit of real work must
-  precede it (a workspace change OR an executor capture, so a legitimate zero-net-change session is
-  not locked out); and findings NEVER expire (a weak round 2 cannot launder round 1's criticals).
-  Post-round fixes do NOT de-qualify the round — they surface as a caveat, because punishing the
-  harness-recommended fix path made the loop never end.
-- **Triage annotates; the fold derives its worth.** `verify` keeps blocking (confirmed real and
-  unfixed is the strongest reason to block); `refute` clears but is recorded verbatim, labeled an
-  UNVERIFIED MODEL CLAIM everywhere AND surfaced as an acceptance caveat (it is the cheapest path
-  past the gate and the only one whose evidence is a bare claim); `accept` is medium/low only;
-  `address` requires refs that both EXIST in the log and POSTDATE the finding. Every rule is
-  enforced twice: refused at the call so the log stays clean, and re-derived in the fold so a
-  hand-forged event cannot launder a blocker on replay.
-- **Acceptance axis**: the fold's blockers join `unfinished` (a missing/stale round when required;
-  every open critical/high ALWAYS — a waiver waives the round requirement, never what a
-  voluntarily-run round found), its caveats join `caveats`. `/accept confirm` remains the user's
-  sovereign override. Both tools are observe-class (events only) and confer no authority.
-- **Scope boundary (deliberate):** the requirement is PLAN-scoped, so executor work delegated with
-  no plan derives none; recorded findings still block regardless.
+  precede it. And findings **never expire**, so a weak second round cannot launder the first
+  round's criticals. Post-round fixes do not de-qualify the round — they surface as a caveat,
+  because punishing the harness-recommended fix path made the loop never end.
+- **Triage annotates; the fold derives worth.** `verify` keeps blocking (confirmed real and unfixed
+  is the strongest reason to block); `refute` clears but is recorded verbatim, labelled an
+  UNVERIFIED MODEL CLAIM everywhere *and* surfaced as an acceptance caveat, because it is the
+  cheapest path past the gate and the only one whose evidence is a bare claim; `accept` is
+  medium/low only; `address` requires references that both exist in the log and postdate the
+  finding. Every rule is enforced twice — refused at the call so the log stays clean, and
+  re-derived in the fold so a hand-forged event cannot launder a blocker on replay.
+- **Two rounds, and the cap knows it.** With no qualifying round left, the blocker text stops
+  prescribing a call that `delegate_task` refuses and hands the exits to the user instead.
 
-## The acceptance boundary (`runtime/acceptance.ts`, `/accept`)
+---
 
-A session's completion is an EXPLICIT, recorded boundary — never a side effect of quitting.
-`computeAcceptance` is a pure fold over (plan state, graph fold, events): COMPLETE = the plan is
-fully executed (every task completed/parent-owned; a DRAFT plan is deliberately NOT silently
-complete) AND every applicable capture is applied, registry-wide including plan-unbound executor
-work. Three further axes: a completed task whose declared check gate is still pending is
-UNFINISHED; a declared `gates.completion` kind that has not passed since the last change is
-UNFINISHED; an open escalation or unproven repair is UNFINISHED. It also carries non-blocking
-**caveats** — above all gates WAIVED because the project cannot run them, each naming the project
-it means ("NEVER RAN in web; it passed in api"), because a bare "NEVER RAN" was false whenever a
-kind passed in one half of a stack and was unsupported in the other. One derivation feeds
-`/accept`, `/status`, the quit summary, the report, and the journal handoff.
+## Capability packs
 
-**Reviewer dead-end carve-outs (e933677 + S16.5b), both LOUD caveats and both fired live:** a
-reviewer plan task NEVER BOUND via `plan_task` (queued/blocked, zero attempts) while the review
-requirement is independently satisfied by recorded rounds is a dead end, not outstanding work —
-once `MAX_REVIEW_ROUNDS` is spent there is no call left that could bind it. Same for the
-BOUND-but-dead variant one event later: a reviewer child that ended failed/cancelled/interrupted
-with the requirement satisfied AND the cap spent. While rounds REMAIN, a re-spawn with
-`plan_task` is a real cure and both states still block.
+Three packs live outside the kernel and share one shape: a pure module with no kernel imports, its
+own failure vocabulary, and thin tool wrappers above it. None of them adds an orchestration layer,
+a plugin system, or a second agent loop.
 
-- **`/accept`** (user-typed = consent; between-turns only, piped-deterministic): on COMPLETE,
-  appends `session.accepted {complete, summary, deliveryRef?, deliveryOid?}` and runs bounded
-  cleanup — prune this session's owed harness refs now, and retire a fully-executed
-  approved-and-current plan through the EXISTING discard flow (`superseded` + `plan.discarded
-  {reason:'accepted'}`; the file stays on disk as audit; zero new crash windows). With unfinished
-  work it refuses with the honest list; the STATELESS `/accept confirm` records a partial
-  acceptance and retires nothing. A prune failure is REPORTED, never swallowed.
-- **Idempotence + crash repair:** re-accepting with no work since the last acceptance is a no-op —
-  and that branch finishes an INTERRUPTED acceptance cleanup.
-- **Staleness is honest:** work-shaped events after an acceptance mark it stale, and `/status`, the
-  quit summary, and the journal handoff say "work has happened since" while the unfinished list and
-  resume pointer always follow the LIVE derivation.
-- Cleanup never erases rollback/audit/resume material: snapshots, captured-change blobs, spill
-  blobs, plan files, and session logs all remain.
+### Documents and PDF (`artifacts/`)
 
-## The REPL (`repl/`)
+**The loop is spec-centred:** request → read sources → author a `*.docspec.json` → render →
+deterministic validation → *see* the pages → revise **the spec** → re-render. The spec is an
+ordinary workspace file written with the ordinary file tools, which is what makes revision
+snapshot-backed, undoable, diffable and attributable for free.
 
-A consumer of the same runtime: one session, `runTurn` per user line. `io.ts` owns the ONE
-persistent readline — idle prompt and approval questions share it; echo is muted during turns
-(Ctrl+C still arrives); typed-ahead lines are buffered; EOF at a pending approval resolves null →
-deny-&-stop. Since S22 the pending resolver installs BEFORE the prompt bytes go out (a
-PassThrough delivers 'data' synchronously, so a zero-delay driver answering the instant the
-prompt appeared used to re-enter readline early and buffer the answer where a `fresh` question
-never looks — the REPL waited forever); readline gets a Tab `completer` over the command table
-(terminal-mode only, so piped input is untouched by construction); and Ctrl+E on an EMPTY line at
-the idle PROMPT dispatches `/expand` (a `pendingKind` guard keeps the chord out of questions,
-where '/expand' would parse as a deny, and readline's own end-of-line binding wins mid-edit).
-`render.ts` subscribes to `EventLog.onAppend`, so the screen is a live view of the
-persisted evidence. Three render-only incremental channels exist alongside it: `onText` (model
-deltas), the live command-output preview (sanitized dim lines, 100ms cadence, 8 KiB/command head
-cap — past which lines feed a bounded ring and command end prints an honest fold marker plus the
-last eight lines, S22: capped means folded, never vanished), and the structured child-status
-channel; for all three the persisted truth remains the events. `/expand [last | <n> | <call-id
-suffix>]` reprints a folded output IN FULL from the RECORD — the spill blob when one was saved,
-the recorded head+tail otherwise, provenance named either way — to stdout, the
-requested-artifact channel; renderer memory is never consulted, so it survives resume by
-construction. Stream split: **stdout = model text + requested artifacts
-only; stderr = all chrome** (piped transcripts stay clean; non-TTY chrome uses ASCII glyphs).
-Slash commands operate on the session's own live log (`/undo` → `applyUndo` on the same open log;
-the model learns of it via a delimited `[[harness note: …]]` in the next `user.message`). Turn
-errors repair and re-prompt; `/quit`, EOF, and double-Ctrl+C end as `user-quit` — never
-`completed`.
+- **Substrate.** OOXML containers are opened **in memory only** — nothing is ever extracted to
+  disk, so zip-slip is structurally impossible rather than defended against — with every entry name
+  validated and entries/bytes capped on `max(size, originalSize)`, because a *stored* entry is
+  materialized by its compressed size. Writing is deterministic: sorted entries, fixed timestamps,
+  fixed level. XML parsing is size- **and** depth-bounded and strict.
+- **Identification is by magic bytes and the content-types part, never the extension**, and never
+  throws: every failure is an `unsupported` verdict whose reason echoes no file content, so a
+  `.env` renamed `report.docx` fails the sniff without leaking a byte.
+- **Readers return one summary shape whose first field is a coverage verdict** — `full`, `partial`
+  or `structural`, with reasons — so "we read it" can never quietly mean three different depths.
+- **DOCX rendering is byte-deterministic**: fixed relationship ids, fixed document-properties
+  timestamps, real field runs for `{pageNumber}`/`{totalPages}`/`{date}`, real named styles, one
+  numbering instance per list block, schema-ordered run properties. Same spec plus same image bytes
+  yields the same sha256, pinned by rendering twice. The PDF is printed through the same probed
+  browser from one self-contained HTML page (no script, no link, no external src — images are
+  data URIs). **PDF bytes are not claimed deterministic** (Chromium embeds dates and ids); DOCX
+  bytes are.
+- **Validation is deterministic and model-free** — the half a non-vision session still gets in
+  full. Each artifact is parsed **back**: outline equality, table shapes, dangling references,
+  header/footer presence, a page field whenever one was asked for, printed page count, headings
+  findable in the printed text. Two severities, deliberately separate: structural mismatches are
+  **failures**; layout heuristics are **notes** that can never block, because the first false
+  positive would turn a guess into a gate.
+- **`inspect_pages`** rasterizes pages by injecting the bundled pdf.js into a blank page of the
+  probed browser, enforcing a per-image byte ceiling by re-rendering at reduced scale. Pages become
+  content-addressed blobs and ride the existing wire-image channel, so the vision choke and image
+  aging apply unchanged.
+- **Artifacts are products, never verification.** `artifact.rendered` and `artifact.inspected` can
+  never satisfy a gate, and the report's asymmetry test pins it: a render exiting clean after a
+  mutation leaves the file UNCHECKED.
 
-**The select surface (S22, `repl/select.ts` + `io.captureKeys` + the status overlay).** Prompts
-on a TTY are arrow-key menus layered OVER the line grammar, never replacing it. The widget owns
-no cursor code (the status area's `overlay` channel draws the menu; `setLines` during an overlay
-stores the base silently, so a forwarded-approval task update cannot clobber it) and no answer
-grammar (menu picks submit their key, typed text opens a visible buffer submitted through the
-CALLER's parser — `parseChoice` for consent, `parseAnswer` for approvals — so NEGATIVE_WORDS and
-every scope rule hold; first-character action at the keypress level would have reintroduced the
-`cancel`/`[c]` hazard). `captureKeys` detaches readline's own keypress listener for the capture's
-lifetime — coexisting was the trap: arrow-up is history recall into `rl.line`, Enter emits
-'line' into type-ahead — making the line path structurally inert while a menu is up; capture
-engages BEFORE any output so a zero-delay driver cannot lose keys; Ctrl+C fires the interrupt
-handler before the widget resolves (the 'SIGINT' ordering); stream close synthesizes an eof key.
-**The initial highlight is always the decline/deny row — Enter never affirms** — and eof keeps
-the exact deny-stop coercion of the line path. Approval menus derive from `approvalChoices`,
-which shares `sessionGrantLabel`/`durableGrantLabel` with the FROZEN `formatApprovalPrompt`
-strings (cross-pinned by test, so menu and text cannot drift); dangerous mode and non-interactive
-answer before any prompt exists, and forwarded asks ride the existing serialized queue. A bare
-`/` opens the same widget over `command-table.ts` (full-name keys, windowed to twelve rows with
-honest "… N more" edges — the overlay's erase math counts drawn lines, so a menu taller than the
-terminal must not exist). Everything is TTY-gated; the widget's unavailable fallback and every
-non-TTY path keep the line grammar byte-for-byte.
+### Web research (`research/`)
 
-**Contextual consent (S21.5, `repl/consent.ts` + `repl/prompt-choice.ts`).** Four decisions are
-ASKED instead of requiring a remembered command: a plan awaiting its first
-approval, an approval invalidated by an amendment, an open repair escalation, and a session that
-would accept cleanly. All four are pure folds over (plan bytes, event log); precedence is
-B > A > D > C with at most one prompt per boundary, and a condition whose key was already asked
-falls through to the next rather than masking it. **S22 split the boundaries by session shape**:
-an APPROVED PLAN completing is a delivery boundary, so plan-carrying sessions keep the
-turn-boundary completion offer; plan-less work — where `computeAcceptance` is complete after any
-mutating turn, so the old trigger re-armed on every one (the recorded S21.6 nag) — is asked once,
-at the typed `/quit`. Never at EOF, never at a double-Ctrl+C: walking away is not a consent
-moment. B, A and D stay turn-only, and one anti-nag set spans both boundaries. Three properties
-are load-bearing:
+The one capability that sends anything off this machine.
 
-- **TTY-gated** (`streams.isTTY && ctx.mode === 'interactive'`). Off a TTY `io.question` ignores
-  its `fresh` flag and would consume a driver's next queued line — which is why S21.5 demoted
-  `/accept` and `/plan approve` rather than removing them, and why a piped test asserts no prompt
-  appears. `--dangerously-allow-all` leaves prompts ON: it bypasses TOOL approvals, never consent
-  about the work.
-- **Fires after the turn's `finally`**, not at the end of the `try`: there the mid-turn handler is
-  still installed and the status region still drawn, so a line typed before the question displays
-  would be eaten as a mid-turn command.
-- **Zero appends of its own.** Every affirmative answer calls the same extracted body the slash
-  command calls (`acceptSession`, `approvePlanCanonical`, `dismissEscalation`), so evidence is
-  byte-identical either way — pinned by running one fixture twice and comparing event arrays.
+**Egress is one host.** `research/tavily.ts` is the only code here that opens a connection, and it
+opens exactly one. Page retrieval happens on the provider's infrastructure, so the pack owns no
+redirect policy and no SSRF guard — it never fetches a model-named URL itself. The claim is scoped:
+*the research tools'* egress is one host, **not** the harness's, and a configured proxy still
+carries the connection. The approval prompt says both.
 
-`prompt-choice.ts` is the ONE new answer grammar: it tokenizes exactly as `parseAnswer` does (trim
-→ lowercase → first char) so the two agree on what a keystroke *is*, and deliberately does not
-reuse it, because those keys denote permission scope (`a` mints durable authority). Empty,
-unrecognized and EOF all mean DO NOTHING; there is no affirmative default. Anti-nag state is an
-in-memory `Set` keyed on derived state (content sha / last work seq / escalation seq) — a decline
-appends nothing, and a `consent.declined` event would write a non-decision into the record that
-`/report` and `computeAcceptance` would then have to interpret.
+**Consent is the budget.** The first call asks with the query verbatim, the per-call bounds and the
+remaining allowance. One budget object — searches, extracts, provider credits and retrieved
+characters — is shared by reference between the parent and every researcher child, and rebuilt from
+events on resume, so a restart cannot refill it. The credit ceiling is checked against the estimate
+*before* the wire, so a call that would overshoot is refused whole rather than half-spent. Every
+bound is re-enforced at execute, because `decide()` is a claim about what *will* happen and a
+sibling can drain the remainder while a human reads the prompt.
 
-**Sigils (`repl/sigils.ts`, S21.5).** One table, not four inlined branches: `@plan`, `@review`,
-`@search`, `@research`. The head guard is `^@word(?=\s|$)` — `\b` matched `@plan.md is stale` and
-routed it. An unknown `@word` is refused by name instead of falling through as prose. `@direct` was
-removed: the system prompt already instructs the complexity routing it forced.
+**The registry split is what makes the claim structural.** The parent holds `web_search` only;
+`web_extract` (full page text) and `record_source` are researcher-only. That is what makes "the
+main agent never receives raw web pages" a property of construction rather than a promise. The
+admissibility table is an exhaustive `satisfies Record<FactKind, boolean>`, so the next policy fact
+breaks the typecheck rather than silently passing into a child registry.
 
-Commands: `/help /status /undo /diff /commit /checkpoint /plan /tasks /cancel /accept /review
-/repair /checks /preview /report /expand /map /init /grants /provider /model /research /remote
-/quit` (`/exit` is an alias); the surface is mirrored as DATA in `command-table.ts` (Tab
-completion + the `/` menu), drift-pinned against the dispatch switch in both directions. `/report [section]` slices the one rendered report into any of fifteen named
-sections; the six inspection views keep their own rendering because each carries live state the
-report structurally cannot (a re-probed project, re-probed process liveness, memory-only remote
-identities, live research spend) or an action affordance (`/repair`'s numbered list).
-`/repair` (S21) renders the bounded-repair ledger and carries the user-side dismissal;
-`/init` (S21) is the skippable onboarding flow (global AGENT.md + project starter — never
-rewrites an existing file; each file writes atomically or not at all, and an abort after the
-global doc exists keeps it and says so); `/grants` (S21) lists the durable machine
-grants loaded at this session's assembly plus a count of any minted mid-session by `[a]`, and
-since S21.5 carries `/grants revoke <id>` (user-typed only — the store changes for the NEXT
-assembly; the running session's in-memory authority is unchanged and the output says so).
-`/checks` re-probes the
-detected project on demand and shows
-the latest EVIDENCE per kind — a check that spawned and never completed reads as "NO VERDICT",
-not as the older passing run. `/diff` carries the report's CHECKED verdict per file through the
-same correlation the report uses (one implementation, so CHECKED cannot mean two things).
+**Untrusted content, three mechanisms, honestly ranked.** Ingestion sanitization; harness-delimiter
+neutralization; and the UNTRUSTED fence plus the prompt contract — which is a **mitigation, not a
+boundary**. A sufficiently persuasive page can still influence a model. What it cannot do is
+*act*: a researcher holds no tool that writes, runs, or delegates. URLs are treated as identifiers,
+so a value sanitization would alter is refused rather than escaped, and loopback, private,
+link-local and bare-IP hosts are refused outright.
 
-**The "working" heartbeat (`repl/heartbeat.ts`, S16.5b).** An always-thinking model (kimi-k3)
-streams nothing while it reasons, so the screen looked frozen for minutes between tool steps.
-One dim TTY-only status line — `· model working (Ns)` — driven by the render-only
-`Session.onModelRequest` seam (`true` before every provider call, `false` in a finally: success,
-error and abort alike; never an event). Drawn only while a request is in flight with NO text
-streamed (a 2s grace stops fast responses from flashing it), erased SYNCHRONOUSLY by the
-wrapped `onText` before the first stdout byte of a step — which is what preserves the status
-area's no-interleaving invariant — zero bytes off-TTY, timer unref'd. The line is PLAIN text by
-contract: the status area sanitizes (and ESCAPES) its content, so styling smuggled in through
-content renders as visible `\u{1b}` text — the first recorded run proved it on camera.
+**Findings, not summaries.** `record_source` takes one falsifiable claim, its source URLs and a
+corroboration verdict, and refuses `corroborated` backed by a single distinct source.
+**Research never verifies anything**: research events never mark a file CHECKED and never satisfy a
+gate. Acceptance carries two caveats instead — that the web was consulted at all, and that some
+findings rested on a single source or on sources that disagreed.
 
-**The live task surface.** `status.ts` is the sticky status area — the ONLY cursor-moving code,
-strictly TTY- and stderr-confined: ALL chrome routes through its status-aware writer (erase →
-write → redraw at line boundaries), approval prompts suspend it, every turn's finally clears it,
-content is sanitized + clipped per redraw — since S22 the clip counts DISPLAY COLUMNS
-(`width.ts`, the prerequisite the old code-unit clip itself named before free-form text could
-land here) — and `!isTTY` is a pure pass-through emitting ZERO
-escape bytes (piped transcripts stay byte-identical). The S22 `overlay` channel draws INSTEAD of
-the base while a select menu is up; styled overlay lines are painted BY THE AREA after sanitize
-and clip (the S16.5b lesson kept structural), and `clear()` drops overlay and base alike. Chrome
-carries semantic style ROLES (`format.ts` `seg`: ok/fail/warn/muted/heading/agent/user/accent,
-one 16-color SGR pair each, identity off-TTY, `NO_STYLE` the default wherever a Style is
-optional) with severity never color-only, and one glyph table covers every marker — the
-previously hardcoded `▸ ⚑ · ±` sites included — so legacy ASCII consoles stay readable. Its safety rests on one structural fact: the
-area is populated only during delegate flight, when the parent is blocked on the tool call — so
-stderr cursor movement can never interleave with stdout model text. `live-tasks.ts` is the
-render-only table behind it. Mid-turn, on a TTY only, `io.ts` offers typed `/`-lines to a handler
-while NO read is pending (a displayed approval always wins; piped input keeps queue semantics
-verbatim — scripted drivers depend on it): `/tasks` prints the live table, `/cancel` fires the
-task-scoped cancel registry.
-
-## Policy model (`policy/`)
-
-Two independent ideas, honestly separated: **path validation** and **action classification**.
-
-`validatePath` (Windows-first) hard-rejects NUL, `\\?\`/`\\.\` device prefixes, UNC, reserved
-device names, NTFS ADS, and trailing dot/space; resolves via `realpathSync.native` of the deepest
-existing ancestor + tail; and containment-checks against `realpath(workspace) + separator` so a
-sibling prefix (`C:\ws` vs `C:\ws-evil`) cannot escape. It returns `{ resolved, inWorkspace,
-protectedPath }`; the engine decides.
-
-`decide(tool, input, ctx, grants)` — deny-first, first match wins:
-
-- **Delegation** (`tool.delegates`) → the explicit STEP-0 branch. First on purpose: a delegating
-  tool must never reach the command auto-run path or the observe fall-through.
-- **Plan-document write** (`tool.planDoc`) → allow/`reversible` (the store archives prior bytes;
-  the write cannot touch workspace files); planDoc+command → deny.
-- **Typed check** (`tool.check`) → after planDoc and BEFORE the command branch: a check SPAWNS a
-  process, so reaching the observe fall-through would be a trap with real execution behind it. All
-  fact combinations refuse; a throwing fact denies. Verdict `reversible` + `noUndo` +
-  `execBoundary: 'unsandboxed'`, and `ask` unless every resolved command already carries replay
-  consent. The fact must be PURE — the tool resolves from a captured project snapshot, never the
-  filesystem. KNOWN EXCEPTION, stated rather than papered over (S16.5b): run_check's bound
-  `test-targeted` scope resolves via a planTouches lookup that reads the PLAN DOCUMENT at decide,
-  and the plan file is outside the workspace drift stamps — the exposure window is exactly an
-  open approval prompt (calls are otherwise serialized); the mechanism fix is in the deferred
-  pool. Kind `'preview'` splits to distinct rule ids and persistent-process reasons.
-- **Browser flow** (`tool.browser`) → previewBound allows; anything else DENIES.
-- **Session-evidence read** (`tool.evidenceRead`) → allow only when the fact says the sha is
-  `admitted`; an un-admitted sha DENIES.
-- **Shell command** (`tool.command`) → **automatic review** (the single default). A declared
-  `cwd` is validated with the same containment rule as a write target and REFUSED for protected
-  paths: `.git` and the state dir are protected as PLACES, not only as write destinations. A hardcoded
-  circuit-breaker denies workspace/drive wipes and `format`. Otherwise `analyzeCommand` decides: a
-  command it PROVES safe **and** an active OS boundary together yield `allow` with `execBoundary:
-  'sandbox'`; anything else is `ask` with `execBoundary: 'unsandboxed'`. With no enforced sandbox a
-  provably-safe command still asks — auto-run is disabled (**fail closed**).
-- **Declared write** → validate each target; out-of-workspace or protected (`.git`, the state dir,
-  any `.agent-cli` segment, config `protectedPaths`) → `deny`; else `reversible` / `allow` with
-  `requiresSnapshot`.
-- **Local git read / agent checkpoint** (`tool.gitRead` / `tool.gitCheckpoint`, S21.6) → two
-  branches after the remote pair and before the command branch, both fail-closed. A read allows as
-  `observe` with a rule that names the argv instead of "read-only workspace access"; a checkpoint
-  allows as `reversible` + `noUndo` and is the ONE model-reachable write inside `.git`, which the
-  declared-write branch below refuses as a protected place. Full contract: "The local git pack".
-- **Reads** → out-of-workspace → `sensitive` / `ask`; secret-named → `sensitive` / `ask` + redaction.
-  Secret classification runs on BOTH the raw request and the RESOLVED path, so a symlink or a
-  Windows 8.3 alias of `.env` cannot evade it.
-
-**`analyzeCommand`** is a POSITIVE proof of safety, deterministic over the command string alone
-(the model's opinion is never consulted). `autoAllowable` requires all of: (1) a single simple
-command with NO shell metacharacters/encoding/control chars — chaining, redirection, substitution,
-expansion sigils, quotes, and the `--%` stop-parse token all disqualify; (2) an executable on a
-small curated read-only allowlist (basename, extensions stripped, NFKC-normalized, casefolded);
-(3) per-executable arg checks with no argument that escapes the workspace. Everything else returns
-false → `ask`. Obfuscation defeats any string reviewer, so safety is *proven*, not pattern-matched
-— and the reviewer is a prompt-skip gate, never the boundary (the sandbox is).
-
-`Grants` are in-memory, session-scoped, keyed `(tool, class)`, and store only grantable classes
-(`sensitive`/`external`) — never `destructive`, never `reversible` (an executor spawn must ask
-every time), and NEVER any command-bearing tool: a command's classification is a best-effort label
-over untrusted model text, so a session grant keyed on it would be standing shell permission won by
-a label. Grants are not persisted or restored on resume. The approval prompt hides `[s]` whenever
-no grant would actually be stored, and sanitizes every line it prints — summary, detail, AND the
-reason (which embeds untrusted model text for command asks).
-
-**Durable machine grants (S21)** — the one explicit, user-recorded exception to
-"authority is not durable", designed against the studied failure modes of the ecosystem (Codex
-#22181: a vague "don't ask again" that minted a machine-wide program-name allow):
-
-- **Exact identity only.** An `[a]` answer persists either the approved check batch's exact
-  replay keys (body-sha-bound — any script or command drift re-asks structurally; scoped to the
-  workspace via the SAME `trustKey` derivation trust uses) or ONE `(tool, external)` pair from
-  the closed `DURABLE_CLASS_ELIGIBLE` set: `web_search`, the researcher spawn via
-  `delegate_task`, and `remote_status` reads — the three read-only-external consents whose blast
-  radius per-session budgets already bound. Machine-wide for class grants (the point is
-  remembering across projects), with trust as the outer gate. No prefixes, no patterns.
-- **Everything else is ineligible with a stated reason** (written on the set itself): remote
-  write (asks every time, three surfaces), migrate/seed, executor spawns, `run_command`,
-  outside-workspace/secret reads, artifact inspect, preview replay, install replay (deferred).
-- **The offer is structural.** `[a]` renders only from an interactive approver (never
-  non-interactive, never `--dangerously-allow-all` — the dangerous approver answers before any
-  prompt exists and can never persist), never on a forwarded child ask, and only for eligible
-  requests; an unoffered `'a'` parses as a DENY, so scope cannot be upgraded by a typo. The
-  prompt prints the LITERAL stored rule, its scope, and the revoke path before anything writes.
-- **The record never lies.** Persistence runs BEFORE `approval.resolved` is appended; a failed
-  or unavailable persist downgrades the recorded scope to `session` with the reason in `detail`.
-- **Store + visibility.** `<stateRoot>/grants.json` (strict schema, corrupt = hard `ConfigError`,
-  never rewritten — the trust-store discipline) with registry-locked atomic writes and an
-  append-only `grants.log` audit. Assembly loads matching entries at EVERY start and resume,
-  validates class entries against the eligibility set (a hand-edited ineligible rule refuses the
-  session, naming `agent grants revoke <id>`), seeds the in-memory `Grants`, and appends
-  `grants.loaded` — standing authority is visible in the evidence of every session it touches.
-  Revocation is `agent grants revoke <id>` or the in-session `/grants revoke <id>` (S21.5 —
-  both USER-typed surfaces; the MODEL has no path to grants) and applies from the next assembly; a running session keeps its
-  in-memory copy until it ends (documented, not hidden). Load-time eligibility refusal covers
-  CLASS entries; replay entries are opaque shas, so their belt is provenance instead — durable
-  keys are seeded into a separate set only the pure-check branch consults, and a hand-edited
-  install- or preview-shaped key is dead weight, never authority.
-
-## Sandbox and enforced isolation (`sandbox/`)
-
-Sandbox (what a process *can technically do*) is a separate axis from approval (when the agent must
-ask). A `SandboxBackend` is selected once per session, PROBED, and reported truthfully; the runtime
-never assumes enforcement from the platform name.
-
-- **`windows-lowil`** is a genuinely OS-enforced boundary. `wrapSpec` is a *transform at spawn
-  time*: it rewrites the spec so `runManaged` spawns a versioned PowerShell + inline-C#
-  (`Add-Type` P/Invoke) **host** instead of the shell. The host duplicates the caller's own token,
-  lowers it to **Low integrity** (`SetTokenInformation` with the `S-1-16-4096` label — no admin
-  needed for a lowered copy of your own token), creates a **Job Object** (`KILL_ON_JOB_CLOSE` +
-  active-process cap + UI restrictions), and `CreateProcessAsUser`-launches the real command
-  **forwarding its inherited std handles**, so output capture and the kill/drain state machine are
-  unchanged. The child's `TEMP`/`TMP` point at a Low-labeled scratch dir under the state root.
-- **What it enforces** (verified against the live OS): Mandatory Integrity Control **denies the
-  child's writes** to Medium+ objects — the workspace, the user profile, system dirs, and the
-  **harness state dir** — at the kernel; and the Job Object's kill-on-close **reaps the whole tree
-  on kill**, including a detached grandchild `taskkill /T` cannot reach. **What it does NOT
-  enforce** (stated verbatim in `EnforcementFacts.doesNotConfine`): reads (a sandboxed command can
-  still read secrets), network, writes to Low-labeled locations, and service-reparented work
-  (schtasks/sc/wmic/BITS).
-- **Probe + fail-closed.** `ensureAvailable()` runs a self-test that spawns a Low-IL child and
-  confirms *both* Low integrity *and* an actual write-deny; only then is `enforced: true`. The
-  probe allows 60 s and one bounded retry (measured ~4–11 s normally): a retry can recover a
-  transient false negative but every path to `enforced: true` still requires the positive marker.
-  On any non-Windows platform, or on probe failure, the backend degrades to `none` semantics and
-  the engine disables auto-run. The host itself never falls back to unsandboxed.
-- **Boundary selection per call.** `PolicyDecision.execBoundary` drives which wrap the runtime
-  hands the tool: an ACTIVE `ExecSandbox` for an auto-run command, identity for an approved one.
-  `run_command` applies `ctx.sandbox.wrap` unconditionally and records the actual boundary in
-  `command.started.sandbox`.
-
-## GitOps (`git/`) — two halves, split by what the user can see
-
-Git serves review, delivery, recovery, and context, and it does not replace the snapshot system.
-Since Session 21.6 the capability has two halves, and the line between them is **whether the user
-can see the result in their own git state**:
+### Git (`git/`) — two halves, split by what the user can see
 
 - **Harness-owned** — everything that moves a ref, index, HEAD, branch, tag or remote the user
-  sees: commits (`/commit`, `agent commit`), checkpoint restores, prunes, the delivery anchor. The
-  model has no path to any of it.
-- **Model-facing** (the local git pack, below) — reading repository state, and capturing a
-  recovery point to a hidden ref. Both go through harness-composed argv; neither changes anything
-  the user's own `git status` would show.
+  sees: commits, checkpoint restores, prunes, the delivery anchor. The model has no path to any of
+  it.
+- **Model-facing** — reading repository state, and capturing a recovery point to a hidden ref.
+  Both go through harness-composed argv, and neither changes anything the user's own `git status`
+  would show.
 
-**Why a git tool needs a policy branch at all:** `decide()` classifies a tool with no `command()`,
-a null `mutates()`, and no reads as `observe`/auto-allow with the recorded reason "read-only
-workspace access" — so a "git_commit" tool of that shape would commit with NO approval. That is
-pinned verbatim by a policy regression test (`hypothetical_git_commit`) plus a TOOLS registry
+Why a git tool needs a policy branch at all: `decide()` classifies a tool with no command, a null
+mutation plan and no reads as `observe`/auto-allow — so a "git_commit" tool of that shape would
+commit with **no** approval. That is pinned verbatim by a policy regression test plus a registry
 guard, and it is why the two model-facing tools declare explicit facts rather than falling through.
-The model also keeps `run_command`: read-only git auto-runs inside the sandbox, mutations ask, and
-work-discarding forms (`restore`, `checkout --`, `reset --hard`, `clean`, `stash drop|clear`,
-`push --force*`) are labeled destructive.
 
-**Consent contract** (explicit), now four conditions:
+- **`git_status`** takes a **view name and a bounded integer, and nothing else** — no ref, path,
+  author or format parameter. That is the entire argument for allowing these reads on machines with
+  no enforced sandbox: the model names a *view*, the harness names the command. Its `changes` view
+  runs the same `prepareCommit` that builds the human's `/commit` preview, so the model's answer
+  and the user's screen cannot drift. **Nothing it returns is file content**, which is what makes
+  allowing before `readsPaths` is evaluated honest.
+- **`git_checkpoint`** takes an optional label; the schema cannot express a restore, reset, commit
+  or push. It auto-allows because a hidden ref built against a temporary index is the most
+  reversible write in the system. Bounds replace the prompt: a per-session cap surfaced as a
+  fact-level deny, and a **secret guard** that refuses to capture secret-named files `.gitignore`
+  does not already exclude — `git add -A` excludes exactly what gitignore excludes and nothing
+  else, and a git blob cannot be redacted.
+- **Deliberate commits** stage only session-attributed paths by default, intersected with git
+  status so every pathspec provably exists in git's view. Blockers where attribution would corrupt
+  (missing identity — never set for the user; a pre-staged index); warnings for externally-modified
+  session files and for unattributable `run_command` effects. Hooks run; failures are honest.
+- **Checkpoints** run as plumbing against a temporary index, writing to hidden refs, so the
+  user-visible git state is byte-identical before and after (tested). Honesty: **low-pollution, not
+  zero** — loose objects and hidden refs are written, and `prune` frees them. A restore materializes
+  content binary-safely and snapshots all current bytes **first** under one synthetic callId, so the
+  whole restore is a single `applyUndo` unit.
+- **Output discipline**: repository-authored text — commit subjects, author names, branch and tag
+  names, paths — is scrubbed, neutralized and sanitized inside a labelled UNTRUSTED fence, because
+  a cloned repository can carry "ignore previous instructions" in a commit message exactly as a
+  stranger's pull request can.
 
-(a) every mutating flow previews and interactively confirms (non-interactive requires `--yes`);
-(b) every operation appends a provenance event (`git.commit` / `git.checkpoint` / `git.restore`,
-and `harness.checkpoint` for harness- and model-created refs);
-(c) `GitClient` is reachable from the model ONLY through the two tools below, whose facts the
-engine gates and whose argv the harness composes — never as a general git surface;
-(d) **the model has no UNILATERAL path to any ref, index, HEAD, branch, tag or remote the user can
-see.** The model-facing tools cannot reach them at all; the only routes are the harness-owned flows
-the user drives, and `run_command`, which asks per call and never auto-runs a git mutation
-(`command-review.ts` proves only read-only subcommands safe). "Never" would be an overclaim: a
+**The consent contract, in full:** every mutating flow previews and interactively confirms
+(non-interactive requires `--yes`); every operation appends a provenance event; `GitClient` is
+reachable from the model only through the two tools above; and the model has **no unilateral path**
+to any ref, index, HEAD, branch, tag or remote the user can see. "Never" would be an overclaim — a
 human who approves `git commit` at the prompt has moved HEAD, and that is consent working, not a
 hole.
 
-Condition (c) is a deliberate widening of the Session 20 wording ("structurally unreachable"),
-argued and pinned in the same change. What it does NOT widen is the compound invariant, restated
-verbatim: **the model cannot commit and a push transmits committed refs only, so the model cannot
-publish content a human did not commit.**
+**Hardening on every invocation**: git is resolved to an absolute path by scanning PATH directly,
+because a bare name resolves against the child cwd on Windows and a `git.exe` planted in a
+workspace must never execute (relative PATH entries are skipped, `.cmd`/`.bat` shims rejected);
+`-c core.fsmonitor=false`, because a repository's own config must not start a daemon;
+`GIT_OPTIONAL_LOCKS=0`; `GIT_TERMINAL_PROMPT=0` and no stdin; repo-targeting `GIT_*` variables
+scrubbed; bounded timeouts. Parsed output is always `-z` porcelain.
 
-### The local git pack (`tools/git-status.ts`, `tools/git-checkpoint.ts`, `git/format.ts`)
+### Remote delivery to GitHub (`remote/`)
 
-Two facts, `gitRead` and `gitCheckpoint`, each with a fail-closed branch — the S20
-`remoteRead`/`remoteWrite` shape, so the conflicting-contract rule refuses a tool that could both
-read and write and "the read tool writes nothing" is verified by finding no second fact. Both
-branches open with the same guards in the same order (`gitGuards`, mirroring `remoteGuards`):
-conflicting contract → **mutation plan must be empty** (a non-empty one would sail past the branch
-that validates write targets and captures snapshots; a throwing `mutates()` denies as an invalid
-contract) → **lineage deny** (an executor child works in a detached worktree, so its checkpoint ref
-would land in the user's real repo under the CHILD's session id, where the parent's owed-prune fold
-never sees it) → the tool's own `blocked` reason.
+The one capability that changes state on a machine the user does not own.
 
-- **`git_status`** (`gitRead` → `observe`/**allow**, rule `git.read`) — views `summary` (a LIVE
-  `detectGitFacts` re-probe, worded so it cannot be confused with the session-start photograph),
-  `changes` (**`prepareCommit`**, the same function that builds the human's `/commit` preview, so
-  the model's answer and the user's screen cannot drift — rendered for a model reader, because the
-  human's warnings say "use `--all`" and "run `git config --global`"), `log`, `checkpoints`
-  (scoped to this session). **It takes no ref, path, author or format parameter** — only a view
-  name and a bounded integer. That is the entire argument for allowing these reads on machines
-  with no enforced sandbox, where the equivalent `run_command git log` asks today: the model names
-  a VIEW, the harness names the command. **Nothing it returns is file content** (no `-p`, no
-  `--patch`, no `-U`), which is what makes the branch honest about allowing before `readsPaths` is
-  evaluated — the secret-name and containment checks never run for this tool.
-- **`git_checkpoint`** (`gitCheckpoint` → `reversible`/**allow**/`noUndo`, rule `git.checkpoint`)
-  — `{ label? }` and nothing else; the schema cannot express a restore, reset, commit or push. It
-  auto-allows because a hidden ref built against a temporary index is the most reversible write in
-  the system and the harness already takes task-base/pre-integration/delivery checkpoints unasked.
-  Bounds replace the prompt: `AGENT_CHECKPOINTS_PER_SESSION = 12` (events-rebuilt, surfaced as a
-  fact-level DENY so exhaustion is recorded as a decision); a **secret guard** that refuses to
-  capture secret-named files `.gitignore` does not already exclude (`git add -A` excludes exactly
-  what gitignore excludes and nothing else, and a git blob cannot be redacted — the
-  `artifact.inspect-secret-name` precedent); a **label guard**, because a label is display and
-  never identity; and the existing untracked-sweep guard, whose decline becomes a refusal naming
-  `/checkpoint` rather than a claim that somebody declined.
-- **Provenance and lifecycle.** The ref rides `harness.checkpoint` with a fourth `HarnessRefKind`,
-  `'agent'` — not a new event type, and deliberately not `git.checkpoint` (which stays
-  user-commanded consent provenance). That inheritance is load-bearing: the owed-prune fold
-  reclaims the ref at clean session end, so twelve whole-tree refs per session cannot accumulate;
-  the pre-integration covered-change rule counts it as coverage; and `WORK_EVENT_TYPES` excludes
-  it, so a recovery point can never stale an acceptance. Creation goes through the
-  `onRefReady` seam (event before ref) via `ToolContext.reportGit`, and the runtime sanitizes and
-  caps the label at the emit site.
-- **Output discipline** (`git/format.ts`, mirroring `remote/format.ts`): repository-authored text —
-  commit subjects, author names, branch and tag names, paths — is `scrubSecrets` →
-  `neutralizeHarnessDelimiters` → `sanitizeLine` inside a labelled UNTRUSTED fence; harness
-  sentences sit outside it; everything passes `truncateForModel`. A cloned repository can carry
-  "ignore previous instructions" in a commit message exactly as a stranger's pull request can.
-- **The delivery anchor is no longer identified by substring.** `agent checkpoint prune` matched
-  `subject.includes(': delivery (accepted)')`, and `createCheckpoint` interpolates the caller's
-  label into that same subject — so once a model could choose a label, it could mint a ref prune
-  would refuse to reclaim. `isDeliverySubject` now anchors on the whole harness-composed subject.
+**Two facts, not one capability with a mode.** `remoteRead` and `remoteWrite` each have their own
+fail-closed branch, which makes the thesis structural rather than documentary: the engine's
+conflicting-contract rule then makes a tool that could both read and publish an automatic deny.
+Consent follows the split — a read asks as `external` and is session-grantable within a real
+counter; a write asks **every time**, is never passed through the grant path, and offers no `[s]`
+in the prompt formatter. The same sentence is written in three places on purpose: a consent surface
+that disagrees with itself is how standing authority gets won by accident.
 
-**Hardening on every invocation**: git resolved to an ABSOLUTE path by scanning PATH directly — a
-bare name resolves against the child cwd on Windows, so a `git.exe` planted in a workspace must
-never execute (relative PATH entries skipped; `.cmd`/`.bat` shims rejected); `-c
-core.fsmonitor=false` (a repo's own config must not start a daemon — the malicious-repo RCE
-vector); `GIT_OPTIONAL_LOCKS=0`; `GIT_TERMINAL_PROMPT=0` and no stdin; repo-targeting `GIT_*` env
-scrubbed; bounded timeouts. Parsed output is always `-z`/porcelain-v2.
+**Observation binding.** A mutation must carry the live look at the remote its effect was computed
+from; absent, or older than a kernel-owned maximum age, is a **deny**. Only `remote_status
+view=refs` produces observations, so "understand the remote before you change it" is enforced by
+the engine rather than requested in a prompt. The bound lives in `src/types.ts`, not in the pack,
+so a workflow pack cannot widen its own leash. Observations and the gh identity are **in memory
+only** and do not survive a resume, while the read/write spend **is** rebuilt from events —
+authority is not durable, spending is.
 
-**Deliberate commits**: default scope stages ONLY session-attributed paths (`sessionMutationState`
-over `file.mutated`, undo folded in, intersected with git status so every pathspec provably exists
-in git's view). Blockers where attribution would corrupt (missing identity — never set for the
-user; pre-staged index in session scope); warnings for externally-modified session files and
-unattributable `run_command` effects. Ordinary `add` + `commit -F`: hooks run, failures are honest.
-Message carries a `Session:` line + `Co-authored-by: Agent CLI <agent-cli@localhost>` (disableable).
+**Looking never writes.** The only network verb is `git ls-remote`: no fetch, no remote-tracking
+refs, no `FETCH_HEAD`. The cost is honest — a commit the remote holds and this repository has never
+seen is genuinely outside our object database, so the relation reports `unknown` and a force push
+over it is **refused even with `force`**, because the harness cannot say what would be discarded.
 
-**Checkpoints**: plumbing against a temp `GIT_INDEX_FILE` under the state dir →
-`refs/agent-cli/checkpoints/<session>/<n>`; the user-visible git state is byte-identical
-before/after (tested), unborn repos use the empty tree, gitignored files are never swept, a large
-untracked set requires confirmation — and when that guard cannot run (`ls-files` failed) the
-checkpoint proceeds with an honest recorded note rather than silently skipping the guard. Honesty:
-**low-pollution, not zero** — loose objects + hidden refs are written; `prune` frees them.
-**Restore**: affected set from diff-tree filtered to the workspace prefix, including deleting files
-the checkpoint predates; content materializes binary-safely via a second temp index +
-`checkout-index --prefix` staging; all current bytes snapshot FIRST under one synthetic callId, so
-the whole restore is a single `applyUndo('last')` unit. `git restore`/`git checkout` are never run
-against the user's worktree. Everything is repoRoot-scoped with no globals.
+**What the human approved is what executes.** The refspec source is the observed oid, not a branch
+name, so a local branch that moves while a human reads the prompt cannot change what is sent.
+Execute re-reads both sides, runs `git push --dry-run --porcelain` and checks it structurally
+(exactly one ref, the approved one, from the approved commit), pushes, then re-reads the remote to
+set `verified` separately from `ok`. A force push carries `--force-with-lease` bound to the
+observed oid, so the **server** enforces the same binding.
 
-## Event log (`store/event-log.ts`)
+**The harness never holds a credential.** Authentication is gh's own stored credential and git's
+credential helper. `GH_TOKEN`/`GITHUB_TOKEN` are dropped from child environments and *cannot* be
+forwarded — recorded as a fact rather than worked around. All gh and git output is scrubbed of
+credential shapes at the pack boundary and again at the event emit site. `gh` itself is managed
+exactly like git: absolute-path resolution, `GH_REPO` scrubbed because it retargets every command,
+debug variables scrubbed because gh's debug mode prints the Authorization header, prompts disabled,
+bounded timeouts. `GH_HOST`/`GH_CONFIG_DIR` deliberately pass through — an enterprise host is
+legitimate — and are recorded so an override is auditable.
 
-One JSON object per line at `<state>/projects/<slug>/sessions/<id>.jsonl`, written synchronously.
-`EventLog.open` acquires an atomic exclusive lock (`{pid, startedAt, token}` — refuses a live
-foreign holder, reclaims a stale one; a present-but-unparseable lock is re-read before any steal,
-because the exclusive create is visible before the JSON bytes land, and a still-unreadable FRESH
-lock refuses rather than stealing from a live sibling), repairs a partial trailing line **before**
-the first append, refuses mid-file corruption (`CorruptLogError`) and newer schema versions
-(`SchemaVersionError`), and exposes the committed events. `events` is **live** — appends through
-the instance appear immediately (the in-session `/undo`, `/report`, `/status` depend on this) — and
-observable via `onAppend`, fired after the synchronous write with observer throws swallowed.
-`readLenient` is a lock-free, never-throwing reader for the report and session listing. Bounded
-static readers `readFirstEvent` / `readLastEvent` / `readLastEventOfTypes` support the child-log
-skip and the lifecycle (clean-end) question without full parses.
+**Everything is harness-composed.** Every argv is built from typed inputs in `--flag=value` form,
+so model text lands only in value positions and a value beginning with `-` cannot become a flag.
+There is no `gh api` passthrough and no generic escape. `gh release create` always carries
+`--verify-tag`: without it gh silently creates the named tag from the default branch — a publish
+nobody asked for, at a commit nobody named.
 
-Event schema stays **v1**; every extension has been ADDITIVE (new event types or optional fields —
-lenient-reader-safe; bumping `v` would lock old binaries out of new logs). The accumulated surface
-(full shapes in `src/types.ts`):
+**Never a gate, in either direction.** Remote events never stale an acceptance, and a publish is an
+acceptance **caveat**, never a blocker — including when it failed, and including when it succeeded
+but could not be verified. Symmetrically, local verification state is *shown* in the publish prompt
+and is deliberately **not** a precondition: making a green gate a requirement would make a green
+gate an authorization, the exact inversion this capability exists to prevent.
 
-| Area | Events / additive fields |
-| --- | --- |
-| session/turn | `session.started` (+`lineage`), `session.resumed`, `session.ended` (+`reason`), `turn.aborted {phase}`, `user.message`, `assistant.message` (+cache usage, +`reasoning[]` opaque blocks, +`usage.reasoningTokens`) |
-| consent/config | `trust.verified {source}`, `config.loaded {sources}`, `policy.decision`, `approval.resolved` (+`source: 'task-aborted'`; S21 +scope `'machine'` — recorded only when the persist succeeded — and +`detail` for the honest downgrade), `grants.loaded {entries}` (S21 — standing authority made visible per session) |
-| provider | `provider.changed {from, to, source: 'user-command'\|'resume', keyEnv?, baseUrlHost?, verification}` — env var NAMES and hosts only, never credentials; readers fold newest-wins |
-| tools/files | `tool.requested`, `tool.completed` (+`fullOutputSaved`, `images`), `snapshot.created`, `snapshot.failed`, `file.mutated` (+`linesAdded/Removed`, `postStateUnverified/postStateError`), `undo.applied` |
-| execution | `command.started` (+`sandbox`), `command.ended` (typed termination), `sandbox.status` |
-| git | `git.context`, `git.commit`, `git.checkpoint`, `git.restore`, `git.checkpoint.pruned {kind}`, `harness.checkpoint {kind, ref, oid, callId?}` |
-| context | `context.compacted` (+`newlyImageElidedCallIds`) |
-| memory | `memory.loaded` (S21 +`scope: 'user'` on the global-AGENT.md entry), `memory.narrative`, `memory.updated` (S21: `doc` widens with `'lessons'`/`'research'`) |
-| retrieval | `workspace.mapped` (+`inventorySha256`, `indexedFiles`, `indexState`) |
-| tasks | `task.started` (+`planTaskId`, `planTaskSha`), `task.ended` (+`role` and `approvalWaitMs`, S20.5 — a never-started attempt still counts; approval wait is excluded from the wall clock), `task.changes`, `task.applied`, `task.base-checkpoint`, `task.supervision`, `worktree.created`, `worktree.removed` |
-| plans | `plan.route {mode, source}`, `plan.updated` (+`graph`), `plan.approved {sha256}`, `plan.discarded` (+`reason: 'accepted'`) |
-| verification | `check.started` (a REAL spawn — a `WORK_EVENT_TYPES` member), `check.completed` (verdict + named signals + `scopePaths`), both +`projectId` |
-| setup | `setup.started` (a REAL spawn; a `WORK_EVENT_TYPES` member), `setup.completed` (`ok`/`failed`/`error`/`unsupported` — never `pass`, and never readable as verification) |
-| recovery | `repair.attempted` (+`projectId` — a proof must come from the project that failed), `repair.escalated` (deliberately NO `repair.ended` — a derived outcome cannot be lost in a crash), `repair.dismissed` (S21 — the USER's closure, joined on the escalation seq, `source: 'user'` required by the fold) |
-| preview/browser | `preview.started`, `preview.ready`, `preview.ended`, `preview.swept`, `browser.flow` (+`traceOmittedBytes`, `screenshotsOmitted`) |
-| documents | `artifact.rendered` (validation verdict + `failureCount`; +`absPath` for caveat retirement, S20.5; `embeddedWorkspaceImages` gates inherited inspect consent), `artifact.render-failed` (S20.5 — a charged attempt that produced NO artifact; budget-fold evidence only), `artifact.inspected` (page-image blob pointers) — PRODUCTS, never verification, and never `WORK_EVENT_TYPES` members |
-| review | `review.findings` (an EMPTY list is a recorded clean lens), `review.triage` (deliberately NO `review.completed` — a round is derived from its capture events) |
-| acceptance | `session.accepted {complete, summary, unfinished?, deliveryRef?, deliveryOid?}` |
+**The compound invariant.** The model cannot commit, and a push transmits committed refs only.
+Together: *the model cannot publish content a human did not commit.*
 
-## Recovery (`store/snapshots.ts`, `runtime/undo.ts`)
+---
 
-Pre-mutation file bytes are stored content-addressed at `<state>/…/objects/<sha256>` (no git
-dependency — undo works with no repository present). `SnapshotStore.restore` verifies the file
-still holds the recorded post-mutation hash and **refuses drifted files** rather than clobber them.
-`applyUndo` reverts the last mutating action or all of them in reverse order, chaining a
-multiply-edited file back to its original bytes, and removes directories the mutation created if
-now empty. Every undo is appended as `undo.applied`; the log is never rewritten. Git checkpoints
-LAYER ON TOP: a checkpoint restore snapshots current bytes first and records ordinary
-`file.mutated` events under one synthetic callId, so it is itself one undoable unit of this same
-machinery — git never becomes the undo mechanism.
+## Providers and networking
 
-## Resume (`runtime/session.ts` → `reconstruct`)
-
-`reconstruct` rebuilds the provider conversation from the committed log. It is faithful for every
-tool result except redacted secret reads (which, by design, are not persisted and cannot be
-replayed). Crash recovery reconciles against `file.mutated`/postHash: a completed edit whose
-`tool.completed` was lost to a truncated tail is recognized as **applied** (post-hash matches
-disk), a snapshot without a matching mutation is flagged **unknown post-state**, and a bare
-`tool.requested` is a true **orphan** — unless `command.started` shows the command had spawned
-(the replay says its effects are unknown) or `task.started` shows delegated tasks were running
-(the replay points at EVERY surviving child log, plus captured changes when a `task.changes`
-exists). Grants and the system prompt/map are regenerated fresh — current state outranks stale
-context. Rebuilt from events at assembly: the captured-changes registry, DelegateCaps, CheckCaps,
-PreviewCaps, and the owed harness-ref list, so a crashed life's cleanup debts survive.
-
-## Verification (`report/report.ts`)
-
-`buildReport` is a pure function `(Event[], approvedGraph?) → { json, md }` (golden-testable). A
-changed file is labeled **CHECKED** only if a `run_command` — or a typed **check** — genuinely
-**exited** zero *after* its last mutation. The widening is honest because a check's `pass` is
-derived from the identical `exited && exitCode === 0` rule; the two sources are merged and **sorted
-by seq** before the lookup. `collectPassingEvidence`/`firstPassingEvidenceAfter` are the ONE
-implementation, shared with `/diff`. Each entry carries the SCOPE it covers — a check's project
-unit, a `run_command`'s declared cwd — and the correlation requires the file to be inside it
-(`'.'`, and every pre-S16 event, covers everything). Without that axis a green `build` in `web/`
-marked a changed file in `api/` as CHECKED, in the one artifact whose job is not overstating what
-was verified. A `command.ended` recording a kill vetoes CHECKED even against
-a stray exit-0 completion. Everything else is **UNCHECKED**, and the report prints *which command*
-with the exact wording "check ran, exit 0" and **no correctness claim**.
-
-"Commands run" lists only commands that actually executed (denied calls stay visible under
-Actions/Approvals); killed commands render as `killed: … no exit code`, and a `command.started`
-with no completion renders `STARTED but never completed … effects unknown`. Each command carries
-its actual boundary marker (`[sandboxed: windows-lowil]` / `[unsandboxed]`), and a header block
-renders the session's `sandbox.status` — mode, whether it was ENFORCED, and the verbatim
-`confines`/`doesNotConfine` scope — plus the probed `git.context` line ("at session start", never
-live state). The session's end is read from the NEWEST lifecycle event, so a resumed-then-crashed
-log never reports the earlier clean end.
-
-Sections (all derived purely from events): per-file `+n/−m` churn; "Commits (user-commanded)" /
-"Checkpoints" / "Checkpoint restores"; "Task-base checkpoints" kept apart from user-commanded
-consent provenance; per-command `captured output preserved: objects/<sha>` pointers; "Delegated
-tasks (subagents)" with footers that child usage is NOT in the parent totals and subagent reports
-are narration; "## Plan"; "## Task changes and integration"; "## Verification (typed checks)" (pass
-/ fail / error / unsupported / no-verdict, findings, signals, plan-task label, targeted scope, and
-the verbatim exit-code contract); "## Recovery" (attempts with DERIVED outcomes, the model-authored
-hypothesis labeled recorded-not-verified); "## Preview processes (managed)"; "## Browser
-verification" (typed step failures, `objects/<sha>` artifact pointers, and the footer that
-screenshots prove pixels at a declared-ready moment while typed step outcomes are the functional
-evidence); "## Adversarial review" (requirement, open blockers, rounds, findings, triage);
-"## Git recovery and audit state" (delivery lines annotated when this log records them pruned);
-and "## Completion". A browser pass can never mark a file CHECKED — the exit-0 rule is structurally
-unsatisfiable by `exitCode: null`.
-
-The reviewable CONTENT lives in `report/diff.ts`: the attributable session diff (first pre-image
-blob → current disk bytes, undo folded in, external edits flagged DRIFTED), rendered by `/diff` and
-`agent diff` with per-line sanitization and the CHECKED verdict per file. A log without
-`session.ended` renders as "IN PROGRESS or CRASHED/UNKNOWN". The report always states that
-assistant narrative is not evidence; the footer is mode-aware. PowerShell invocations run via
-`-EncodedCommand` and append `; exit $LASTEXITCODE` so a failing inner command cannot masquerade as
-exit 0 → a false CHECKED.
-
-## Providers (`provider/`)
-
-Five real providers over **two genuinely different protocols**, plus the mock, behind the same
+Five real providers over **two genuinely different protocols**, plus a mock, behind the same
 `Provider` contract and the same `runTurn`. Everything provider-specific is either an adapter or
-DATA; the runtime has no provider name-checks (one exception, the vision choke, reads the CATALOG,
-not a name).
+data; the runtime has no provider name checks (the single exception, the vision choke, reads the
+catalog rather than a name).
 
-```
-catalog.ts    Capability model as DATA: per-model context/output caps, defaultMaxTokens, vision +
-              `toolResultImages` ('native'|'rehomed'|'none'), reasoning {mode, replay}, caching
-              style, lifecycle, quirk notes, and `budgetTokens` — OUR working-context cap under
-              the S20.5 derivation rule (`budget×1.25 + 40k overhead + defaultMaxTokens ≤
-              contextTokens`, then clamped under provider billing thresholds; test-pinned), not
-              the provider's
-              window) + PROVIDERS (key envs, base-URL env, key URL, default model, models path).
-              `CATALOG_VERIFIED` is rendered by every listing. Retired ids are ABSENT; invite-only
-              models are never listed. An uncataloged model gets conservative defaults + a note.
-profiles.ts   Per-provider wire deviations for the chat-compat adapter (param names, include_usage
-              policy, strict-flag policy, reasoning-replay policy, usage extraction, extra
-              finish_reasons, error envelopes).
-errors.ts     ProviderError taxonomy (auth|rate-limit|balance|context-window|bad-request|server|
-              network|aborted) + bounded CONNECTION-PHASE-ONLY retry, Retry-After aware — ≤2 by
-              default, rate-limit 429s draw a deeper default budget (RATE_LIMIT_RETRIES = 4: a
-              throttle is EXPECTED to clear, and kimi Tier 0 is 3 req/min); an explicit
-              `retries` option is honored verbatim for every kind (S16.5b).
-sse.ts        One incremental SSE parser: chunk splits mid-UTF-8, CRLF, comment keep-alives,
-              multi-line data, `[DONE]` yielded to callers.
-registry.ts   The ONE construction/discovery seam: env-only key discovery (NAMES + presence),
-              base-URL overrides, and a bounded models-list validation probe.
-```
+| Module | Role |
+| --- | --- |
+| `catalog.ts` | The capability model **as data**: per-model context and output caps, vision support and tool-result image handling, reasoning mode and replay policy, caching style, lifecycle, quirk notes, and `budgetTokens` — *our* working-context cap, derived so the request fits the window under provider billing clamps, not the provider's raw number. Retired ids are absent; invitation-only models are never listed. An uncataloged model gets conservative defaults and a note. |
+| `profiles.ts` | Per-provider wire deviations for the chat-compatible adapter: parameter names, usage-inclusion policy, strict-flag policy, reasoning-replay policy, usage extraction, extra finish reasons, error envelopes. |
+| `errors.ts` | The `ProviderError` taxonomy plus a bounded **connection-phase-only** retry, `Retry-After` aware, with a deeper budget for rate limits (a throttle is expected to clear). |
+| `sse.ts` | One incremental SSE parser handling chunk splits mid-UTF-8, CRLF, comment keep-alives, multi-line data and `[DONE]`. |
+| `registry.ts` | The one construction and discovery seam: env-only key discovery (names and presence), base-URL overrides, and a bounded models-list validation probe. |
 
-- **`AnthropicProvider`** streams via the SDK (abort signal passed through), maps
-  messages/blocks/stop-reasons, and applies `coalesceUserMessages` at the wire (aborted turns and
-  crash-resumes legitimately leave consecutive user messages). The `thinking` parameter is
-  deliberately OMITTED so each model's own default applies — which on `claude-opus-5` (the v1.1
-  default), `claude-sonnet-5` and `claude-fable-5` means adaptive thinking is ON. It contains no
-  networking logic — it obtains a `fetch` from the transport factory.
-- **`OpenAiResponsesProvider`** speaks the **Responses API**, not Chat Completions: since GPT-5.4
-  Chat Completions cannot tool-call with reasoning off, and reasoning-item replay is
-  Responses-only. `store:false` + `include:['reasoning.encrypted_content']` keeps the harness
-  stateless; the terminal `response.completed`/`incomplete` payload is authoritative (streamed
-  deltas drive live text only), `incomplete` maps to `max_tokens`/`refusal`, and `response.failed`
-  or a terminal-less stream throws rather than fabricating a turn.
-- **`OpenAiCompatProvider`** is ONE Chat-Completions adapter parameterized by a profile
-  (deepseek/kimi/glm). Load-bearing mappings: each tool_result becomes its own `role:'tool'`
-  message before same-message user text (kimi's pairing rule); consecutive USER TEXT messages
-  COALESCE at the wire (the crash-resume/aborted-turn shapes legitimately produce them, and
-  "this family generally tolerates it" is not a contract — S16.5b); `[DONE]` is the terminator,
-  and a stream that ends with NEITHER `[DONE]` nor any `finish_reason` THROWS a non-retryable
-  typed server error rather than committing a half-generated turn (a proxy idle half-close used
-  to turn a truncated sentence into the model's "final" answer; part of the stream was consumed,
-  so a replay would double-bill — S16.5b); usage is accepted from all three documented
-  locations; error-shaped `finish_reason`s throw typed errors; no sampling params, no
-  `tool_choice`, no `thinking` are ever sent (provider defaults are what the harness wants, and
-  kimi locks sampling outright).
-- **`MockProvider`** replays scripted turns offline and throws if exhausted — the entire loop,
-  policy, snapshot, resume, and report behavior are proven through it. `hang: true` turns
-  (in-process only) resolve only when the abort signal fires — the deterministic way to test
-  mid-stream aborts. A `reasoning` field scripts opaque reasoning blocks offline.
+- **Anthropic** streams via the SDK with the abort signal passed through, and coalesces consecutive
+  user messages at the wire (aborted turns and crash resumes legitimately produce them). The
+  `thinking` parameter is deliberately omitted so each model's own default applies.
+- **OpenAI** speaks the **Responses API**, not Chat Completions, because reasoning-item replay is
+  Responses-only. `store: false` plus encrypted reasoning content keeps the harness stateless; the
+  terminal payload is authoritative, and a failed or terminal-less stream throws rather than
+  fabricating a turn.
+- **DeepSeek, Kimi and GLM** share **one** Chat-Completions adapter parameterized by a profile.
+  Load-bearing mappings: each tool result becomes its own `role: 'tool'` message before same-message
+  user text; consecutive user text coalesces at the wire; and a stream that ends with neither
+  `[DONE]` nor any finish reason **throws** a typed non-retryable error rather than committing a
+  half-generated turn — a proxy idle half-close used to turn a truncated sentence into the model's
+  final answer.
+- **Mock** replays scripted turns offline and throws if exhausted. The entire loop, policy,
+  snapshot, resume and report behaviour is proven through it, and its `hang` turns are the
+  deterministic way to test mid-stream aborts.
 
-**Opaque reasoning round-trip.** `ContentBlock` has a `reasoning` variant carrying the
-provider-NATIVE artifact verbatim (an Anthropic thinking/redacted_thinking block, an OpenAI
-reasoning item incl. `encrypted_content`, a `reasoning_content` string), tagged with the producing
-`providerName` + `model`. `assistant.message.reasoning` persists it (additive; old logs have no
-field and rebuild exactly as before), `reconstruct` replays it at the head of assistant content,
-and elision WEIGHS it but never replaces it (only tool_result content is rewritten). Each adapter
-replays only its own blocks for its own model, within that provider's documented scope — kimi
-`all`, anthropic/deepseek/openai `current-loop`, glm never (its server strips prior thinking).
-Foreign or out-of-window blocks are dropped from the WIRE VIEW only; `session.messages` is never
-mutated. This is what makes always-thinking models (kimi-k3, claude-fable-5) and reasoning tool
-loops legal at all.
+**Opaque reasoning round-trip.** A content-block variant carries the provider-native artifact
+verbatim, tagged with the producing provider *and* model. It is persisted additively, replayed at
+the head of assistant content on resume, and **weighed but never replaced** by elision. Each
+adapter replays only its own blocks for its own model, within that provider's documented scope.
+Foreign or out-of-window blocks are dropped from the **wire view** only; `session.messages` is
+never mutated. This is what makes always-thinking models and reasoning tool loops legal at all.
 
-**Prompt caching:** `buildApiParams` is a pure, unit-tested request builder with two ephemeral
-`cache_control` breakpoints — the system block (tools+system = the stable prefix) and a MOVING one
-on the final content block of the final wire message, attached AFTER coalescing (a pre-attached
-marker could land mid-merged-message and silently cache a shorter prefix) and never on a replayed
-thinking block, whose bytes must not change. Each step re-reads the prior conversation from cache;
-the pipeline order is fixed as elide → scope-reasoning → coalesce → cache-mark. The other
-providers cache automatically. Cache accounting flows into events, `/status`, and the report;
-`reasoningTokens` is recorded on `assistant.message.usage` only — no reader surfaces it yet
-(deferred: fold it into the report/`/status` token lines).
+**Prompt caching.** The Anthropic request builder sets two ephemeral breakpoints — the system block
+(tools plus system: the stable prefix) and a moving one on the final content block of the final
+wire message, attached *after* coalescing and never on a replayed thinking block, whose bytes must
+not change. The pipeline order is fixed: elide → scope reasoning → coalesce → cache-mark. The other
+providers cache automatically. Cache accounting flows into events, `/status` and the report.
 
-**Identity, selection, and honest degradation.**
+**Identity and honest degradation.** Selection precedence is flags, then user config, then the
+catalog default; the workspace config layer structurally cannot express either. Credentials are
+env-only — never a flag, never config, never a command argument — so they cannot reach argv, a user
+message, or any event. `/provider` and `/model` are between-turns **user** commands (never tools:
+the model cannot switch itself); they append `provider.changed` recording the env var *name*, the
+API *host*, and how the key was checked. Readers fold identity newest-wins. **Vision degrades at
+one choke**: when the catalog says a model has no image input, wire image parts are replaced with
+an explicit stored-as-evidence pointer and `view_image` refuses with the same explanation — blobs,
+metadata, DOM assertions, gates, checks and recovery are untouched.
 
-- Selection precedence is `--provider`/`--model` > user config (`provider`, `model`) > the
-  provider's catalog default; the WORKSPACE config layer structurally cannot express either.
-  Credentials are env-only: never a flag, never config, never a command argument (`/provider`
-  refuses key-shaped arguments), so they cannot reach argv, `user.message`, or any event.
-- `maxTokens` and the elision `contextBudget` come from the catalog — production finally sets
-  `Session.contextBudget` (the V0.5 seam that only tests used).
-- `/provider` and `/model` are between-turns user commands (never tools — the model cannot switch
-  itself). They mutate the live session, append `provider.changed` (from/to, source, env var
-  NAME, API host, and HOW the key was checked), push a harness note telling the model its
-  predecessor produced the earlier turns, and print the capability line. Children follow via a
-  live `currentRuntime()` getter read per delegate call, so a child's own `session.started`
-  records the truth. Resuming under a different identity records the same event with
-  `source:'resume'` — closing a silent-switch hole.
-- Readers fold identity **newest-wins** (the same correction `endedReason` got): the report names
-  the final identity and lists `modelsUsed` when it changed; the journal carries a model line.
-- **Vision degrades honestly at ONE choke:** when the catalog says the model has no image input,
-  `runExecution` replaces wire image parts with `[screenshot: stored as evidence at objects/<sha>
-  — model has no image input]` and `view_image` refuses with the same explanation. Blobs, image
-  metadata, DOM assertions, gates, checks and recovery are untouched — only the visual-judgment
-  step degrades, and it says so.
+**Networking** (`net/transport.ts`) is a reusable factory, deliberately decoupled from any
+provider. `resolveProxy` is a pure function over the standard environment variables with a stated
+precedence (an explicit override wins; the protocol-specific variable beats `ALL_PROXY`; `NO_PROXY`
+overrides an environment-derived proxy but not an explicit override). **Every** network path goes
+through it — including the registry's key-validation probe, because a bare global fetch ignores
+system proxy settings and on a proxied machine produced a 401 for a valid key. A proxy dispatcher
+is attached **per request**; `setGlobalDispatcher` is never called. Proxy URLs and any embedded
+credentials are never written to the event log, the report, or any persisted state.
 
-## Networking (`net/transport.ts`)
+---
 
-A reusable transport factory, deliberately decoupled from any provider. `resolveProxy(targetUrl,
-env, explicit?)` is a pure function that detects standard system proxy settings (`HTTPS_PROXY`,
-`HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, either case) and decides, per target URL, whether to proxy
-or go direct. Precedence: an explicit override wins; otherwise the protocol-specific variable beats
-`ALL_PROXY`; and `NO_PROXY` (exact host, domain-suffix, `*`, or `host:port`) overrides an
-environment-derived proxy but not an explicit override.
+## The terminal
 
-`createTransport(opts)` returns `{ fetch?, describe() }`; `describeUrl` names the representative
-host so the label matches the provider actually in use (routing always resolves per request URL).
-**Every network path goes through it — including the registry's key-validation probe:** a bare
-global fetch ignores system proxy settings, and on a proxied machine that produced a 401/403 for a
-valid key, which would have made `/provider` refuse a working credential (live-found, S15). When no
-proxy could ever apply it returns no custom `fetch`, so the client uses its own default. Otherwise `fetch` resolves the proxy **per
-request URL** and attaches an undici `ProxyAgent` **dispatcher for that request only** — there are
-no global side effects (`setGlobalDispatcher` is never called); ProxyAgent instances are cached per
-proxy URL. `describe()` returns a credential-redacted summary. Proxy URLs (and any embedded
-credentials) are never written to the event log, report, or any persisted state.
+The REPL is a consumer of the same runtime: one session, `runTurn` per user line. `io.ts` owns the
+**one** persistent readline — the idle prompt and approval questions share it, echo is muted during
+turns (Ctrl+C still arrives), typed-ahead lines are buffered, and EOF at a pending approval
+resolves to deny-and-stop. The pending resolver installs **before** the prompt bytes go out, so a
+zero-delay driver answering the instant a prompt appears cannot land its answer where the question
+never looks.
+
+`render.ts` subscribes to `EventLog.onAppend`, so the screen is a live view of the persisted
+evidence. Three render-only channels sit alongside it: streamed model text, the live command-output
+preview, and the structured child-status channel. For all three, the persisted truth remains the
+events. Long command output shows its head live, then an honest fold marker and the run's final
+lines; `/expand` reprints it **from the record** — the spill blob when one was saved, the recorded
+head and tail otherwise, provenance named either way — so it survives resume by construction.
+
+**Stream split: stdout carries model text and requested artifacts only; stderr carries all chrome.**
+Piped transcripts stay clean, and non-TTY chrome uses ASCII glyphs.
+
+**The select surface.** Prompts on a TTY are arrow-key menus layered **over** the line grammar,
+never replacing it. The widget owns no cursor code (the status area's overlay channel draws the
+menu) and no answer grammar (menu picks submit their key; typed text opens a visible buffer
+submitted through the *caller's* parser, so every scope rule holds). `captureKeys` detaches
+readline's own keypress listener for the capture's lifetime — coexisting was the trap, since
+arrow-up is history recall and Enter emits a line into type-ahead. **The initial highlight is
+always the decline row — Enter never affirms.** Approval menus derive from the same label helpers
+the frozen prompt strings use, cross-pinned by test so menu and text cannot drift. Everything is
+TTY-gated, and every non-TTY path keeps the line grammar byte-for-byte.
+
+**Contextual consent.** Four decisions are *asked* instead of requiring a remembered command: a
+plan awaiting first approval, an approval invalidated by an amendment, an open repair escalation,
+and a session that would accept cleanly. All four are pure folds over (plan bytes, event log), at
+most one prompt per boundary. The boundaries split by session shape: an approved plan completing is
+a delivery boundary, so plan-carrying sessions keep the turn-boundary offer, while plan-less work is
+asked once at the typed `/quit` — never at EOF, never at a double Ctrl+C, because walking away is
+not a consent moment. Three properties are load-bearing: they are **TTY-gated** (off a TTY the
+question would consume a driver's next queued line); they fire **after** the turn's `finally`, not
+at the end of the `try`; and they make **zero appends of their own** — every affirmative answer
+calls the same body the slash command calls, pinned by running one fixture twice and comparing
+event arrays.
+
+**The status area** (`status.ts`) is the only cursor-moving code, strictly TTY- and stderr-confined.
+All chrome routes through its status-aware writer, approval prompts suspend it, every turn's
+`finally` clears it, and content is sanitized and clipped by **display column** per redraw. Off a
+TTY it is a pure pass-through emitting **zero** escape bytes. Its safety rests on one structural
+fact: the area is populated only during delegate flight, when the parent is blocked on the tool
+call — so stderr cursor movement can never interleave with stdout model text.
+
+**Sigils** are one table, not four inlined branches: `@plan`, `@review`, `@search`, `@research`.
+The head guard is anchored, and an unknown `@word` is refused by name instead of falling through as
+prose.
+
+The slash-command surface is mirrored **as data** in `command-table.ts`, drift-pinned against the
+dispatch switch in both directions, and used for both Tab completion and the `/` menu.
+`/report [section]` slices the one rendered report; the inspection views keep their own rendering
+because each carries live state the report structurally cannot (a re-probed project, re-probed
+process liveness, memory-only remote identities, live research spend) or an action affordance.
+
+---
+
+## Limits that are real
+
+Stated here because they are stated in the product too — in the banner, the report, the approval
+prompts and the system prompt.
+
+- **Trust is recorded consent, not isolation.** It changes what the agent is allowed to do, not
+  what a process can technically do.
+- **The sandbox is Windows-only and narrow.** It denies writes and reaps process trees. It does
+  **not** stop reads, does **not** gate the network, permits writes to Low-labeled locations, and
+  cannot hold service-reparented work. On any other platform, or on probe failure, there is no
+  enforcement — and auto-run is disabled entirely.
+- **Approved commands run unsandboxed**, at full user privilege, and their effects are not
+  snapshotted and not undoable. The sandbox backs the *auto-run* decision, not an approval.
+- **Undo is file-only.** It reverts the typed file tools' changes through content-addressed
+  snapshots and refuses drifted files. It does not cover `run_command` side effects,
+  out-of-workspace edits, or external changes.
+- **Command output is not scrubbed for secrets.** Secret-classified *file reads* are redacted in
+  the log; `run_command` stdout is captured verbatim. The narrow exception is remote delivery,
+  whose gh/git output passes a credential scrubber that matches documented token shapes and URL
+  userinfo — it is not a general secret detector.
+- **Path checks are TOCTOU-racy**, as all path checks are. They are logical policy, not
+  enforcement, and they guard the typed file tools rather than arbitrary shell text.
+- **The command reviewer is a prompt-skip gate, not a boundary.** It is a positive proof of safety
+  over the command string, so obfuscation lands in "ask" — but a string reviewer can never be a
+  security boundary. The sandbox is what actually contains an auto-run command.
+- **The untrusted-content fence is a mitigation, not a boundary.** A persuasive page or commit
+  message can still influence a model; what it cannot do is act.
+- **Symbol and import extraction is heuristic** (column-0 regex, no tree-sitter), so Rust `impl`
+  methods, C++ templates and generated Go are invisible to the *map*. Live reads always see them.
+  The Go import graph resolves by directory suffix, wrong only toward missing edges.
+- **Ecosystem coverage is a bounded surface.** Node/TS, Rust/Cargo and Go are first-class; Python
+  is minimal; C/C++ is detection and indexing only, with no build recipes; external database
+  servers, Docker and containers are out of scope. `yarn` is implemented from documentation rather
+  than live-proven.
+- **DOCX visual fidelity belongs to Word.** DOCX claims are structural and parse-back verified;
+  visual judgment happens on the PDF twin rendered from the same spec. PDF bytes are not
+  deterministic. Editing pre-existing DOCX files, PPTX generation, footnotes, TOC fields, tracked
+  changes, cell merges and RTL fidelity are out of scope rather than partially supported.
+- **`--dangerously-allow-all` covers remote mutations too.** The policy engine returns `ask` for
+  every publish and never consults a session grant, but that flag replaces the human at the prompt.
+  "Asks every time" is a statement about the policy decision, not about that flag.
+- **Legacy console note:** on Windows PowerShell 5.1, piping or redirecting output can re-encode it
+  through the OEM code page and mangle non-ASCII text. Piped output uses ASCII status glyphs for
+  this reason.
