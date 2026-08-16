@@ -1968,8 +1968,9 @@ export const SPILL_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Preserve truncated-away tool output as a content-addressed blob (Session 11.5). Opt-in per
- * tool via the transient ToolResult.fullOutput (run_command + delegate only — file reads are
- * recoverable from the files themselves); skipped whenever ANY redaction applies (redacted
+ * tool via the transient ToolResult.fullOutput (run_command, run_check, delegate_task,
+ * project_setup and read_document — workspace file reads are recoverable from the files
+ * themselves and do not spill); skipped whenever ANY redaction applies (redacted
  * outputs are deliberately non-replayable and must never persist un-redacted); never fails
  * the turn. Returns true only when the blob verifiably landed under the recorded sha.
  */

@@ -96,7 +96,7 @@ Options:
   --max-steps <n>          Maximum agent steps per turn (default: ${String(DEFAULT_MAX_STEPS)}; --max-turns is the
                            legacy alias for the same limit)
   --dangerously-allow-all  Bypass approvals (loud; every auto-allow is logged). No isolation whatsoever.
-  --session <id>           Target session for undo (default: latest)
+  --session <id>           Target session for undo/diff/commit/checkpoint/report/plan (default: latest)
   --trust-this-workspace   Proceed in an untrusted workspace for THIS invocation only (not recorded)
   --version                Print the version and exit
   -h, --help               Show this help

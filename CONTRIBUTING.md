@@ -15,7 +15,7 @@ they explain *why* several things that look over-engineered are the way they are
 git clone https://github.com/earthwalker17/agent-cli.git
 cd agent-cli
 npm install          # runs the build automatically (see the `prepare` script)
-npm test             # 1072 tests, hermetic — no network, no API key, no billing
+npm test             # 2,415 tests, hermetic — no network, no API key, no billing
 ```
 
 Requires **Node 22+**. Developed and tested Windows-first; the logic is cross-platform, but only

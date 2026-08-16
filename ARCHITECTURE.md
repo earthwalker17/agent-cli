@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-How Agent CLI **v1.8.x** is actually built. This describes the implemented system — its modules,
+How Agent CLI **v1.10.x** is actually built. This describes the implemented system — its modules,
 contracts, orderings, and honest limits. `ROADMAP.md` records how it got here and what is
 deferred; this file avoids session narration except where a decision's *reason* is the contract.
 
@@ -257,15 +257,18 @@ kills, wall-budgeted) → **ranked map + retrieval index** (any failure falls ba
 with the reason surfaced) → **project-memory load** (six docs incl. the global AGENT.md, S21) →
 system prompt → start/resume → post-start
 records in a fixed order (trust.verified, config.loaded, sandbox.status, git.context,
-workspace.mapped, memory.loaded, then `grants.loaded` when durable grants apply — S21, loaded and
-validated at every start AND resume) → per-session tool attachment (retrieve, delegate_task with the
+remote.context — always, usable remote or not: the local remote inventory is the premise every
+later remote decision rests on — then workspace.mapped, memory.loaded, `preview.swept` when the
+assembly sweep found orphaned preview processes, and `grants.loaded` when durable grants apply —
+S21, loaded and validated at every start AND resume) → per-session tool attachment (retrieve, delegate_task with the
 executor bundle + forwarding queue, update_plan, run_check, preview, browser_flow, recover,
 review, apply_task_changes with the changes registry rebuilt from events on resume).
 
-Read-only commands (`report`/`sessions`/`undo`/`diff`/`map`/`plan`/`memory`/`providers`/`version`/
+Read-only commands (`report`/`sessions`/`diff`/`map`/`plan`/`memory`/`providers`/`version`/
 `help`) are ungated, never create state dirs, and never run git (`providers` also makes no network
-call); `agent commit`/`agent checkpoint` ARE
-trust-gated (they execute repo hooks / write `.git`); `map` reads workspace bytes but sends
+call); `agent commit`/`agent checkpoint`/`agent undo` ARE trust-gated (`commit`/`checkpoint`
+execute repo hooks and write `.git`; `undo` restores bytes INTO the workspace — reverting a
+change is exactly as consequential as making it, S21.5); `map` reads workspace bytes but sends
 nothing to a model (documented exception) and keeps the pure walker pre-trust.
 
 ## The core loop (`runtime/session.ts`)
@@ -308,7 +311,8 @@ locks, EISDIR), the mutation is still recorded with `postStateUnverified` — lo
 would leave `/undo` blind to bytes already on disk while the log claimed nothing ran.
 
 `tool.completed` is also the SPILL choke point: when a tool attached transient
-`ToolResult.fullOutput` (only `run_command`, `run_check`, and `delegate_task` do) and the output
+`ToolResult.fullOutput` (five do: `run_command`, `run_check`, `delegate_task`, `project_setup`,
+and `read_document`) and the output
 was truncated, the runtime stores the full pre-truncation bytes as `objects/<sha>` and marks the
 event `fullOutputSaved` — skipped under ANY redaction, capped at 8 MiB (S20.5: 2→8), never turn-failing, and
 flagged only when the stored blob's hash verifiably equals the recorded sha. `reconstruct`
@@ -713,7 +717,8 @@ and a do-not-cite output line), matching the trace-omission honesty.
   DECLARED condition — a load event, networkidle, or a quiet spinner never count; expect/
   screenshot steps cannot precede the first goto (schema) and steps run strictly in order,
   stopping at the first failure. Caps: ≤20 steps, ≤4 declared screenshots, per-step timeouts
-  clamped to the 90s flow wall, bounded error/request records.
+  clamped to the 120s flow wall (90→120 S20.5: a cold dev server's first compile ate most of
+  90s), bounded error/request records.
 - **Typed taxonomy**: `timeout` / `assertion` (last observed state recorded) / `navigation` (the
   origin lock: any off-origin TOP-LEVEL navigation aborts the flow; a REAL URL-origin comparison,
   not a string prefix) / `runtime` (uncaught page error) / `protocol` (browser/driver died — the
@@ -726,7 +731,8 @@ and a do-not-cite output line), matching the trace-omission honesty.
   exactly what keeps a browser pass out of the report's file-CHECKED correlation (exit-0 rule)
   while gates, waivers, acceptance caveats, classification, and the repair ledger all work
   unchanged. A `browser.flow` event carries the detail. Flows share the session check budget plus
-  a 64 MiB events-rebuilt artifact byte budget; dropped artifacts are recorded, never silent.
+  a 96 MiB events-rebuilt artifact byte budget; a spent budget drops artifacts (with omission
+  markers) but never refuses the flow itself — dropped artifacts are recorded, never silent.
 - **Policy**: the `browser` fact's whole decision is `previewBound` — a flow bound to a RUNNING
   managed preview auto-allows, anything else DENIES (no ask path for arbitrary origins). Execute
   re-verifies; a died-in-between preview is a typed error, never a silent pass. The fact also
@@ -1134,7 +1140,10 @@ review → apply, every link evidenced.
   crash orphans and is PATH-GUARDED — entries outside this project's worktree home are dropped
   from the registry but never touched on disk.
 - **The registry is concurrency-safe:** entries are OWNER-STAMPED (`ownerSessionId` + `pid`); the
-  sweep skips live-pid entries with a 2h age hatch. Every mutation runs under an in-process async
+  sweep ALWAYS skips live-pid entries — there is deliberately NO age hatch (S22.5: approval wait
+  is excluded from the executor clock, so a live task's age is unbounded and nothing file-based
+  distinguishes a live owner from a crashed one whose pid was recycled; dead pids still sweep
+  immediately). Every mutation runs under an in-process async
   mutex PLUS a token `O_EXCL` lock file — a live same-pid holder is NEVER reclaimed (group members
   share the pid). The lock is held only at registry read/write edges, and the sweep's save is a
   MERGE, so a sibling's concurrent registration always survives.
@@ -1168,8 +1177,9 @@ contract, non-empty mutation plan, empty request, an unusable target (any single
 whole call), a config-denylisted domain, and an exhausted bound.
 
 **Consent is the budget.** First call asks (`external`, grantable) with the query verbatim, the
-per-call bounds and the remaining allowance in the reason. One `ResearchBudget` object — 24
-searches / 12 extracts / 80 credits / 800k chars — is shared by reference between the parent's
+per-call bounds and the remaining allowance in the reason. One `ResearchBudget` object — 36
+searches / 20 extracts / 120 credits / 1.2M chars (S20.5 raised the session pools) — is shared
+by reference between the parent's
 instance and every researcher child's, and rebuilt from parent events on resume
 (`researchSpendFromEvents`) so a restart cannot refill it. The credit ceiling is checked against the
 *estimate* before the wire, so a call that would overshoot is refused whole rather than half-spent,
@@ -1747,9 +1757,11 @@ identities, live research spend) or an action affordance (`/repair`'s numbered l
 `/repair` (S21) renders the bounded-repair ledger and carries the user-side dismissal;
 `/init` (S21) is the skippable onboarding flow (global AGENT.md + project starter — never
 rewrites an existing file; each file writes atomically or not at all, and an abort after the
-global doc exists keeps it and says so); `/grants` (S21) is the read-only
-view of durable machine grants loaded at this session's assembly, plus a count of any minted
-mid-session by `[a]`. `/checks` re-probes the
+global doc exists keeps it and says so); `/grants` (S21) lists the durable machine
+grants loaded at this session's assembly plus a count of any minted mid-session by `[a]`, and
+since S21.5 carries `/grants revoke <id>` (user-typed only — the store changes for the NEXT
+assembly; the running session's in-memory authority is unchanged and the output says so).
+`/checks` re-probes the
 detected project on demand and shows
 the latest EVIDENCE per kind — a check that spawned and never completed reads as "NO VERDICT",
 not as the older passing run. `/diff` carries the report's CHECKED verdict per file through the
@@ -1878,8 +1890,8 @@ reason (which embeds untrusted model text for command asks).
   validates class entries against the eligibility set (a hand-edited ineligible rule refuses the
   session, naming `agent grants revoke <id>`), seeds the in-memory `Grants`, and appends
   `grants.loaded` — standing authority is visible in the evidence of every session it touches.
-  Revocation is `agent grants revoke <id>` (deliberately outside the conversation; `/grants` is
-  the in-session READ-ONLY view) and applies from the next assembly; a running session keeps its
+  Revocation is `agent grants revoke <id>` or the in-session `/grants revoke <id>` (S21.5 —
+  both USER-typed surfaces; the MODEL has no path to grants) and applies from the next assembly; a running session keeps its
   in-memory copy until it ends (documented, not hidden). Load-time eligibility refusal covers
   CLASS entries; replay entries are opaque shas, so their belt is provenance instead — durable
   keys are seeded into a separate set only the pure-check branch consults, and a hand-edited

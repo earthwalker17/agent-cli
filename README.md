@@ -69,35 +69,36 @@ What that means concretely:
   credentials stay env-only, and a model without image input gets honest screenshot *pointers*
   rather than silently dropped pixels.
 
-> **Status: v1.9.0.** 2,307 hermetic tests across 145 files (real-OS sandbox,
+> **Status: v1.10.x.** 2,415 hermetic tests across 151 files (real-OS sandbox,
 > real-repository git, **a local bare repo standing in as a real remote**, real browser flows, real
 > PDF print + rasterization, hermetic HTTP wire pins, adversarial-review suites) plus opt-in live
-> smokes. Newest live proof (S21.6, validated **29/29** from
-> persisted evidence alone): the model read the repository through `git_status` three times with
-> **zero approvals spent on the git tools all session**, every call recorded on its own policy
-> branch rather than the observe fall-through; a recovery capture **refused by name** because a
-> non-gitignored `.env` would have been hashed into the object database; the model, told
-> explicitly to `git commit -am wip`, reached the approval prompt and the scripted human **denied
-> it** — no commit process ever started; the named cure worked and a real recovery point landed;
-> and the commit that did happen came from the user answering *commit the 1 file(s) this session
-> changed, then accept* at the completion prompt. At quit the agent's ref was pruned, the delivery
-> anchor survived, and the credential appeared **neither in the session log nor in any git object**
-> (`agent-cli-s216-live/DEMO.md`). Before it: the **contextual consent** surface, live — an
-> approval prompt firing on a real model-authored plan with `/plan approve` never typed, and
-> `@review` finding a seeded defect while consuming zero adversarial rounds
-> (`agent-cli-s215-live/DEMO.md`); a **fresh machine state** onboarded with `/init`, a durable
-> "always allow" grant minted with one keystroke and **consumed by an unattended `--no-input`
-> run**, then revoked and honestly denied (S21, 31/31); and **an empty folder to a real GitHub
-> release in one continuous session** — 1,006 events, three lives across two terminal deaths,
-> source-backed research, three parallel worktree executors, two real test failures found and
-> fixed live, five passing browser flows, a DOCX/PDF overview whose visual defect the model saw
-> and corrected in its own pages, and a publish whose first release attempt policy **denied** for
-> citing a stale observation (S20.5, 62/62). Earlier proofs cover polyglot verification three
-> ways, web research as a controlled experiment with and without the credential, the full
-> multi-project workflow in one 84-minute session (38/38), and all five providers exercised live
-> through the real bounded tool loop. No credential appears anywhere in the evidence. This is an
-> open, build-in-public engineering effort — see `PROJECT.md` for the thesis, `ARCHITECTURE.md`
-> for how it works, and `ROADMAP.md` for what is done, deferred, and next.
+> smokes. Newest live proof (S22, the v1.10 interactive surface — **14/14 driver steps, 20/20
+> post-hoc checks** from the persisted record alone, with a real provider on real work): an
+> approval answered with **arrow keys** whose transcript echo is the picked label (`> allow once`
+> — no typed letter produces that); honest folding of a 400-line command (`… 225 line(s) folded`)
+> with **Ctrl+E** reprinting the full output from the session record; the bare-`/` menu
+> arrow-picking a command; the plan-less completion prompt firing **only at the typed `/quit`**,
+> arrows to `[c]`, one commit and one acceptance recorded in order; and the piped control — the
+> same scripted session driven through the v1.9.0 baseline build and the new one, stdout AND
+> stderr **byte-identical**: the whole interactive surface moved without moving a byte of the
+> piped contract. Before it, each validated from persisted evidence alone (the runs are recorded
+> in `ROADMAP.md`): the git surface with **zero approvals spent on read-only git tools**, a
+> recovery capture **refused by name** over a non-gitignored `.env`, and an explicit
+> `git commit -am wip` instruction stopped at the human's denial (S21.6, 29/29); the
+> **contextual consent** surface live with `/plan approve` never typed (S21.5); a fresh machine
+> onboarded with `/init`, a durable "always allow" grant minted with one keystroke, **consumed by
+> an unattended `--no-input` run**, then revoked and honestly denied (S21, 31/31); and **an empty
+> folder to a real GitHub release in one continuous session** — 1,006 events, three lives across
+> two terminal deaths, source-backed research, three parallel worktree executors, two real test
+> failures found and fixed live, five passing browser flows, a DOCX/PDF overview whose visual
+> defect the model saw and corrected in its own pages, and a publish whose first release attempt
+> policy **denied** for citing a stale observation (S20.5, 62/62). Earlier proofs cover polyglot
+> verification three ways, web research as a controlled experiment with and without the
+> credential, the full multi-project workflow in one 84-minute session (38/38), and all five
+> providers exercised live through the real bounded tool loop. No credential appears anywhere in
+> the evidence. This is an open, build-in-public engineering effort — see `PROJECT.md` for the
+> thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is done, deferred, and
+> next.
 
 ## Install
 
@@ -108,10 +109,12 @@ npm install          # also builds src → dist (the `prepare` script)
 npm link             # optional: puts `agent` on your PATH
 ```
 
-Requires **Node 22+**. Windows-first: developed and tested on Windows 11, and the OS-enforced
-sandbox backend exists **only** for Windows. The rest of the logic is cross-platform and CI runs
-the suite on both Windows and Linux, but on non-Windows the sandbox suites skip and the agent
-runs with approval only (auto-run is disabled — fail closed).
+Requires **Node 22+** (the CLI checks and refuses older runtimes with one actionable line).
+Windows-first: developed and tested on Windows 11, and the OS-enforced sandbox backend exists
+**only** for Windows. The rest of the logic is cross-platform; CI gates on Windows, and the
+Linux leg is **advisory** (`continue-on-error` — its verdict never blocks a merge). On
+non-Windows the sandbox suites skip and the agent runs with approval only (auto-run is
+disabled — fail closed).
 
 To actually run the agent you need an API key for at least one provider. Credentials are read
 **only** from the environment — never from a config file, a CLI flag, or a slash command, so they
@@ -177,7 +180,8 @@ all share the one widget; piped runs never see a menu and keep the line grammar 
   interrupted); at the idle prompt press it twice to quit. **Ctrl+D** on an empty line quits.
   Both need a terminal — under `--interactive` over pipes there is no SIGINT channel.
 - **`/` alone opens the command menu; Tab completes a typed `/name`.** **Ctrl+E** on an empty
-  idle prompt reprints the last folded command output in full (`/expand` is the typed form) —
+  idle prompt reprints the last folded command output in full (`/expand [last | <n> | <call-id>]`
+  is the typed form, replayed from the session record) —
   long command output shows its head live, then an honest fold marker and the run's final lines,
   with the full bytes kept in the session record.
 - **`@` invokes a specialist:** **`@plan <request>`** investigates read-only, writes a persistent
@@ -238,6 +242,8 @@ agent commit [-m "msg"]        # commit session-attributed changes (preview + co
                                #   --no-trailer omits the Co-authored-by trailer)
 agent checkpoint [label]       # capture the workspace to a hidden git ref (recovery point)
 agent checkpoint list|prune    # list checkpoints / delete refs so git gc can collect them
+                               #   (prune takes --all / --yes; delivery anchors are KEPT
+                               #   unless --include-delivery)
 agent checkpoint restore <n>   # return to a checkpoint — snapshot-first, undoable via agent undo
 agent report [<id>] [--json]   # print the evidence report (default: latest session)
 agent sessions                 # list this workspace's sessions (subagent children labeled)
@@ -520,11 +526,11 @@ The agent also reaches for either on its own when a request clearly needs curren
     max results: 5
     provider: api.tavily.com (the only research destination; a configured proxy still carries the connection)
     bounds: ≤12000 retrieved chars · 20000 ms · ~1 credit(s)
-    session budget remaining: 23 search(es), 12 extract(s), 79 credit(s)
+    session budget remaining: 35 search(es), 20 extract(s), 119 credit(s)
   [y] allow once   [s] allow further research this session, within the session budget   [n] deny
 ```
 
-**What bounds it.** One session allowance — 24 searches, 12 extracts, 80 provider credits, 800k
+**What bounds it.** One session allowance — 36 searches, 20 extracts, 120 provider credits, 1.2M
 retrieved characters — shared by the main agent and every researcher, and **rebuilt from the event
 log on resume** so restarting cannot refill it. The prompt shows the query verbatim before anything
 is sent, and `[s]` is bounded by that budget rather than by the session.
@@ -823,22 +829,26 @@ Note that `npm test` needs `dist/` to exist for the CLI smoke suite to run rathe
 
 ## Contributing
 
-Issues and pull requests are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) — it covers
+Issues and pull requests are welcome. Start with
+[`CONTRIBUTING.md`](https://github.com/earthwalker17/agent-cli/blob/main/CONTRIBUTING.md) — it covers
 the verification bar (evidence over narration), what tends to get pushback, and which suites are
-platform-gated. Security problems go through [`SECURITY.md`](SECURITY.md), privately, not the
+platform-gated. Security problems go through
+[`SECURITY.md`](https://github.com/earthwalker17/agent-cli/blob/main/SECURITY.md), privately, not the
 public issue tracker.
 
 ## Documentation
 
-- [`PROJECT.md`](PROJECT.md) — the long-term thesis, principles, and reference context.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the current system is actually built: contracts,
+Absolute links, so they work from the npm tarball too (only `README`/`CHANGELOG`/`LICENSE` ship in it):
+
+- [`PROJECT.md`](https://github.com/earthwalker17/agent-cli/blob/main/PROJECT.md) — the long-term thesis, principles, and reference context.
+- [`ARCHITECTURE.md`](https://github.com/earthwalker17/agent-cli/blob/main/ARCHITECTURE.md) — how the current system is actually built: contracts,
   load-bearing orderings, and honest limits. Start here to understand the code.
-- [`ROADMAP.md`](ROADMAP.md) — session-by-session evolution, verification evidence, and the
+- [`ROADMAP.md`](https://github.com/earthwalker17/agent-cli/blob/main/ROADMAP.md) — session-by-session evolution, verification evidence, and the
   deferred pool (what is deliberately not built yet, and why).
-- [`BLUEPRINT.md`](BLUEPRINT.md) — planned near-term direction. **Not implemented behaviour.**
-- [`CLAUDE.md`](CLAUDE.md) — the operating contract given to the AI agent that develops this
+- [`BLUEPRINT.md`](https://github.com/earthwalker17/agent-cli/blob/main/BLUEPRINT.md) — planned near-term direction. **Not implemented behaviour.**
+- [`CLAUDE.md`](https://github.com/earthwalker17/agent-cli/blob/main/CLAUDE.md) — the operating contract given to the AI agent that develops this
   repository. It is part of the build-in-public record, not user documentation.
-- [`CHANGELOG.md`](CHANGELOG.md) — release notes.
+- [`CHANGELOG.md`](https://github.com/earthwalker17/agent-cli/blob/main/CHANGELOG.md) — release notes.
 
 ## Licence
 

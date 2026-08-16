@@ -54,7 +54,7 @@ body:
     attributes:
       label: Agent CLI version
       description: Output of `agent --version`
-      placeholder: "agent-cli 1.2.1"
+      placeholder: "agent-cli 1.10.1"
     validations:
       required: true
 
