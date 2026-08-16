@@ -5,7 +5,7 @@ understand how agent harnesses actually work by building one from first principl
 evidence at every step. Contributions are welcome, and so is criticism — the useful parts of
 harsh review have historically been the most valuable input this project gets.
 
-Please read [`PROJECT.md`](PROJECT.md) (the thesis) and [`CLAUDE.md`](CLAUDE.md) (the operating
+Please read [`docs/PROJECT.md`](docs/PROJECT.md) (the thesis) and [`CLAUDE.md`](CLAUDE.md) (the operating
 constitution) before proposing anything structural. They are the project's working documents, and
 they explain *why* several things that look over-engineered are the way they are.
 
@@ -38,8 +38,8 @@ The bar this project holds itself to, in rough priority order:
 4. **Regression tests for real defects**, especially anything touching safety, persistence,
    recovery, or a boundary. If you fixed a bug, the test should fail without your fix.
 5. **Honest limits stay honest.** If a change narrows what the system can truthfully claim,
-   update the claim. `ARCHITECTURE.md` documents the implemented system; `ROADMAP.md` records
-   what is deferred and why.
+   update the claim. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) documents the implemented
+   system; [`docs/ROADMAP.md`](docs/ROADMAP.md) records what is deferred and why.
 
 ## Things that will get pushback
 

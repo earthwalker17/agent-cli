@@ -30,8 +30,9 @@ open-source project, not a staffed product, so please calibrate expectations acc
 ## What Agent CLI does and does not defend against
 
 Agent CLI runs an LLM-driven agent against your real filesystem and shell. Its security model is
-documented in detail in [`ARCHITECTURE.md`](ARCHITECTURE.md) ("Policy model", "Sandbox and
-enforced isolation") and summarized in the README. The short version, stated honestly:
+documented in full in [`docs/SAFETY.md`](docs/SAFETY.md), with the implementing contracts in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and summarized in the README. The short version,
+stated honestly:
 
 **Enforced (Windows only):** a probed Low-integrity + Job Object boundary confines *writes* and
 process lifetime for commands the harness auto-runs. Every path to `enforced: true` requires a

@@ -5,7 +5,9 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Development history before 1.0.0 is recorded session-by-session in
-[`ROADMAP.md`](ROADMAP.md), with implemented contracts in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+[`docs/ROADMAP.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/ROADMAP.md), with implemented contracts in
+[`docs/ARCHITECTURE.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/ARCHITECTURE.md). (Absolute links: this file ships in the
+package, those do not.)
 
 ## [1.10.1] — 2026-08-16
 
@@ -17,7 +19,7 @@ final full-system live E2E: an empty folder to a public GitHub release (research
 plan approval → parallel build surviving a real mid-build kill via `agent resume` → typed
 checks/previews/browser flows → DOCX/PDF inspected by the model → review → commit → acceptance
 → push/tag/Release, each mutation individually approved), validated **37/37 from persisted
-evidence plus the live remote** — see `ROADMAP.md` Session 22.5.
+evidence plus the live remote** — see `docs/ROADMAP.md` Session 22.5.
 
 ### Fixed
 
@@ -351,7 +353,7 @@ verified-empty. Post-hoc validator **62/62** over the persisted logs plus the li
 **Honest caveat the proof surfaced:** the session's acceptance is PARTIAL by the documented
 `/accept confirm` override — a session-targeted escalation has no closure path in this version
 (the known deferred-pool gap, now live-demonstrated and scheduled for S21) — with every check
-green and the escalation named in the handoff. Full record: `ROADMAP.md` Session 20.5 and the
+green and the escalation named in the handoff. Full record: `docs/ROADMAP.md` Session 20.5 and the
 evidence directory's `DEMO.md`.
 
 ### Fixed
@@ -1102,7 +1104,7 @@ alone.
 
 ### Known limitations
 
-These are documented choices, not oversights. The full list lives in `ROADMAP.md`; the ones most
+These are documented choices, not oversights. The full list lives in `docs/ROADMAP.md`; the ones most
 likely to matter:
 
 - Sandbox enforcement is **Windows-only**. macOS and Linux run with approval only.

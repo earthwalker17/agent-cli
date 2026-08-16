@@ -285,8 +285,8 @@ Important memory rules:
 7. Conflicts and outdated entries should be detectable and correctable.
 8. Session summaries should be grounded in actual events, diffs, and verification, not generated from recollection alone.
 
-The project's own `CLAUDE.md`, `PROJECT.md`, `ROADMAP.md`, and `ARCHITECTURE.md` provide an initial
-manual version of this philosophy and should also serve as a useful dogfooding target.
+The project's own `CLAUDE.md` and its `docs/` set provide an initial manual version of this
+philosophy and should also serve as a useful dogfooding target.
 
 ## 9. Optimized Artifact Workflows
 
@@ -421,17 +421,19 @@ many integrations but weak trust and inconsistent outputs.
 
 ## 16. Documentation Strategy
 
-The repository uses five complementary documents:
+Two documents sit at the repository root by convention — `README.md`, the public front door, and
+`CLAUDE.md`, the stable constitution and agent operating rules. The rest live under `docs/`:
 
-- `CLAUDE.md`: stable constitution and Claude Code operating rules.
-- `PROJECT.md`: this long-term context, product thesis, principles, and reference material.
-- `ROADMAP.md`: session-by-session evolution, verification, open work, and next steps — kept as a
-  rolling record (recent sessions in full, older ones compressed to milestones).
-- `ARCHITECTURE.md`: the current implemented system, modules, contracts, data flows, and operational logic.
-- `BLUEPRINT.md`: a rolling near-term development horizon, revised as repository evidence accumulates.
+- `docs/PROJECT.md`: this long-term context, product thesis, principles, and reference material.
+- `docs/ARCHITECTURE.md`: the current implemented system, modules, contracts, data flows, and operational logic.
+- `docs/ROADMAP.md`: evolution and milestones, plus the deferred pool — kept as a rolling record,
+  recent work in useful detail and older sessions compressed to a short entry each.
+- `docs/USAGE.md`: the complete user-facing surface — commands, flags, exit codes, providers, configuration, memory.
+- `docs/SAFETY.md`: the security model in full, and every honest limitation.
 
-`ROADMAP.md`, `ARCHITECTURE.md`, and `BLUEPRINT.md` should be updated as the project evolves.
-`CLAUDE.md` and `PROJECT.md` should change only when enduring assumptions genuinely change.
+`docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/USAGE.md` and `docs/SAFETY.md` should be updated
+as the project evolves. `CLAUDE.md` and `docs/PROJECT.md` should change only when enduring
+assumptions genuinely change.
 
 ## 17. Reference Projects and Reading
 

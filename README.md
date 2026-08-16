@@ -82,7 +82,7 @@ What that means concretely:
 > same scripted session driven through the v1.9.0 baseline build and the new one, stdout AND
 > stderr **byte-identical**: the whole interactive surface moved without moving a byte of the
 > piped contract. Before it, each validated from persisted evidence alone (the runs are recorded
-> in `ROADMAP.md`): the git surface with **zero approvals spent on read-only git tools**, a
+> in `docs/ROADMAP.md`): the git surface with **zero approvals spent on read-only git tools**, a
 > recovery capture **refused by name** over a non-gitignored `.env`, and an explicit
 > `git commit -am wip` instruction stopped at the human's denial (S21.6, 29/29); the
 > **contextual consent** surface live with `/plan approve` never typed (S21.5); a fresh machine
@@ -96,8 +96,8 @@ What that means concretely:
 > verification three ways, web research as a controlled experiment with and without the
 > credential, the full multi-project workflow in one 84-minute session (38/38), and all five
 > providers exercised live through the real bounded tool loop. No credential appears anywhere in
-> the evidence. This is an open, build-in-public engineering effort — see `PROJECT.md` for the
-> thesis, `ARCHITECTURE.md` for how it works, and `ROADMAP.md` for what is done, deferred, and
+> the evidence. This is an open, build-in-public engineering effort — see `docs/PROJECT.md` for the
+> thesis, `docs/ARCHITECTURE.md` for how it works, and `docs/ROADMAP.md` for what is done, deferred, and
 > next.
 
 ## Install
@@ -792,7 +792,7 @@ Read this before trusting the harness with anything sensitive.
   PowerShell 7+ and Windows Terminal handle UTF-8 correctly. Piped/non-TTY output uses ASCII
   status glyphs for this reason.
 - **Stronger isolation** (network egress control, a read/confidentiality boundary, containers/VM,
-  macOS/Linux enforcement) is future work — see `ROADMAP.md`.
+  macOS/Linux enforcement) is future work — see `docs/ROADMAP.md`.
 
 State (event logs, snapshots, trust) lives **outside** the workspace at
 `%USERPROFILE%\.agent-cli\` (override with `AGENT_CLI_STATE_DIR`). The startup check refuses to
@@ -840,12 +840,11 @@ public issue tracker.
 
 Absolute links, so they work from the npm tarball too (only `README`/`CHANGELOG`/`LICENSE` ship in it):
 
-- [`PROJECT.md`](https://github.com/earthwalker17/agent-cli/blob/main/PROJECT.md) — the long-term thesis, principles, and reference context.
-- [`ARCHITECTURE.md`](https://github.com/earthwalker17/agent-cli/blob/main/ARCHITECTURE.md) — how the current system is actually built: contracts,
+- [`docs/PROJECT.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/PROJECT.md) — the long-term thesis, principles, and reference context.
+- [`docs/ARCHITECTURE.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/ARCHITECTURE.md) — how the current system is actually built: contracts,
   load-bearing orderings, and honest limits. Start here to understand the code.
-- [`ROADMAP.md`](https://github.com/earthwalker17/agent-cli/blob/main/ROADMAP.md) — session-by-session evolution, verification evidence, and the
+- [`docs/ROADMAP.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/ROADMAP.md) — evolution, milestones, and the
   deferred pool (what is deliberately not built yet, and why).
-- [`BLUEPRINT.md`](https://github.com/earthwalker17/agent-cli/blob/main/BLUEPRINT.md) — planned near-term direction. **Not implemented behaviour.**
 - [`CLAUDE.md`](https://github.com/earthwalker17/agent-cli/blob/main/CLAUDE.md) — the operating contract given to the AI agent that develops this
   repository. It is part of the build-in-public record, not user documentation.
 - [`CHANGELOG.md`](https://github.com/earthwalker17/agent-cli/blob/main/CHANGELOG.md) — release notes.

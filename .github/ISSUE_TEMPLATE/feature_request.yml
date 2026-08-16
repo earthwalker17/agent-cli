@@ -6,9 +6,9 @@ body:
     attributes:
       value: |
         Before proposing something structural, please skim
-        [PROJECT.md](https://github.com/earthwalker17/agent-cli/blob/main/PROJECT.md) (the thesis)
+        [PROJECT.md](https://github.com/earthwalker17/agent-cli/blob/main/docs/PROJECT.md) (the thesis)
         and the **deferred pool** at the end of
-        [ROADMAP.md](https://github.com/earthwalker17/agent-cli/blob/main/ROADMAP.md) — a lot of
+        [ROADMAP.md](https://github.com/earthwalker17/agent-cli/blob/main/docs/ROADMAP.md) — a lot of
         obvious ideas are already there with a recorded design and a reason they are waiting.
 
   - type: textarea
@@ -46,4 +46,4 @@ body:
       options:
         - label: This does not widen the agent's authority, or if it does, it goes through the policy engine
         - label: This does not add a second runtime loop or a second source of truth for session state
-        - label: I checked the deferred pool in ROADMAP.md and this is not already recorded there
+        - label: I checked the deferred pool in docs/ROADMAP.md and this is not already recorded there

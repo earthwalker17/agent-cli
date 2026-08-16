@@ -107,9 +107,9 @@ Concretely:
 ### Public release alignment
 
 This is a public project. Every substantial public-facing session must leave implementation,
-`README.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `CHANGELOG.md`, the `package.json` version, and
-release metadata (security-supported versions, issue templates) consistent with each other and
-with what is actually built.
+`README.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/USAGE.md`, `docs/SAFETY.md`,
+`CHANGELOG.md`, the `package.json` version, and release metadata (security-supported versions,
+issue templates) consistent with each other and with what is actually built.
 
 Publishing requires, in order: verified evidence, then explicit user authorization, then push,
 then an appropriate semantic version tag and a GitHub Release created with the GitHub CLI, then
@@ -119,36 +119,49 @@ model, platform, or feature that has only been tested hermetically must say so i
 
 ## Documentation Hierarchy
 
-The repository uses four primary context documents with distinct responsibilities:
+Two documents live at the repository root because convention puts them there; the rest live under
+`docs/`.
 
+**Root**
+
+- **README.md** — the public front door: what this is, why the architecture is useful, how to
+  install and run it, and the safety limits, each stated proportionally to what is built.
 - **CLAUDE.md** — this constitution: concise, highest-level, stable rules and session protocol.
+- **CHANGELOG.md**, **CONTRIBUTING.md**, **SECURITY.md**, **CODE_OF_CONDUCT.md**, **LICENSE** —
+  the conventional release and community files, kept at root because tools and GitHub expect them.
+
+**`docs/`**
+
 - **PROJECT.md** — detailed long-term product thesis, background, goals, principles, and reference context.
-- **ROADMAP.md** — chronological evolution and current project state: what each session attempted, changed, verified, decided, left open, and should do next.
-- **ARCHITECTURE.md** — current system shape: modules, boundaries, data flows, execution logic, persistence, safety model, and important implementation contracts.
-- **BLUEPRINT.md** — rolling near-term horizon: the direction for the next several sessions, revised as repository evidence accumulates.
+- **ARCHITECTURE.md** — how the current system works: modules, boundaries, data flows, execution logic, persistence, the safety model, and the contracts that are load-bearing.
+- **ROADMAP.md** — chronological evolution and current project state, plus the deferred pool: what is deliberately not built yet, and why.
+- **USAGE.md** — the complete user-facing surface: commands, flags, exit codes, providers, configuration, memory.
+- **SAFETY.md** — the security model in full, and every honest limitation.
 
 ROADMAP describes **how the project evolved and where it is going next**.
 ARCHITECTURE describes **how the current system works**.
 Do not duplicate large sections between them.
 
-**Rolling-docs policy (apply at the end of every substantial session):** `ROADMAP.md` is a
-rolling execution record, not a growing diary — keep only the latest one or two sessions in full
-detail and compress older sessions into an "Earlier Milestones" section that preserves their
-objective, lasting architectural decisions, key verification evidence, and still-relevant
-limitations, while dropping superseded detail and long narratives. `BLUEPRINT.md` is a rolling
-horizon — replace the completed section with a short outcome note once the result is fully
-recorded in ROADMAP/ARCHITECTURE, advance the next unresolved direction to the top, and revise
-later sections that repository evidence has invalidated.
+**Rolling-docs policy (apply at the end of every substantial session):** `docs/ROADMAP.md` is a
+rolling execution record, not a growing diary — keep the latest session in useful detail and
+compress older ones to a short entry that preserves the objective, the lasting decision, the key
+verification evidence, and any still-relevant limitation, while dropping proof narration and
+debug detail. Nothing in it should require a reader to consult an evidence directory that is not
+in this repository; where one is cited, say so.
 
-CLAUDE.md and PROJECT.md should remain stable. Change them only when the project's enduring
+`docs/ARCHITECTURE.md` describes the system as built. It is not an implementation ledger: session
+tags, regression stories, and per-decision archaeology belong in ROADMAP or in the commit message,
+and appear here only where the *reason* for a decision IS the contract.
+
+CLAUDE.md and `docs/PROJECT.md` should remain stable. Change them only when the project's enduring
 mission, principles, or documentation contract genuinely changes. Do not use them as session logs.
 
 ## Session Start Protocol
 
 Before substantial work:
 
-1. Read `CLAUDE.md` and `PROJECT.md`.
-2. Read `ROADMAP.md` and `ARCHITECTURE.md` if they exist.
+1. Read `CLAUDE.md` and `docs/PROJECT.md`.
+2. Read `docs/ROADMAP.md` and `docs/ARCHITECTURE.md` if they exist.
 3. Inspect Git status and the files relevant to the requested task.
 4. Reconcile documentation with observable repository state; trust current code and evidence over stale summaries.
 5. Enter plan mode for non-trivial work. State the intended scope, risks, verification, and likely documentation impact.
@@ -162,13 +175,11 @@ Before ending a productive session:
 
 1. Run relevant tests, checks, or artifact verification that are feasible in the environment.
 2. Review the final diff and identify unverified or incomplete work.
-3. Update `ROADMAP.md` with the session objective, material changes, verification evidence, decisions, open issues, and recommended next step.
-4. Update `ARCHITECTURE.md` only where the implemented system shape, module responsibilities, contracts, or flows changed.
-5. Keep documentation factual; do not document planned behavior as implemented behavior.
-6. Leave the repository in a coherent, reviewable state.
-
-In the first implementation session, create `ROADMAP.md` and `ARCHITECTURE.md` with useful initial
-content based on actual decisions and code produced.
+3. Update `docs/ROADMAP.md` with the session objective, material changes, verification evidence, decisions, open issues, and recommended next step.
+4. Update `docs/ARCHITECTURE.md` only where the implemented system shape, module responsibilities, contracts, or flows changed.
+5. Update `README.md`, `docs/USAGE.md` and `docs/SAFETY.md` wherever the user-facing surface or an honest limit moved.
+6. Keep documentation factual; do not document planned behavior as implemented behavior.
+7. Leave the repository in a coherent, reviewable state.
 
 ## Scope Discipline
 

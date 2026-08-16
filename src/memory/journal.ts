@@ -5,7 +5,7 @@ import { parseFrontmatter, serializeFrontmatter } from './store.js';
  * The rolling project journal (JOURNAL.md): pure parse/build/roll functions, no I/O. One
  * `## Session <id>` entry per session, newest first. Every entry couples model-written narrative
  * sections (explicitly labeled) with an Evidence section DERIVED from the session's event log
- * (PROJECT.md §8 rules 5+8: memory claims carry provenance; summaries are grounded in events,
+ * (docs/PROJECT.md §8 rules 5+8: memory claims carry provenance; summaries are grounded in events,
  * not recollection). Parsing is driven only by the entry-heading boundary, so user edits —
  * a preamble, notes inside an entry, extra sections — survive byte-verbatim until their entry
  * is compressed by the rolling policy.

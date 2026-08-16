@@ -924,17 +924,17 @@ REPL path, and the clean-end predicate already fixed in S14.5); `agent gc` — a
 blob/plan-file collector over a conservative reference walk (treat every 64-hex string in every
 event as a reference; refuse to delete anything when any log is corrupt or locked; age-gated).
 
-**Cross-platform test portability (found by CI's first run, 2026-07-28):** the suite is
-Windows-first in a way that is only now measured. On `ubuntu-latest`, 10 tests fail because the
-TESTS encode win32 semantics, not because the runtime is wrong there: backslash traversal and UNC
-rejection fixtures, case-insensitive child-env deduplication (Linux env vars are case-sensitive,
-and `buildChildEnv` correctly does not fold them), taskkill-based tree-kill expectations, and a
-git hook-failure fixture. The CI Linux job is kept and marked advisory so the gap stays visible;
-the work is to gate or parameterize those fixtures per platform. Two REAL defects the same first
-CI run found were fixed immediately: `resolveLayout` compared a realpath'd workspace against a
-merely resolved state root (so a state dir inside the workspace could evade the refusal when
-spelled as an 8.3 short path or through a symlink), and a test whose premise silently broke when
-cwd and TEMP sit on different drives.
+**Cross-platform test portability — RESOLVED in S22.6.** Opened by CI's first run (2026-07-28),
+when 10 tests failed on `ubuntu-latest` because the TESTS encoded win32 semantics rather than
+because the runtime was wrong there; the job was kept advisory so the gap stayed visible. Most of
+those fixtures were gated or parameterized over the following sessions, and by S22.6 the residue
+was three case-folding assertions, now pinned on both platforms. The Linux job is a real gate. What
+remains is a genuine COVERAGE difference, not a portability debt: the Low-integrity/Job Object
+sandbox, taskkill tree-kill and the win32 path rules have no Linux counterpart, so 30 tests skip
+there against 11 on Windows. Two REAL defects the original run found were fixed immediately:
+`resolveLayout` compared a realpath'd workspace against a merely resolved state root (so a state
+dir inside the workspace could evade the refusal when spelled as an 8.3 short path or through a
+symlink), and a test whose premise silently broke when cwd and TEMP sit on different drives.
 
 **Provider/model (new, S15; amended S16.5):** surface `Usage.reasoningTokens` in the report and
 `/status` (recorded on `assistant.message`; no reader folds it yet); a live reasoning render
@@ -1036,3 +1036,29 @@ service-reparented work that escapes the Job Object.
 **Cosmetics (informational only):** command-label noise — word-boundary matches can mislabel (the
 literal "format" in `format.js` → destructive); labels never grant and never gate. PowerShell
 CLIXML progress-stream noise on some chained commands' stderr.
+
+## Beyond the current horizon
+
+Folded in from `BLUEPRINT.md`, which was deleted in Session 22.6: its near-term programme had been
+fully executed, and the surviving content is this list plus the next-direction note below.
+
+Keep these visible, but do not pull them forward without direct implementation pressure:
+
+- broad SaaS deployment orchestration and autonomous production operations;
+- network-egress enforcement and a true read/confidentiality sandbox;
+- macOS/Linux sandbox parity;
+- unrestricted computer use, deep inter-agent messaging, or remote distributed execution;
+- MCP/plugin marketplaces, or many shallow integrations;
+- multi-repository orchestration and hardware-in-the-loop embedded execution;
+- a database-backed memory/index layer, before Markdown plus bounded retrieval stops being adequate;
+- simultaneous first-class development of several non-coding workflow packs.
+
+**The next direction with real accumulated pressure** is the second non-coding pack. Documents and
+PDF proved the contracts generalize once; slides would prove the *pattern* — spec → deterministic
+render → visual verification loop — rather than the instance, reusing the same substrate. (The
+other candidate, cross-platform honesty, was resolved in Session 22.6: the Linux CI leg is a real
+gate rather than an advisory one.)
+
+The objective remains quality before capability count: broaden Agent CLI only when each new surface
+inherits the same explicit authority, evidence, reversibility, recovery and completion semantics
+that made v1.0 credible.

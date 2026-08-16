@@ -86,7 +86,7 @@ body:
       options:
         - label: >
             I checked the documented limitations in
-            [ROADMAP.md](https://github.com/earthwalker17/agent-cli/blob/main/ROADMAP.md)
+            [ROADMAP.md](https://github.com/earthwalker17/agent-cli/blob/main/docs/ROADMAP.md)
             and this is not one of them
           required: true
         - label: I have redacted secrets from any output I pasted

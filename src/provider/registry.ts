@@ -46,7 +46,7 @@ export interface ProviderRegistry {
   validateKey(name: RealProviderName, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<KeyValidation>;
 }
 
-/** CLI aliases accepted for provider names (BLUEPRINT names Kimi and GLM; vendors differ). */
+/** CLI aliases accepted for provider names (the vendors' own names differ from ours). */
 export function resolveProviderName(raw: string): RealProviderName | 'mock' | undefined {
   const name = raw.trim().toLowerCase();
   if (name === 'mock') return 'mock';
