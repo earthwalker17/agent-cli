@@ -359,14 +359,16 @@ export function createConsentAsker(): ConsentAsker {
       // plan-less sessions are asked once, at the typed /quit (S22 — the recorded S21.6 nag).
       // Legacy plans count: a resumed pre-canonical session with an approved plan kept its
       // turn-boundary offer before S22 and keeps it now (review finding).
-      if (boundary === 'turn') {
-        try {
-          const st = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
-          if (!((st.kind === 'canonical' || st.kind === 'legacy') && st.status === 'approved')) return;
-        } catch {
-          return; // an unreadable plan state must not become a completion question
-        }
+      let planCarrying = false;
+      try {
+        const st = readPlanState(ctx.layout, ctx.session.id, ctx.session.log.events);
+        planCarrying = (st.kind === 'canonical' || st.kind === 'legacy') && st.status === 'approved';
+      } catch {
+        // An unreadable plan state must not become a completion question at the turn boundary;
+        // at the typed /quit the session reads as plan-less and the header claims accordingly.
+        if (boundary === 'turn') return;
       }
+      if (boundary === 'turn' && !planCarrying) return;
       const done = completionReady(ctx);
       if (done !== null && !asked.has(done.key)) {
         asked.add(done.key);
@@ -374,7 +376,11 @@ export function createConsentAsker(): ConsentAsker {
         const picked = await askOnce(
           ctx,
           [
-            'session: everything the plan declares is done and the gates are green.',
+            // The plan sentence must not print for a PLAN-LESS quit-boundary session — there is
+            // no plan and no gates, and the derived summary right below would contradict it.
+            planCarrying
+              ? 'session: everything the plan declares is done and the gates are green.'
+              : "session: this session's work is ready to accept.",
             clip(sanitizeLine(done.summary), 200),
             // Caveats print BEFORE the keys. A "complete" that hides waived gates is the exact
             // overclaim `computeAcceptance` maintains a caveat list to prevent, and a
@@ -403,7 +409,20 @@ export function createConsentAsker(): ConsentAsker {
           // The commit runs through the SAME slash body a user would type, which is what keeps the
           // recorded evidence byte-identical either way — and it keeps its own preview and
           // confirmation, so this answer routes to the decision rather than replacing it.
-          if (picked === 'c') await dispatchSlash('/commit', ctx);
+          if (picked === 'c') {
+            const before = ctx.session.log.events.length;
+            await dispatchSlash('/commit', ctx);
+            // The answer promised commit-THEN-accept. A commit cancelled at its message or
+            // confirm prompt (or refused by a blocker) appended no `git.commit`, and recording
+            // the acceptance anyway would mint `session.accepted` for a delivery that never
+            // happened. The state key was already marked asked, so this stays nag-free.
+            if (!ctx.session.log.events.slice(before).some((e) => e.type === 'git.commit')) {
+              ctx.renderer.chromeLine(
+                '  not accepted: the commit did not complete — /accept records the acceptance when you are ready',
+              );
+              return;
+            }
+          }
           await acceptSession(ctx, { confirm: false });
         }
       }

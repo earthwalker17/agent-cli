@@ -431,7 +431,29 @@ describe('anti-nag (S21.5)', () => {
     const atTurn = ctxWith(['y']);
     await createConsentAsker().maybeAsk(atTurn.ctx, ON);
     expect(atTurn.asked).toHaveLength(1);
+    // The header may claim the plan and its gates ONLY here, where a plan actually exists.
+    expect(atTurn.asked[0]).toContain('everything the plan declares is done and the gates are green');
     expect(kinds()).toContain('session.accepted');
+  });
+
+  it('S22.5: the plan-less quit-boundary header claims no plan and no gates', async () => {
+    // The old header printed 'everything the plan declares is done and the gates are green.' for
+    // EVERY completion prompt — in a plan-less session that contradicted the derived summary
+    // printed directly beneath it.
+    session.log.append({
+      type: 'file.mutated',
+      callId: 'c1',
+      path: path.join(ws, 'a.ts'),
+      kind: 'create',
+      beforeSha256: null,
+      afterSha256: 'a'.repeat(64),
+      createdDirs: [],
+    });
+    const { ctx, asked } = ctxWith(['n']);
+    await createConsentAsker().maybeAsk(ctx, ON_QUIT);
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("this session's work is ready to accept");
+    expect(asked[0]).not.toContain('everything the plan declares');
   });
 });
 
@@ -746,6 +768,31 @@ describe.skipIf(findGitOnPath(process.env, process.platform) === null)('accept-a
     const commit = r.events.find((e) => e.type === 'git.commit');
     expect(commit).toMatchObject({ scope: 'session', trailer: true });
     expect(commit?.type === 'git.commit' ? commit.files : []).toEqual(['note.txt']);
+  }, 120_000);
+
+  it('S22.5: [c] whose commit is declined records NO acceptance and says so', async () => {
+    expect((await git('init', '-q', '-b', 'main')).ok).toBe(true);
+    expect((await git('config', 'user.name', 'T')).ok).toBe(true);
+    expect((await git('config', 'user.email', 't@e.c')).ok).toBe(true);
+
+    const r = await driveTTY(
+      [{ say: 'writing', calls: [{ name: 'write_file', input: { path: 'note.txt', content: 'hello\n' } }] }, { say: 'done' }],
+      [
+        { awaitChrome: /\/help for commands/, send: 'write a note' },
+        { awaitChrome: /1 file\(s\) · /, send: '/quit' },
+        { awaitChrome: /\[c\] commit the 1 file\(s\)/, send: 'c' },
+        { awaitChrome: /commit message \[/, send: '' },
+        // The commit's own confirm answers NO. Before S22.5 the branch then minted
+        // `session.accepted` anyway — an acceptance for a delivery that never happened.
+        { awaitChrome: /commit 1 file\(s\) as/, send: 'n' },
+      ],
+    );
+
+    expect(r.code).toBe(0);
+    expect(r.chrome).toContain('not accepted: the commit did not complete');
+    expect(r.events.some((e) => e.type === 'git.commit')).toBe(false);
+    expect(r.events.some((e) => e.type === 'session.accepted')).toBe(false);
+    expect(r.events.find((e) => e.type === 'session.ended')).toMatchObject({ reason: 'user-quit' });
   }, 120_000);
 
   it('does NOT offer [c] when a commit would be blocked — here, no git identity', async () => {
