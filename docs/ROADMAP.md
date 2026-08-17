@@ -33,10 +33,10 @@ nothing outside that page could ever appear, and a DOCX never could.
 still comes from the ConPTY-to-xterm bridge, now at 1920x1080 native so terminal footage is never
 resampled; the application, its generated PDF and the live GitHub pages are recorded at native 1080p
 with real input events; and the two scenes that cannot be rendered headlessly — a real browser window
-with its URL bar, and Microsoft Word displaying the harness's own DOCX — are verified screen stills
-given a slow zoom in the cut. The cut itself is a function of one shot list: scenes, anchors,
+with its URL bar, and Microsoft Word displaying the harness's own DOCX — are verified screen stills,
+held rather than animated. The cut itself is a function of one shot list: scenes, anchors,
 durations, speeds and captions in a manifest, rendered by a three-pass editor into a 1920x1080 H.264
-master plus the scene table that documents it. **Result: 2:41, 33 MB, 30 scenes, gate 14/14.**
+master plus the scene table that documents it. **Result: 1:59, 22.7 MB, 30 scenes, gate 14/14.**
 
 **The take was a real session, and it published.** One bounded request against the existing Shelfmark
 workspace (a per-shelf breakdown for its stats page, then a one-page release note as DOCX and PDF):
@@ -71,6 +71,16 @@ window shooter's own window enumeration silently returned nothing, which made a 
 check vacuous. The QA gate also had two detector passes that could report "clean" without decoding a
 frame, and it called legible dark-theme terminal footage black (the theme background is luma 14/255,
 and a readable frame is >98% background) — both corrected, with the thresholds justified in the code.
+
+**Three defects survived every still-frame check and appeared only in playback**, which is its own
+lesson about what a frame-by-frame pass can and cannot see. A slow `zoompan` on a still walks the image
+one whole input pixel at a time — perfect in every frame, visibly juddering in motion; the stills are
+now held frames, proven bit-identical. A white caption face on a 33%-opaque plate is legible over a
+terminal and invisible over a white document page; the plate is now near-opaque. And the first cut ran
+2:41, which read as slow; retiming to 1:59 came from shortening windows rather than speeding realtime
+footage, plus raising the four already-badged montages. Retiming also surfaced that two beats were out
+of source order — the cut showed executors writing files before the delegation that spawned them — so
+the manifest now requires source in-points to increase within every beat.
 
 **The product was observed, not just filmed.** One take was lost to a genuine v1.10.2 behaviour: a
 command invoked through the `/` command menu prints its output and then does not repaint the idle
