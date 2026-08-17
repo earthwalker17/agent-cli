@@ -36,7 +36,8 @@ with real input events; and the two scenes that cannot be rendered headlessly �
 with its URL bar, and Microsoft Word displaying the harness's own DOCX — are verified screen stills,
 held rather than animated. The cut itself is a function of one shot list: scenes, anchors,
 durations, speeds and captions in a manifest, rendered by a three-pass editor into a 1920x1080 H.264
-master plus the scene table that documents it. **Result: 1:59, 22.7 MB, 30 scenes, gate 14/14.**
+master plus the scene table that documents it. **Result: 1:59, 30 scenes, 25.0 MiB with the
+voice-over, gate 19/19.**
 
 **The take was a real session, and it published.** One bounded request against the existing Shelfmark
 workspace (a per-shelf breakdown for its stats page, then a one-page release note as DOCX and PDF):
@@ -89,9 +90,28 @@ the prompt lands on the same line as the echoed answer. That is now pinned in th
 worked around in the driver, and covered during a take by a watchdog that sends one bare Enter only on
 that exact signature and logs every nudge. It fired once. The wart itself belongs in the deferred pool.
 
+**The narration was mixed to the finished picture, and every audio decision was measured.** The
+deliverable now carries the user's own voice recording; the editor keeps ownership of the picture and
+writes a silent master, while the mixer copies that video stream rather than re-encoding it, so
+re-cutting can never clobber the voiced file and the voiced file is never a second generation.
+Alignment was measured before it was trusted (median 0.17 s from each scene change to the nearest
+pause; a best-fit search moved it 0.2 s, so nothing was shifted), the trim to picture length was
+proven to land in silence, and a denoise sweep is why there is no denoiser: `afftdn` bought 0.7 dB of
+noise floor for 1.0 dB of the >4 kHz band and then saturated, because the floor is breath and room
+rather than hiss. Three audio measurements had to be corrected first — a like-for-like channel count
+before comparing loudness, a speech gate relative to the file's own loudness instead of an absolute
+one, and a high-band baseline that includes the downmix. **The QA gate grew five audio checks**
+(format, loudness, true peak, speech duty cycle, speech-to-room), a silent deliverable is now a
+failure rather than a note, and the gate's own true-peak check was caught reading the last progress
+line instead of the running maximum — it reported -20 dBTP for a -1.4 dBTP master, so a clipping file
+would have passed. Its self-test now pins that with an anti-narration fixture. What the chain still
+cannot do is hear the words: whether the narration says what the picture shows is stated as a human
+check, not asserted as verified.
+
 Evidence lives in `agent-cli-s227-launch/` on the development machine — the master, the scene
 manifest, the QA stills, the session's own event log, and the whole capture chain, runnable
-standalone. The failed take is kept beside it rather than deleted.
+standalone. The failed take is kept beside it rather than deleted. The video is not hosted anywhere
+yet, so the README carries no embed.
 
 ### Session 22.6 (2026-08-16) — Public release surface and repository polish (v1.10.2)
 
