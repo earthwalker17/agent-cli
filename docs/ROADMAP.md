@@ -21,6 +21,68 @@ on Windows and Linux.
 
 ## Sessions
 
+### Session 22.7 (2026-08-17) — The launch demo, and recording as an engineering problem
+
+No product change. The objective was the one artefact v1.10.x still lacked: a video a stranger can
+watch. The previous session's master was 2:42:38 of execution transcript, and **99.6% of it was
+terminal** — 39.68 s of 9757.64 s showed anything else. The cause was structural, not editorial: the
+video source *was* a browser page (a real ConPTY mirrored into xterm.js, recorded by Playwright), so
+nothing outside that page could ever appear, and a DOCX never could.
+
+**The capture path was rebuilt around the final edit.** Four sources instead of one: the terminal
+still comes from the ConPTY-to-xterm bridge, now at 1920x1080 native so terminal footage is never
+resampled; the application, its generated PDF and the live GitHub pages are recorded at native 1080p
+with real input events; and the two scenes that cannot be rendered headlessly — a real browser window
+with its URL bar, and Microsoft Word displaying the harness's own DOCX — are verified screen stills
+given a slow zoom in the cut. The cut itself is a function of one shot list: scenes, anchors,
+durations, speeds and captions in a manifest, rendered by a three-pass editor into a 1920x1080 H.264
+master plus the scene table that documents it. **Result: 2:41, 33 MB, 30 scenes, gate 14/14.**
+
+**The take was a real session, and it published.** One bounded request against the existing Shelfmark
+workspace (a per-shelf breakdown for its stats page, then a one-page release note as DOCX and PDF):
+79 tool calls, 18 file mutations, 11 typed checks with 8 green, 5 delegated tasks with 2 integrated
+through disposable worktrees, 3 browser flows all passing against the running preview, 15 recorded
+approvals with none denied — two of them answered with real arrow keys — then a session-attributed
+commit and exactly 3 remote mutations (push, tag `v0.2.0`, release), each individually approved and
+each recorded `VERIFIED against the remote`. The acceptance record names its own caveats: the publish
+is outside the harness and cannot be undone here, one review lens never completed, and ten workspace
+changes landed after the last review round.
+
+**What the environment actually allows, measured rather than assumed.** `gdigrab -i title=<window>` is
+solid black for GPU-composited windows, so per-window capture is unusable and region capture with
+deterministic window placement is the only path. Capture rate is load-bound, not area-bound: ~27 fps
+idle at full desktop and ~5 fps with other work running, identically for `gdigrab` and `ddagrab` —
+which is why window video was implemented and then retired for stills that cannot stutter.
+`Application.Activate()` cannot raise a window from a background process, and a Word run once reported
+eleven green COM steps while the clip contained only the terminal; the fix is
+`SetWindowPos(HWND_TOPMOST)` plus five-point pixel-ownership verification, and a shot that cannot
+prove its subject is now deleted rather than shipped. Privacy turned out to be a recording concern
+too: a fresh Edge profile implicitly signs in from the Windows account and puts the user's email
+address on screen, and Word's chrome carries the signed-in name plus an activation notice — both
+suppressed or cropped, and disclosed in the scene manifest.
+
+**Three of this session's own tools were caught lying, each by looking at the artefact.** Feeding
+concat-demuxer output into ffmpeg's `xfade` truncated the master to 106 s of an intended 187 s while
+every intermediate decoded perfectly, so `xfade` now only ever sees short single-source clips and
+assembly uses the concat filter. Worse, the check that should have caught it compared the scene
+table's duration against the rendered file — a value written *from* that file — and passed; it now
+checks the file against the manifest's arithmetic, and the editor fails loudly on a mismatch. The
+window shooter's own window enumeration silently returned nothing, which made a "no dialog was up"
+check vacuous. The QA gate also had two detector passes that could report "clean" without decoding a
+frame, and it called legible dark-theme terminal footage black (the theme background is luma 14/255,
+and a readable frame is >98% background) — both corrected, with the thresholds justified in the code.
+
+**The product was observed, not just filmed.** One take was lost to a genuine v1.10.2 behaviour: a
+command invoked through the `/` command menu prints its output and then does not repaint the idle
+prompt, while the same command typed directly does; the same wart appears after a consent menu, where
+the prompt lands on the same line as the echoed answer. That is now pinned in the recording rehearsal,
+worked around in the driver, and covered during a take by a watchdog that sends one bare Enter only on
+that exact signature and logs every nudge. It fired once. The wart itself belongs in the deferred pool.
+
+Evidence lives in `agent-cli-s227-launch/` on the development machine — the master, the scene
+manifest, the QA stills, the session's own event log, and the whole capture chain, runnable
+standalone. The failed take is kept beside it rather than deleted.
+
 ### Session 22.6 (2026-08-16) — Public release surface and repository polish (v1.10.2)
 
 Zero capability change; the target was everything a first-time visitor or installer meets.
@@ -458,9 +520,12 @@ process-age parsing for the sweep (the current shape is Linux-flavoured and fail
 the select path handles it, the line-question fallback keeps the old wart. Plan-file pruning (folded
 into `agent gc`). A `/cancel` surface for non-TTY sessions.
 
-**Terminal UX.** Hardening the piped first-character grammar (`stop` still reads as `[s]` and
-`abort` as `[a]` where offered; the frozen prompt-text family binds the wording, so this is its own
-pass). A live-filter dropdown while typing `/`. Provider, model and checkpoint-restore pickers on
+**Terminal UX.** A command invoked through the `/` **menu** — and an answered consent menu — leaves the
+next prompt on the same line as the echoed answer instead of repainting it on its own line; a typed
+command does repaint. Harmless to a human (the next keystroke fixes it) but it defeats any anchor that
+requires a newline before `›`, which cost a recorded take in Session 22.7. Hardening the piped
+first-character grammar (`stop` still reads as `[s]` and `abort` as `[a]` where offered; the frozen
+prompt-text family binds the wording, so this is its own pass). A live-filter dropdown while typing `/`. Provider, model and checkpoint-restore pickers on
 the select widget. Mid-turn `/expand`. A resize redraw hook. The stderr tint in the live preview
 (the stream parameter is threaded and unused).
 
