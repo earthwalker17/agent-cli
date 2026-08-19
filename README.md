@@ -12,6 +12,19 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%C2%B7%20Linux-lightgrey" alt="Windows and Linux">
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/zrds4v9wDr4">
+    <img src="docs/images/demo-thumbnail.png" alt="Agent CLI — official demo (watch on YouTube)" width="900">
+  </a>
+</p>
+
+<p align="center">
+  <b><a href="https://youtu.be/zrds4v9wDr4">▶ Watch the official demo — 1:59</a></b><br>
+  <sub>One real session, end to end: a plan you approve, subagents in isolated git worktrees, typed
+  checks, a generated DOCX and PDF, then a session-attributed commit pushed, tagged and released —
+  with every approval and every exit code on the record.</sub>
+</p>
+
 ---
 
 Most agent tools ask you to trust a summary. Agent CLI is built so you never have to: every action
