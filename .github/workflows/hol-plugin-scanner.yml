@@ -1,0 +1,54 @@
+# HOL AI Plugin Scanner — an external, reproducible security/packaging baseline.
+#
+# This is the workflow the Hashgraph Online `awesome-ai-plugins` catalog requires a listed
+# repository to run (CONTRIBUTING.md → "Scanner Requirements"). It is deliberately a SECOND
+# opinion, not a replacement for anything in ci.yml: the release gate stays typecheck + build
+# + test, and `npm audit --omit=dev` remains this project's dependency claim.
+#
+# Pinning and permissions follow the upstream secure example in SCANNER_GUIDE.md: commit-SHA
+# pins so a moved tag cannot change what runs, `contents: read` and nothing else, no repository
+# secrets, no SARIF upload, and checkout credentials not persisted.
+#
+# On `fail_on_severity` and the absent `min_score`
+# ------------------------------------------------
+# The catalog gate is "score >= 80 AND no critical/high findings". This repository meets the
+# severity half and cannot honestly meet the score half: 25 of the scanner's 80 applicable
+# points are Manifest Validation, which requires a `.codex-plugin/plugin.json`. Agent CLI is a
+# standalone terminal agent harness, not an assistant plugin — it has no plugin manifest, and
+# inventing one to collect those points would be a false claim about what this software is.
+#
+# So this job asserts the part that is real and enforceable — zero critical/high findings — and
+# does not set `min_score`, because a threshold this repository is structurally unable to reach
+# would mean a permanently red check that tells a reader nothing. The score is still computed
+# and printed in the job summary on every run. See docs/SAFETY.md, "External plugin-scanner
+# audit", for the full mismatch analysis and the two findings downgraded in .plugin-scanner.toml.
+name: HOL Plugin Scanner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hol-scanner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Plugin security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashgraph-online/ai-plugin-scanner-action@55616c962cf86368423f7673b2ecdfdbe613d1af # v1.2.515
+        with:
+          plugin_dir: "."
+          fail_on_severity: high

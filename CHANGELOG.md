@@ -9,6 +9,49 @@ Development history before 1.0.0 is recorded session-by-session in
 [`docs/ARCHITECTURE.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/ARCHITECTURE.md). (Absolute links: this file ships in the
 package, those do not.)
 
+## [Unreleased]
+
+**External plugin-scanner audit** (Session 22.8). No capability change. Agent CLI was submitted to
+the [HOL AI Plugin Scanner](https://github.com/hashgraph-online/hol-guard) — the gate the Hashgraph
+Online `awesome-ai-plugins` catalog requires — and the findings were treated as an outside code
+review rather than a score to clear. First run: 38/100, 16 high-severity findings. Now: 52/100 with
+**zero critical or high findings**.
+
+### Security
+
+- **GitHub Actions are pinned to commit SHAs.** `ci.yml` used mutable `@v7` tags for
+  `actions/checkout` and `actions/setup-node`; whoever controls an action could repoint a tag and
+  change what runs against this repository, and both workflows are reachable from `pull_request`.
+  Both are now pinned (`# vX.Y.Z` retained as the readable half), taking Operational Security from
+  15/20 to 20/20.
+- **No string in the tree is shaped like a live credential.** Ten findings, none of them a real
+  secret: nine test fixtures — several belonging to the suites that *prove* redaction works — plus
+  the internal approval id `'task-base-untracked-guard'`, in which `sk-` falls inside the word
+  "ta**sk-**base…" and so read as a hardcoded secret. Fixtures are now unmistakably synthetic and the id was renamed;
+  Security went 9/16 to 16/16. Nothing about the tests' behaviour changed.
+
+### Added
+
+- **`.github/workflows/hol-plugin-scanner.yml`** — the scanner runs on every push and pull request,
+  using the upstream secure example: SHA-pinned action, `contents: read` and nothing else, no
+  secrets, no SARIF upload, checkout credentials not persisted.
+- **`.plugin-scanner.toml`** — records the six remaining findings as the false positives they are,
+  with the reasoning inline. They are *downgraded to `info`, not disabled*, so they still appear in
+  every report and their checks still score zero: five `SHELL_INJECTION_PATTERN` hits that are error
+  strings, a `case 'spawn':` label and a `RegExp.exec`, and one `new Function` that is a constant
+  expression evaluated inside a headless-Chromium page.
+- **Two repository-invariant tests** in `test/architecture.test.ts`: every workflow action stays
+  SHA-pinned, and the scanner workflow keeps the shape the catalog's validator reads.
+
+### Notes
+
+- The catalog's 80/100 threshold is **not met and is not honestly reachable**: 25 of the scanner's
+  80 applicable points are Manifest Validation, which requires a `.codex-plugin/plugin.json`, and
+  three more want a `.codexignore`. Agent CLI is a standalone terminal harness, not an assistant
+  plugin, so it has neither and does not pretend to. The gap is a category mismatch, not a defect —
+  see [`docs/SAFETY.md`](https://github.com/earthwalker17/agent-cli/blob/main/docs/SAFETY.md),
+  "External plugin-scanner audit".
+
 ## [1.10.2] — 2026-08-16
 
 **Release surface and repository polish** (Session 22.6). No capability change: the runtime is

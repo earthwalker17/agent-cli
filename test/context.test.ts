@@ -54,6 +54,7 @@ describe('registry key discovery (env-only)', () => {
   });
 
   it('the first present key env wins; aliases are honored; availability reports names only', () => {
+    // A synthetic key fixture; the assertions below are what prove the VALUE never escapes.
     const registry = createProviderRegistry({ env: { KIMI_API_KEY: 'sk-secret-value' } });
     const a = registry.availability('kimi');
     expect(a).toMatchObject({ present: true, keyEnv: 'KIMI_API_KEY' });

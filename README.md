@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/earthwalker17/agent-cli/actions/workflows/ci.yml"><img src="https://github.com/earthwalker17/agent-cli/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/earthwalker17/agent-cli/actions/workflows/hol-plugin-scanner.yml"><img src="https://github.com/earthwalker17/agent-cli/actions/workflows/hol-plugin-scanner.yml/badge.svg" alt="HOL Plugin Scanner"></a>
   <a href="https://github.com/earthwalker17/agent-cli/releases/latest"><img src="https://img.shields.io/github/v/release/earthwalker17/agent-cli" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node 22+"></a>

@@ -210,6 +210,50 @@ is Medium integrity and the Low-integrity child is OS-denied.
 
 ---
 
+## External plugin-scanner audit
+
+Agent CLI is scanned on every push and pull request by the [HOL AI Plugin
+Scanner](https://github.com/hashgraph-online/hol-guard) — an outside tool with no knowledge of this
+project's intentions — in `.github/workflows/hol-plugin-scanner.yml`. It is a second opinion, not a
+gate this project controls, and it is worth reading precisely because it disagrees with us in
+places.
+
+**What it found, and what changed.** The first run scored 38/100 with 16 high-severity findings.
+Two were real and are fixed:
+
+- **Unpinned GitHub Actions.** `ci.yml` used mutable `@v7` tags. Both actions are now pinned to
+  commit SHAs, and `test/architecture.test.ts` fails if any workflow reintroduces a floating tag.
+- **Credential-shaped strings in the tree.** Ten hits, none of them a live secret — nine were test
+  fixtures (several of which exist precisely to prove redaction works) and one was the internal id
+  `'task-base-untracked-guard'`, in which the letters `sk-` fall inside the word "ta**sk-**base…"
+  and so read as a hardcoded secret.
+  No secret was ever exposed, but strings shaped like real credentials trip every scanner in the
+  ecosystem, so the fixtures are now unmistakably synthetic and the id was renamed.
+
+That took Security to 16/16 and Operational Security to 20/20, and **critical and high findings to
+zero** — the half of the catalog gate that describes real risk.
+
+**What did not change, and why.** The remaining six high findings were false positives, and they
+are recorded as such in [`.plugin-scanner.toml`](../.plugin-scanner.toml) with the reasoning
+inline. They are *downgraded to `info`, not disabled*: they still appear in every report, and the
+checks they belong to are still scored zero, so nothing here inflates the number. Five are
+`SHELL_INJECTION_PATTERN`, a rule that matches a template literal within 30 characters of the word
+`exec`/`spawn` with no dataflow analysis — every hit is an error message, a `case 'spawn':` label,
+or `RegExp.prototype.exec`. The sixth is the single `new Function('u', 'return import(u)')` in
+`src/artifacts/pdf-pages.ts`, a constant expression that runs inside the headless-Chromium page
+rather than in Node, and exists only because vite's SSR transform rewrites a literal `import()`.
+
+**The mismatch worth naming.** The scanner assumes it is looking at an assistant plugin. Twenty-five
+of its eighty applicable points are Manifest Validation, which requires a `.codex-plugin/plugin.json`;
+three more want a `.codexignore`. Agent CLI is a standalone terminal harness, not a plugin for Codex
+or any other assistant, so it has neither — and inventing them to collect the points would be a false
+claim about what this software is. Those checks are therefore left at zero on purpose. The current
+score is **52/100 with zero critical or high findings**, and the ~28-point gap to the catalog's
+80-point threshold is that structural mismatch, not an unfixed defect. This is why the workflow
+asserts `fail_on_severity: high` and deliberately sets no `min_score`.
+
+---
+
 ## What is not built
 
 **Stronger isolation is future work**, and named as such: network-egress control, a

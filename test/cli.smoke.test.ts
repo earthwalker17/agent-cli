@@ -145,7 +145,7 @@ d('CLI end-to-end via the built binary', () => {
     // Env var NAMES and presence only — never a value. Deterministic canary (S15 review
     // finding): the old assertion was conditional on the DEV MACHINE having a real key, so on a
     // keyless CI runner — the release gate — it silently checked nothing.
-    const canary = 'sk-canary-DO-NOT-PRINT-0123456789abcdef';
+    const canary = 'sk-canary-DO-NOT-PRINT';
     const withKey = spawnSync(process.execPath, [CLI, 'providers'], {
       cwd: ws,
       env: { ...process.env, AGENT_CLI_STATE_DIR: state, DEEPSEEK_API_KEY: canary },

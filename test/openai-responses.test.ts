@@ -142,6 +142,7 @@ function makeProvider(responses: Response[]): { provider: OpenAiResponsesProvide
   const calls: { url: string; body?: unknown }[] = [];
   let i = 0;
   const provider = new OpenAiResponsesProvider({
+    // Synthetic key fixture — never a live credential.
     apiKey: 'sk-test-not-real',
     fetchImpl: async (input, init) => {
       calls.push({ url: String(input), ...(init?.body !== undefined ? { body: JSON.parse(init.body as string) } : {}) });

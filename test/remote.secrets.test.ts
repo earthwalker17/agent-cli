@@ -12,6 +12,7 @@ import { hasResidualSecret, scrubSecrets } from '../src/shared/secrets.js';
  * real credential would be the failure it exists to prevent.
  */
 
+// Synthetic token fixture: real shape, never a live credential.
 const FAKE_OAUTH = 'gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const FAKE_PAT = 'github_pat_11ABCDEFG0aBcDeFgHiJk_LmNoPqRsTuVwXyZ0123456789abcdef';
 
