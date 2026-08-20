@@ -185,4 +185,43 @@ describe('release surface (S22.5)', () => {
     expect(lock.version).toBe(pkg.version);
     expect(lock.packages['']?.version).toBe(pkg.version);
   });
+
+  it('every GitHub Action is pinned to a commit SHA (S22.8)', () => {
+    // A `@v7` tag is mutable: whoever controls the action can repoint it, and the next CI run
+    // executes different code against this repository with no diff here to show it. The HOL
+    // plugin scanner flagged exactly this (Operational Security, 0/5) and it was a fair hit —
+    // these workflows run on `pull_request`, so an unpinned action is reachable from a fork PR.
+    // The `# vX.Y.Z` comment after each pin is the human-readable half; the SHA is the contract.
+    const dir = path.resolve(__dirname, '..', '.github', 'workflows');
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'));
+    expect(files.length, 'no workflows found — has the path moved?').toBeGreaterThan(0);
+
+    const unpinned: string[] = [];
+    for (const file of files) {
+      const text = fs.readFileSync(path.join(dir, file), 'utf8');
+      for (const line of text.split(/\r?\n/)) {
+        const uses = line.match(/^\s*-?\s*uses:\s*(\S+)/)?.[1];
+        if (uses === undefined || uses.startsWith('./')) continue; // local composite actions
+        if (!/@[0-9a-f]{40}$/.test(uses)) unpinned.push(`${file}: ${uses}`);
+      }
+    }
+    expect(unpinned, `unpinned actions: ${unpinned.join(', ')}`).toEqual([]);
+  });
+
+  it('the HOL scanner workflow keeps the shape the catalog gate reads (S22.8)', () => {
+    // The awesome-ai-plugins validator does not run our workflow — it fetches this file and
+    // asserts two things about the YAML: that some step `uses:` the scanner action, and that
+    // the workflow triggers on push or pull_request. Both are easy to break while "tidying"
+    // (renaming the file is fine; dropping the trigger or the action reference is not).
+    // `contents: read` is pinned here for the reason SCANNER_GUIDE.md gives: this job needs no
+    // secrets and no write scope, and a widened token is the thing worth noticing in review.
+    const wf = path.resolve(__dirname, '..', '.github', 'workflows', 'hol-plugin-scanner.yml');
+    const text = fs.readFileSync(wf, 'utf8').replace(/\r\n/g, '\n');
+    expect(text).toMatch(/uses:\s*hashgraph-online\/ai-plugin-scanner-action@[0-9a-f]{40}/);
+    expect(text).toMatch(/^\s{2}pull_request:/m);
+    expect(text).toMatch(/^permissions:\n\s{2}contents: read\n/m);
+    expect(text, 'no other top-level permission may be granted').not.toMatch(
+      /^permissions:\n(?:\s{2}\w[\w-]*:.*\n){2,}/m,
+    );
+  });
 });
