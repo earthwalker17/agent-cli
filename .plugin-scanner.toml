@@ -1,0 +1,44 @@
+# HOL AI Plugin Scanner configuration — https://github.com/hashgraph-online/hol-guard
+#
+# Agent CLI is a standalone terminal agent harness, not an assistant plugin. Two of the
+# scanner's purely syntactic rules fire on constructs that are provably not the risk they
+# model. Both are DOWNGRADED here rather than disabled: the findings still appear in every
+# report, with the reasoning below, so a reviewer can re-judge them. Nothing is hidden, and
+# no check is credited points it did not earn — a disabled rule would have been scored as
+# passing, which would have overstated this repository's result.
+#
+# What is deliberately NOT configured here: the Manifest Validation rules. This repository
+# genuinely has no `.codex-plugin/plugin.json`, and it should not pretend otherwise, so
+# those checks are left to score zero. See docs/SAFETY.md, "External plugin-scanner audit".
+
+[rules.severity_overrides]
+
+# SHELL_INJECTION_PATTERN matches a template literal containing `${...}` that appears within
+# 30 characters of the word `exec`/`spawn`, with no dataflow analysis. Every hit in this
+# repository is an error-message string, a `case 'spawn':` switch label, or a regex match —
+# none is a shell invocation:
+#
+#   src/checks/detect.ts:283      new RegExp(`^\s*${key}\s*=...`).exec(...)   ← RegExp.exec
+#   src/checks/normalize.ts:146   `aborted after ${...}ms ...`  then  case 'spawn':
+#   src/report/report.ts:1295     `${c.command}` → failed to spawn            ← report text
+#   src/tools/preview.ts:312      `the preview process could not be spawned: ${err.message}`
+#   src/tools/run-command.ts:171  `aborted after ${...}ms ...`  then  case 'spawn':
+#
+# Commands in this harness are executed through argv arrays, never a shell string, and only
+# after the policy engine classifies and (where required) a human approves them. The
+# execution path and its limits are documented in docs/SAFETY.md.
+SHELL_INJECTION_PATTERN = "info"
+
+# DANGEROUS_DYNAMIC_EXECUTION matches `new Function(` syntactically. There is exactly one
+# occurrence in this repository, src/artifacts/pdf-pages.ts:94:
+#
+#   const dynImport = new Function('u', 'return import(u)');
+#
+# It is a constant expression — nothing is interpolated into it. Its source is serialized
+# into a headless-Chromium page by `page.evaluate`, so it never executes in the Node
+# process; its only argument is a blob URL built from unpdf's own bundled pdfjs.mjs, read
+# from node_modules. It exists because vite's SSR transform rewrites a literal `import()`
+# into a helper that does not exist inside the page. The untrusted input in this path — the
+# PDF bytes — never reaches it and is parsed with `isEvalSupported: false` in an offline
+# page with http(s) requests aborted.
+DANGEROUS_DYNAMIC_EXECUTION = "info"
