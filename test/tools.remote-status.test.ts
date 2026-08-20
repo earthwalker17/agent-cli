@@ -202,6 +202,7 @@ describe('remote_status — execute', () => {
   it('never lets the credential reach the model or the evidence', async () => {
     // gh 2.96.0 could print part of the token; the runner returns output that contains one, and
     // the managed client's scrub is what stands between it and the log.
+    // The token below is a synthetic fixture; it must never reach the model or the evidence.
     const leaky = ghOk(`${AUTH_JSON}\nToken: gho_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789`);
     const t = createRemoteStatusTool({
       state: state(),

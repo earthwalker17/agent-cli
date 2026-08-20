@@ -29,6 +29,7 @@ describe('parseRemoteUrl', () => {
   });
 
   it('REDACTS embedded credentials and reports that it did', () => {
+    // Synthetic token fixture: real shape, never a live credential.
     const p = parseRemoteUrl('https://x-access-token:ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@github.com/o/r.git');
     expect(p.hadCredentials).toBe(true);
     expect(p.displayUrl).not.toContain('ghs_');

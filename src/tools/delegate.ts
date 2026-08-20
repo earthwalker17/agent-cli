@@ -716,7 +716,7 @@ export function createDelegateTool(
                   confirmLargeUntracked: async (count: number) => {
                     const outcome = await deps.forwardAsk!(
                       {
-                        callId: 'task-base-untracked-guard',
+                        callId: 'task-base-untracked',
                         tool: 'delegate_task',
                         classification: 'reversible',
                         summary: `task-base checkpoint would capture ${count} UNTRACKED files`,

@@ -32,7 +32,7 @@ function json(payload: unknown, status = 200, headers: Record<string, string> = 
 function makeClient(responses: Response[], opts: Partial<Parameters<typeof createTavilyClient>[0]> = {}) {
   const calls: Call[] = [];
   const client = createTavilyClient({
-    apiKey: 'tvly-test-key',
+    apiKey: 'tvly-key-example',
     env: {},
     searchTimeoutMs: 5_000,
     extractTimeoutMs: 5_000,
@@ -61,7 +61,7 @@ const OK_SEARCH = {
 
 describe('credential discovery — names and presence only', () => {
   it('reports the first present env var NAME and never a value', () => {
-    const a = tavilyKeyAvailability({ TAVILY_API_KEY: 'tvly-secret-value' });
+    const a = tavilyKeyAvailability({ TAVILY_API_KEY: 'tvly-secret-example' });
     expect(a).toEqual({ present: true, keyEnv: 'TAVILY_API_KEY' });
     expect(JSON.stringify(a)).not.toContain('secret');
   });
@@ -102,7 +102,7 @@ describe('search — request wire format', () => {
     expect(calls[0]!.url).toBe(`https://${TAVILY_HOST}/search`);
     expect(calls[0]!.init.method).toBe('POST');
     const headers = calls[0]!.init.headers as Record<string, string>;
-    expect(headers['authorization']).toBe('Bearer tvly-test-key');
+    expect(headers['authorization']).toBe('Bearer tvly-key-example');
     expect(headers['content-type']).toBe('application/json');
     expect(calls[0]!.body).toMatchObject({
       query: 'zod v4 migration',
@@ -285,7 +285,7 @@ describe('error taxonomy', () => {
     expect(err).toBeInstanceOf(ResearchError);
     expect((err as ResearchError).reason).toBe('auth');
     expect((err as ResearchError).message).toContain('TAVILY_API_KEY');
-    expect((err as ResearchError).message).not.toContain('tvly-test-key');
+    expect((err as ResearchError).message).not.toContain('tvly-key-example');
   });
 
   it('does NOT retry a 432 plan limit — a ceiling does not move on retry', async () => {
@@ -323,7 +323,7 @@ describe('error taxonomy', () => {
 
   it('reports a transport failure as network, naming the host but not the credential', async () => {
     const client = createTavilyClient({
-      apiKey: 'tvly-test-key',
+      apiKey: 'tvly-key-example',
       env: {},
       fetchImpl: () => Promise.reject(new Error('getaddrinfo ENOTFOUND')),
     });

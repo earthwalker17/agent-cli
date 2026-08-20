@@ -125,6 +125,7 @@ describe('AnthropicProvider transport integration', () => {
       fetch: spy,
       describe: () => 'proxy http://***@127.0.0.1:7897 (via https_proxy)',
     };
+    // Synthetic key fixture — never a live credential.
     const p = new AnthropicProvider({ apiKey: 'sk-test-not-real', transport });
     expect(p.transport).toContain('proxy');
     expect(p.transport).toContain('***');
