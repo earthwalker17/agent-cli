@@ -21,6 +21,47 @@ on Windows and Linux.
 
 ## Sessions
 
+### Session 22.8 (2026-08-20) — An outside scanner, taken as a code review
+
+No product change. A contributor from the Hashgraph Online `awesome-ai-plugins` ecosystem suggested
+Agent CLI belonged in their catalog, which gates listings on the HOL AI Plugin Scanner. The scanner
+was installed and run against a clean clone, and its findings were worked as an external audit — the
+question was never "how do we score 80", it was "which of these is true".
+
+**Two findings were true and are fixed.** `ci.yml` pinned `actions/checkout` and `actions/setup-node`
+to mutable `@v7` tags, on workflows reachable from `pull_request`; both are now commit-SHA pinned.
+And ten strings in the tree were shaped like live credentials — nine test fixtures, several inside
+the very suites that prove redaction works, plus the approval id `'task-base-untracked-guard'`, in
+which `sk-` sits inside the word "ta**sk-**base…" and so read as a hardcoded secret. None was a real
+credential; all are now unmistakably synthetic. Security 9/16 → 16/16, Operational 15/20 → 20/20, and high findings 16 → 0.
+
+**Six were false positives, and are recorded rather than hidden.** `SHELL_INJECTION_PATTERN` matches
+a template literal within 30 characters of the word `exec`/`spawn` with no dataflow analysis; all
+five hits are error messages, a `case 'spawn':` label, or `RegExp.prototype.exec`. The sixth is the
+one `new Function('u','return import(u)')` in `pdf-pages.ts` — a constant expression that runs inside
+the headless-Chromium page, not Node, and exists because vite's SSR pass rewrites a literal
+`import()`. `.plugin-scanner.toml` *downgrades* these to `info` rather than disabling them: a
+disabled rule is scored as passing, which would have credited 10 points the repository did not earn.
+
+**The decision that outlived the session: the score is not reachable honestly, and that is the
+finding.** 25 of the scanner's 80 applicable points are Manifest Validation, gated entirely on a
+`.codex-plugin/plugin.json`; three more want a `.codexignore`. Agent CLI is a standalone terminal
+harness — a peer to Codex and Claude Code, not an extension of them — so it has neither. Adding them
+would collect 28 points by asserting something false about what this software is, and the project
+does not do that. Final: **52/100, zero critical or high**, against a catalog threshold of 80. The
+gap is a category mismatch and is documented as one in `docs/SAFETY.md`; it is also the substance of
+the note to the catalog maintainers, since a non-plugin repository cannot clear their gate no matter
+how clean it is.
+
+**Evidence.** Scanner v2.2.115 (the build pinned by scanner-action v1.2.528) run against a
+clone-equivalent tree; baseline and final JSON reports compared check-by-check. `plugin-scanner`
+has no Windows wheel — `litellm` publishes manylinux only — so the runs were done under WSL Ubuntu
+24.04, which is also what upstream CI uses. Release gate green: typecheck, build, 2,418 tests over
+151 files. Two new invariants in `test/architecture.test.ts` pin the action SHAs and the scanner
+workflow's shape, both negative-tested.
+
+---
+
 ### Session 22.7 (2026-08-17) — The launch demo, and recording as an engineering problem
 
 No product change. The objective was the one artefact v1.10.x still lacked: a video a stranger can
